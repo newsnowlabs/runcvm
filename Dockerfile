@@ -39,7 +39,8 @@ RUN mkinitfs $(basename $(ls -d /lib/modules/*))
 RUN mkdir -p /opt/dkvm/kernels/alpine/$(basename $(ls -d /lib/modules/*)) && \
     cp -a /boot/vmlinuz-virt /opt/dkvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
     cp -a /boot/initramfs-virt /opt/dkvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/initrd && \
-    cp -a /lib/modules/ /opt/dkvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/
+    cp -a /lib/modules/ /opt/dkvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/ && \
+    chmod -R u+rwX,g+rX,o+rX /opt/dkvm/kernels/alpine
 
 # Build Debian bullseye kernel and initramfs with virtiofs module
 
@@ -52,7 +53,8 @@ RUN apt update && apt install -y linux-image-amd64:amd64 && \
 RUN mkdir -p /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*)) && \
     cp -aL /vmlinuz /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
     cp -aL /initrd.img /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/initrd && \
-    cp -a /lib/modules/ /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/
+    cp -a /lib/modules/ /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/ && \
+    chmod -R u+rwX,g+rX,o+rX /opt/dkvm/kernels/debian
 
 # Build DKVM installation
 
