@@ -7,6 +7,19 @@
 # - https://virtio-fs.gitlab.io/howto-qemu.html
 # - https://www.tauceti.blog/posts/qemu-kvm-share-host-directory-with-vm-with-virtio/
 
+LOG=/tmp/dkvm.log
+DKVM=/opt/dkvm
+DKVM_ENTRYPOINT=/opt/dkvm/scripts/dkvm-ctr-entrypoint
+DKVM_EXEC=/opt/dkvm/scripts/dkvm-ctr-exec
+DKVM_INIT=/opt/dkvm/scripts/dkvm-vm-init
+DKVM_KERNEL_MODULES=/opt/dkvm/kernels/debian/latest/modules
+DKVM_DEV_SHM_SIZE_DEFAULT="1G"
+DKVM_DEBUG=1
+
+debug() {
+  [ -n "$DKVM_DEBUG" ] && true || false
+}
+
 jq_set() {
   local file="$1"
   shift
@@ -28,16 +41,19 @@ jq_get() {
   jq -r "$@" $file
 }
 
-LOG=/tmp/dkvm.log
-DKVM=/opt/dkvm
-DKVM_ENTRYPOINT=/opt/dkvm/scripts/dkvm-ctr-entrypoint
-DKVM_EXEC=/opt/dkvm/scripts/dkvm-ctr-exec
-DKVM_INIT=/opt/dkvm/scripts/dkvm-vm-init
-DKVM_KERNEL_MODULES=/opt/dkvm/kernels/debian/latest/modules
+log() {
+  echo "$@" >>$LOG
+}
 
-echo "$0 ${@@Q}" >>$LOG
+get_config_env() {
+  local var="$1"
+  local default="$2"
+  local value=$(jq_get "$CFG" --arg env "$var" '.process.env[] | select(match("^" + $env + "=")) | match("^" + $env + "=(.*)") | .captures[] | .string')
+  
+  [ -n "$value" ] && echo -n "$value" || echo -n "$default"
+}
 
-# FIXME: Write resilient command-line parsing logic
+debug && log "$0 ${@@Q}"
 
 # PARSE RUNC GLOBAL OPTIONS:
 # --debug             enable debug logging
@@ -65,7 +81,7 @@ shift
 
 if [ "$COMMAND" = "create" ]; then
 
-  echo "create ${@@Q}" >>$LOG
+  debug && log "create ${@@Q}"
   
   # USAGE:
   #    runc create [command options] <container-id>
@@ -90,13 +106,16 @@ if [ "$COMMAND" = "create" ]; then
   ID="$1"
   
   CFG="$BUNDLE/config.json"
-
-  ls -l $BUNDLE >>$LOG
-  cp -a $BUNDLE /tmp/
-  
   ROOT=$(jq -r .root.path $CFG)
-  echo "ID $ID" >>$LOG
-  echo "ROOT=$ROOT" >>$LOG
+
+  if debug; then
+    ls -l $BUNDLE >>$LOG
+    echo "ID $ID" >>$LOG
+    echo "ROOT=$ROOT" >>$LOG
+    
+    # Save formatted config.json
+    jq -r . <$CFG >/tmp/config.json-$$-1
+  fi
 
   # [UNIMPLEMENTED]
   # Optionally, launch virtiofsd on host and bind-mount socket into container
@@ -113,8 +132,27 @@ if [ "$COMMAND" = "create" ]; then
   jq_set "$CFG" --arg entrypoint "$DKVM_ENTRYPOINT" --arg dkvm "$DKVM" --arg init "$DKVM_INIT" --arg modules "$DKVM_KERNEL_MODULES" '.mounts += [{"destination":$dkvm,"type":"bind","source":$dkvm,"options":["rbind","rprivate","ro"]},{"destination":"/lib/modules","type":"bind","source":$modules,"options":["rbind","rprivate","ro"]}]'
   jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":232,"access":"rwm"},{"allow":true,"type":"c","major":10,"minor":200,"access":"rwm"}]'
   jq_set "$CFG" '.linux.devices+=[{"path":"/dev/net/tun","type":"c","major":10,"minor":200,"fileMode":8630,"uid":0,"gid":0},{"path":"/dev/kvm","type":"c","major":10,"minor":232,"fileMode":8630,"uid":0,"gid":0}]'
-  jq_set "$CFG" '.process.capabilities.bounding += ["CAP_NET_ADMIN"] | .process.capabilities.effective += ["CAP_NET_ADMIN"] | .process.capabilities.permitted += ["CAP_NET_ADMIN"]'
-  jq_set "$CFG" '( .mounts[] | select(.source == "shm") ).options = ["nosuid","noexec","nodev","mode=1777","size=68719476736"]'
+  
+  # Set /dev/shm to DKVM_DEV_SHM_SIZE env var, or to default
+  # - it should be large enough to support VM memory
+  DKVM_DEV_SHM_SIZE=$(get_config_env "DKVM_DEV_SHM_SIZE")
+  if [ -z "$DKVM_DEV_SHM_SIZE" ]; then
+    DKVM_DEV_SHM_SIZE="$DKVM_DEV_SHM_SIZE_DEFAULT"
+    jq_set "$CFG" --arg env "DKVM_DEV_SHM_SIZE=$DKVM_DEV_SHM_SIZE" '.process.env |= (.+ [$env] | unique)'
+  fi
+  
+  log "DKVM_DEV_SHM_SIZE=$DKVM_DEV_SHM_SIZE"
+  jq_set "$CFG" --arg size "$DKVM_DEV_SHM_SIZE" '( .mounts[] | select(.destination == "/dev/shm") ) = {"destination": "/dev/shm","type": "tmpfs","source": "shm","options": ["nosuid","noexec","nodev","mode=1777","size=" + $size]}'
+  
+  # Add non-default capabilities needed by:
+  # - Docker: CAP_NET_ADMIN
+  # - Podman: CAP_NET_ADMIN, CAP_NET_RAW, CAP_MKNOD, CAP_AUDIT_WRITE
+  for field in bounding effective permitted
+  do
+    jq_set "$CFG" --arg field "bounding" '.process.capabilities[$field] |= (.+ ["CAP_NET_ADMIN","CAP_NET_RAW","CAP_MKNOD","CAP_AUDIT_WRITE"] | unique)'
+  done
+  
+  debug && cp -a $CFG /tmp/config.json-$$-2
   
   # Filter for DKVM_SYS_ADMIN=1
   DKVM_SYS_ADMIN=$(jq_get "$CFG" '.process.env | map(select(test("^DKVM_SYS_ADMIN="))) | length')
@@ -122,11 +160,9 @@ if [ "$COMMAND" = "create" ]; then
     jq_set "$CFG" '.process.capabilities.bounding += ["CAP_SYS_ADMIN"] | .process.capabilities.effective += ["CAP_SYS_ADMIN"] | .process.capabilities.permitted += ["CAP_SYS_ADMIN"]'    
   fi
   
-  # cp $D/config.json /tmp/config.json-$ID
-
 elif [ "$COMMAND" = "exec" ]; then
 
-  echo "exec ${@@Q}" >>$LOG
+  debug && log "exec ${@@Q}"
 
   # USAGE:
   #   runc exec [command options] <container-id> <command> [command options]  || -p process.json <container-id>
@@ -157,7 +193,14 @@ elif [ "$COMMAND" = "exec" ]; then
       *) break; ;;
     esac
   done
-  
+
+  if debug; then
+    ls -l $PROCESS >>$LOG
+    
+    # Save formatted process.json
+    jq -r . <$PROCESS >/tmp/process.json-$$-1
+  fi
+
   ARG1=$(jq_get "$PROCESS" '.args[0]')
   if [ "$ARG1" = "---" ]; then
     jq_set "$PROCESS" 'del(.args[0])'
@@ -165,7 +208,7 @@ elif [ "$COMMAND" = "exec" ]; then
     jq_set "$PROCESS" --arg exec "$DKVM_EXEC" '.args |= [$exec] + .'
   fi
   
-  cat $PROCESS >>$LOG
+  debug && cp -a $PROCESS /tmp/process.json-$$-2
 fi
 
 echo >>$LOG
