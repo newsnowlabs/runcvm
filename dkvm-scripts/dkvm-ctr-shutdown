@@ -1,0 +1,13 @@
+#!/opt/dkvm/bin/bash
+
+poweroff() {
+  # Try ACPI poweroff
+  /opt/dkvm/scripts/dkvm-ctr-qemu-poweroff
+  
+  # Try running busybox poweroff
+  /opt/dkvm/scripts/dkvm-ctr-exec /opt/dkvm/bin/poweroff
+}
+
+poweroff
+
+exit 0

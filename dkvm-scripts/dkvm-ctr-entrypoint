@@ -1,0 +1,46 @@
+#!/opt/dkvm/bin/bash
+
+# We throw away the host socket path when we run virtiofs in the container
+# HOST_SOCKET="$1"; shift
+
+# SAVE ENTRYPOINT
+args=("$@")
+printf "%s\n" "${args[@]}" >/.dockerentrypoint
+
+# SAVE ENVIRONMENT
+export -n SHLVL
+env >/.dockerenviron
+export >/.dockerexport
+
+# NOW LOAD DEFAULT ENV
+. /opt/dkvm/scripts/dkvm-ctr-defaults
+
+# DEBUG
+# exec bash
+
+# SAVE NETWORKING CONFIG
+DOCKER_IF=$(ip -json route show | jq -r '.[] | select(.dst == "default") | .dev')
+DOCKER_GW=$(ip -json route show | jq -r '.[] | select(.dst == "default") | .gateway')
+DOCKER_IP=$(ip addr show dev $DOCKER_IF | grep inet | head -n 1 | awk '{print $2}')
+
+echo $DOCKER_IP >/.dockernet
+echo $DOCKER_GW >/.dockernetgw
+
+# RECONFIGURE CONTAINER NETWORK
+ip addr flush dev $DOCKER_IF
+
+# https://bugs.launchpad.net/neutron/+bug/1738659
+ip link add $QEMU_BRIDGE type bridge forward_delay 0 ageing 0
+
+ip link set dev $DOCKER_IF master $QEMU_BRIDGE
+ip link set dev $DOCKER_IF up
+ip link set dev $QEMU_BRIDGE up
+
+# DEBUG
+# exec bash
+
+# LAUNCH VIRTIOFSD
+/opt/dkvm/scripts/dkvm-ctr-virtiofsd &
+
+# LAUNCH INIT SUPERVISING QEMU
+exec /opt/dkvm/sbin/dumb-init -v -c /opt/dkvm/scripts/dkvm-ctr-qemu

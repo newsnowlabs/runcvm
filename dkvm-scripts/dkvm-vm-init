@@ -1,0 +1,67 @@
+#!/opt/dkvm/bin/bash
+
+DKVM=/opt/dkvm
+PATH=$DKVM/sbin:$DKVM/bin:$DKVM/usr/bin
+unset DKVM
+
+# Alpine initrd doesn't honour command-line rw flag
+mount -o remount,rw /
+
+# FIXME: This must be run early enough, otherwise other interfaces like docker0 might have started
+IF=$(ls /sys/class/net/ | grep -vE '^(lo|docker)' | head -n 1)
+
+IP=$(cat /.dockernet)
+GW=$(cat /.dockernetgw)
+
+# https://bugzilla.redhat.com/show_bug.cgi?id=501934
+for i in all $IF
+do
+  # /sbin/sysctl -w net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0 net.ipv6.conf.$i.accept_ra=0
+  sysctl -w net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0 2>/dev/null
+done
+
+ip addr add $IP dev $IF
+ip link set lo up
+ip link set $IF up
+
+route add default gw $GW
+echo nameserver $GW >/etc/resolv.conf
+
+# Setup hostname
+hostname -F /etc/hostname
+
+# 1. Run /sbin/init from the image
+
+. /.dockerexport
+
+if [ "$DKVM_INIT" != "0" ]; then
+  # TODO:
+  # - Check for and exec alternative init process specified by DKVM_INIT?
+  # - OR only do this if ENTRYPOINT =~ init
+
+  if [ -x /sbin/init ]; then
+    # Run the qemu guest agent, needed to support 'docker exec'
+  
+    # TODO:
+    # - Add option to inhibit this
+    /opt/dkvm/scripts/dkvm-vm-qemu-ga &
+  
+    # Run init from the image
+    exec -c /sbin/init
+  fi
+fi
+
+# 2. Run our own /opt/dkvm/bin/init
+
+cat >/etc/inittab <<_EOE_
+ttyS0::respawn:-/opt/dkvm/scripts/dkvm-vm-start
+::respawn:/opt/dkvm/scripts/dkvm-vm-qemu-ga
+::ctrlaltdel:/opt/dkvm/bin/poweroff
+::restart:/opt/dkvm/bin/poweroff
+_EOE_
+
+# Allow dkvm-vm-start to runs once (and only once)
+rm -f /.dkvm.vm.once
+
+# Run our own init
+exec -c /opt/dkvm/bin/init

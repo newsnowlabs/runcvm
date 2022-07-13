@@ -1,0 +1,21 @@
+#!/opt/dkvm/bin/bash
+
+. /opt/dkvm/scripts/dkvm-ctr-defaults
+
+# FIXME: -o posix_acl works with alpine kernel, but not debian kernel
+# virtiofsd -o posix_acl -o xattr --socket-path=$SOCKET -o cache=always -o source=/ -o sandbox=chroot >/tmp/virtiofsd.log 2>&1 &
+
+# WORKING WELL
+# virtiofsd -o xattr --socket-path=$SOCKET -o cache=always -o source=/ -o sandbox=chroot >/tmp/virtiofsd.log 2>&1 &
+
+# Also present submounts within qemu instances (should showup with mount -v)
+# virtiofsd -o announce_submounts -o xattr --socket-path=$SOCKET -o cache=always -o source=/ -o sandbox=chroot >/tmp/virtiofsd.log 2>&1 &
+
+# Also add sys_admin (req. --cap-add=SYS_ADMIN) to allow overlayfs2 ?!?
+# virtiofsd -o modcaps=+sys_admin -o announce_submounts -o xattr --socket-path=$SOCKET -o cache=always -o source=/ -o sandbox=chroot >/tmp/virtiofsd.log 2>&1 &
+
+if [ "$DKVM_SYS_ADMIN" = "1" ]; then
+  OPTS+=(-o modcaps=+sys_admin)
+fi
+
+exec virtiofsd "${OPTS[@]}" -o announce_submounts -o xattr --socket-path=$SOCKET -o cache=always -o source=/ -o sandbox=chroot >/tmp/virtiofsd.log 2>&1

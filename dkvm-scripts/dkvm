@@ -1,0 +1,109 @@
+#!/bin/bash
+
+# References:
+# - https://github.com/joshkunz/qemu-docker
+# - https://mergeboard.com/blog/2-qemu-microvm-docker/
+# - https://vmsplice.net/~stefan/virtio-fs_%20A%20Shared%20File%20System%20for%20Virtual%20Machines.pdf
+# - https://virtio-fs.gitlab.io/howto-qemu.html
+# - https://www.tauceti.blog/posts/qemu-kvm-share-host-directory-with-vm-with-virtio/
+
+jq_set() {
+  local file="$1"
+  shift
+  
+  local tmp="/tmp/config.json.$$"
+
+  if jq "$@" $file >$tmp; then
+    mv $tmp $file
+  else
+    echo "Failed to update $(basename $file); aborting!" 2>&1
+    exit 1
+  fi
+}
+
+jq_get() {
+  local file="$1"
+  shift
+  
+  jq -r "$@" $file
+}
+
+LOG=/tmp/dkvm.log
+DKVM=/opt/dkvm
+DKVM_ENTRYPOINT=/opt/dkvm/scripts/dkvm-ctr-entrypoint
+DKVM_EXEC=/opt/dkvm/scripts/dkvm-ctr-exec
+DKVM_INIT=/opt/dkvm/scripts/dkvm-vm-init
+DKVM_KERNEL_MODULES=/opt/dkvm/kernels/debian/latest/modules
+
+echo "$0 ${@@Q}" >>$LOG
+
+# FIXME: Write resilient command-line parsing logic
+
+if [ "$7" = "create" ]; then
+
+  D="$9"
+  CFG="$D/config.json"
+
+  ls -l $D >>$LOG
+  
+  ROOT=$(jq -r .root.path $D/config.json)
+  ID=${14}
+  echo "ID $ID" >>$LOG
+  echo "ROOT=$ROOT" >>$LOG
+
+  # [UNIMPLEMENTED]
+  # Optionally, launch virtiofsd on host and bind-mount socket into container
+  # HOST_SOCKET="/tmp/.virtiofs-$ID.sock"
+  # touch $HOST_SOCKET
+  # /usr/lib/qemu/virtiofsd --socket-path=$HOST_SOCKET -o cache=always -o source=$ROOT >/tmp/virtiofsd.log 2>&1 &  
+  
+  DKVM_KERNEL=$(jq_get "$CFG" '.process.env[] | select(match("^DKVM_KERNEL=")) | match("^DKVM_KERNEL=(.*)") | .captures[] | .string')
+  if [ -n "$DKVM_KERNEL" ]; then
+    DKVM_KERNEL_MODULES="/opt/dkvm/kernels/$DKVM_KERNEL/modules"
+  fi
+  
+  jq_set "$CFG" --arg entrypoint "$DKVM_ENTRYPOINT" '.process.args |= [$entrypoint] + .'
+  jq_set "$CFG" --arg entrypoint "$DKVM_ENTRYPOINT" --arg dkvm "$DKVM" --arg init "$DKVM_INIT" --arg modules "$DKVM_KERNEL_MODULES" '.mounts += [{"destination":$dkvm,"type":"bind","source":$dkvm,"options":["rbind","rprivate","ro"]},{"destination":"/lib/modules","type":"bind","source":$modules,"options":["rbind","rprivate","ro"]}]'
+  jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":232,"access":"rwm"},{"allow":true,"type":"c","major":10,"minor":200,"access":"rwm"}]'
+  jq_set "$CFG" '.linux.devices+=[{"path":"/dev/net/tun","type":"c","major":10,"minor":200,"fileMode":8630,"uid":0,"gid":0},{"path":"/dev/kvm","type":"c","major":10,"minor":232,"fileMode":8630,"uid":0,"gid":0}]'
+  jq_set "$CFG" '.process.capabilities.bounding += ["CAP_NET_ADMIN"] | .process.capabilities.effective += ["CAP_NET_ADMIN"] | .process.capabilities.permitted += ["CAP_NET_ADMIN"]'
+  jq_set "$CFG" '( .mounts[] | select(.source == "shm") ).options = ["nosuid","noexec","nodev","mode=1777","size=68719476736"]'
+  
+  # Filter for DKVM_SYS_ADMIN=1
+  DKVM_SYS_ADMIN=$(jq_get "$CFG" '.process.env | map(select(test("^DKVM_SYS_ADMIN="))) | length')
+  if [ "$DKVM_SYS_ADMIN" = "1" ]; then
+    jq_set "$CFG" '.process.capabilities.bounding += ["CAP_SYS_ADMIN"] | .process.capabilities.effective += ["CAP_SYS_ADMIN"] | .process.capabilities.permitted += ["CAP_SYS_ADMIN"]'    
+  fi
+  
+  # cp $D/config.json /tmp/config.json-$ID
+
+elif [ "$7" = "exec" ]; then
+  # /usr/local/bin/dkvm
+  # '--root' '/var/run/docker/runtime-runc/moby'
+  # '--log' '/run/containerd/io.containerd.runtime.v2.task/moby/c8582e431969c2a54e7243d44e9a4cd57cc2f52ea642886b7c5e72824f2e2b14/log.json' 
+  # '--log-format' 'json'
+  # 'exec'
+  # '--process' '/tmp/runc-process1562598997'
+  # '--console-socket' '/tmp/pty238447284/pty.sock'
+  # '--detach'
+  # '--pid-file' '/run/containerd/io.containerd.runtime.v2.task/moby/c8582e431969c2a54e7243d44e9a4cd57cc2f52ea642886b7c5e72824f2e2b14/e076be8a2f9db8397cd251bdee932c0497d90df606b565a69da164cf87bc0429.pid'
+  # 'c8582e431969c2a54e7243d44e9a4cd57cc2f52ea642886b7c5e72824f2e2b14'
+  
+  # /tmp/runc-process1562598997 contains e.g.:
+  # {"terminal":true,"user":{"uid":0,"gid":0},"args":["bash"],"env":["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin","HOSTNAME=cf17c6c9fe3a","TERM=xterm"],"cwd":"/","capabilities":{"bounding":["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE","CAP_SYS_ADMIN"],"effective":["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE","CAP_SYS_ADMIN"],"permitted":["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE","CAP_SYS_ADMIN"]},"oomScoreAdj":0}
+
+  CFG="$9"
+  
+  ARG1=$(jq_get "$CFG" '.args[0]')
+  if [ "$ARG1" = "---" ]; then
+    jq_set "$CFG" 'del(.args[0])'
+  else
+    jq_set "$CFG" --arg exec "$DKVM_EXEC" '.args |= [$exec] + .'
+  fi
+  
+  cat $9 >>$LOG
+fi
+
+echo >>$LOG
+
+exec /usr/bin/runc "$@"

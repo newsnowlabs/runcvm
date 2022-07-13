@@ -1,0 +1,6 @@
+#!/opt/dkvm/bin/bash
+
+. /opt/dkvm/scripts/dkvm-ctr-defaults
+
+ip link set dev "$1" down || true
+exit 0

@@ -1,0 +1,77 @@
+#!/opt/dkvm/bin/bash
+
+. /opt/dkvm/scripts/dkvm-ctr-defaults
+
+if [ -f /.dkvm.ctr.once ]; then
+  kill 1
+  exit 0
+else
+  touch /.dkvm.ctr.once
+fi
+
+# BREAK="break=mountroot"
+# PANIC="panic=-1"
+# OPTS="cgroup_enable=memory swapaccount=1 apparmor=0 systemd.unified_cgroup_hierarchy=0"
+
+INIT="init=/opt/dkvm/scripts/dkvm-vm-init"
+
+KERNEL=$DKVM/kernels/debian/latest/vmlinuz
+INITRD=$DKVM/kernels/debian/latest/initrd
+
+if [ -n "$DKVM_KERNEL" ]; then
+  KERNEL=$DKVM/kernels/$DKVM_KERNEL/vmlinuz
+  INITRD=$DKVM/kernels/$DKVM_KERNEL/initrd
+fi
+
+SERIAL="mon:stdio"
+# SERIAL="stdio"
+
+# CONSOLE="-display curses"
+CONSOLE="-nographic"
+
+DOCKER_IP=$(cat /.dockernet)
+MAC=$(printf "52:54:00:%02x:%02x:%02x" $(echo $DOCKER_IP | cut -d'/' -f1 | cut -d'.' -f2,3,4 | tr '.' ' '))
+
+DISK="/volume/disk.img"
+
+if [ -n "$DISK" ]; then
+  if ! [ -f $DISK ]; then
+    # This will not wipe $DISK if it exists, although it will truncate/expand it.
+    echo NOT RUNNING: busybox truncate -s 5G $DISK
+  fi
+
+  if [ -f $DISK ]; then
+    DISKS="-drive file=$DISK,format=raw,if=virtio"
+  fi
+fi
+
+# -device pvpanic
+
+exec qemu-system-x86_64 \
+  -enable-kvm \
+  $CONSOLE \
+  -no-user-config \
+  -nodefaults \
+  -serial $SERIAL \
+  -m 1G \
+  -cpu host \
+  -machine q35,accel=kvm,usb=off \
+  -chardev socket,id=char0,path=$SOCKET -device vhost-user-fs-pci,queue-size=1024,chardev=char0,tag=myfs,ats=on \
+  -kernel $KERNEL \
+  -initrd $INITRD \
+  -append "rootfstype=virtiofs root=myfs rw nomodeset $BREAK $INIT console=ttyS0 noresume net.ifnames=0 $PANIC $OPTS" \
+  -object memory-backend-file,id=mem,size=1G,mem-path=/dev/shm,share=on \
+  -numa node,memdev=mem \
+  -nic tap,id=qemu0,model=virtio-net-pci,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN,mac=$MAC \
+  -no-reboot \
+  $DISKS \
+  -action panic=none -action reboot=shutdown \
+  -monitor unix:/.qemu-monitor-socket,server,nowait \
+  -chardev socket,id=charchannel0,path=/.qemu-guest-agent,server=on,wait=off \
+  -device virtio-serial \
+  -device virtserialport,chardev=charchannel0,name=org.qemu.guest_agent.0
+}
+
+# DEBUG: ENABLE TO SKIP QEMU BOOT AND INSTEAD FALL INTO CONTAINER SHELL
+# exec "/bin/bash"
+

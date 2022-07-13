@@ -1,0 +1,91 @@
+#!/opt/dkvm/bin/bash -e
+
+# See https://qemu-project.gitlab.io/qemu/interop/qemu-ga-ref.html
+
+DKVM=/opt/dkvm
+
+jq() {
+  $DKVM/usr/bin/jq "$@"
+}
+
+busybox() {
+  $DKVM/bin/busybox "$@"
+}
+
+env() {
+  busybox env "$@"
+}
+
+# https://blog.dhampir.no/content/sleeping-without-a-subprocess-in-bash-and-how-to-sleep-forever
+# From https://blog.dhampir.no/content/sleeping-without-a-subprocess-in-bash-and-how-to-sleep-forever
+
+snore() {
+  local IFS
+  [[ -n "${_snore_fd:-}" ]] || { exec {_snore_fd}<> <(:); } 2>/dev/null ||
+  {
+    # workaround for MacOS and similar systems
+    local fifo
+    fifo=$(mktemp -u)
+    mkfifo -m 700 "$fifo"
+    exec {_snore_fd}<>"$fifo"
+    rm "$fifo"
+  }
+  
+  read ${1:+-t "$1"} -u $_snore_fd || :
+}
+
+command="$1"
+shift
+args=("$@")
+
+if [ ${#args[@]} -gt 0 ]; then
+  args_json=$(printf '%s\n' "${args[@]}" | jq -R . | jq -s .)
+else
+  args_json='[]'
+fi
+
+mapfile -t env < <(env -u _ -u SHLVL -u HOME -u PWD -u HOSTNAME)
+
+if [ ${#env[@]} -gt 0 ]; then
+  env_json=$(printf '%s\n' "${env[@]}" | jq -R . | jq -s .)
+else
+  env_json='[]'
+fi
+
+#echo "- $command -"
+#echo "- $args_json -"
+#echo "- $env_json -"
+#exit
+
+# read RESPONSE < <(echo "{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"$command\",\"arg\":$args_json,\"capture-output\":true}}" | /opt/dkvm/usr/bin/nc -w 1 -U /.qemu-guest-agent)
+read RESPONSE < <(echo "{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"$command\",\"arg\":$args_json,\"env\":$env_json,\"capture-output\":true}}" | /opt/dkvm/usr/bin/nc -w 1 -U /.qemu-guest-agent)
+
+# {"return": {"pid": 1056}}
+pid=$(echo $RESPONSE | jq -r '.return.pid')
+
+# {"error": {"class": "GenericError", "desc": "Guest agent command failed, error was 'Failed to execute child process u201Clsqu201D (No such file or directory)'}
+if [ -z "$pid" ] || [ "$pid" = "null" ]; then
+  echo $RESPONSE | jq -r '.error.desc' >&2
+  exit 127
+fi
+
+while true
+do
+  read RESPONSE < <(echo "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$pid}}" | /opt/dkvm/usr/bin/nc -w 1 -U /.qemu-guest-agent)
+  
+  # {"return": {"exitcode": 0, "out-data": "YTI4ZTYxODdiMTJjCg==", "exited": true}}
+
+  if [ "$(echo $RESPONSE | jq -r '.return.exited')" = 'true' ]; then
+    stdout=$(echo $RESPONSE | jq -r '.return["out-data"]')
+    [ -n "$stdout" ] && [ "$stdout" != "null" ] && echo "$stdout" | busybox base64 -d
+    
+    stderr=$(echo $RESPONSE | jq -r '.return["err-data"]')
+    [ -n "$stderr" ] && [ "$stderr" != "null" ] && echo "$stderr" | busybox base64 -d >&2
+
+    exit $(echo $RESPONSE | jq -r '.return.exitcode')
+  fi
+  
+  # .return.exited = false
+  snore 0.2
+
+done

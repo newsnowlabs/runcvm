@@ -1,0 +1,19 @@
+#!/opt/dkvm/bin/bash
+
+# TODO Rationalise these into defaults
+DKVM=/opt/dkvm
+PATH=$DKVM/sbin:$DKVM/bin:$DKVM/usr/bin
+unset DKVM
+
+if [ -f /.dkvm.vm.once ]; then
+  poweroff
+  exit 0
+else
+  touch /.dkvm.vm.once
+fi
+
+mapfile -t ARGS <<< $(cat /.dockerentrypoint)
+. /.dockerexport
+
+echo "Running ${ARGS[@]}"
+exec "${ARGS[@]}"

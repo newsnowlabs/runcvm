@@ -1,0 +1,7 @@
+#!/opt/dkvm/bin/bash
+
+. /opt/dkvm/scripts/dkvm-ctr-defaults
+
+ip link set dev "$1" up
+ip link set dev "$1" master $QEMU_BRIDGE
+exit 0

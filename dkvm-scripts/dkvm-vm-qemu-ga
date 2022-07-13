@@ -1,0 +1,23 @@
+#!/opt/dkvm/bin/bash
+
+# TODO Rationalise these into defaults
+DKVM=/opt/dkvm
+PATH=$DKVM/sbin:$DKVM/bin:$DKVM/usr/bin
+unset DKVM
+
+if [ -f "/dev/virtio-ports/org.qemu.guest_agent.0" ]; then
+  DEV="/dev/virtio-ports/org.qemu.guest_agent.0"
+  OPTS=()
+else
+  DEV=$(ls /dev/vport* | head -n 1)
+  
+  if [ -n "$DEV" ] && [ -c "$DEV" ]; then  
+    OPTS=(-p "$DEV")
+  fi
+fi
+
+if [ -z "$DEV" ]; then
+  exit 0
+fi
+
+qemu-ga "${OPTS[@]}"
