@@ -39,15 +39,62 @@ echo "$0 ${@@Q}" >>$LOG
 
 # FIXME: Write resilient command-line parsing logic
 
-if [ "$7" = "create" ]; then
+# PARSE RUNC GLOBAL OPTIONS:
+# --debug             enable debug logging
+# --log value         set the log file to write runc logs to (default is '/dev/stderr')
+# --log-format value  set the log format ('text' (default), or 'json') (default: "text")
+# --root value        root directory for storage of container state (this should be located in tmpfs) (default: "/run/user/1000/runc")
+# --criu value        path to the criu binary used for checkpoint and restore (default: "criu")
+# --systemd-cgroup    enable systemd cgroup support, expects cgroupsPath to be of form "slice:prefix:name" for e.g. "system.slice:runc:434234"
+# --rootless value    ignore cgroup permission errors ('true', 'false', or 'auto') (default: "auto")
 
-  D="$9"
-  CFG="$D/config.json"
+COMMAND_LINE=("$@")
 
-  ls -l $D >>$LOG
+while true
+do
+  case "$1" in
+    --debug|--systemd-cgroup) shift; continue; ;;
+    --log|--log-format|--root|--criu|--rootless) shift; shift; continue; ;;
+    --log=*|--log-format=*|--root=*|--criu=*|--rootless=*) shift; continue; ;;
+    *) break; ;;
+  esac
+done
+
+COMMAND="$1"
+shift
+
+if [ "$COMMAND" = "create" ]; then
+
+  echo "create ${@@Q}" >>$LOG
   
-  ROOT=$(jq -r .root.path $D/config.json)
-  ID=${14}
+  # USAGE:
+  #    runc create [command options] <container-id>
+  #   
+  # PARSE 'create' COMMAND OPTIONS
+  # --bundle value, -b value  path to the root of the bundle directory, defaults to the current directory
+  # --console-socket value    path to an AF_UNIX socket which will receive a file descriptor referencing the master end of the console's pseudoterminal
+  # --pid-file value          specify the file to write the process id to
+  # --no-pivot                do not use pivot root to jail process inside rootfs.  This should be used whenever the rootfs is on top of a ramdisk
+  # --no-new-keyring          do not create a new session keyring for the container.  This will cause the container to inherit the calling processes session key
+  # --preserve-fds value      Pass N additional file descriptors to the container (stdio + $LISTEN_FDS + N in total) (default: 0)
+  while true
+  do
+    case "$1" in
+      --bundle|-b) shift; BUNDLE="$1"; shift; continue; ;;
+      --console-socket|--pid-file|--preserve-fds) shift; shift; continue; ;;
+      --no-pivot|--no-new-keyring) shift; continue; ;;
+      *) break; ;;
+    esac
+  done
+
+  ID="$1"
+  
+  CFG="$BUNDLE/config.json"
+
+  ls -l $BUNDLE >>$LOG
+  cp -a $BUNDLE /tmp/
+  
+  ROOT=$(jq -r .root.path $CFG)
   echo "ID $ID" >>$LOG
   echo "ROOT=$ROOT" >>$LOG
 
@@ -77,33 +124,50 @@ if [ "$7" = "create" ]; then
   
   # cp $D/config.json /tmp/config.json-$ID
 
-elif [ "$7" = "exec" ]; then
-  # /usr/local/bin/dkvm
-  # '--root' '/var/run/docker/runtime-runc/moby'
-  # '--log' '/run/containerd/io.containerd.runtime.v2.task/moby/c8582e431969c2a54e7243d44e9a4cd57cc2f52ea642886b7c5e72824f2e2b14/log.json' 
-  # '--log-format' 'json'
-  # 'exec'
-  # '--process' '/tmp/runc-process1562598997'
-  # '--console-socket' '/tmp/pty238447284/pty.sock'
-  # '--detach'
-  # '--pid-file' '/run/containerd/io.containerd.runtime.v2.task/moby/c8582e431969c2a54e7243d44e9a4cd57cc2f52ea642886b7c5e72824f2e2b14/e076be8a2f9db8397cd251bdee932c0497d90df606b565a69da164cf87bc0429.pid'
-  # 'c8582e431969c2a54e7243d44e9a4cd57cc2f52ea642886b7c5e72824f2e2b14'
-  
-  # /tmp/runc-process1562598997 contains e.g.:
-  # {"terminal":true,"user":{"uid":0,"gid":0},"args":["bash"],"env":["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin","HOSTNAME=cf17c6c9fe3a","TERM=xterm"],"cwd":"/","capabilities":{"bounding":["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE","CAP_SYS_ADMIN"],"effective":["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE","CAP_SYS_ADMIN"],"permitted":["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE","CAP_SYS_ADMIN"]},"oomScoreAdj":0}
+elif [ "$COMMAND" = "exec" ]; then
 
-  CFG="$9"
+  echo "exec ${@@Q}" >>$LOG
+
+  # USAGE:
+  #   runc exec [command options] <container-id> <command> [command options]  || -p process.json <container-id>
+  #
+  # PARSE 'exec' COMMAND OPTIONS
+  # --console-socket value             path to an AF_UNIX socket which will receive a file descriptor referencing the master end of the console's pseudoterminal
+  # --cwd value                        current working directory in the container
+  # --env value, -e value              set environment variables
+  # --tty, -t                          allocate a pseudo-TTY
+  # --user value, -u value             UID (format: <uid>[:<gid>])
+  # --additional-gids value, -g value  additional gids
+  # --process value, -p value          path to the process.json
+  # --detach, -d                       detach from the container's process
+  # --pid-file value                   specify the file to write the process id to
+  # --process-label value              set the asm process label for the process commonly used with selinux
+  # --apparmor value                   set the apparmor profile for the process
+  # --no-new-privs                     set the no new privileges value for the process
+  # --cap value, -c value              add a capability to the bounding set for the process
+  # --preserve-fds value               Pass N additional file descriptors to the container (stdio + $LISTEN_FDS + N in total) (default: 0)
+  # --cgroup value                     run the process in an (existing) sub-cgroup(s). Format is [<controller>:]<cgroup>.
+  # --ignore-paused                    allow exec in a paused container    
+  while true
+  do
+    case "$1" in
+      --console-socket|--cwd|--env|-e|--user|-u|--additional-gids|-g|--pid-file|--process-label|--apparmor|--cap|-c|--preserve-fds|--cgroup) shift; shift; continue; ;;
+      --tty|-t|--detach|-d|--no-new-privs|--ignore-paused) shift; continue; ;;
+      --process|-p) shift; PROCESS="$1"; continue; ;;
+      *) break; ;;
+    esac
+  done
   
-  ARG1=$(jq_get "$CFG" '.args[0]')
+  ARG1=$(jq_get "$PROCESS" '.args[0]')
   if [ "$ARG1" = "---" ]; then
-    jq_set "$CFG" 'del(.args[0])'
+    jq_set "$PROCESS" 'del(.args[0])'
   else
-    jq_set "$CFG" --arg exec "$DKVM_EXEC" '.args |= [$exec] + .'
+    jq_set "$PROCESS" --arg exec "$DKVM_EXEC" '.args |= [$exec] + .'
   fi
   
-  cat $9 >>$LOG
+  cat $PROCESS >>$LOG
 fi
 
 echo >>$LOG
 
-exec /usr/bin/runc "$@"
+exec /usr/bin/runc "${COMMAND_LINE[@]}"
