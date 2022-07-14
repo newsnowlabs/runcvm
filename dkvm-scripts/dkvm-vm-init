@@ -32,14 +32,16 @@ hostname -F /etc/hostname
 
 # 1. Run /sbin/init from the image
 
+# Load original entrypoint and environment
+mapfile -t ARGS <<< $(cat /.dockerentrypoint)
 . /.dockerexport
 
-if [ "$DKVM_INIT" != "0" ]; then
-  # TODO:
-  # - Check for and exec alternative init process specified by DKVM_INIT?
-  # - OR only do this if ENTRYPOINT =~ init
+# We don't know if the original entrypoint is an init process or not.
+# Work this out and do the right thing.
 
-  if [ -x /sbin/init ]; then
+if [ "${ARGS[0]}" = "/sbin/init" ] || [ "$DKVM_ENTRYPOINT_IS_INIT" = "1" ]; then
+
+  if [ -x "${ARGS[0]}" ]; then
     # Run the qemu guest agent, needed to support 'docker exec'
   
     # TODO:
@@ -47,7 +49,7 @@ if [ "$DKVM_INIT" != "0" ]; then
     /opt/dkvm/scripts/dkvm-vm-qemu-ga &
   
     # Run init from the image
-    exec -c /sbin/init
+    exec -c "${ARGS[0]}"
   fi
 fi
 
