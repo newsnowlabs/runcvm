@@ -12,8 +12,8 @@ else
   touch /.dkvm.vm.once
 fi
 
+# Load original entrypoint and environment
 mapfile -t ARGS <<< $(cat /.dockerentrypoint)
 . /.dockerexport
 
-echo "Running ${ARGS[@]}"
 exec "${ARGS[@]}"
