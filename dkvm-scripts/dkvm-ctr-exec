@@ -57,15 +57,21 @@ fi
 #echo "- $env_json -"
 #exit
 
-# read RESPONSE < <(echo "{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"$command\",\"arg\":$args_json,\"capture-output\":true}}" | /opt/dkvm/usr/bin/nc -w 1 -U /.qemu-guest-agent)
-read RESPONSE < <(echo "{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"$command\",\"arg\":$args_json,\"env\":$env_json,\"capture-output\":true}}" | /opt/dkvm/usr/bin/nc -w 1 -U /.qemu-guest-agent)
+JSON=$(jq -r --arg command "$command" --argjson args_json "$args_json" --argjson env_json "$env_json" '{"execute":"guest-exec","arguments":{"path":$command,"arg":$args_json,"env":$env_json,"capture-output":true}}' <(echo '{}'))
+
+while true;
+do
+  read RESPONSE < <(echo "$JSON" | /opt/dkvm/usr/bin/nc -U /.qemu-guest-agent 2>>/tmp/exec.log)
+  [ $? -eq 0 ] && break
+  snore 1
+done
 
 # {"return": {"pid": 1056}}
-pid=$(echo $RESPONSE | jq -r '.return.pid')
+pid=$(echo "$RESPONSE" | jq -r '.return.pid')
 
 # {"error": {"class": "GenericError", "desc": "Guest agent command failed, error was 'Failed to execute child process u201Clsqu201D (No such file or directory)'}
 if [ -z "$pid" ] || [ "$pid" = "null" ]; then
-  echo $RESPONSE | jq -r '.error.desc' >&2
+  echo "$RESPONSE" | jq -r '.error.desc' >&2
   exit 127
 fi
 
@@ -76,13 +82,13 @@ do
   # {"return": {"exitcode": 0, "out-data": "YTI4ZTYxODdiMTJjCg==", "exited": true}}
 
   if [ "$(echo $RESPONSE | jq -r '.return.exited')" = 'true' ]; then
-    stdout=$(echo $RESPONSE | jq -r '.return["out-data"]')
-    [ -n "$stdout" ] && [ "$stdout" != "null" ] && echo "$stdout" | busybox base64 -d
+    stdout=$(echo "$RESPONSE" | jq -r '.return["out-data"]')
+    stderr=$(echo "$RESPONSE" | jq -r '.return["err-data"]')
     
-    stderr=$(echo $RESPONSE | jq -r '.return["err-data"]')
     [ -n "$stderr" ] && [ "$stderr" != "null" ] && echo "$stderr" | busybox base64 -d >&2
+    [ -n "$stdout" ] && [ "$stdout" != "null" ] && echo "$stdout" | busybox base64 -d
 
-    exit $(echo $RESPONSE | jq -r '.return.exitcode')
+    exit $(echo "$RESPONSE" | jq -r '.return.exitcode')
   fi
   
   # .return.exited = false
