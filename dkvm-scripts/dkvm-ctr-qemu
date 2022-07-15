@@ -5,13 +5,6 @@
 
 . /opt/dkvm/scripts/dkvm-ctr-defaults
 
-if [ -f /.dkvm.ctr.once ]; then
-  kill 1
-  exit 0
-else
-  touch /.dkvm.ctr.once
-fi
-
 # BREAK="break=mountroot"
 # PANIC="panic=-1"
 # OPTS="cgroup_enable=memory swapaccount=1 apparmor=0 systemd.unified_cgroup_hierarchy=0"
