@@ -117,7 +117,8 @@ if [ "$COMMAND" = "create" ]; then
     jq -r . <$CFG >/tmp/config.json-$$-1
   fi
 
-  # [UNIMPLEMENTED]
+  # [UNIMPLEMENTED] LAUNCH virtiofsd ON HOST INSTEAD OF CONTAINER
+  #
   # Optionally, launch virtiofsd on host and bind-mount socket into container
   # HOST_SOCKET="/tmp/.virtiofs-$ID.sock"
   # touch $HOST_SOCKET
