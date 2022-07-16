@@ -34,8 +34,9 @@ RUN cd /root/init && cc -o /root/dumb-init -std=gnu99 -static -s -Wall -Werror -
 FROM alpine:edge as alpine-kernel
 
 RUN apk add --no-cache linux-virt
-RUN sed -i -r 's!^kernel/fs/virtiofs!kernel/fs/fuse/virtiofs!' /etc/mkinitfs/features.d/virtio.modules
-RUN mkinitfs $(basename $(ls -d /lib/modules/*))
+RUN echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules && \
+    sed -r 's/\b(ata|nvme|raid|scsi|usb|cdrom|kms|mmc)\b//g; s/[ ]+/ /g' /etc/mkinitfs/mkinitfs.conf && \
+    mkinitfs $(basename $(ls -d /lib/modules/*))
 RUN mkdir -p /opt/dkvm/kernels/alpine/$(basename $(ls -d /lib/modules/*)) && \
     cp -a /boot/vmlinuz-virt /opt/dkvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
     cp -a /boot/initramfs-virt /opt/dkvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/initrd && \
@@ -48,7 +49,9 @@ FROM amd64/debian:bullseye as debian-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt update && apt install -y linux-image-amd64:amd64 && \
-    echo -n "virtiofs\nvirtio_console\n" >>/etc/initramfs-tools/modules && \
+    echo 'virtiofs' >>/etc/initramfs-tools/modules && \
+    echo 'virtio_console' >>/etc/initramfs-tools/modules && \
+    echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
 RUN mkdir -p /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*)) && \
     cp -aL /vmlinuz /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
