@@ -156,6 +156,10 @@ if [ "$COMMAND" = "create" ]; then
   jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":232,"access":"rwm"},{"allow":true,"type":"c","major":10,"minor":200,"access":"rwm"}]'
   jq_set "$CFG" '.linux.devices+=[{"path":"/dev/net/tun","type":"c","major":10,"minor":200,"fileMode":8630,"uid":0,"gid":0},{"path":"/dev/kvm","type":"c","major":10,"minor":232,"fileMode":8630,"uid":0,"gid":0}]'
   
+  # For now, hardcode --security-opt=seccomp=unconfined;
+  # later, we can work out the minimal seccomp permissions required.
+  jq_set "$CFG" '.linux.seccomp |= empty'
+  
   # Set /dev/shm to DKVM_DEV_SHM_SIZE env var, or to default
   # - it should be large enough to support VM memory
   DKVM_DEV_SHM_SIZE=$(get_config_env "DKVM_DEV_SHM_SIZE")
