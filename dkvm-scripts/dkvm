@@ -123,7 +123,7 @@ if [ "$COMMAND" = "create" ]; then
   # touch $HOST_SOCKET
   # /usr/lib/qemu/virtiofsd --socket-path=$HOST_SOCKET -o cache=always -o source=$ROOT >/tmp/virtiofsd.log 2>&1 &  
   
-  DKVM_KERNEL=$(jq_get "$CFG" '.process.env[] | select(match("^DKVM_KERNEL=")) | match("^DKVM_KERNEL=(.*)") | .captures[] | .string')
+  DKVM_KERNEL=$(get_config_env 'DKVM_KERNEL')
   if [ -n "$DKVM_KERNEL" ]; then
     DKVM_KERNEL_MODULES="/opt/dkvm/kernels/$DKVM_KERNEL/modules"
   fi
@@ -177,7 +177,7 @@ if [ "$COMMAND" = "create" ]; then
   debug && cp -a $CFG /tmp/config.json-$$-2
   
   # Filter for DKVM_SYS_ADMIN=1
-  DKVM_SYS_ADMIN=$(jq_get "$CFG" '.process.env | map(select(test("^DKVM_SYS_ADMIN="))) | length')
+  DKVM_SYS_ADMIN=$(get_config_env "DKVM_SYS_ADMIN")
   if [ "$DKVM_SYS_ADMIN" = "1" ]; then
     # TODO use 'unique'
     jq_set "$CFG" '.process.capabilities.bounding += ["CAP_SYS_ADMIN"] | .process.capabilities.effective += ["CAP_SYS_ADMIN"] | .process.capabilities.permitted += ["CAP_SYS_ADMIN"]'
