@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/bin/sh -e
 
 DOCKER_BUILDKIT=1 docker build -t dkvm:latest .
 
