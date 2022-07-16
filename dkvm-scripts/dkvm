@@ -9,15 +9,42 @@
 
 LOG=/tmp/dkvm.log
 DKVM=/opt/dkvm
-DKVM_ENTRYPOINT=/opt/dkvm/scripts/dkvm-ctr-entrypoint
-DKVM_EXEC=/opt/dkvm/scripts/dkvm-ctr-exec
-DKVM_INIT=/opt/dkvm/scripts/dkvm-vm-init
-DKVM_KERNEL_MODULES=/opt/dkvm/kernels/debian/latest/modules
+DKVM_ENTRYPOINT=$DKVM/scripts/dkvm-ctr-entrypoint
+DKVM_EXEC=$DKVM/scripts/dkvm-ctr-exec
+DKVM_INIT=$DKVM/scripts/dkvm-vm-init
+DKVM_KERNELS=$DKVM/kernels
 DKVM_DEV_SHM_SIZE_DEFAULT="1G"
 DKVM_DEBUG=1
 
 debug() {
   [ -n "$DKVM_DEBUG" ] && true || false
+}
+
+log() {
+  debug && echo "$1" >>$LOG
+}
+
+error() {
+  echo "$1" >&2
+  exit -1
+}
+
+load_env_from_file() {
+  local file="$1"
+  local var="$2"
+
+  while read LINE
+  do
+    local name="${LINE%%=*}"
+    local value="${LINE#*=}"
+    
+    if [ "$name" != "$LINE" ] && [ "$value" != "$LINE" ] && [ "$name" = "$var" ]; then
+      echo "$value"
+      return 0
+    fi
+  done <"$file"
+  
+  return 1
 }
 
 jq_set() {
@@ -51,6 +78,13 @@ get_config_env() {
   local value=$(jq_get "$CFG" --arg env "$var" '.process.env[] | select(match("^" + $env + "=")) | match("^" + $env + "=(.*)") | .captures[] | .string')
   
   [ -n "$value" ] && echo -n "$value" || echo -n "$default"
+}
+
+set_config_env() {
+  local var="$1"
+  local value="$2"
+  
+  jq_set "$CFG" --arg env "$var=$value" '.process.env |= (.+ [$env] | unique)'
 }
 
 debug && log "$0 ${@@Q}"
@@ -115,6 +149,7 @@ if [ "$COMMAND" = "create" ]; then
     
     # Save formatted config.json
     jq -r . <$CFG >/tmp/config.json-$$-1
+    
   fi
 
   # [UNIMPLEMENTED] LAUNCH virtiofsd ON HOST INSTEAD OF CONTAINER
@@ -124,11 +159,6 @@ if [ "$COMMAND" = "create" ]; then
   # touch $HOST_SOCKET
   # /usr/lib/qemu/virtiofsd --socket-path=$HOST_SOCKET -o cache=always -o source=$ROOT >/tmp/virtiofsd.log 2>&1 &  
   
-  DKVM_KERNEL=$(get_config_env 'DKVM_KERNEL')
-  if [ -n "$DKVM_KERNEL" ]; then
-    DKVM_KERNEL_MODULES="/opt/dkvm/kernels/$DKVM_KERNEL/modules"
-  fi
-
   ARG0=$(jq_get "$CFG" '.process.args[0]')
   # Now look in mounts for destination == $ARG0 (this works for Docker and Podman)
   if [ "$ARG0" = "/sbin/docker-init" ] || [ "$ARG0" = "/dev/init" ]; then
@@ -151,8 +181,99 @@ if [ "$COMMAND" = "create" ]; then
     
     jq_set "$CFG" --arg entrypoint "$DKVM_ENTRYPOINT" '.process.args |= [$entrypoint] + .'
   fi
+ 
+  # DETERMINE LAUNCH KERNEL:
+  #
+  # 1. If DKVM_KERNEL specified:
+  #    - <dist> or <dist>/latest - use latest DKVM kernel available for this dist
+  #    - <dist>/<version> - use specific DKVM kernel version for this dist
+  # 2. Else, check /etc/os-release and:
+  #    a. Use builtin kernel for this dist (if present)
+  #    b. Use latest DKVM kernel available for the dist:
+  #      - ID=alpine, VERSION_ID=3.16.0 => alpine/latest
+  #      - ID=debian, VERSION_ID=11     => debian/latest
+  #      - ID=ubuntu, VERSION_ID=22.04  => ubuntu/latest
+  
+  DKVM_KERNEL=$(get_config_env 'DKVM_KERNEL')
+  log "DKVM_KERNEL #1=$DKVM_KERNEL"
+  if [ -z "$DKVM_KERNEL" ]; then
+    
+    DKVM_KERNEL_OS_ID=$(load_env_from_file "$ROOT/etc/os-release" "ID")
+    
+    # Currently unused
+    # DKVM_KERNEL_OS_VERSION_ID=$(load_var_from_env "$ROOT/etc/os-release" "VERSION_ID")
+    
+    if [ -n "$DKVM_KERNEL_OS_ID" ]; then
+    
+      case "$DKVM_KERNEL_OS_ID" in
+        debian|ubuntu) DKVM_KERNEL_OS_KERNEL="/vmlinuz"; DKVM_KERNEL_OS_INITRAMFS="/initrd.img"; ;;
+               alpine) DKVM_KERNEL_OS_KERNEL="/boot/vmlinuz-virt"; DKVM_KERNEL_OS_INITRAMFS="/boot/initramfs-virt"; ;;
+                    *) ;;
+      esac
+    
+      if [[ -f "$ROOT/$DKVM_KERNEL_OS_KERNEL" && -f "$ROOT/$DKVM_KERNEL_OS_INITRAMFS" ]]; then
+        DKVM_KERNEL_PATH="$DKVM_KERNEL_OS_KERNEL"
+	DKVM_KERNEL_INITRAMFS_PATH="$DKVM_KERNEL_OS_INITRAMFS"
+      else
+        # If we can't find a kernel and initramfs at the expected paths, just select the latest KVM kernel
+	# for this distribution (assuming we have one).
+        DKVM_KERNEL="$DKVM_KERNEL_OS_ID/latest"
+	log "DKVM_KERNEL #2=$DKVM_KERNEL"
+      fi
+    fi
+  fi  
+ 
+  if [ -n "$DKVM_KERNEL" ]; then
+  
+    if [[ "$DKVM_KERNEL" =~ ^[a-z]+$ ]]; then
+      DKVM_KERNEL+="/latest"
+    fi
+  
+    if [[ "$DKVM_KERNEL" =~ \.\. ]]; then
+      error "Kernel '$DKVM_KERNEL' invalid (contains '..')"
+    fi
+  
+    if ! [[ "$DKVM_KERNEL" =~ ^[a-z]+/[^/]+$ ]]; then
+      error "Kernel '$DKVM_KERNEL' invalid (should match ^[a-z]+/[^/]++$)"
+    fi
+  
+    if ! [ -d "$DKVM_KERNELS/$DKVM_KERNEL" ]; then
+      error "Kernel '$DKVM_KERNEL' not found (check $DKVM_KERNELS)"
+    fi
 
-  jq_set "$CFG" --arg dkvm "$DKVM" --arg init "$DKVM_INIT" --arg modules "$DKVM_KERNEL_MODULES" '.mounts += [{"destination":$dkvm,"type":"bind","source":$dkvm,"options":["rbind","rprivate","ro"]},{"destination":"/lib/modules","type":"bind","source":$modules,"options":["rbind","rprivate","ro"]}]'
+    DKVM_KERNEL_ID=$(dirname "$DKVM_KERNEL") # Returns e.g. alpine, debian, ubuntu
+    DKVM_KERNEL_VERSION=$(basename $(readlink -f "$DKVM_KERNELS/$DKVM_KERNEL")) # Returns e.g. 5.15.53-0-virt
+
+    DKVM_KERNEL_MOUNT_LIB_MODULES=$(get_config_env 'DKVM_KERNEL_MOUNT_LIB_MODULES')
+    if [ -n "$DKVM_KERNEL_MOUNT_LIB_MODULES" ]; then
+      DKVM_KERNEL_MODULES_SRC="$DKVM_KERNELS/$DKVM_KERNEL_ID/$DKVM_KERNEL_VERSION/modules"
+      DKVM_KERNEL_MODULES_DST="/lib/modules"
+    else
+      DKVM_KERNEL_MODULES_SRC="$DKVM_KERNELS/$DKVM_KERNEL_ID/$DKVM_KERNEL_VERSION/modules/$DKVM_KERNEL_VERSION"
+      DKVM_KERNEL_MODULES_DST="/lib/modules/$DKVM_KERNEL_VERSION"
+    fi
+    
+    DKVM_KERNEL_PATH="$DKVM_KERNELS/$DKVM_KERNEL_ID/$DKVM_KERNEL_VERSION/vmlinuz"
+    DKVM_KERNEL_INITRAMFS_PATH="$DKVM_KERNELS/$DKVM_KERNEL_ID/$DKVM_KERNEL_VERSION/initrd"
+  
+    jq_set "$CFG" --arg modules_dst "$DKVM_KERNEL_MODULES_DST" --arg modules_src "$DKVM_KERNEL_MODULES_SRC" '.mounts += [{"destination":$modules_dst,"type":"bind","source":$modules_src,"options":["rbind","rprivate","ro"]}]'
+  fi
+
+  log "DKVM_KERNEL=$DKVM_KERNEL"
+  log "DKVM_KERNEL_ID=$DKVM_KERNEL_ID"
+  log "DKVM_KERNEL_VERSION=$DKVM_KERNEL_VERSION"
+  log "DKVM_KERNEL_OS_ID=$DKVM_KERNEL_OS_ID"
+  log "DKVM_KERNEL_OS_VERSION_ID=$DKVM_KERNEL_OS_VERSION_ID"
+  log "DKVM_KERNEL_OS_KERNEL=$DKVM_KERNEL_OS_KERNEL"
+  log "DKVM_KERNEL_OS_INITRAMFS=$DKVM_KERNEL_OS_INITRAMFS"
+  log "DKVM_KERNEL_PATH=$DKVM_KERNEL_PATH"
+  log "DKVM_KERNEL_INITRAMFS_PATH=$DKVM_KERNEL_INITRAMFS_PATH"
+  
+  set_config_env "DKVM_KERNEL_PATH" "$DKVM_KERNEL_PATH"
+  set_config_env "DKVM_KERNEL_INITRAMFS_PATH" "$DKVM_KERNEL_INITRAMFS_PATH"
+  # error "EXITING"
+  
+  jq_set "$CFG" --arg dkvm "$DKVM" '.mounts += [{"destination":$dkvm,"type":"bind","source":$dkvm,"options":["rbind","rprivate","ro"]}]'
   jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":232,"access":"rwm"},{"allow":true,"type":"c","major":10,"minor":200,"access":"rwm"}]'
   jq_set "$CFG" '.linux.devices+=[{"path":"/dev/net/tun","type":"c","major":10,"minor":200,"fileMode":8630,"uid":0,"gid":0},{"path":"/dev/kvm","type":"c","major":10,"minor":232,"fileMode":8630,"uid":0,"gid":0}]'
   
@@ -165,7 +286,7 @@ if [ "$COMMAND" = "create" ]; then
   DKVM_DEV_SHM_SIZE=$(get_config_env "DKVM_DEV_SHM_SIZE")
   if [ -z "$DKVM_DEV_SHM_SIZE" ]; then
     DKVM_DEV_SHM_SIZE="$DKVM_DEV_SHM_SIZE_DEFAULT"
-    jq_set "$CFG" --arg env "DKVM_DEV_SHM_SIZE=$DKVM_DEV_SHM_SIZE" '.process.env |= (.+ [$env] | unique)'
+    set_config_env "DKVM_DEV_SHM_SIZE" "$DKVM_DEV_SHM_SIZE"
   fi
   
   log "DKVM_DEV_SHM_SIZE=$DKVM_DEV_SHM_SIZE"

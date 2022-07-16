@@ -11,14 +11,6 @@
 
 INIT="init=/opt/dkvm/scripts/dkvm-vm-init"
 
-KERNEL=$DKVM/kernels/debian/latest/vmlinuz
-INITRD=$DKVM/kernels/debian/latest/initrd
-
-if [ -n "$DKVM_KERNEL" ]; then
-  KERNEL=$DKVM/kernels/$DKVM_KERNEL/vmlinuz
-  INITRD=$DKVM/kernels/$DKVM_KERNEL/initrd
-fi
-
 SERIAL="mon:stdio"
 # SERIAL="stdio"
 
@@ -54,8 +46,8 @@ exec qemu-system-x86_64 \
   -cpu host \
   -machine q35,accel=kvm,usb=off \
   -chardev socket,id=char0,path=$SOCKET -device vhost-user-fs-pci,queue-size=1024,chardev=char0,tag=myfs,ats=on \
-  -kernel $KERNEL \
-  -initrd $INITRD \
+  -kernel $DKVM_KERNEL_PATH \
+  -initrd $DKVM_KERNEL_INITRAMFS_PATH \
   -append "rootfstype=virtiofs root=myfs rw nomodeset $BREAK $INIT console=ttyS0 noresume net.ifnames=0 $PANIC $OPTS" \
   -object memory-backend-file,id=mem,size="$DKVM_DEV_SHM_SIZE",mem-path=/dev/shm,share=on \
   -numa node,memdev=mem \
