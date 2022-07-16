@@ -41,18 +41,30 @@ docker run --rm -v /opt/dkvm:/dkvm dkvm
 
 ## Usage
 
-Just append `--runtime=dkvm` to your `docker run` (or, experimentally, `podman run`) command:
+Just append `--runtime=dkvm` to your `docker run` (or, experimentally, `podman run`) command. e.g.
+
+Launch a vanilla ubuntu VM, with interactive terminal, that will be removed on exit:
 
 ```
 docker run --runtime=dkvm -it --rm ubuntu
 ```
 
+Launch a vanilla debian VM, with interactive terminal, that will be removed on exit:
+
 ```
 docker run --runtime=dkvm -it --rm debian
 ```
 
+Launch a vanilla debian VM, with interactive terminal, that will be removed on exit:
+
 ```
 docker run --runtime=dkvm -it --rm alpine
+```
+
+Launch nginx, listening on port 80:
+
+```
+docker run --runtime=dkvm --rm -p 80:80 nginx
 ```
 
 ## Options
@@ -91,7 +103,7 @@ docker run --runtime=dkvm --mount=type=volume,src=mydocker1,dst=/volume --env=DK
 
 DKVM will check for existence of /volume/disk1, and if it doesn't find it will create a 5G disk with an ext4 filesystem. It will add the disk to `/etc/fstab`.
 
-#### Running overlayfs in the VM without a volume mount - NOT RECOMMENDED
+### Running overlayfs in the VM without a volume mount - NOT RECOMMENDED
 
 `virtiofsd` must be launched with `-o modcaps=+sys_admin` to allow the VM to mount an overlayfs2 filesystem that is backed by the underlying overlayfs2 filesystem. Doing this is _not recommended_, but can be enabled by launching with this option, which also adds `CAP_SYS_ADMIN` capabilities to the container:
 
@@ -112,4 +124,8 @@ DKVM currently has the following limitations, which it may be possible to addres
 
 - `docker run` arguments affecting the container will not all generally have the expected or even a supported effect on the VM. For example, while files and directories can be bind-mounted (and volumes mounted), sockets bind-mounted from the host will not be accessible from within the VM.
 - `docker exec` doesn't currently support `-i` or `-t`.
+- The exit code of the `docker run` entrypoint is not currently returned.
 
+## DKVM with Dockside
+
+[Dockside](https://dockside.io/) can be used to launch DKVM 'devtainers'. Follow the Dockside instructions for adding the DKVM runtime to your profiles.
