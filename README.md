@@ -4,27 +4,27 @@ DKVM (DocKer VM) is an open source Docker container runtime, for launching stand
 
 It makes launching containerised workloads in VMs as easy as launching them in containers.
 
-Like Kata Containers, DKVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger
+Like Kata Containers, DKVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualization technology as a second layer of defense.
 
 Unlike Kata Containers, DKVM:
-- Uses a lightweight 'wrapper' runtime technology, that makes its code footprint and external dependencies extremely low, its internals extremely simple and e
+- Uses a lightweight 'wrapper' runtime technology, that makes its code footprint and external dependencies extremely low, its internals extremely simple and easy to tailor for specific purposes. Written almost entirely in shell script. Builds very quickly `docker build`.
 - Is compatible with `docker run` (with experimental support for `podman run` today)
 - Has some limitations (see below)
 
-DKVM was born out of difficulties experienced getting the Docker and Podman CLIs to launch Kata Containers, and a belief that launching a containerised worklo
+DKVM was born out of difficulties experienced getting the Docker and Podman CLIs to launch Kata Containers, and a belief that launching a containerised workload in a VM shouldn’t need to be so complicated.
 
 ## Aims
 
 - Run any standard container workload in a VM using `docker run`: no need to create customised container images
 - Run systemd workloads in a VM using `docker run`, including Docker-in-Docker
-- Minimal need for `docker run` command line customisation: just add --runtime=dkvm.
+- Minimal need for `docker run` command line customisation: just add `--runtime=dkvm`.
 - VM specs, including kernels, can be customised by modifying defaults, or using optional command-line arguments
 - Container start/stop/kill semantics respected, where possible providing clean VM shutdown on stop
 - Efficient VM launch using the container filesystem, using virtiofs
 - Reproduction of container's network configuration in the VM during VM launch
-- VM serial console accessible through ‘docker run -it’, ‘docker start -ai’ and`docker attach`
+- VM serial console accessible through `docker run -it`, `docker start -ai` and`docker attach`
 - Support for `docker exec` (no `-i` or `-t`)
-- DKVM doesn’t aim for perfect security, but improved security compared to the standard container runtime, and as much security as possible without compromisi
+- DKVM doesn’t aim for perfect security, but improved security compared to the standard container runtime, and as much security as possible without compromising the simplicity of the implementation.
 
 ## Use cases
 
@@ -35,16 +35,16 @@ DKVM was born out of difficulties experienced getting the Docker and Podman CLIs
 
 ## How DKVM works
 
-- DKVM's 'wrapper' runtime intercepts container create commands, and modifies the specification of the container before calling the standard containerd runc t
-- The dkvm-ctr-entrypoint is launched within the standard Docker container. It saves the container's pre-existing entrypoint and command line arguments, envir
-- The dkvm-vm-init script runs within the VM. It reproduces the container’s environment variables and network configuration, then launches an init process tha
-- DKVM's 'wrapper' runtime also intercepts container exec commands, and modifies the command to execute a wrapper script within the container that uses the QE
+- DKVM's 'wrapper' runtime intercepts container create commands, and modifies the specification of the container before calling the standard containerd runc to actually create the container. The wrapper mounts required code, devices (`/dev/kvm`, `/dev/net/tun`) and kernel modules into the container, increases the `/dev/shm` size, adds necessary capabilities (NET_ADMIN), and prepends the DKVM container entrypoint (`dkvm-ctr-entrypoint`) to the container's pre-existing entrypoint.
+- The `dkvm-ctr-entrypoint` is launched as PID1 within the standard Docker container. It saves the container's pre-existing entrypoint and command line arguments, environment variables and network configuration. It launches `virtiofsd` for the container's root filesystem and keeps it running. It creates a bridge, that will join each pre-existing container network interface to a VM network interface. It launches a VM with a specified kernel (or the kernel referenced by /vmlinuz in the image) with the container’s root filesystem mounted via virtiofs, with the required network interfaces, and with dkvm-vm-init as the VM's init process. It waits for a TERM signal and, on receiving one, it sends an ACPI shutdown to the VM and tries also to power it down cleanly.
+- The `dkvm-vm-init` script runs within the VM. It reproduces the container’s environment variables and network configuration, then launches an init process that launches the saved entrypoint and arguments.
+- DKVM's 'wrapper' runtime also intercepts container exec commands, and modifies the command to execute a wrapper script within the container that uses the QEMU Guest Agent protocol to execute the desired command within the VM.
 
 ## Limitations
 
 DKVM currently has the following limitations, which it may be possible to address later:
 
-- `docker run` arguments affecting the container will not all generally have the expected or even a supported effect on the VM. For example, while files and d
+- `docker run` arguments affecting the container will not all generally have the expected or even a supported effect on the VM. For example, while files and directories can be bind-mounted (and volumes mounted), sockets bind-mounted from the host will not be accessible from within the VM.
 - `docker exec` doesn't currently support `-i` or `-t`.
 
 ## Options
