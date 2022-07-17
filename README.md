@@ -1,17 +1,22 @@
 # DKVM README
 
-DKVM (DocKer VM) is an open source Docker container runtime, for launching standard container workloads in VMs.
+DKVM (DocKer VM) is an open source Docker container runtime for launching standard container workloads in VMs.
 
-It makes launching containerised workloads in VMs as easy as launching them in containers.
+DKVM makes launching containerised workloads in VMs as easy as launching them in containers e.g.:
 
-Like Kata Containers, DKVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualization technology as a second layer of defense.
+```console
+docker run --runtime=dkvm --rm -it -p 80 nginx
+```
+
+Like Kata Containers, DKVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualisation technology as a second layer of defence.
 
 Unlike Kata Containers, DKVM:
-- Uses a lightweight 'wrapper' runtime technology, that makes its code footprint and external dependencies extremely low, its internals extremely simple and easy to tailor for specific purposes. Written almost entirely in shell script. Builds very quickly `docker build`.
+
+- Uses a lightweight 'wrapper' runtime technology that makes its code footprint and external dependencies extremely small, its internals extremely simple and easy to tailor for specific purposes. Written almost entirely in shell script. Builds very quickly with `docker build`
 - Is compatible with `docker run` (with experimental support for `podman run` today)
 - Has some [limitations](#limitations) (see below)
 
-DKVM was born out of difficulties experienced getting the Docker and Podman CLIs to launch Kata Containers, and a belief that launching a containerised workload in a VM shouldn’t need to be so complicated.
+DKVM was born out of difficulties experienced getting the Docker and Podman CLIs to launch Kata Containers, and a belief that launching a containerised workload in a VM needn't be so complicated.
 
 ## Aims
 
@@ -20,6 +25,7 @@ DKVM was born out of difficulties experienced getting the Docker and Podman CLIs
 - Container start/stop/kill semantics respected, where possible providing clean VM shutdown on stop
 - VM serial console accessible as one would expect using `docker run -it`, `docker start -ai` and`docker attach`
 - Support for `docker exec` (but no `-i` or `-t` for now - see [limitations](#limitations))
+- Support for `docker commit`
 - Prioritise container/VM start efficiency, by using virtiofs to serve the container's filesystem to the VM
 - Improved security compared to the standard container runtime, and as much security as possible without compromising the simplicity of the implementation.
 - Command-line and image-embedded options for customising the a container's VM specifications, devices, kernel
@@ -35,7 +41,7 @@ DKVM was born out of difficulties experienced getting the Docker and Podman CLIs
 
 Install the DKVM software package at /opt/dkvm (it cannot be installed elsewhere):
 
-```
+```console
 docker run --rm -v /opt/dkvm:/dkvm dkvm
 ```
 
@@ -49,7 +55,7 @@ Lastly, restart docker, and confirm DKVM is recognised:
 
 ```console
 $ docker info | grep -i dkvm
- Runtimes: runc runsc sysbox-runc dkvm io.containerd.runc.v2 io.containerd.runtime.v1.linux
+ Runtimes: runc dkvm io.containerd.runc.v2 io.containerd.runtime.v1.linux
 ```
 
 ## Usage
@@ -58,25 +64,27 @@ Just append `--runtime=dkvm` to your `docker run` (or, experimentally, `podman r
 
 Launch a vanilla ubuntu VM, with interactive terminal, that will be removed on exit:
 
-```
+```console
 docker run --runtime=dkvm -it --rm ubuntu
 ```
 
+Launch a vanilla debian VM, that will be removed on exit:
+
+```console
+docker run --runtime=dkvm --name=t1 debian bash -c 'apt update && apt -y install procps'
+docker commit -c 'CMD ["/bin/bash"]' t1 debian-t1
+docker run --name=t2 --runtime=dkvm -it --rm debian-t1
+```
+
 Launch a vanilla debian VM, with interactive terminal, that will be removed on exit:
 
-```
-docker run --runtime=dkvm -it --rm debian
-```
-
-Launch a vanilla debian VM, with interactive terminal, that will be removed on exit:
-
-```
+```console
 docker run --runtime=dkvm -it --rm alpine
 ```
 
 Launch nginx, listening on port 80:
 
-```
+```console
 docker run --runtime=dkvm --rm -p 80:80 nginx
 ```
 
@@ -87,12 +95,25 @@ command line.
 
 ### Memory
 
-- `-—env=DKVM_DEV_SHM_SIZE=<size>`
+- `DKVM_DEV_SHM_SIZE=<size>`
 
 ### Kernel
 
-- `-—env=DKVM_KERNEL=<dist>/<version>` or -—env=DKVM_KERNEL=<dist>`
-- `--env=DKVM_KERNEL_MOUNT_LIB_MODULES=1` - mount DKVM kernel modules over `/lib/modules` instead of `/lib/modules/<kernel-version>` (the default)
+DKVM will examine the image to try and determine a suitable kernel to boot the VM with. The process is as follows:
+
+1. Identify distro from `/etc/os-release`
+2. Select an in-image kernel, if found in the following distro-specific location:
+   - Debian: `/vmlinuz` and `/initrd.img`
+   - Ubuntu: `/boot/vmlinuz` and `/boot/initrd.img`
+   - Alpine: `/boot/vmlinuz-virt` `/boot/initramfs-virt`
+3. Select the latest DKVM kernel for the distro, if available
+4. Select the kernel indicated by setting the `DKVM_KERNEL` environment variable for the container,
+   which may be set to `<distro>` (indicating the latest DKVM kernel for that distro)
+   or to `<distro>/<version>` (indicating a specific version).
+   - Look in `/opt/dkvm/kernels` to see the bundled DKVM kernels
+   - Example values for `DKVM_KERNEL` are `alpine/latest`, `alpine/5.15.55-0-virt`, `debian/latest`
+
+- `DKVM_KERNEL_MOUNT_LIB_MODULES=1` - mount DKVM kernel modules over `/lib/modules` instead of (the default) `/lib/modules/<kernel-version>`
 
 ### Running Docker in a VM
 
@@ -102,7 +123,7 @@ If running Docker within a VM, it is recommended that `/var/lib/docker` is a ded
 
 To launch a VM with a volume mount, run:
 
-```
+```console
 docker run --runtime=dkvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker -it <docker-image>
 ```
 
@@ -110,7 +131,7 @@ docker run --runtime=dkvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker 
 
 To launch a VM with a disk mount, run:
 
-```
+```console
 docker run --runtime=dkvm --mount=type=volume,src=mydocker1,dst=/volume --env=DKVM_DISKS=ext4,5G,/volume/disk1 -it <docker-image>
 ```
 
