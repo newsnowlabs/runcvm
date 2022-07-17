@@ -29,7 +29,7 @@ _EOE_
 if [ -f "/etc/docker/daemon.json" ]; then
   log "Detected /etc/docker/daemon.json:"
   log -n "Adding dkvm to runtimes property"
-  jq_set  "/etc/docker/daemon.json" '.runtimes.dkvm.path |= "/opt/dkvm/scripts/dkvm"'
+  jq_set  "/etc/docker/daemon.json" '.runtimes.dkvm.path |= "/opt/dkvm/scripts/dkvm-runtime"'
   log "Now restart docker in the usual way for your system, e.g.:"
   log "systemctl restart docker"
   log
@@ -40,6 +40,6 @@ if [ -n "$(which podman)" ]; then
 To enable experimental DKVM support for Podman, add the following to
   /etc/containers/containers.conf in the [engine.runtimes] section:
 
-  dkvm = [ "/opt/dkvm/scripts/dkvm" ]
+  dkvm = [ "/opt/dkvm/scripts/dkvm-runtime" ]
 _EOE_
 fi
