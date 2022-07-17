@@ -10,14 +10,14 @@ mount -o remount,rw /
 # FIXME: This must be run early enough, otherwise other interfaces like docker0 might have started
 IF=$(ls /sys/class/net/ | grep -vE '^(lo|docker)' | head -n 1)
 
-IP=$(cat /.dockernet)
-GW=$(cat /.dockernetgw)
+IP=$(cat /.dkvm/net)
+GW=$(cat /.dkvm/netgw)
 
 # https://bugzilla.redhat.com/show_bug.cgi?id=501934
 for i in all $IF
 do
   # /sbin/sysctl -w net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0 net.ipv6.conf.$i.accept_ra=0
-  sysctl -w net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0 2>/dev/null
+  sysctl --quiet --write net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0
 done
 
 ip addr add $IP dev $IF
@@ -33,8 +33,8 @@ hostname -F /etc/hostname
 # 1. Run /sbin/init from the image
 
 # Load original entrypoint and environment
-mapfile -t ARGS <<< $(cat /.dockerentrypoint)
-. /.dockerexport
+mapfile -t ARGS <<< $(cat /.dkvm/entrypoint)
+. /.dkvm/export
 
 # We don't know if the original entrypoint is an init process or not.
 # Work this out and do the right thing.

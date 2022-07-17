@@ -5,12 +5,12 @@
 
 # SAVE ENTRYPOINT
 args=("$@")
-printf "%s\n" "${args[@]}" >/.dockerentrypoint
+printf "%s\n" "${args[@]}" >/.dkvm/entrypoint
 
 # SAVE ENVIRONMENT
 export -n SHLVL
-env >/.dockerenviron
-export >/.dockerexport
+env >/.dkvm/env
+export >/.dkvm/export
 
 # NOW LOAD DEFAULT ENV
 . /opt/dkvm/scripts/dkvm-ctr-defaults
@@ -23,8 +23,8 @@ DOCKER_IF=$(ip -json route show | jq -r '.[] | select(.dst == "default") | .dev'
 DOCKER_GW=$(ip -json route show | jq -r '.[] | select(.dst == "default") | .gateway')
 DOCKER_IP=$(ip addr show dev $DOCKER_IF | grep inet | head -n 1 | awk '{print $2}')
 
-echo $DOCKER_IP >/.dockernet
-echo $DOCKER_GW >/.dockernetgw
+echo $DOCKER_IP >/.dkvm/net
+echo $DOCKER_GW >/.dkvm/netgw
 
 # RECONFIGURE CONTAINER NETWORK
 ip addr flush dev $DOCKER_IF

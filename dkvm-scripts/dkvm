@@ -273,7 +273,7 @@ if [ "$COMMAND" = "create" ]; then
   set_config_env "DKVM_KERNEL_INITRAMFS_PATH" "$DKVM_KERNEL_INITRAMFS_PATH"
   # error "EXITING"
   
-  jq_set "$CFG" --arg dkvm "$DKVM" '.mounts += [{"destination":$dkvm,"type":"bind","source":$dkvm,"options":["rbind","rprivate","ro"]}]'
+  jq_set "$CFG" --arg dkvm "$DKVM" '.mounts += [{"destination":$dkvm,"type":"bind","source":$dkvm,"options":["rbind","rprivate","ro"]},{"destination":"/.dkvm","type":"tmpfs","source":"dkvm","options":["nosuid","noexec","nodev","size=1M","mode=700"]}]'
   jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":232,"access":"rwm"},{"allow":true,"type":"c","major":10,"minor":200,"access":"rwm"}]'
   jq_set "$CFG" '.linux.devices+=[{"path":"/dev/net/tun","type":"c","major":10,"minor":200,"fileMode":8630,"uid":0,"gid":0},{"path":"/dev/kvm","type":"c","major":10,"minor":232,"fileMode":8630,"uid":0,"gid":0}]'
   

@@ -5,15 +5,15 @@ DKVM=/opt/dkvm
 PATH=$DKVM/sbin:$DKVM/bin:$DKVM/usr/bin
 unset DKVM
 
-if [ -f /.dkvm.vm.once ]; then
+if [ -f /.dkvm/once ]; then
   poweroff
   exit 0
 else
-  touch /.dkvm.vm.once
+  touch /.dkvm/once
 fi
 
 # Load original entrypoint and environment
-mapfile -t ARGS <<< $(cat /.dockerentrypoint)
-. /.dockerexport
+mapfile -t ARGS <<< $(cat /.dkvm/entrypoint)
+. /.dkvm/export
 
 exec "${ARGS[@]}"

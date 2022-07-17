@@ -1,7 +1,7 @@
 #!/opt/dkvm/bin/bash
 
 # TODO: Clean up ENV vars
-. /.dockerexport
+. /.dkvm/export
 
 . /opt/dkvm/scripts/dkvm-ctr-defaults
 
@@ -17,7 +17,7 @@ SERIAL="mon:stdio"
 # CONSOLE="-display curses"
 CONSOLE="-nographic"
 
-DOCKER_IP=$(cat /.dockernet)
+DOCKER_IP=$(cat /.dkvm/net)
 MAC=$(printf "52:54:00:%02x:%02x:%02x" $(echo $DOCKER_IP | cut -d'/' -f1 | cut -d'.' -f2,3,4 | tr '.' ' '))
 
 DISK="/volume/disk.img"
