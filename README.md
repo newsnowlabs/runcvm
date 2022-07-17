@@ -35,8 +35,25 @@ DKVM was born out of difficulties experienced getting the Docker and Podman CLIs
 
 ## Install
 
+Install the DKVM software package at /opt/dkvm (it cannot be installed elsewhere):
+
 ```
 docker run --rm -v /opt/dkvm:/dkvm dkvm
+```
+
+Enable the DKVM runtime for Docker, by running:
+
+```console
+sudo /opt/dkvm/scripts/install.sh
+```
+
+(This simply adds `"dkvm": { "path": "/opt/dkvm/scripts/dkvm" }` to the `runtimes` property of `/etc/docker/daemon.json`).
+
+Lastly, restart docker, and confirm DKVM is recognised:
+
+```console
+$ docker info | grep -i dkvm
+ Runtimes: runc runsc sysbox-runc dkvm io.containerd.runc.v2 io.containerd.runtime.v1.linux
 ```
 
 ## Usage
@@ -125,6 +142,7 @@ DKVM currently has the following limitations, which it may be possible to addres
 - `docker run` arguments affecting the container will not all generally have the expected or even a supported effect on the VM. For example, while files and directories can be bind-mounted (and volumes mounted), sockets bind-mounted from the host will not be accessible from within the VM.
 - `docker exec` doesn't currently support `-i` or `-t`.
 - The exit code of the `docker run` entrypoint is not currently returned.
+- The DKVM software package at `/opt/dkvm` is mounted read-only within DKVM containers. Container applications cannot compromise DKVM, but they can execute binaries from within the DKVM package.
 
 ## DKVM with Dockside
 
