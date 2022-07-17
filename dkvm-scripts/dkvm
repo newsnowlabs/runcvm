@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/opt/dkvm/bin/bash
 
 # References:
 # - https://github.com/joshkunz/qemu-docker
