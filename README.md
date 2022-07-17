@@ -24,6 +24,14 @@ DKVM was born out of difficulties experienced getting the Docker and Podman CLIs
 
 - [Licence](#licence)
 - [Project aims](#project-aims)
+- [How DKVM works](#how-dkvm-works)
+- [Installation](#installation)
+- [Using DKVM](#using-dkvm)
+- [Limitations](#limitations)
+- [Upgrading](#upgrading)
+- [Contributing](#contributing)
+- [Uninstallation](#uninstallation)
+- [DKVM and Dockside](#dkvm-and-dockside)
 
 ## Licence
 
@@ -45,8 +53,9 @@ Applications for DKVM include:
 
 - Running container workloads that require increased security
 - Running container workloads that require a running kernel
-- Running or developing applications, like Docker daemon, Docker Swarm, and systemd, and kernel modules, that don't play nicely with the default container runtime `runc`
-- Automated testing of kernels, kernel modules, or any application that must run in VMs
+- Running applications, like Docker daemon, Docker swarm, and systemd, and kernel modules, that don't play nicely with the default container runtime `runc`
+- Automated testing of kernels, kernel modules, or any application that must run in VMs. e.g. A load-balancing Docker swarm.
+- Developing applications that require a VM to run. [Dockside](https://dockside.io/) can be used to launch DKVM 'devtainers'. Follow the Dockside instructions for adding the DKVM runtime to your profiles.
 
 ## How DKVM works
 
@@ -116,7 +125,7 @@ $ docker info | grep -i dkvm
  Runtimes: runc dkvm io.containerd.runc.v2 io.containerd.runtime.v1.linux
 ```
 
-## Usage
+## Using DKVM
 
 Just append `--runtime=dkvm` to your `docker run` (or, experimentally, `podman run`) command. e.g.
 
@@ -209,7 +218,3 @@ DKVM currently has the following limitations, which it may be possible to addres
 - `docker exec` doesn't currently support `-i` or `-t`. This may be fixed in a later version.
 - Returning an exit code from the `docker run` entrypoint currently needs application support: your application may either write its exit code to `/.dkvm/exit-code` (supported exit codes 0-255) or call `/opt/dkvm/sbin/qemu-exit <code>` (supported exit codes 0-127). Automatic handling of exit codes from the entrypoint will be provided in a later version.
 - The DKVM software package at `/opt/dkvm` is mounted read-only within DKVM containers. Container applications cannot compromise DKVM, but they can execute binaries from within the DKVM package. This may be fixed in a later version.
-
-## DKVM with Dockside
-
-[Dockside](https://dockside.io/) can be used to launch DKVM 'devtainers'. Follow the Dockside instructions for adding the DKVM runtime to your profiles.
