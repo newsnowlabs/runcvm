@@ -1,6 +1,8 @@
-# DKVM README
+# DKVM Container Runtime
 
-DKVM (DocKer VM) is an open source Docker container runtime for launching standard container workloads in VMs.
+## Introduction
+
+DKVM (DocKer VM) is an open source Docker container runtime, developed by NewsNow Labs, that launches standard container workloads in VMs.
 
 DKVM makes launching containerised workloads in VMs as easy as launching them in containers e.g.:
 
@@ -8,9 +10,9 @@ DKVM makes launching containerised workloads in VMs as easy as launching them in
 docker run --runtime=dkvm --rm -it -p 80 nginx
 ```
 
-Like Kata Containers, DKVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualisation technology as a second layer of defence.
+DKVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualisation technology as a second layer of defence. In this sense, DKVM has similar aims to [Kata Containers](https://katacontainers.io/).
 
-Unlike Kata Containers, DKVM:
+However, DKVM:
 
 - Uses a lightweight 'wrapper' runtime technology that makes its code footprint and external dependencies extremely small, its internals extremely simple and easy to tailor for specific purposes. Written almost entirely in shell script. Builds very quickly with `docker build`
 - Is compatible with `docker run` (with experimental support for `podman run` today)
@@ -18,7 +20,16 @@ Unlike Kata Containers, DKVM:
 
 DKVM was born out of difficulties experienced getting the Docker and Podman CLIs to launch Kata Containers, and a belief that launching a containerised workload in a VM needn't be so complicated.
 
-## Aims
+## Contents
+
+- [Licence](#licence)
+- [Project aims](#project-aims)
+
+## Licence
+
+DKVM is free and open-source, licensed under the Apache Licence, Version 2.0. See the [LICENSE](LICENSE) file for details.
+
+## Project aims
 
 - Run any standard container workload in a VM using `docker run` with almost no command line customisation: no need to create customised container images; just add `--runtime=dkvm`.
 - Maintain a similar experience within a DKVM VM as within a container: process table, network interfaces, exit code handling should broadly "look the same"
@@ -30,12 +41,57 @@ DKVM was born out of difficulties experienced getting the Docker and Podman CLIs
 - Improved security compared to the standard container runtime, and as much security as possible without compromising the simplicity of the implementation.
 - Command-line and image-embedded options for customising the a container's VM specifications, devices, kernel
 
-## Applications
+Applications for DKVM include:
 
-- Running workloads that require increased security
-- Running workloads that require a running kernel
-- Running or developing applications, like Docker daemon, Docker Swarm, and systemd, and kernel modules, that don't play nicely with containers
-- Automated testing of kernels, kernel modules, or applications that must run in VMs
+- Running container workloads that require increased security
+- Running container workloads that require a running kernel
+- Running or developing applications, like Docker daemon, Docker Swarm, and systemd, and kernel modules, that don't play nicely with the default container runtime `runc`
+- Automated testing of kernels, kernel modules, or any application that must run in VMs
+
+## How DKVM works
+
+### dkvm-runtime
+
+DKVM's 'wrapper' runtime, `dkvm-runtime`, receives container create commands, and modifies the configuration of the requested container before calling the standard container runtime (`runc`) to actually create the container.
+
+The modifications are designed to make the created container launch a VM that boots off the container's filesystem.
+
+The DKVM runtime:
+- Determines a suitable kernel, by looking for one inside the container's image, or choosing a stock DKVM kernel matching the image.
+- Arranges to mount required code, devices (`/dev/kvm`, `/dev/net/tun`) and kernel modules into the container. 
+- Sets `/dev/shm` to the size desired for the VM's memory.
+- Adds necessary capabilities, if not already present (`NET_ADMIN`, `NET_RAW`, `MKNOD`, `AUDIT_WRITE`).
+- Sets the seccomp profile to 'unconfined'.
+- Prepends the DKVM container entrypoint, `dkvm-ctr-entrypoint`, to the container's pre-existing entrypoint.
+- Executes the standard container runtime `runc`.
+
+The DKVM runtime also:
+- Receives container exec commands, and modifies the requested command line to run `dkvm-ctr-exec` within the container. It uses the QEMU Guest Agent protocol to execute the desired command within the VM and return stdout and stderr.
+- Passes all other commands directly through to `runc` unchanged.
+
+The `dkvm-ctr-entrypoint`:
+- Is always launched as PID1 within the standard Docker container.
+- Saves the container's pre-existing entrypoint and command line arguments, environment variables and network configuration to a tmpfs filesystem.
+- Creates a bridge for each container network interface, that will be joined to a VM network interface.
+- Launches `virtiofsd` to serve up the container's root filesystem.
+- Execs `dkvm-init`.
+
+The `dkvm-init` process:
+- Is a custom init process, that takes over as PID1 within the standard Docker container, supervising the launch of the VM.
+- Calls `dkvm-ctr-qemu` to launch the VM (using [QEMU](https://www.qemu.org/), with the specified kernel, the required network interfaces, with the container’s root filesystem mounted via virtiofs, with the required network interfaces, and with `dkvm-vm-init` as the VM's init process.
+- Waits for a TERM signal. On receiving one, it spawns `dkvm-ctr-shutdown` (which sends an ACPI shutdown to the VM and tries also to power it down cleanly).
+- Waits for its child (QEMU) to exit. When it does, execs `dkvm-ctr-exit` to retrieve any saved exit code (written by the application to `/.dkvm/exit-code`) and exits with this code.
+
+The `dkvm-vm-init` process:
+- Runs as PID1 within the VM.
+- Reproduces the container’s network configuration, restores the saved environment variables, then launches the container's pre-existing entrypoint, in one of two ways.
+   1. If that entrypoint is an init process within the container (e.g. `/sbin/init`), it backgrounds `dkvm-vm-qemu-ga` and execs the `/sbin/init`. The new entrypoint becomes the VM's PID1.
+   2. Otherwise, it execs `/opt/dkvm/bin/init`, DKVM's own init process (currently busybox init), which becomes the VM's PID1.
+
+The `/opt/dkvm/bin/init` process:
+- Runs as PID1 within the VM.
+- Supervises `dkvm-vm-qemu-ga`, restarting it if it fails.
+- Launches `dkvm-vm-start`, which restores the saved environment variables, and execs the container's pre-existing entrypoint _within the VM_. When it exits, it is respawned to power down the VM.
 
 ## Installation
 
@@ -45,11 +101,13 @@ Install the DKVM software package at /opt/dkvm (it cannot be installed elsewhere
 docker run --rm -v /opt/dkvm:/dkvm dkvm
 ```
 
-Enable the DKVM runtime for Docker, by running the following to add `"dkvm": { "path": "/opt/dkvm/scripts/dkvm" }` to the `runtimes` property of `/etc/docker/daemon.json`:
+Enable the DKVM runtime for Docker:
 
 ```console
 sudo /opt/dkvm/scripts/install.sh
 ```
+
+The above command adds `"dkvm": {"path": "/opt/dkvm/scripts/dkvm-runtime"}` to the `runtimes` property of `/etc/docker/daemon.json`.
 
 Lastly, restart docker, and confirm DKVM is recognised:
 
@@ -143,22 +201,13 @@ DKVM will check for existence of /volume/disk1, and if it doesn't find it will c
 
 - `--env=DKVM_SYS_ADMIN=1`
 
-## How DKVM works
-
-1. DKVM's 'wrapper' runtime intercepts container create commands, and modifies the specification of the container before calling the standard containerd runc to actually create the container. It determines a suitable kernel, or detects one inside the image. It arranges to mount required code, devices (`/dev/kvm`, `/dev/net/tun`) and kernel modules into the container. It sets the `/dev/shm` size, and adds necessary capabilities (NET_ADMIN). It prepends the DKVM container entrypoint (`dkvm-ctr-entrypoint`) to the container's pre-existing entrypoint.
-2. The `dkvm-ctr-entrypoint` is launched within the standard Docker container as PID1. It saves the container's pre-existing entrypoint and command line arguments, environment variables and network configuration. It creates a bridge for each pre-existing container network interface for joining the interface to a VM network interface. It launches `virtiofsd` to serve up the container's root filesystem. It launches a custom `dkvm-ctr-init` process as a new PID1, which in turn calls `dkvm-ctr-qemu` to launch the VM (using [QEMU](https://www.qemu.org/), with the required kernel and with the container’s root filesystem mounted via virtiofs, with the required network interfaces, and with `dkvm-vm-init` as the VM's init process). `dkvm-ctr-init` waits for a TERM signal and, on receiving one, calls `dkvm-ctr-shutdown` (which sends an ACPI shutdown to the VM and tries also to power it down cleanly). When its child (QEMU) exits, it execs `dkvm-ctr-exit` to retrieve any saved exit code and exit.
-3. The `dkvm-vm-init` script runs within the VM. It reproduces the container’s environment variables and network configuration, then either:
-   - backgrounds `dkvm-vm-qemu-ga` and execs the `/sbin/init` process from within the image; or
-   - execs DKVM's own init process (busybox init), which supervises `dkvm-vm-qemu-ga` and launches `dkvm-vm-start`, which restores the saved container environment, entrypoint and arguments and executes the entrypoint.
-4. DKVM's 'wrapper' runtime also intercepts container exec commands, and modifies the command to execute a wrapper script within the container that uses the QEMU Guest Agent protocol to execute the desired command within the VM.
-
 ## Limitations
 
 DKVM currently has the following limitations, which it may be possible to address later:
 
 - `docker run` arguments affecting the container will not all generally have the expected or even a supported effect on the VM. For example, while files and directories can be bind-mounted (and volumes mounted), sockets bind-mounted from the host will not be accessible from within the VM.
 - `docker exec` doesn't currently support `-i` or `-t`. This may be fixed in a later version.
-- Returning an exit code from the `docker run` entrypoint currently needs application support: your application may either write its exit code to `/.dkvm/exitcode` (supported exit codes 0-255) or call `/opt/dkvm/sbin/qemu-exit <code>` (supported exit codes 0-127). Automatic handling of exit codes from the entrypoint will be provided in a later version.
+- Returning an exit code from the `docker run` entrypoint currently needs application support: your application may either write its exit code to `/.dkvm/exit-code` (supported exit codes 0-255) or call `/opt/dkvm/sbin/qemu-exit <code>` (supported exit codes 0-127). Automatic handling of exit codes from the entrypoint will be provided in a later version.
 - The DKVM software package at `/opt/dkvm` is mounted read-only within DKVM containers. Container applications cannot compromise DKVM, but they can execute binaries from within the DKVM package. This may be fixed in a later version.
 
 ## DKVM with Dockside
