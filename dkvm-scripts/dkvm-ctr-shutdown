@@ -1,5 +1,7 @@
 #!/opt/dkvm/bin/bash
 
+# dkvm-init forks and execs this script when it receives a SIGTERM
+
 poweroff() {
   # Try ACPI poweroff
   /opt/dkvm/scripts/dkvm-ctr-qemu-poweroff

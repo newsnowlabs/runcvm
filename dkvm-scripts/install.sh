@@ -28,12 +28,11 @@ _EOE_
 
 if [ -f "/etc/docker/daemon.json" ]; then
   log "Detected /etc/docker/daemon.json:"
-  log -n "- Adding dkvm to runtimes property ... "
+  log -n "Adding dkvm to runtimes property"
   jq_set  "/etc/docker/daemon.json" '.runtimes.dkvm.path |= "/opt/dkvm/scripts/dkvm"'
-  log "done"
-  log
   log "Now restart docker in the usual way for your system, e.g.:"
   log "systemctl restart docker"
+  log
 fi
 
 if [ -n "$(which podman)" ]; then

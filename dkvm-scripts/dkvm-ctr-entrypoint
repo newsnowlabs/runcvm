@@ -43,4 +43,4 @@ ip link set dev $QEMU_BRIDGE up
 /opt/dkvm/scripts/dkvm-ctr-virtiofsd &
 
 # LAUNCH INIT SUPERVISING QEMU
-exec /opt/dkvm/sbin/dumb-init -v -c /opt/dkvm/scripts/dkvm-ctr-qemu
+exec /opt/dkvm/sbin/dkvm-init -v -c /opt/dkvm/scripts/dkvm-ctr-qemu

@@ -121,8 +121,12 @@ pid_t shutdown() {
 }
 
 void quit(int exit_status) {
-    char *exit_cmd[] = {"/opt/dkvm/scripts/dkvm-ctr-exit", NULL};
-    DEBUG("Exiting by execing %s\n", exit_cmd[0]);
+    char exit_status_string[4];
+    char *exit_cmd[] = {"/opt/dkvm/scripts/dkvm-ctr-exit", exit_status_string, NULL};
+
+    sprintf(exit_status_string, "%d", exit_status & 0xFF);
+
+    DEBUG("Exiting by execing: %s %s\n", exit_cmd[0], exit_cmd[1]);
     execvp(exit_cmd[0], &exit_cmd[0]);
     DEBUG("Failed to exec %s, so exiting now with status %d\n", exit_cmd[0], exit_status);
     exit(exit_status);

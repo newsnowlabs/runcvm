@@ -26,8 +26,13 @@ FROM alpine:edge as init
 RUN apk update && \
     apk add --no-cache gcc musl-dev
 
-ADD dumb-init /root/init
-RUN cd /root/init && cc -o /root/dumb-init -std=gnu99 -static -s -Wall -Werror -O3 dumb-init.c
+ADD dumb-init /root/dkvm-init
+RUN cd /root/dkvm-init && cc -o /root/dkvm-init/dkvm-init -std=gnu99 -static -s -Wall -Werror -O3 dumb-init.c
+
+# Build qemu-exit while we're here
+
+ADD qemu-exit /root/qemu-exit
+RUN cd /root/qemu-exit && cc -o /root/qemu-exit/qemu-exit -std=gnu99 -static -s -Wall -Werror -O3 qemu-exit.c
 
 # Build alpine kernel and initramfs with virtiofs module
 
@@ -66,7 +71,7 @@ FROM alpine
 COPY --from=binaries /opt/dkvm /opt/dkvm
 COPY --from=alpine-kernel /opt/dkvm/kernels/alpine /opt/dkvm/kernels/alpine
 COPY --from=debian-kernel /opt/dkvm/kernels/debian /opt/dkvm/kernels/debian
-COPY --from=init /root/dumb-init /opt/dkvm/sbin/dumb-init
+COPY --from=init /root/dkvm-init/dkvm-init /root/qemu-exit/qemu-exit /opt/dkvm/sbin/
 
 RUN for d in /opt/dkvm/kernels/*; do cd $d && ln -s $(ls -d * | sort | head -n 1) latest; done
 

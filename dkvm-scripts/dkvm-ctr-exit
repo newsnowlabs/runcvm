@@ -1,0 +1,18 @@
+#!/opt/dkvm/bin/sh
+
+# dkvm-init execs this script when it exits.
+# It:
+# - performs any post-VM tests.
+# - retrieves any saved exit code.
+# - 
+
+if [ -f /.dkvm-exitcode ]; then
+  read CODE </.dkvm-exitcode
+
+  # Convert negative codes to positive and ensure in acceptable range (0-255)
+  CODE=$(( $CODE & 255 ))
+elif [ -n "$1" ]; then
+  CODE=$(( ($1+1)/2 ))
+fi
+
+exit ${CODE:-0}
