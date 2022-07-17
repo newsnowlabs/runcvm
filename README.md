@@ -82,10 +82,10 @@ Launch a vanilla debian VM, with interactive terminal, that will be removed on e
 docker run --runtime=dkvm -it --rm alpine
 ```
 
-Launch nginx, listening on port 80:
+Launch nginx in a VM, listening on port 8080:
 
 ```console
-docker run --runtime=dkvm --rm -p 80:80 nginx
+docker run --runtime=dkvm --rm -p 8080:80 nginx
 ```
 
 ## Options
