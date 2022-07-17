@@ -6,8 +6,8 @@
 # - retrieves any saved exit code.
 # - 
 
-if [ -f /.dkvm-exitcode ]; then
-  read CODE </.dkvm-exitcode
+if [ -f /.dkvm/exitcode ]; then
+  read CODE </.dkvm/exitcode
 
   # Convert negative codes to positive and ensure in acceptable range (0-255)
   CODE=$(( $CODE & 255 ))

@@ -15,25 +15,23 @@ DKVM was born out of difficulties experienced getting the Docker and Podman CLIs
 
 ## Aims
 
-- Run any standard container workload in a VM using `docker run`: no need to create customised container images
-- Run systemd workloads in a VM using `docker run`, including Docker-in-Docker
-- Minimal need for `docker run` command line customisation: just add `--runtime=dkvm`.
-- VM specs, including kernels, can be customised by modifying defaults, or using optional command-line arguments
+- Run any standard container workload in a VM using `docker run` with almost no command line customisation: no need to create customised container images; just add `--runtime=dkvm`.
+- Maintain a similar experience within a DKVM VM as within a container: process table, network interfaces, exit code handling should broadly "look the same"
 - Container start/stop/kill semantics respected, where possible providing clean VM shutdown on stop
-- Efficient VM launch using the container filesystem, using virtiofs
-- Reproduction of container's network configuration in the VM during VM launch
-- VM serial console accessible through `docker run -it`, `docker start -ai` and`docker attach`
-- Support for `docker exec` (no `-i` or `-t`)
-- DKVM doesn’t aim for perfect security, but improved security compared to the standard container runtime, and as much security as possible without compromising the simplicity of the implementation.
+- VM serial console accessible as one would expect using `docker run -it`, `docker start -ai` and`docker attach`
+- Support for `docker exec` (but no `-i` or `-t` for now - see [limitations](#limitations))
+- Prioritise container/VM start efficiency, by using virtiofs to serve the container's filesystem to the VM
+- Improved security compared to the standard container runtime, and as much security as possible without compromising the simplicity of the implementation.
+- Command-line and image-embedded options for customising the a container's VM specifications, devices, kernel
 
-## Use cases
+## Applications
 
 - Running workloads that require increased security
 - Running workloads that require a running kernel
-- Running or developing applications, like Docker/Docker Swarm, that don't play nicely with containers
+- Running or developing applications, like Docker daemon, Docker Swarm, and systemd, and kernel modules, that don't play nicely with containers
 - Automated testing of kernels, kernel modules, or applications that must run in VMs
 
-## Install
+## Installation
 
 Install the DKVM software package at /opt/dkvm (it cannot be installed elsewhere):
 
@@ -141,7 +139,7 @@ DKVM currently has the following limitations, which it may be possible to addres
 
 - `docker run` arguments affecting the container will not all generally have the expected or even a supported effect on the VM. For example, while files and directories can be bind-mounted (and volumes mounted), sockets bind-mounted from the host will not be accessible from within the VM.
 - `docker exec` doesn't currently support `-i` or `-t`. This may be fixed in a later version.
-- Returning an exit code from the `docker run` entrypoint currently needs application support: your application may either write its exit code to `/.dkvm-exitcode` (0-255). This will be fixed in a later version.
+- Returning an exit code from the `docker run` entrypoint currently needs application support: your application may either write its exit code to `/.dkvm/exitcode` (supported exit codes 0-255) or call `/opt/dkvm/sbin/qemu-exit <code>` (supported exit codes 0-127). Automatic handling of exit codes from the entrypoint will be provided in a later version.
 - The DKVM software package at `/opt/dkvm` is mounted read-only within DKVM containers. Container applications cannot compromise DKVM, but they can execute binaries from within the DKVM package. This may be fixed in a later version.
 
 ## DKVM with Dockside

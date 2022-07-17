@@ -17,7 +17,7 @@ GW=$(cat /.dkvm/netgw)
 for i in all $IF
 do
   # /sbin/sysctl -w net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0 net.ipv6.conf.$i.accept_ra=0
-  sysctl --quiet --write net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0
+  sysctl -q -w net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0
 done
 
 ip addr add $IP dev $IF
