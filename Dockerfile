@@ -72,5 +72,5 @@ RUN for d in /opt/dkvm/kernels/*; do cd $d && ln -s $(ls -d * | sort | head -n 1
 
 ADD dkvm-scripts/* /opt/dkvm/scripts/
 
-ADD build-utils/install.sh /
-ENTRYPOINT ["/install.sh"]
+ADD build-utils/entrypoint-install.sh /
+ENTRYPOINT ["/entrypoint-install.sh"]
