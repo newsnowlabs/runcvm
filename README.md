@@ -104,7 +104,7 @@ The `/opt/dkvm/bin/init` process:
 
 ## Installation
 
-Install the DKVM software package at /opt/dkvm (it cannot be installed elsewhere):
+Install the DKVM software package at `/opt/dkvm` (it cannot be installed elsewhere):
 
 ```console
 docker run --rm -v /opt/dkvm:/dkvm dkvm
@@ -113,7 +113,7 @@ docker run --rm -v /opt/dkvm:/dkvm dkvm
 Enable the DKVM runtime for Docker:
 
 ```console
-sudo /opt/dkvm/scripts/install.sh
+sudo /opt/dkvm/scripts/dkvm-install-runtime.sh
 ```
 
 The above command adds `"dkvm": {"path": "/opt/dkvm/scripts/dkvm-runtime"}` to the `runtimes` property of `/etc/docker/daemon.json`.
