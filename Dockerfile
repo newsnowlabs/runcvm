@@ -64,6 +64,22 @@ RUN mkdir -p /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*)) && \
     cp -a /lib/modules/ /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/ && \
     chmod -R u+rwX,g+rX,o+rX /opt/dkvm/kernels/debian
 
+# Build Ubuntu bullseye kernel and initramfs with virtiofs module
+
+FROM amd64/ubuntu:latest as ubuntu-kernel
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt update && apt install -y linux-generic:amd64 && \
+    echo 'virtiofs' >>/etc/initramfs-tools/modules && \
+    echo 'virtio_console' >>/etc/initramfs-tools/modules && \
+    echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
+    update-initramfs -u
+RUN mkdir -p /opt/dkvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*)) && \
+    cp -aL /boot/vmlinuz /opt/dkvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
+    cp -aL /boot/initrd.img /opt/dkvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/initrd && \
+    cp -a /lib/modules/ /opt/dkvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/ && \
+    chmod -R u+rwX,g+rX,o+rX /opt/dkvm/kernels/ubuntu
+
 # Build DKVM installation
 
 FROM alpine
@@ -71,6 +87,7 @@ FROM alpine
 COPY --from=binaries /opt/dkvm /opt/dkvm
 COPY --from=alpine-kernel /opt/dkvm/kernels/alpine /opt/dkvm/kernels/alpine
 COPY --from=debian-kernel /opt/dkvm/kernels/debian /opt/dkvm/kernels/debian
+COPY --from=ubuntu-kernel /opt/dkvm/kernels/ubuntu /opt/dkvm/kernels/ubuntu
 COPY --from=init /root/dkvm-init/dkvm-init /root/qemu-exit/qemu-exit /opt/dkvm/sbin/
 
 RUN for d in /opt/dkvm/kernels/*; do cd $d && ln -s $(ls -d * | sort | head -n 1) latest; done
