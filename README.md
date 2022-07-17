@@ -31,7 +31,7 @@ DKVM was born out of difficulties experienced getting the Docker and Podman CLIs
 - [Upgrading](#upgrading)
 - [Contributing](#contributing)
 - [Uninstallation](#uninstallation)
-- [DKVM and Dockside](#dkvm-and-dockside)
+- [Legals](#Legals)
 
 ## Licence
 
@@ -218,3 +218,45 @@ DKVM currently has the following limitations, which it may be possible to addres
 - `docker exec` doesn't currently support `-i` or `-t`. This may be fixed in a later version.
 - Returning an exit code from the `docker run` entrypoint currently needs application support: your application may either write its exit code to `/.dkvm/exit-code` (supported exit codes 0-255) or call `/opt/dkvm/sbin/qemu-exit <code>` (supported exit codes 0-127). Automatic handling of exit codes from the entrypoint will be provided in a later version.
 - The DKVM software package at `/opt/dkvm` is mounted read-only within DKVM containers. Container applications cannot compromise DKVM, but they can execute binaries from within the DKVM package. This may be fixed in a later version.
+
+## Upgrading
+
+## Contributing
+
+If you are experiencing an issue, please [raise an issue](https://github.com/newsnowlabs/dkvm/issues) or reach out to us on the [NewsNow Labs Slack Workspace](https://join.slack.com/t/newsnowlabs/shared_invite/zt-wp54l05w-0DTxuc_n8uISJRtks3Xw3A).
+
+If you would like to contribute a bugfix, patch or feature, please raise an issue or submit a pull request.
+
+## Contact
+
+Github: [Raise an issue](https://github.com/newsnowlabs/dkvm/issues/new)
+
+Slack: [NewsNow Labs Slack Workspace](https://join.slack.com/t/newsnowlabs/shared_invite/zt-wp54l05w-0DTxuc_n8uISJRtks3Xw3A)
+
+We are typically available to respond to queries Monday-Friday, 9am-5pm UK time.
+
+## Uninstallation
+
+## Legals
+
+This project (known as "DKVM"), comprising the files in this Git repository,
+is copyright 2022 NewsNow Publishing Limited and contributors.
+
+DKVM is an open-source project licensed under the Apache License, Version 2.0
+(the "License"); you may not use DKVM or its constituent files except in
+compliance with the License.
+
+You may obtain a copy of the License at [http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0).
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+> N.B. In order to run, DKVM relies upon other third-party open-source software dependencies that are separate to and independent from DKVM and published under their own independent licences.
+>
+> DKVM Docker images made available at [https://hub.docker.com/repository/docker/newsnowlabs/dkvm](https://hub.docker.com/repository/docker/newsnowlabs/dkvm) are distributions
+> designed to run DKVM that comprise: (a) the DKVM project source and/or object code; and
+> (b) third-party dependencies that DKVM needs to run; and which are each distributed under the terms
+> of their respective licences.
