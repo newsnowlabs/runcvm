@@ -63,7 +63,7 @@ ttyS0::respawn:-/opt/dkvm/scripts/dkvm-vm-start
 _EOE_
 
 # Allow dkvm-vm-start to runs once (and only once)
-rm -f /.dkvm.vm.once
+rm -f /.dkvm/once
 
 # Run our own init
 exec -c /opt/dkvm/bin/init
