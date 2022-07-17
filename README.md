@@ -243,6 +243,10 @@ We are typically available to respond to queries Monday-Friday, 9am-5pm UK time.
 
 ## Uninstallation
 
+Shut down any DKVM containers.
+
+Then run `sudo rm -f /opt/dkvm`.
+
 ## Legals
 
 This project (known as "DKVM"), comprising the files in this Git repository,
