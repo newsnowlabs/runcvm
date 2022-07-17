@@ -1,25 +1,17 @@
-#!/bin/sh
+#!/opt/dkvm/bin/bash
 
-MNT=/dkvm
+log() {
+    echo "$@" >&2
+}
 
-if mountpoint $MNT >/dev/null; then
-
-  rm -rf $MNT/*
-  cp -a /opt/dkvm/* $MNT/
-
-  cat <<_EOE_ >&2
-Now enable DKVM for Docker (and, experimentally, Podman), by running:
-
-/opt/dkvm/scripts/install.sh
-_EOE_
-
-else
+usage() {
   cat <<"_EOE_" >&2
-Usage: docker run --rm -v /opt/dkvm:$MNT dkvm
-
- - Installs dkvm package to host:/opt/dkvm
- - N.B. /opt/dkvm is hardcoded and requires a rebuild to be changed
-
+Usage: $0
 _EOE_
+  exit 1
+}
 
-fi
+# TODO:
+# - Check for any running DKVM containers, and if found, throw error
+
+docker run --rm -v /opt/dkvm:/dkvm dkvm:latest
