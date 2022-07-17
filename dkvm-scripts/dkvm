@@ -21,7 +21,7 @@ debug() {
 }
 
 log() {
-  debug && echo "$1" >>$LOG
+  debug && echo "$@" >>$LOG
 }
 
 error() {
@@ -68,10 +68,6 @@ jq_get() {
   jq -r "$@" $file
 }
 
-log() {
-  echo "$@" >>$LOG
-}
-
 get_config_env() {
   local var="$1"
   local default="$2"
@@ -87,7 +83,6 @@ set_config_env() {
   jq_set "$CFG" --arg env "$var=$value" '.process.env |= (.+ [$env] | unique)'
 }
 
-debug && log "$0 ${@@Q}"
 
 # PARSE RUNC GLOBAL OPTIONS:
 # --debug             enable debug logging
@@ -99,6 +94,9 @@ debug && log "$0 ${@@Q}"
 # --rootless value    ignore cgroup permission errors ('true', 'false', or 'auto') (default: "auto")
 
 COMMAND_LINE=("$@")
+
+debug && log "--- LOG BEGINS ---"
+echo "Command line: $0 ${COMMAND_LINE[@]@Q}" >>$LOG
 
 while true
 do
@@ -115,7 +113,7 @@ shift
 
 if [ "$COMMAND" = "create" ]; then
 
-  debug && log "create ${@@Q}"
+  debug && log "Command: create"
   
   # USAGE:
   #    runc create [command options] <container-id>
@@ -138,14 +136,13 @@ if [ "$COMMAND" = "create" ]; then
   done
 
   ID="$1"
-  
+
+
   CFG="$BUNDLE/config.json"
   ROOT=$(jq -r .root.path $CFG)
 
   if debug; then
-    ls -l $BUNDLE >>$LOG
-    echo "ID $ID" >>$LOG
-    echo "ROOT=$ROOT" >>$LOG
+    log "Command: create bundle=$BUNDLE id=$ID root=$ROOT"
     
     # Save formatted config.json
     jq -r . <$CFG >/tmp/config.json-$$-1
@@ -188,7 +185,7 @@ if [ "$COMMAND" = "create" ]; then
   #    - <dist> or <dist>/latest - use latest DKVM kernel available for this dist
   #    - <dist>/<version> - use specific DKVM kernel version for this dist
   # 2. Else, check /etc/os-release and:
-  #    a. Use builtin kernel for this dist (if present)
+  #    a. Use builtin kernel for this dist (if present in the expected location)
   #    b. Use latest DKVM kernel available for the dist:
   #      - ID=alpine, VERSION_ID=3.16.0 => alpine/latest
   #      - ID=debian, VERSION_ID=11     => debian/latest
@@ -206,19 +203,30 @@ if [ "$COMMAND" = "create" ]; then
     if [ -n "$DKVM_KERNEL_OS_ID" ]; then
     
       case "$DKVM_KERNEL_OS_ID" in
-        debian|ubuntu) DKVM_KERNEL_OS_KERNEL="/vmlinuz"; DKVM_KERNEL_OS_INITRAMFS="/initrd.img"; ;;
-               alpine) DKVM_KERNEL_OS_KERNEL="/boot/vmlinuz-virt"; DKVM_KERNEL_OS_INITRAMFS="/boot/initramfs-virt"; ;;
-                    *) ;;
+          debian) DKVM_KERNEL_OS_KERNEL="/vmlinuz"
+                  DKVM_KERNEL_OS_INITRAMFS="/initrd.img"
+                  DKVM_KERNEL_ARGS="noresume"
+                  ;;
+          ubuntu) DKVM_KERNEL_OS_KERNEL="/boot/vmlinuz"
+                  DKVM_KERNEL_OS_INITRAMFS="/boot/initrd.img"
+                  DKVM_KERNEL_ARGS="noresume"
+                  ;;
+          alpine) DKVM_KERNEL_OS_KERNEL="/boot/vmlinuz-virt"
+                  DKVM_KERNEL_OS_INITRAMFS="/boot/initramfs-virt"
+                  DKVM_KERNEL_ARGS="resume="
+                  ;;
+
+               *) ;;
       esac
     
       if [[ -f "$ROOT/$DKVM_KERNEL_OS_KERNEL" && -f "$ROOT/$DKVM_KERNEL_OS_INITRAMFS" ]]; then
         DKVM_KERNEL_PATH="$DKVM_KERNEL_OS_KERNEL"
-	DKVM_KERNEL_INITRAMFS_PATH="$DKVM_KERNEL_OS_INITRAMFS"
+        DKVM_KERNEL_INITRAMFS_PATH="$DKVM_KERNEL_OS_INITRAMFS"
       else
         # If we can't find a kernel and initramfs at the expected paths, just select the latest KVM kernel
-	# for this distribution (assuming we have one).
+        # for this distribution (assuming we have one).
         DKVM_KERNEL="$DKVM_KERNEL_OS_ID/latest"
-	log "DKVM_KERNEL #2=$DKVM_KERNEL"
+        log "DKVM_KERNEL #2=$DKVM_KERNEL"
       fi
     fi
   fi  
@@ -268,6 +276,7 @@ if [ "$COMMAND" = "create" ]; then
   log "DKVM_KERNEL_OS_INITRAMFS=$DKVM_KERNEL_OS_INITRAMFS"
   log "DKVM_KERNEL_PATH=$DKVM_KERNEL_PATH"
   log "DKVM_KERNEL_INITRAMFS_PATH=$DKVM_KERNEL_INITRAMFS_PATH"
+  log "DKVM_KERNEL_ARGS=$DKVM_KERNEL_ARGS"
   
   set_config_env "DKVM_KERNEL_PATH" "$DKVM_KERNEL_PATH"
   set_config_env "DKVM_KERNEL_INITRAMFS_PATH" "$DKVM_KERNEL_INITRAMFS_PATH"
@@ -311,7 +320,7 @@ if [ "$COMMAND" = "create" ]; then
   
 elif [ "$COMMAND" = "exec" ]; then
 
-  debug && log "exec ${@@Q}"
+  debug && log "Command: exec"
 
   # USAGE:
   #   runc exec [command options] <container-id> <command> [command options]  || -p process.json <container-id>
@@ -344,7 +353,7 @@ elif [ "$COMMAND" = "exec" ]; then
   done
 
   if debug; then
-    ls -l $PROCESS >>$LOG
+    log "Command: exec process=$PROCESS"
     
     # Save formatted process.json
     jq -r . <$PROCESS >/tmp/process.json-$$-1
@@ -360,6 +369,6 @@ elif [ "$COMMAND" = "exec" ]; then
   debug && cp -a $PROCESS /tmp/process.json-$$-2
 fi
 
-echo >>$LOG
+debug && log "--- LOG ENDS ---"
 
 exec /usr/bin/runc "${COMMAND_LINE[@]}"
