@@ -1,3 +1,29 @@
+// For the purposes of the following license, the "Software" is this file, dumb-init.c.
+//
+// The MIT License (MIT)
+//
+// Copyright (c) 2015 Yelp, Inc.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+
+// dumb-init.c modifications (c) NewsNow Publishing Limited 2022
+
 /*
  * dumb-init is a simple wrapper program designed to run as PID 1 and pass
  * signals to its children.
@@ -22,7 +48,7 @@
 #include "VERSION.h"
 
 #define PRINTERR(...) do { \
-    fprintf(stderr, "[dumb-init] " __VA_ARGS__); \
+    fprintf(stderr, "[dkvm-init] " __VA_ARGS__); \
 } while (0)
 
 #define DEBUG(...) do { \
@@ -80,11 +106,11 @@ pid_t shutdown() {
         return 1;
     } else if (my_child_pid == 0) {
         /* child */
-        DEBUG("Shutting down");
+        DEBUG("Requesting child to shut down by spawning %s\n", shutdown_cmd[0]);
         execvp(shutdown_cmd[0], &shutdown_cmd[0]);
 
         // if this point is reached, exec failed, so we should exit nonzero
-        PRINTERR("Shutdown failed: %s\n", strerror(errno));
+        PRINTERR("Shutdown child spawn failed: %s\n", strerror(errno));
         return 2;
     } else {
         /* parent */
@@ -94,6 +120,13 @@ pid_t shutdown() {
     return my_child_pid;
 }
 
+void quit(int exit_status) {
+    char *exit_cmd[] = {"/opt/dkvm/scripts/dkvm-ctr-exit", NULL};
+    DEBUG("Exiting by execing %s\n", exit_cmd[0]);
+    execvp(exit_cmd[0], &exit_cmd[0]);
+    DEBUG("Failed to exec %s, so exiting now with status %d\n", exit_cmd[0], exit_status);
+    exit(exit_status);
+}
 
 /*
  * The dumb-init signal handler.
@@ -139,7 +172,8 @@ void handle_signal(int signum) {
             if (killed_pid == child_pid) {
                 forward_signal(SIGTERM);  // send SIGTERM to any remaining children
                 DEBUG("Child exited with status %d. Goodbye.\n", exit_status);
-                exit(exit_status);
+                quit(exit_status);
+                // exit(exit_status);
             }
         }
     } else {
@@ -153,10 +187,10 @@ void handle_signal(int signum) {
 
 void print_help(char *argv[]) {
     fprintf(stderr,
-        "dumb-init v%.*s"
+        "dkvm-init v%.*s"
         "Usage: %s [option] command [[arg] ...]\n"
         "\n"
-        "dumb-init is a simple process supervisor that forwards signals to children.\n"
+        "dkvm-init is a simple process supervisor that forwards signals to children.\n"
         "It is designed to run as PID1 in minimal container environments.\n"
         "\n"
         "Optional arguments:\n"
@@ -169,8 +203,7 @@ void print_help(char *argv[]) {
         "   -v, --verbose        Print debugging information to stderr.\n"
         "   -h, --help           Print this help message and exit.\n"
         "   -V, --version        Print the current version and exit.\n"
-        "\n"
-        "Full help is available online at https://github.com/Yelp/dumb-init\n",
+        "\n",
         VERSION_len, VERSION,
         argv[0]
     );
