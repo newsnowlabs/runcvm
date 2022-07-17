@@ -39,13 +39,11 @@ Install the DKVM software package at /opt/dkvm (it cannot be installed elsewhere
 docker run --rm -v /opt/dkvm:/dkvm dkvm
 ```
 
-Enable the DKVM runtime for Docker, by running:
+Enable the DKVM runtime for Docker, by running the following to add `"dkvm": { "path": "/opt/dkvm/scripts/dkvm" }` to the `runtimes` property of `/etc/docker/daemon.json`:
 
 ```console
 sudo /opt/dkvm/scripts/install.sh
 ```
-
-(This simply adds `"dkvm": { "path": "/opt/dkvm/scripts/dkvm" }` to the `runtimes` property of `/etc/docker/daemon.json`).
 
 Lastly, restart docker, and confirm DKVM is recognised:
 
