@@ -6,6 +6,9 @@ if mountpoint $MNT >/dev/null; then
 
   rm -rf $MNT/*
   cp -a /opt/dkvm/* $MNT/
+
+  echo "DKVM install/upgrade successful!" >&2
+  echo >&2
 else
 
   cat <<"_EOE_" >&2
