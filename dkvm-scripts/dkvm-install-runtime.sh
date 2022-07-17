@@ -20,9 +20,9 @@ jq_set() {
 
 usage() {
   cat <<"_EOE_" >&2
-Usage: sudo $0 [--install|--uninstall] [--docker] [--podman]
+Usage: sudo $0
 
-Enables/Disables DKVM for Docker and/or Podman
+Installs DKVM runtime for Docker / Podman
 _EOE_
   exit 1
 }
@@ -36,8 +36,8 @@ _EOE_
   usage
 fi
 
-log "DKVM Installer"
-log "=============="
+log "DKVM Runtime Installer"
+log "======================"
 log
 
 if [ -f "/etc/docker/daemon.json" ]; then
