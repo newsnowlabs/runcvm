@@ -221,6 +221,12 @@ DKVM currently has the following limitations, which it may be possible to addres
 
 ## Upgrading
 
+To upgrade, follow this procedure:
+
+1. Stop all DKVM containers.
+2. Run `/opt/dkvm/scripts/dkvm-upgrade.sh`
+3. Start any DKVM containers.
+
 ## Contributing
 
 If you are experiencing an issue, please [raise an issue](https://github.com/newsnowlabs/dkvm/issues) or reach out to us on the [NewsNow Labs Slack Workspace](https://join.slack.com/t/newsnowlabs/shared_invite/zt-wp54l05w-0DTxuc_n8uISJRtks3Xw3A).
