@@ -26,7 +26,7 @@ FROM alpine:edge as init
 RUN apk update && \
     apk add --no-cache gcc musl-dev
 
-ADD dumb-init /root/dkvm-init
+ADD dkvm-init /root/dkvm-init
 RUN cd /root/dkvm-init && cc -o /root/dkvm-init/dkvm-init -std=gnu99 -static -s -Wall -Werror -O3 dumb-init.c
 
 # Build qemu-exit while we're here
