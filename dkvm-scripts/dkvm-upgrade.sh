@@ -1,5 +1,7 @@
 #!/opt/dkvm/bin/bash
 
+REPO=newsnowlabs/dkvm
+
 log() {
     echo "$@" >&2
 }
@@ -14,4 +16,4 @@ _EOE_
 # TODO:
 # - Check for any running DKVM containers, and if found, throw error
 
-docker run --rm -v /opt/dkvm:/dkvm dkvm:latest
+docker run --rm -v /opt/dkvm:/dkvm $REPO

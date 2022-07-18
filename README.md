@@ -107,7 +107,7 @@ The `/opt/dkvm/bin/init` process:
 Install the DKVM software package at `/opt/dkvm` (it cannot be installed elsewhere):
 
 ```console
-docker run --rm -v /opt/dkvm:/dkvm dkvm
+docker run --rm -v /opt/dkvm:/dkvm newsnowlabs/dkvm
 ```
 
 Enable the DKVM runtime for Docker:

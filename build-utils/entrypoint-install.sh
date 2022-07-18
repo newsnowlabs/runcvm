@@ -1,6 +1,7 @@
 #!/bin/sh
 
 MNT=/dkvm
+REPO=newsnowlabs/dkvm
 
 if mountpoint $MNT >/dev/null; then
 
@@ -12,7 +13,7 @@ if mountpoint $MNT >/dev/null; then
 else
 
   cat <<"_EOE_" >&2
-Usage: docker run --rm -v /opt/dkvm:$MNT dkvm
+Usage: docker run --rm -v /opt/dkvm:$MNT $REPO
 
  - Installs dkvm package to host:/opt/dkvm
  - N.B. /opt/dkvm is hardcoded and requires a rebuild to be changed
