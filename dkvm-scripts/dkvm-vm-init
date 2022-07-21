@@ -16,8 +16,8 @@ GW=$(cat /.dkvm/netgw)
 # https://bugzilla.redhat.com/show_bug.cgi?id=501934
 for i in all $IF
 do
-  # /sbin/sysctl -w net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0 net.ipv6.conf.$i.accept_ra=0
-  sysctl -q -w net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0
+  # /sbin/sysctl -q -w -e net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0 net.ipv6.conf.$i.accept_ra=0
+  sysctl -q -w -e net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0
 done
 
 ip addr add $IP dev $IF
