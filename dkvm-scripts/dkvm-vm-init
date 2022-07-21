@@ -24,11 +24,20 @@ ip addr add $IP dev $IF
 ip link set lo up
 ip link set $IF up
 
+# TODO
+# - bind-mount or overwrite /etc/resolv.conf, /etc/hosts and /etc/hostname
+
 route add default gw $GW
-echo nameserver $GW >/etc/resolv.conf
+#echo nameserver $GW >/etc/resolv.conf
 
 # Setup hostname
-hostname -F /etc/hostname
+#hostname -F /etc/hostname
+
+# Mount filesystems defined in /etc/fstab OR as defined in DKVM_DISKS
+if [ -f /.dkvm/fstab ]; then
+  busybox modprobe ext4
+  mount -av --fstab /.dkvm/fstab
+fi
 
 # 1. Run /sbin/init from the image
 

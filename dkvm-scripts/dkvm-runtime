@@ -1,14 +1,27 @@
 #!/opt/dkvm/bin/bash
 
-# References:
+# REFERENCES
+
+# Qemu:
 # - https://github.com/joshkunz/qemu-docker
 # - https://mergeboard.com/blog/2-qemu-microvm-docker/
+# - https://github.com/BBVA/kvm
+
+# Virtiofs
 # - https://vmsplice.net/~stefan/virtio-fs_%20A%20Shared%20File%20System%20for%20Virtual%20Machines.pdf
 # - https://virtio-fs.gitlab.io/howto-qemu.html
 # - https://www.tauceti.blog/posts/qemu-kvm-share-host-directory-with-vm-with-virtio/
 
+# Container config.json spec
+# - https://github.com/opencontainers/runtime-spec/blob/main/config.md
+
+# Mount namespaces
+# - https://www.kernel.org/doc/Documentation/filesystems/sharedsubtree.txt
+# - https://www.redhat.com/sysadmin/mount-namespaces
+
 LOG=/tmp/dkvm.log
 DKVM=/opt/dkvm
+DKVM_VM_MOUNTPOINT="/vm"
 DKVM_ENTRYPOINT=$DKVM/scripts/dkvm-ctr-entrypoint
 DKVM_EXEC=$DKVM/scripts/dkvm-ctr-exec
 DKVM_INIT=$DKVM/scripts/dkvm-vm-init
@@ -178,7 +191,35 @@ if [ "$COMMAND" = "create" ]; then
     
     jq_set "$CFG" --arg entrypoint "$DKVM_ENTRYPOINT" '.process.args |= [$entrypoint] + .'
   fi
- 
+
+  # CONFIGURE MOUNTS
+  set_config_env "DKVM_VM_MOUNTPOINT" "$DKVM_VM_MOUNTPOINT"
+
+  # First, rewrite all pre-existing bind/volume mounts to mount to $DKVM_VM_MOUNTPOINT instead of /
+  # If we excluded /etc/(resolv.conf,hosts,hostname), and moved these to top of the array
+  # (by promoting them at the end of the below statements), they would be present in both
+  # container and VM
+  jq_set "$CFG" --arg vm "$DKVM_VM_MOUNTPOINT" '( .mounts[] | select(.type == "bind") ).destination |= $vm + .'
+
+  # FIXME
+  # Add tmpfs mount container-only - at /run? - for .virtiofs.sock, /run/..virtiofs.sock.pid, /run/qga.state,
+  # .qemu-guest-agent, virtiofsd.log, /.qemu-guest-agent and /.qemu-monitor-socket
+  #
+  # FIXME
+  # Exclude /disks mount from being migrated to /vm, so disks are created in container only
+
+  # Mount / from container to $DKVM_VM_MOUNTPOINT, recursively binding all pre-existing mount points
+  # (these being only the ones defined ahead of this item in the mounts[] array - so order matters!)
+  jq_set "$CFG" --arg root "$ROOT" --arg vm "$DKVM_VM_MOUNTPOINT" '.mounts |= [{"destination":$vm,"type":"bind","source":$root,"options":["rbind","private","rw"]}] + .'
+
+  # Mount a tmpfs at /.dkvm in container
+  # Define this at top of mounts[] so it is recursively mounted
+  jq_set "$CFG" --arg dkvm "$DKVM" '.mounts |= [{"destination":"/.dkvm","type":"tmpfs","source":"dkvm","options":["nosuid","noexec","nodev","size=1M","mode=700"]}] + .'
+
+  # Mount /opt/dkvm from host to container
+  # Define this at top of mounts[] so it is recursively mounted
+  jq_set "$CFG" --arg dkvm "$DKVM" '.mounts |= [{"destination":$dkvm,"type":"bind","source":$dkvm,"options":["rbind","rprivate","ro"]}] + .'
+
   # DETERMINE LAUNCH KERNEL:
   #
   # 1. If DKVM_KERNEL specified:
@@ -223,7 +264,7 @@ if [ "$COMMAND" = "create" ]; then
         DKVM_KERNEL_PATH="$DKVM_KERNEL_OS_KERNEL"
         DKVM_KERNEL_INITRAMFS_PATH="$DKVM_KERNEL_OS_INITRAMFS"
       else
-        # If we can't find a kernel and initramfs at the expected paths, just select the latest KVM kernel
+        # If we can't find a kernel and initramfs at the expected paths, just select the latest DKVM kernel
         # for this distribution (assuming we have one).
         DKVM_KERNEL="$DKVM_KERNEL_OS_ID/latest"
         log "DKVM_KERNEL #2=$DKVM_KERNEL"
@@ -264,7 +305,7 @@ if [ "$COMMAND" = "create" ]; then
     DKVM_KERNEL_PATH="$DKVM_KERNELS/$DKVM_KERNEL_ID/$DKVM_KERNEL_VERSION/vmlinuz"
     DKVM_KERNEL_INITRAMFS_PATH="$DKVM_KERNELS/$DKVM_KERNEL_ID/$DKVM_KERNEL_VERSION/initrd"
   
-    jq_set "$CFG" --arg modules_dst "$DKVM_KERNEL_MODULES_DST" --arg modules_src "$DKVM_KERNEL_MODULES_SRC" '.mounts += [{"destination":$modules_dst,"type":"bind","source":$modules_src,"options":["rbind","rprivate","ro"]}]'
+    jq_set "$CFG" --arg modules_dst "$DKVM_VM_MOUNTPOINT$DKVM_KERNEL_MODULES_DST" --arg modules_src "$DKVM_KERNEL_MODULES_SRC" '.mounts += [{"destination":$modules_dst,"type":"bind","source":$modules_src,"options":["rbind","rprivate","ro"]}]'
   fi
 
   log "DKVM_KERNEL=$DKVM_KERNEL"
@@ -280,9 +321,9 @@ if [ "$COMMAND" = "create" ]; then
   
   set_config_env "DKVM_KERNEL_PATH" "$DKVM_KERNEL_PATH"
   set_config_env "DKVM_KERNEL_INITRAMFS_PATH" "$DKVM_KERNEL_INITRAMFS_PATH"
-  # error "EXITING"
-  
-  jq_set "$CFG" --arg dkvm "$DKVM" '.mounts += [{"destination":$dkvm,"type":"bind","source":$dkvm,"options":["rbind","rprivate","ro"]},{"destination":"/.dkvm","type":"tmpfs","source":"dkvm","options":["nosuid","noexec","nodev","size=1M","mode=700"]}]'
+  set_config_env "DKVM_KERNEL_ARGS" "$DKVM_KERNEL_ARGS"
+
+  # Configure devices
   jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":232,"access":"rwm"},{"allow":true,"type":"c","major":10,"minor":200,"access":"rwm"}]'
   jq_set "$CFG" '.linux.devices+=[{"path":"/dev/net/tun","type":"c","major":10,"minor":200,"fileMode":8630,"uid":0,"gid":0},{"path":"/dev/kvm","type":"c","major":10,"minor":232,"fileMode":8630,"uid":0,"gid":0}]'
   

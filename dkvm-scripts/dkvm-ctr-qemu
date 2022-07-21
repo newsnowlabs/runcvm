@@ -20,18 +20,33 @@ CONSOLE="-nographic"
 DOCKER_IP=$(cat /.dkvm/net)
 MAC=$(printf "52:54:00:%02x:%02x:%02x" $(echo $DOCKER_IP | cut -d'/' -f1 | cut -d'.' -f2,3,4 | tr '.' ' '))
 
-DISK="/volume/disk.img"
+# e.g. ext4,5G,/volume/disk1,/var/lib/docker
+do_disk() {
+  local spec="$1"
+  local src dst fs size
 
-if [ -n "$DISK" ]; then
-  if ! [ -f $DISK ]; then
-    # This will not wipe $DISK if it exists, although it will truncate/expand it.
-    echo NOT RUNNING: busybox truncate -s 5G $DISK
+  read src dst fs size <<< $(echo "$spec" | tr ',' ' ')
+
+  if [[ -n "$src" && ! -f "$src" ]]; then
+    busybox truncate -s "$size" "$src" >&2
+    mke2fs -F -t "$fs" "$src" >&2
   fi
 
-  if [ -f $DISK ]; then
-    DISKS="-drive file=$DISK,format=raw,if=virtio"
+  if [[ -n "$src" && -f "$src" ]]; then
+    UUID=$(blkid -o value "$src" | head -n 1)
+    mkdir -p "$DKVM_VM_MOUNTPOINT/$dst" >&2
+    echo "UUID=$UUID $dst $fs defaults,noatime 0 0" >>/.dkvm/fstab
+    DISKS+=("-drive file=$src,format=raw,if=virtio,index=3,media=disk")
   fi
+}
+
+DISKS=()
+if [ -n "$DKVM_DISKS" ]; then
+  do_disk "$DKVM_DISKS"
 fi
+
+echo "DISKS: ${DISKS[@]}"
+bash && exit 0
 
 # TODO:
 # - Consider using '-device pvpanic'
@@ -50,12 +65,12 @@ exec qemu-system-x86_64 \
   -chardev socket,id=char0,path=$SOCKET -device vhost-user-fs-pci,queue-size=1024,chardev=char0,tag=myfs,ats=on \
   -kernel $DKVM_KERNEL_PATH \
   -initrd $DKVM_KERNEL_INITRAMFS_PATH \
-  -append "rootfstype=virtiofs root=myfs rw nomodeset $BREAK $INIT console=ttyS0 noresume net.ifnames=0 $PANIC $OPTS" \
+  -append "rootfstype=virtiofs root=myfs rw nomodeset $BREAK $INIT console=ttyS0 net.ifnames=0 $PANIC $OPTS $DKVM_KERNEL_ARGS" \
   -object memory-backend-file,id=mem,size="$DKVM_DEV_SHM_SIZE",mem-path=/dev/shm,share=on \
   -numa node,memdev=mem \
   -nic tap,id=qemu0,model=virtio-net-pci,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN,mac=$MAC \
   -no-reboot \
-  $DISKS \
+  ${DISKS[@]} \
   -action panic=none -action reboot=shutdown \
   -monitor unix:/.qemu-monitor-socket,server,nowait \
   -chardev socket,id=charchannel0,path=/.qemu-guest-agent,server=on,wait=off \

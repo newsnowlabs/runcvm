@@ -18,4 +18,4 @@ if [ "$DKVM_SYS_ADMIN" = "1" ]; then
   OPTS+=(-o modcaps=+sys_admin)
 fi
 
-exec virtiofsd "${OPTS[@]}" -o announce_submounts -o xattr --socket-path=$SOCKET -o cache=always -o source=/ -o sandbox=chroot >/tmp/virtiofsd.log 2>&1
+exec virtiofsd "${OPTS[@]}" -o announce_submounts -o xattr --socket-path=$SOCKET -o cache=always -o source=$DKVM_VM_MOUNTPOINT -o sandbox=chroot >/tmp/virtiofsd.log 2>&1

@@ -3,7 +3,8 @@
 FROM alpine:edge as binaries
 
 RUN apk update && \
-    apk add --no-cache file bash qemu-system-x86_64 qemu-virtiofsd qemu-ui-curses qemu-guest-agent jq iproute2 netcat-openbsd
+    apk add --no-cache file bash qemu-system-x86_64 qemu-virtiofsd qemu-ui-curses qemu-guest-agent \
+        jq iproute2 netcat-openbsd e2fsprogs blkid util-linux
 
 RUN apk add --no-cache patchelf --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community
 
@@ -13,7 +14,7 @@ RUN apk add --no-cache patchelf --repository=http://dl-cdn.alpinelinux.org/alpin
 # Patch all binaries and dynamic libraries for full portability.
 COPY build-utils/elf-patcher.sh /usr/local/bin/elf-patcher.sh
 
-ENV BINARIES="busybox bash jq ip nc qemu-system-x86_64 qemu-ga /usr/lib/qemu/*"
+ENV BINARIES="busybox bash jq ip nc mke2fs blkid mount qemu-system-x86_64 qemu-ga /usr/lib/qemu/*"
 ENV CODE_PATH="/opt/dkvm"
 RUN /usr/local/bin/elf-patcher.sh
 RUN bash -c 'cd /opt/dkvm/bin; for cmd in sh cat cut awk chmod grep head mount route sysctl ps init poweroff mkdir ls hostname tr getty login touch rm base64; do ln -s busybox $cmd; done'
@@ -63,6 +64,7 @@ RUN mkdir -p /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*)) && \
     cp -aL /initrd.img /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/initrd && \
     cp -a /lib/modules/ /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/ && \
     chmod -R u+rwX,g+rX,o+rX /opt/dkvm/kernels/debian
+# RUN find /opt/dkvm/kernels/debian -name '*.ko' -exec gzip {} \;
 
 # Build Ubuntu bullseye kernel and initramfs with virtiofs module
 
@@ -79,6 +81,7 @@ RUN mkdir -p /opt/dkvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*)) && \
     cp -aL /boot/initrd.img /opt/dkvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/initrd && \
     cp -a /lib/modules/ /opt/dkvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/ && \
     chmod -R u+rwX,g+rX,o+rX /opt/dkvm/kernels/ubuntu
+# RUN find /opt/dkvm/kernels/ubuntu -name '*.ko' -exec gzip {} \;
 
 # Build DKVM installation
 
