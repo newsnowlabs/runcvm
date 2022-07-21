@@ -16,6 +16,10 @@ env() {
   busybox env "$@"
 }
 
+nc() {
+  /opt/dkvm/usr/bin/nc -U $QEMU_GUEST_AGENT "$@" 2>>/tmp/exec.log
+}
+
 # https://blog.dhampir.no/content/sleeping-without-a-subprocess-in-bash-and-how-to-sleep-forever
 # From https://blog.dhampir.no/content/sleeping-without-a-subprocess-in-bash-and-how-to-sleep-forever
 
@@ -44,6 +48,7 @@ else
   args_json='[]'
 fi
 
+# N.B. Only exported env vars will be returned and sent
 mapfile -t env < <(env -u _ -u SHLVL -u HOME -u PWD -u HOSTNAME)
 
 if [ ${#env[@]} -gt 0 ]; then
@@ -61,7 +66,7 @@ JSON=$(jq -r --arg command "$command" --argjson args_json "$args_json" --argjson
 
 while true;
 do
-  read RESPONSE < <(echo "$JSON" | /opt/dkvm/usr/bin/nc -U $QEMU_AGENT 2>>/tmp/exec.log)
+  read RESPONSE < <(echo "$JSON" | nc)
   [ $? -eq 0 ] && break
   snore 1
 done
@@ -77,7 +82,7 @@ fi
 
 while true
 do
-  read RESPONSE < <(echo "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$pid}}" | /opt/dkvm/usr/bin/nc -w 1 -U $QEMU_AGENT)
+  read RESPONSE < <(echo "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$pid}}" | nc -w 1)
   
   # {"return": {"exitcode": 0, "out-data": "YTI4ZTYxODdiMTJjCg==", "exited": true}}
 

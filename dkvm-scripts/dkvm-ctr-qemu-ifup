@@ -1,6 +1,6 @@
 #!/opt/dkvm/bin/bash
 
-. /opt/dkvm/scripts/dkvm-ctr-defaults
+. /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
 
 ip link set dev "$1" up
 ip link set dev "$1" master $QEMU_BRIDGE

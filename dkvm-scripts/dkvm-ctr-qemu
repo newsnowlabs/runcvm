@@ -4,7 +4,7 @@
 . /.dkvm/export
 
 # Load defaults after exports (so that PATH is overridden)
-. /opt/dkvm/scripts/dkvm-ctr-defaults
+. /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
 
 # BREAK="break=mountroot"
 PANIC="panic=-1"

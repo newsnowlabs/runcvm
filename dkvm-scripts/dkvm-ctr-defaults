@@ -1,6 +1,5 @@
 DKVM=/opt/dkvm
-
-PATH=$DKVM/sbin:$DKVM/bin:$DKVM/usr/bin:$DKVM/usr/lib/qemu
+DKVM_PATH=$DKVM/sbin:$DKVM/bin:$DKVM/usr/bin:$DKVM/usr/lib/qemu
 
 QEMU_IFUP="$DKVM/scripts/dkvm-ctr-qemu-ifup"
 QEMU_IFDOWN="$DKVM/scripts/dkvm-ctr-qemu-ifdown"

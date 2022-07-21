@@ -1,6 +1,6 @@
 #!/opt/dkvm/bin/bash
 
-. /opt/dkvm/scripts/dkvm-ctr-defaults
+. /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
 
 # FIXME: -o posix_acl works with alpine kernel, but not debian kernel
 # virtiofsd -o posix_acl -o xattr --socket-path=$SOCKET -o cache=always -o source=/ -o sandbox=chroot >/tmp/virtiofsd.log 2>&1 &

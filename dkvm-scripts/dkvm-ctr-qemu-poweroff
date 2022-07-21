@@ -1,5 +1,5 @@
 #!/opt/dkvm/bin/bash
 
-. /opt/dkvm/scripts/dkvm-ctr-defaults
+. /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
 
-echo "system_powerdown" | /opt/dkvm/usr/bin/nc -w 1 -U /.qemu-monitor-socket
+echo "system_powerdown" | nc -w 1 -U $QEMU_MONITOR_SOCKET

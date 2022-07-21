@@ -12,8 +12,8 @@ export -n SHLVL
 env >/.dkvm/env
 export >/.dkvm/export
 
-# NOW LOAD DEFAULT ENV
-. /opt/dkvm/scripts/dkvm-ctr-defaults
+# NOW LOAD DEFAULT ENV AND PATH
+. /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
 
 # DEBUG
 # exec bash
