@@ -31,7 +31,7 @@ route add default gw $GW
 #echo nameserver $GW >/etc/resolv.conf
 
 # Setup hostname
-#hostname -F /etc/hostname
+hostname -F /etc/hostname
 
 # Mount filesystems defined in /etc/fstab OR as defined in DKVM_DISKS
 if [ -f /.dkvm/fstab ]; then
