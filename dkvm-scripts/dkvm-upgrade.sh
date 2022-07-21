@@ -1,6 +1,6 @@
 #!/opt/dkvm/bin/bash
 
-REPO=newsnowlabs/dkvm
+REPO=${REPO:-newsnowlabs/dkvm}
 
 log() {
     echo "$@" >&2
