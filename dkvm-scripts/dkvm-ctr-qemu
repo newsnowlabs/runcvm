@@ -1,9 +1,10 @@
 #!/opt/dkvm/bin/bash
 
-. /opt/dkvm/scripts/dkvm-ctr-defaults
-
 # TODO: Clean up ENV vars
 . /.dkvm/export
+
+# Load defaults after exports (so that PATH is overridden)
+. /opt/dkvm/scripts/dkvm-ctr-defaults
 
 # BREAK="break=mountroot"
 PANIC="panic=-1"
