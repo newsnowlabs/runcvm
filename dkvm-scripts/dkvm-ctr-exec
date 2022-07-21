@@ -2,7 +2,7 @@
 
 # See https://qemu-project.gitlab.io/qemu/interop/qemu-ga-ref.html
 
-DKVM=/opt/dkvm
+. /opt/dkvm/scripts/dkvm-ctr-defaults
 
 jq() {
   $DKVM/usr/bin/jq "$@"
@@ -61,7 +61,7 @@ JSON=$(jq -r --arg command "$command" --argjson args_json "$args_json" --argjson
 
 while true;
 do
-  read RESPONSE < <(echo "$JSON" | /opt/dkvm/usr/bin/nc -U /.qemu-guest-agent 2>>/tmp/exec.log)
+  read RESPONSE < <(echo "$JSON" | /opt/dkvm/usr/bin/nc -U $QEMU_AGENT 2>>/tmp/exec.log)
   [ $? -eq 0 ] && break
   snore 1
 done
@@ -77,7 +77,7 @@ fi
 
 while true
 do
-  read RESPONSE < <(echo "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$pid}}" | /opt/dkvm/usr/bin/nc -w 1 -U /.qemu-guest-agent)
+  read RESPONSE < <(echo "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$pid}}" | /opt/dkvm/usr/bin/nc -w 1 -U $QEMU_AGENT)
   
   # {"return": {"exitcode": 0, "out-data": "YTI4ZTYxODdiMTJjCg==", "exited": true}}
 

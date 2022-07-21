@@ -198,15 +198,10 @@ if [ "$COMMAND" = "create" ]; then
   # First, rewrite all pre-existing bind/volume mounts to mount to $DKVM_VM_MOUNTPOINT instead of /
   # If we excluded /etc/(resolv.conf,hosts,hostname), and moved these to top of the array
   # (by promoting them at the end of the below statements), they would be present in both
-  # container and VM
-  jq_set "$CFG" --arg vm "$DKVM_VM_MOUNTPOINT" '( .mounts[] | select(.type == "bind") ).destination |= $vm + .'
-
-  # FIXME
-  # Add tmpfs mount container-only - at /run? - for .virtiofs.sock, /run/..virtiofs.sock.pid, /run/qga.state,
-  # .qemu-guest-agent, virtiofsd.log, /.qemu-guest-agent and /.qemu-monitor-socket
+  # container and VM.
   #
-  # FIXME
-  # Exclude /disks mount from being migrated to /vm, so disks are created in container only
+  # N.B. A mount at /disks will be excluded.
+  jq_set "$CFG" --arg vm "$DKVM_VM_MOUNTPOINT" '( .mounts[] | select(.type == "bind" and .destination != "/disks") ).destination |= $vm + .'
 
   # Mount / from container to $DKVM_VM_MOUNTPOINT, recursively binding all pre-existing mount points
   # (these being only the ones defined ahead of this item in the mounts[] array - so order matters!)
@@ -218,7 +213,11 @@ if [ "$COMMAND" = "create" ]; then
 
   # Mount /opt/dkvm from host to container
   # Define this at top of mounts[] so it is recursively mounted
-  jq_set "$CFG" --arg dkvm "$DKVM" '.mounts |= [{"destination":$dkvm,"type":"bind","source":$dkvm,"options":["rbind","rprivate","ro"]}] + .'
+  jq_set "$CFG" --arg dkvm "$DKVM" '.mounts |= [{"destination":$dkvm,"type":"bind","source":$dkvm,"options":["bind","private","ro"]}] + .'
+
+  # Mount a tmpfs at /run in container
+  # Define this at bottom of mounts[] so it is not recursively mounted to /vm
+  jq_set "$CFG" '.mounts += [{"destination":"/run","type":"tmpfs","source":"run","options":["nosuid","noexec","nodev","size=1M","mode=700"]}]'
 
   # DETERMINE LAUNCH KERNEL:
   #
@@ -305,7 +304,7 @@ if [ "$COMMAND" = "create" ]; then
     DKVM_KERNEL_PATH="$DKVM_KERNELS/$DKVM_KERNEL_ID/$DKVM_KERNEL_VERSION/vmlinuz"
     DKVM_KERNEL_INITRAMFS_PATH="$DKVM_KERNELS/$DKVM_KERNEL_ID/$DKVM_KERNEL_VERSION/initrd"
   
-    jq_set "$CFG" --arg modules_dst "$DKVM_VM_MOUNTPOINT$DKVM_KERNEL_MODULES_DST" --arg modules_src "$DKVM_KERNEL_MODULES_SRC" '.mounts += [{"destination":$modules_dst,"type":"bind","source":$modules_src,"options":["rbind","rprivate","ro"]}]'
+    jq_set "$CFG" --arg modules_dst "$DKVM_VM_MOUNTPOINT$DKVM_KERNEL_MODULES_DST" --arg modules_src "$DKVM_KERNEL_MODULES_SRC" '.mounts += [{"destination":$modules_dst,"type":"bind","source":$modules_src,"options":["bind","private","ro"]}]'
   fi
 
   log "DKVM_KERNEL=$DKVM_KERNEL"

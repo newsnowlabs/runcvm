@@ -1,9 +1,9 @@
 #!/opt/dkvm/bin/bash
 
+. /opt/dkvm/scripts/dkvm-ctr-defaults
+
 # TODO: Clean up ENV vars
 . /.dkvm/export
-
-. /opt/dkvm/scripts/dkvm-ctr-defaults
 
 # BREAK="break=mountroot"
 PANIC="panic=-1"
@@ -62,7 +62,7 @@ exec qemu-system-x86_64 \
   -m "$DKVM_DEV_SHM_SIZE" \
   -cpu host \
   -machine q35,accel=kvm,usb=off \
-  -chardev socket,id=char0,path=$SOCKET -device vhost-user-fs-pci,queue-size=1024,chardev=char0,tag=myfs,ats=on \
+  -chardev socket,id=char0,path=$QEMU_VIRTIOFSD_SOCKET -device vhost-user-fs-pci,queue-size=1024,chardev=char0,tag=myfs,ats=on \
   -kernel $DKVM_KERNEL_PATH \
   -initrd $DKVM_KERNEL_INITRAMFS_PATH \
   -append "rootfstype=virtiofs root=myfs rw nomodeset $BREAK $INIT console=ttyS0 net.ifnames=0 $PANIC $OPTS $DKVM_KERNEL_ARGS" \
@@ -72,8 +72,8 @@ exec qemu-system-x86_64 \
   -no-reboot \
   ${DISKS[@]} \
   -action panic=none -action reboot=shutdown \
-  -monitor unix:/.qemu-monitor-socket,server,nowait \
-  -chardev socket,id=charchannel0,path=/.qemu-guest-agent,server=on,wait=off \
+  -monitor unix:$QEMU_MONITOR_SOCKET,server,nowait \
+  -chardev socket,id=charchannel0,path=$QEMU_GUEST_AGENT,server=on,wait=off \
   -device virtio-serial \
   -device virtserialport,chardev=charchannel0,name=org.qemu.guest_agent.0 \
   "${QEMU_OPTS[@]}"

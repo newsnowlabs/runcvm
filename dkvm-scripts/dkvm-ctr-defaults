@@ -6,4 +6,6 @@ QEMU_IFUP="$DKVM/scripts/dkvm-ctr-qemu-ifup"
 QEMU_IFDOWN="$DKVM/scripts/dkvm-ctr-qemu-ifdown"
 QEMU_BRIDGE='q0'
 
-SOCKET=/.virtiofs.sock
+QEMU_VIRTIOFSD_SOCKET=/run/.virtiofs.sock
+QEMU_GUEST_AGENT=/run/.qemu-guest-agent
+QEMU_MONITOR_SOCKET=/run/.qemu-monitor-socket
