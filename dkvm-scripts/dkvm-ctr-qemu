@@ -46,8 +46,7 @@ if [ -n "$DKVM_DISKS" ]; then
   do_disk "$DKVM_DISKS"
 fi
 
-echo "DISKS: ${DISKS[@]}"
-bash && exit 0
+# echo "DISKS: ${DISKS[@]}"; bash && exit 0
 
 # TODO:
 # - Consider using '-device pvpanic'
