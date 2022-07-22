@@ -64,7 +64,6 @@ RUN mkdir -p /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*)) && \
     cp -aL /initrd.img /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/initrd && \
     cp -a /lib/modules/ /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/ && \
     chmod -R u+rwX,g+rX,o+rX /opt/dkvm/kernels/debian
-# RUN find /opt/dkvm/kernels/debian -name '*.ko' -exec gzip {} \;
 
 # Build Ubuntu bullseye kernel and initramfs with virtiofs module
 
@@ -81,7 +80,6 @@ RUN mkdir -p /opt/dkvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*)) && \
     cp -aL /boot/initrd.img /opt/dkvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/initrd && \
     cp -a /lib/modules/ /opt/dkvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/ && \
     chmod -R u+rwX,g+rX,o+rX /opt/dkvm/kernels/ubuntu
-# RUN find /opt/dkvm/kernels/ubuntu -name '*.ko' -exec gzip {} \;
 
 # Build DKVM installation
 
