@@ -20,4 +20,4 @@ if [ -z "$DEV" ]; then
   exit 0
 fi
 
-qemu-ga "${OPTS[@]}"
+exec qemu-ga "${OPTS[@]}"
