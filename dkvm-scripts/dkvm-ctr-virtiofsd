@@ -18,4 +18,5 @@ if [ "$DKVM_SYS_ADMIN" = "1" ]; then
   OPTS+=(-o modcaps=+sys_admin)
 fi
 
+# FIXME: Only redirect logs to volume path if DKVM_DEBUG_VIRTIOFSD set
 exec virtiofsd "${OPTS[@]}" -o announce_submounts -o xattr --socket-path=$QEMU_VIRTIOFSD_SOCKET -o cache=always -o source=$DKVM_VM_MOUNTPOINT -o sandbox=chroot >/tmp/virtiofsd.log 2>&1

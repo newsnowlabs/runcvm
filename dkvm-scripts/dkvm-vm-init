@@ -7,6 +7,9 @@ unset DKVM
 # Alpine initrd doesn't honour command-line rw flag
 mount -o remount,rw /
 
+# FIXME: Make this resilient
+# /opt/dkvm/bin/mount -t virtiofs | awk '{print $3}' | xargs -n 1 mount -o remount,rw
+
 # FIXME: This must be run early enough, otherwise other interfaces like docker0 might have started
 IF=$(ls /sys/class/net/ | grep -vE '^(lo|docker)' | head -n 1)
 

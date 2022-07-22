@@ -17,6 +17,7 @@ env() {
 }
 
 nc() {
+  # FIXME: Only redirect logs if DKVM_DEBUG_EXEC set
   /opt/dkvm/usr/bin/nc -U $QEMU_GUEST_AGENT "$@" 2>>/tmp/exec.log
 }
 
