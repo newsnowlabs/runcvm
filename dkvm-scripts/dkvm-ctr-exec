@@ -39,9 +39,17 @@ snore() {
   read ${1:+-t "$1"} -u $_snore_fd || :
 }
 
-command="$1"
-shift
-args=("$@")
+# Expects:
+# $1 <uid:gid>
+# $2 <cwd>
+# $3... <command> <args>
+
+command="$DKVM/scripts/dkvm-vm-exec"
+IFS=':' read -r uid gid <<< "$1"
+args=($uid $gid "$2")
+shift 2
+
+args+=("$@")
 
 if [ ${#args[@]} -gt 0 ]; then
   args_json=$(printf '%s\n' "${args[@]}" | jq -R . | jq -s .)
@@ -58,10 +66,10 @@ else
   env_json='[]'
 fi
 
-#echo "- $command -"
-#echo "- $args_json -"
-#echo "- $env_json -"
-#exit
+# echo "- uidgid: $uidgid"
+# echo "- command: $command"
+# echo "- args: $args_json"
+# echo "- env: $env_json"
 
 JSON=$(jq -r --arg command "$command" --argjson args_json "$args_json" --argjson env_json "$env_json" '{"execute":"guest-exec","arguments":{"path":$command,"arg":$args_json,"env":$env_json,"capture-output":true}}' <(echo '{}'))
 

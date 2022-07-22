@@ -1,0 +1,10 @@
+#!/opt/dkvm/bin/bash
+
+uid="$1"
+gid="$2"
+cwd="$3"
+shift 3
+
+cd "$cwd"
+
+exec /opt/dkvm/bin/s6-applyuidgid -u $uid -g $gid -G "" "$@"

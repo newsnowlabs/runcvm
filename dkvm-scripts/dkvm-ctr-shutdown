@@ -7,7 +7,7 @@ poweroff() {
   /opt/dkvm/scripts/dkvm-ctr-qemu-poweroff
   
   # Try running busybox poweroff
-  /opt/dkvm/scripts/dkvm-ctr-exec /opt/dkvm/bin/poweroff
+  /opt/dkvm/scripts/dkvm-ctr-exec 0:0 / /opt/dkvm/bin/poweroff
 }
 
 poweroff

@@ -81,6 +81,13 @@ jq_get() {
   jq -r "$@" $file
 }
 
+jq_get_join() {
+  local file="$1"
+  shift
+  
+  jq -j "$@" $file
+}
+
 get_config_env() {
   local var="$1"
   local default="$2"
@@ -403,7 +410,14 @@ elif [ "$COMMAND" = "exec" ]; then
   if [ "$ARG1" = "---" ]; then
     jq_set "$PROCESS" 'del(.args[0])'
   else
-    jq_set "$PROCESS" --arg exec "$DKVM_EXEC" '.args |= [$exec] + .'
+    uidgid=$(jq_get_join "$PROCESS" '.user.uid, ":", .user.gid')
+    cwd=$(jq_get "$PROCESS" '.cwd')
+
+    jq_set "$PROCESS" --arg exec "$DKVM_EXEC" --arg uidgid "$uidgid" --arg cwd "$cwd" '.args |= [$exec, $uidgid, $cwd] + .'
+
+    # Force root (or whatever user qemu runs as)
+    # Force cwd in the container to /
+    jq_set "$PROCESS" '.user = {"uid":0, "gid":0} | .cwd="/"'
   fi
   
   debug && cp -a $PROCESS /tmp/process.json-$$-2
