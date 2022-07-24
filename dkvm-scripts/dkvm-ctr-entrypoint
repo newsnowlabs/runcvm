@@ -1,8 +1,5 @@
 #!/opt/dkvm/bin/bash
 
-# We throw away the host socket path when we run virtiofs in the container
-# HOST_SOCKET="$1"; shift
-
 # SAVE ENTRYPOINT
 args=("$@")
 printf "%s\n" "${args[@]}" >/.dkvm/entrypoint
@@ -43,4 +40,5 @@ ip link set dev $QEMU_BRIDGE up
 /opt/dkvm/scripts/dkvm-ctr-virtiofsd &
 
 # LAUNCH INIT SUPERVISING QEMU
-exec /opt/dkvm/sbin/dkvm-init -v -c /opt/dkvm/scripts/dkvm-ctr-qemu
+# FIXME: Add -v to debug
+exec /opt/dkvm/sbin/dkvm-init -c /opt/dkvm/scripts/dkvm-ctr-qemu
