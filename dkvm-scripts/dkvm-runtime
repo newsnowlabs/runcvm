@@ -13,6 +13,7 @@
 # - https://www.tauceti.blog/posts/qemu-kvm-share-host-directory-with-vm-with-virtio/
 
 # Container config.json spec
+# - https://github.com/opencontainers/runtime-spec/
 # - https://github.com/opencontainers/runtime-spec/blob/main/config.md
 
 # Mount namespaces
@@ -198,6 +199,10 @@ if [ "$COMMAND" = "create" ]; then
     
     jq_set "$CFG" --arg entrypoint "$DKVM_ENTRYPOINT" '.process.args |= [$entrypoint] + .'
   fi
+
+  # CONFIGURE USER
+  # - Must be root to run container
+  jq_set "$CFG" '.process.user = {"uid":0, "gid":0}'
 
   # CONFIGURE MOUNTS
   set_config_env "DKVM_VM_MOUNTPOINT" "$DKVM_VM_MOUNTPOINT"
@@ -416,7 +421,7 @@ elif [ "$COMMAND" = "exec" ]; then
     jq_set "$PROCESS" --arg exec "$DKVM_EXEC" --arg uidgid "$uidgid" --arg cwd "$cwd" '.args |= [$exec, $uidgid, $cwd] + .'
 
     # Force root (or whatever user qemu runs as)
-    # Force cwd in the container to /
+    # Force cwd in the container to / 
     jq_set "$PROCESS" '.user = {"uid":0, "gid":0} | .cwd="/"'
   fi
   
