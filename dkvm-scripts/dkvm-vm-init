@@ -1,8 +1,6 @@
 #!/opt/dkvm/bin/bash
 
-DKVM=/opt/dkvm
-PATH=$DKVM/sbin:$DKVM/bin:$DKVM/usr/bin
-unset DKVM
+. /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
 
 # Alpine initrd doesn't honour command-line rw flag
 mount -o remount,rw /

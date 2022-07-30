@@ -1,7 +1,5 @@
 #!/opt/dkvm/bin/bash
 
-# TODO Rationalise these into defaults
-
 . /opt/dkvm/scripts/dkvm-ctr-defaults
 
 if [ -f /.dkvm/once ]; then
