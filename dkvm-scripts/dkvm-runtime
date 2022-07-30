@@ -202,6 +202,8 @@ if [ "$COMMAND" = "create" ]; then
 
   # CONFIGURE USER
   # - Must be root to run container
+  DKVM_UIDGID=$(jq_get_join "$CFG" '.process.user.uid, ":", .process.user.gid')
+  set_config_env "DKVM_UIDGID" "$DKVM_UIDGID"
   jq_set "$CFG" '.process.user = {"uid":0, "gid":0}'
 
   # CONFIGURE MOUNTS
@@ -212,7 +214,7 @@ if [ "$COMMAND" = "create" ]; then
   # (by promoting them at the end of the below statements), they would be present in both
   # container and VM.
   #
-  # N.B. A mount at /disks will be excluded.
+  # N.B. A mount at /disks will not be mapped to /vm/disks - this path reserved for mounting disk files to the container
   jq_set "$CFG" --arg vm "$DKVM_VM_MOUNTPOINT" '( .mounts[] | select(.type == "bind" and .destination != "/disks") ).destination |= $vm + .'
 
   # Mount / from container to $DKVM_VM_MOUNTPOINT, recursively binding all pre-existing mount points
