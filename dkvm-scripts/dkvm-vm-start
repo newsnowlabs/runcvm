@@ -1,6 +1,6 @@
 #!/opt/dkvm/bin/bash
 
-. /opt/dkvm/scripts/dkvm-ctr-defaults
+. /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
 
 if [ -f /.dkvm/once ]; then
   poweroff
@@ -15,4 +15,3 @@ mapfile -t ARGS <<< $(cat /.dkvm/entrypoint)
 
 IFS=':' read -r uid gid <<< "$DKVM_UIDGID"
 exec $DKVM/bin/s6-applyuidgid -u $uid -g $gid -G "" "${ARGS[@]}"
-# exec "${ARGS[@]}"
