@@ -193,6 +193,7 @@ if [ "$COMMAND" = "create" ]; then
     # We know the user intended an init process to be run in the container.
     # TODO: We might want to indicate this, so that our entrypoint does not skip doing this
     # if the original entrypoint also looks like an init process.
+    set_config_env "DKVM_OPT_INIT" "1"
   else
     # We don't know if the original entrypoint is an init process or not.
     # Run our entrypoint first to work this out and do the right thing.

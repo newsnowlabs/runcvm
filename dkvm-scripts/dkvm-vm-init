@@ -40,40 +40,36 @@ if [ -f /.dkvm/fstab ]; then
   mount -av --fstab /.dkvm/fstab
 fi
 
-# 1. Run /sbin/init from the image
-
-# Load original entrypoint and environment
-mapfile -t ARGS <<< $(cat /.dkvm/entrypoint)
+# Load original environment
 . /.dkvm/export
 
-# We don't know if the original entrypoint is an init process or not.
-# Work this out and do the right thing.
+if [ "$DKVM_OPT_INIT" = "1" ]; then
+  # If launched with '--init' (or --env=DKVM_OPT_INIT=1) then run our own init in place of Docker's/Podman's.
 
-if [ "${ARGS[0]}" = "/sbin/init" ] || [ "$DKVM_ENTRYPOINT_IS_INIT" = "1" ]; then
-
-  if [ -x "${ARGS[0]}" ]; then
-    # Run the qemu guest agent, needed to support 'docker exec'
-  
-    # TODO:
-    # - Add option to inhibit this
-    /opt/dkvm/scripts/dkvm-vm-qemu-ga &
-  
-    # Run init from the image
-    exec -c "${ARGS[0]}"
-  fi
-fi
-
-# 2. Run our own /opt/dkvm/bin/init
-
-cat >/etc/inittab <<_EOE_
+  cat >/etc/inittab <<_EOE_
 ttyS0::respawn:-/opt/dkvm/scripts/dkvm-vm-start
 ::respawn:/opt/dkvm/scripts/dkvm-vm-qemu-ga
 ::ctrlaltdel:/opt/dkvm/bin/poweroff
 ::restart:/opt/dkvm/bin/poweroff
 _EOE_
 
-# Allow dkvm-vm-start to runs once (and only once)
-rm -f /.dkvm/once
+  # Allow dkvm-vm-start to runs once (and only once)
+  rm -f /.dkvm/once
 
-# Run our own init
-exec -c /opt/dkvm/bin/init
+  # Run our own init
+  exec -c /opt/dkvm/bin/init
+else
+  # If not, assume the user knows what they're doing: launch qemu-ga and just run their entrypoint.
+
+  # Load original entrypoint
+  mapfile -t ARGS <<< $(cat /.dkvm/entrypoint)
+
+  # Run the qemu guest agent, needed to support 'docker exec'
+
+  # TODO:
+  # - Add option to inhibit this
+  /opt/dkvm/scripts/dkvm-vm-qemu-ga &
+
+  # Run init from the image
+  exec -c "${ARGS[@]}"
+fi
