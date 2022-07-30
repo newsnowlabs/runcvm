@@ -43,8 +43,8 @@ fi
 # Load original environment
 . /.dkvm/export
 
-if [ "$DKVM_OPT_INIT" = "1" ]; then
-  # If launched with '--init' (or --env=DKVM_OPT_INIT=1) then run our own init in place of Docker's/Podman's.
+if [ "$DKVM_INIT" = "1" ]; then
+  # If launched with '--init' (or --env=DKVM_INIT=1) then run our own init in place of Docker's/Podman's.
 
   cat >/etc/inittab <<_EOE_
 ttyS0::respawn:-/opt/dkvm/scripts/dkvm-vm-start
