@@ -162,7 +162,7 @@ command line.
 
 ### Memory
 
-- `DKVM_DEV_SHM_SIZE=<size>`
+- `DKVM_MEM_SIZE=<size>`
 
 ### Kernel
 

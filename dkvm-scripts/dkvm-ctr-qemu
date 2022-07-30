@@ -59,14 +59,14 @@ exec qemu-system-x86_64 \
   -no-user-config \
   -nodefaults \
   -serial $SERIAL \
-  -m "$DKVM_DEV_SHM_SIZE" \
   -cpu host \
   -machine q35,accel=kvm,usb=off \
+  -m "$DKVM_MEM_SIZE" \
   -chardev socket,id=char0,path=$QEMU_VIRTIOFSD_SOCKET -device vhost-user-fs-pci,queue-size=1024,chardev=char0,tag=myfs,ats=on \
   -kernel $DKVM_KERNEL_PATH \
   -initrd $DKVM_KERNEL_INITRAMFS_PATH \
   -append "rootfstype=virtiofs root=myfs rw nomodeset $BREAK $INIT console=ttyS0 net.ifnames=0 $PANIC $OPTS $DKVM_KERNEL_ARGS" \
-  -object memory-backend-file,id=mem,size="$DKVM_DEV_SHM_SIZE",mem-path=/dev/shm,share=on \
+  -object memory-backend-file,id=mem,size="$DKVM_MEM_SIZE",mem-path=/dev/shm,share=on \
   -numa node,memdev=mem \
   -nic tap,id=qemu0,model=virtio-net-pci,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN,mac=$MAC \
   -no-reboot \
