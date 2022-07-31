@@ -5,6 +5,13 @@
 # Alpine initrd doesn't honour command-line rw flag
 mount -o remount,rw /
 
+# Unmount /run if it is a tmpfs (not a virtiofs) mounted by the initramfs
+# /run may be populated in the underlying image, and may also be a volume or be bind-mounted,
+# and its contents should be accessible in these cases.
+if [ $(findmnt -rnu -o FSTYPE /run) = "tmpfs" ]; then
+  busybox umount -fl /run
+fi
+
 # FIXME: virtiofs mounts aren't always made rw. Remount them all rw (if allowed)
 # /opt/dkvm/bin/mount -t virtiofs | awk '{print $3}' | xargs -n 1 mount -o remount,rw
 
@@ -71,5 +78,5 @@ else
   /opt/dkvm/scripts/dkvm-vm-qemu-ga &
 
   # Run init from the image
-  exec -c "${ARGS[@]}"
+  exec "${ARGS[@]}"
 fi

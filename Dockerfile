@@ -12,7 +12,7 @@ RUN apk add --no-cache patchelf --repository=http://dl-cdn.alpinelinux.org/alpin
 # Patch all binaries and dynamic libraries for full portability.
 COPY build-utils/elf-patcher.sh /usr/local/bin/elf-patcher.sh
 
-ENV BINARIES="busybox bash jq ip nc mke2fs blkid mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/*"
+ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/*"
 ENV CODE_PATH="/opt/dkvm"
 RUN /usr/local/bin/elf-patcher.sh
 RUN bash -c 'cd /opt/dkvm/bin; for cmd in sh cat cut awk chmod grep head mount route sysctl ps init poweroff mkdir ls hostname tr getty login touch rm base64; do ln -s busybox $cmd; done'
