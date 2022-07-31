@@ -80,7 +80,8 @@ ARGS=(
   -device virtserialport,chardev=charchannel0,name=org.qemu.guest_agent.0
 )
 
-exec $CMD "${ARGS[@]}"
+if [ -n "$DKVM_BREAK_PREQEMU" ]; then
+  /bin/bash
+fi
 
-# DEBUG: ENABLE TO SKIP QEMU BOOT AND INSTEAD FALL INTO CONTAINER SHELL
-# exec "/bin/bash"
+exec $CMD "${ARGS[@]}"
