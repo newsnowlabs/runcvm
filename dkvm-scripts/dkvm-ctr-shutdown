@@ -9,7 +9,7 @@ poweroff() {
   # Try running busybox poweroff
   /opt/dkvm/scripts/dkvm-ctr-exec 0:0 / /opt/dkvm/bin/poweroff
 
-  # Try killing PID 1
+  # Try killing the VM's PID 1
   /opt/dkvm/scripts/dkvm-ctr-exec 0:0 / /opt/dkvm/bin/busybox kill 1
 }
 
