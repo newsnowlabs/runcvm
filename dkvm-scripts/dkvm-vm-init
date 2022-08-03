@@ -36,7 +36,6 @@ ip link set $IF up
 # - bind-mount or overwrite /etc/resolv.conf, /etc/hosts and /etc/hostname
 
 route add default gw $GW
-#echo nameserver $GW >/etc/resolv.conf
 
 # Setup hostname
 hostname -F /etc/hostname
@@ -48,7 +47,7 @@ if [ -f /.dkvm/fstab ]; then
 fi
 
 # Load original environment
-. /.dkvm/export
+. /.dkvm/config
 
 if [ "$DKVM_INIT" = "1" ]; then
   # If launched with '--init' (or --env=DKVM_INIT=1) then run our own init in place of Docker's/Podman's.
@@ -63,7 +62,7 @@ _EOE_
   # Allow dkvm-vm-start to runs once (and only once)
   rm -f /.dkvm/once
 
-  # Run our own init
+  # Clear the environment, and run our own init
   exec -c /opt/dkvm/bin/init
 else
   # If not, assume the user knows what they're doing: launch qemu-ga and just run their entrypoint.
@@ -71,10 +70,10 @@ else
   # Load original entrypoint
   mapfile -t ARGS <<< $(cat /.dkvm/entrypoint)
 
-  # Run the qemu guest agent, needed to support 'docker exec'
+  # Clean DKVM env vars
+  clean_env
 
-  # TODO:
-  # - Add option to inhibit this
+  # Run the qemu guest agent, needed to support 'docker exec'
   /opt/dkvm/scripts/dkvm-vm-qemu-ga &
 
   # Run init from the image

@@ -9,9 +9,14 @@ else
   touch /.dkvm/once
 fi
 
-# Load original entrypoint and environment
+# Load original environment
+. /.dkvm/config
+
+# Load original entrypoint
 mapfile -t ARGS <<< $(cat /.dkvm/entrypoint)
-. /.dkvm/export
+
+# Clean DKVM env vars
+clean_env
 
 IFS=':' read -r uid gid <<< "$DKVM_UIDGID"
 exec $DKVM/bin/s6-applyuidgid -u $uid -g $gid -G "" "${ARGS[@]}"

@@ -1,43 +1,78 @@
 #!/opt/dkvm/bin/bash
 
+# DEBUG
+if [[ "$DKVM_BREAK" =~ (prenet|postnet) ]]; then set -x; fi
+
 # SAVE ENTRYPOINT
 args=("$@")
 printf "%s\n" "${args[@]}" >/.dkvm/entrypoint
 
 # SAVE ENVIRONMENT
-export -n SHLVL
-env >/.dkvm/env
-export >/.dkvm/export
+export -n SHLVL OLDPWD
+
+export >/.dkvm/config
 
 # NOW LOAD DEFAULT ENV AND PATH
 . /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
 
 # DEBUG
-# exec bash
+if [[ "$DKVM_BREAK" =~ prenet ]]; then /bin/bash; fi
 
 # SAVE NETWORKING CONFIG
 DOCKER_IF=$(ip -json route show | jq -r '.[] | select(.dst == "default") | .dev')
 DOCKER_GW=$(ip -json route show | jq -r '.[] | select(.dst == "default") | .gateway')
-DOCKER_IP=$(ip addr show dev $DOCKER_IF | grep inet | head -n 1 | awk '{print $2}')
+DOCKER_NET=$(ip -json route show | jq -r '.[] | select(.dst != "default") | .dst')
+DOCKER_IP_NET=$(ip addr show dev $DOCKER_IF | grep inet | head -n 1 | awk '{print $2}')
+DOCKER_IP=$(echo $DOCKER_IP_NET | cut -d'/' -f1)
 
-echo $DOCKER_IP >/.dkvm/net
+QEMU_BRIDGE_IP=169.254.1.1
+DKVM_DNS_IP=169.254.169.254
+
+echo $DOCKER_IP_NET >/.dkvm/net
 echo $DOCKER_GW >/.dkvm/netgw
 
 # RECONFIGURE CONTAINER NETWORK
 ip addr flush dev $DOCKER_IF
 
-# https://bugs.launchpad.net/neutron/+bug/1738659
+# Create the container bridge
+# See https://bugs.launchpad.net/neutron/+bug/1738659
 ip link add $QEMU_BRIDGE type bridge forward_delay 0 ageing 0
 
+# Add a private IP to the bridge.
+# We need it so the bridge can receive traffic, but the IP won't ever see the light of day.
+ip addr add $QEMU_BRIDGE_IP dev $QEMU_BRIDGE
+
+# Add the original container interface to the bridge and bring it up.
 ip link set dev $DOCKER_IF master $QEMU_BRIDGE
 ip link set dev $DOCKER_IF up
+
+# Bring the bridge up!
 ip link set dev $QEMU_BRIDGE up
 
-# DEBUG
-# exec bash
+# Restore routes needed for the bridge
+ip route add $DOCKER_NET dev $QEMU_BRIDGE
+ip route add default via $DOCKER_GW dev $QEMU_BRIDGE
+
+# Accept DNS requests for $DKVM_DNS_IP; these will be passed to dnsmasq
+XTABLES_LIBDIR=/opt/dkvm/lib64/usr/lib/xtables/ /opt/dkvm/sbin/xtables-nft-multi iptables -t nat -A PREROUTING -d $DKVM_DNS_IP/32 -p udp -m udp --dport 53 -j REDIRECT
+
+# Ensure all outgoing traffic via the QEMU bridge from the bridge's own IP is masqueraded as if from the VM
+XTABLES_LIBDIR=/opt/dkvm/lib64/usr/lib/xtables/ /opt/dkvm/sbin/xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -j SNAT --to-source $DOCKER_IP
+
+#cat /vm/etc/resolv.conf >/etc/resolv.conf
+RESOLV_CONF_NEW=$(busybox sed -r 's/127.0.0.11/169.254.169.254/' /vm/etc/resolv.conf)
+echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
+
+# LAUNCH DNSMASQ
+# It will receive local DNS requests (within the container, on 127.0.0.1)
+# and requests redirected locally (via the iptables PREROUTING REDIRECT rule) for $DKVM_DNS_IP.
+dnsmasq -u root --no-hosts
 
 # LAUNCH VIRTIOFSD
 /opt/dkvm/scripts/dkvm-ctr-virtiofsd &
+
+# DEBUG
+if [[ "$DKVM_BREAK" =~ postnet ]]; then /bin/bash; fi
 
 # LAUNCH INIT SUPERVISING QEMU
 # FIXME: Add -v to debug

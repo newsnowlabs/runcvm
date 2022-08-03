@@ -1,4 +1,4 @@
-#!/bin/sh -x
+#!/bin/sh
 
 # Patches all required binaries, Theia binaries and Theia dynamic libraries (ELF libs) for full portability.
 
@@ -19,54 +19,56 @@ checkelfs() {
   [ -z $CODE_PATH ] && CODE_PATH=$(realpath $(dirname $0)/..)
 
   # Now check the ELF files
-  for lib in $(cat $CODE_PATH/.elfs)
+  for lib in $(cat $CODE_PATH/.binelfs $CODE_PATH/.libelfs)
   do
-     $CODE_PATH/lib64/lib/ld-musl-x86_64.so.1 --list $lib 2>/dev/null | sed -nr '/=>/!d; s/^\s*(\S+)\s*=>\s*(.*?)(\s*\(0x[0-9a-f]+\))?$/\1 \2/;/^.+$/p;' | append " in $lib" | egrep -v "$CODE_PATH/lib64"
+    printf "Checking %-60s ... " "$lib" >&2
+    $CODE_PATH/lib64/lib/ld-musl-x86_64.so.1 --list $lib 2>/dev/null | sed -nr '/=>/!d; s/^\s*(\S+)\s*=>\s*(.*?)(\s*\(0x[0-9a-f]+\))?$/\1 \2/;/^.+$/p;' | append " in $lib" | egrep -v "$CODE_PATH/lib64"
   
-     # If any libraries do not match the expected pattern, grep returns true
-     [ $? -eq 0 ] && status=1
+    # If any libraries do not match the expected pattern, grep returns true
+    if [ $? -eq 0 ]; then
+      status=1
+      echo "BAD" >&2
+    else
+      echo "GOOD" >&2
+    fi
+
+    sleep 0.02
   done
   
   return $status
 }
 
-scan_app() {
-  local APP="$1"
+copy_binaries() {
+  # Copy any non-Theia binaries we require to the install location.
+  # Write their paths to cmd-elf-bin.
 
-  # Find all Theia ELF files that are dynamically linked.
-  # - This should includes all Theia .node files and spawn-helper, but not statically-linked binaries like 'rg'
-  # - The only way to tell if a file is an ELF binary (or library) is to check the first 4 bytes for the magic byte sequence.
-  
-  local app=$(basename "$APP")
-  
-  mkdir -p $CODE_PATH/apps/$app
-  cp -a $APP $CODE_PATH/apps/$app
-  find $CODE_PATH/apps/$app -type f ! -name '*.o' -exec hexdump -n 4 -e '4/1 "%2x" " {}\n"' {} \; | sed '/^7f454c46/!d; s/^7f454c46 //' | xargs -n 1 -P 4 file | grep dynamically >/tmp/theia-elf-file
-
-  # Separate out those that do and do not require an interpreter (binaries and libs, respectively) into separate lists.
-  grep interpreter /tmp/theia-elf-file | cut -d':' -f1 >>/tmp/theia-elf-bin
-  grep -v interpreter /tmp/theia-elf-file | cut -d':' -f1 >>/tmp/theia-elf-lib
-  
-  # Clean up temporary file
-  rm -f /tmp/theia-elf-file
-}
-
-scan_binaries() {
-  # Copy any non-Theia binaries we require to the install location, and generate an additional list.
   mkdir -p $CODE_PATH/bin $CODE_PATH/usr/bin
-  for bin in $BINARIES
+  for bin in "$@"
   do
     local file=$(which $bin)
-    tar cv $file | tar x -C $CODE_PATH/
-    echo $CODE_PATH/$file >>/tmp/cmd-elf-bin
+
+    if [ -n "$file" ]; then
+      tar cv $file 2>/dev/null | tar x -C $CODE_PATH/
+      echo "$CODE_PATH$file"
+    fi
   done
+}
+
+scan_extra_libs() {
+  find "$@" ! -type d | while read lib
+    do
+      local f=$(basename $lib)
+      echo "$f $lib"
+    done
 }
 
 # Using ldd, generate list of resolved library filepaths for each ELF binary and library,
 # logging first argument (to be used as $lib) and second argument (to be used as $dest).
+# e.g.
+# libaio.so.1  /usr/lib/libaio.so.1
+# libblkid.so.1  /lib/libblkid.so.1
 find_lib_deps() {
-  cat /tmp/theia-elf-bin /tmp/theia-elf-lib | xargs -n 1 -I '{}' ldd '{}' 2>/dev/null | sed -nr 's/^\s*(.*)=>\s*(.*?)\s.*$/\1 \2/p' | sort -u >/tmp/theia-lib
-  cat /tmp/cmd-elf-bin | xargs -n 1 -I '{}' ldd '{}' 2>/dev/null | sed -nr 's/^\s*(.*)=>\s*(.*?)\s.*$/\1 \2/p' | sort -u >/tmp/cmd-lib
+  cat "$@" | xargs -n 1 -I '{}' ldd '{}' 2>/dev/null | sed -nr 's/^\s*(.*)=>\s*(.*?)\s.*$/\1 \2/p' | sort -u
 }
 
 copy_libs() {
@@ -80,7 +82,7 @@ copy_libs() {
   # N.B. These steps are all needed to ensure the Alpine dynamic linker can resolve library filepaths as required.
   #      For more, see https://www.musl-libc.org/doc/1.0.0/manual.html
   #
-  sort -u /tmp/theia-lib /tmp/cmd-lib | while read lib dest
+  sort -u "$@" | while read lib dest
   do
     # Copy $dest; and if $dest is a symlink, copy its target.
     # This could conceivably result in duplicates if multiple symlinks point to the same target,
@@ -89,28 +91,37 @@ copy_libs() {
 
     # If needed, add a symlink from $lib to $(basename $dest)
     [ "$(basename $dest)" != "$lib" ] && cd $CODE_PATH/lib64/$(dirname $dest) && ln -s $(basename $dest) $lib && cd -
+
+    if [ "$dest" != "/lib/ld-musl-x86_64.so.1" ]; then
+        echo "$CODE_PATH/lib64$dest" >>/tmp/cmd-elf-lib
+    fi
   done
 }
 
 patch_binaries() {
   # For all ELF binaries, set the interpreter to our own.
-  for bin in $(sort -u /tmp/cmd-elf-bin /tmp/theia-elf-bin)
+  for bin in $(sort -u "$@")
   do
-    patchelf --set-interpreter $CODE_PATH/lib64/lib/ld-musl-x86_64.so.1 $bin
+    echo patchelf --set-interpreter $CODE_PATH/lib64/lib/ld-musl-x86_64.so.1 $bin >>/tmp/patchelf.log
+    patchelf --set-interpreter $CODE_PATH/lib64/lib/ld-musl-x86_64.so.1 $bin >>/tmp/patchelf.log 2>&1
   done
 }
 
-patch_elf_libs() {
+patch_elf_binaries_and_libs() {
   # For all ELF libs, set the RPATH to our own, and force RPATH use.
-  for lib in $(sort -u /tmp/cmd-elf-bin /tmp/theia-elf-bin /tmp/theia-elf-lib)
+  for lib in $(sort -u "$@")
   do
-    patchelf --force-rpath --set-rpath $CODE_PATH/lib64/lib:$CODE_PATH/lib64/usr/lib $lib
+    echo patchelf --force-rpath --set-rpath $CODE_PATH/lib64/lib:$CODE_PATH/lib64/usr/lib:$CODE_PATH/lib64/usr/lib/xtables $lib >>/tmp/patchelf.log
+    patchelf --force-rpath --set-rpath $CODE_PATH/lib64/lib:$CODE_PATH/lib64/usr/lib:$CODE_PATH/lib64/usr/lib/xtables $lib >>/tmp/patchelf.log 2>&1
   done
 }
+
+#   find $CODE_PATH/apps/$app -type f ! -name '*.o' -exec hexdump -n 4 -e '4/1 "%2x" " {}\n"' {} \; | sed '/^7f454c46/!d; s/^7f454c46 //' | xargs -n 1 -P 4 file | grep dynamically >/tmp/theia-elf-file
 
 write_digest() {
   # Prepare full and unique list of ELF binaries and libs for reference purposes and for checking
-  sort -u /tmp/cmd-elf-bin /tmp/theia-elf-bin /tmp/theia-elf-lib >$CODE_PATH/.elfs
+  sort -u /tmp/cmd-elf-bin >$CODE_PATH/.binelfs
+  sort -u /tmp/cmd-elf-lib >$CODE_PATH/.libelfs
 }
 
 # Run with --checkelfs from within any distribution, to check that all dynamic library dependencies
@@ -121,17 +132,17 @@ if [ "$1" = "--checkelfs" ]; then
 fi
 
 # Initialise
->/tmp/theia-elf-bin
->/tmp/theia-elf-lib
 >/tmp/cmd-elf-bin
+>/tmp/cmd-elf-lib
+>/tmp/libs
 
-# for app in "${APPS[@]}"; do scan_app "$app"; done
-scan_binaries
-find_lib_deps
-copy_libs
-patch_binaries
-patch_elf_libs
-write_digest
+copy_binaries $BINARIES >>/tmp/cmd-elf-bin # Copy elf binaries to CODE_PATH and generate cmd-elf-bin
+find_lib_deps /tmp/cmd-elf-bin >>/tmp/libs # Find library dependencies of these binaries
+scan_extra_libs $EXTRA_LIBS >>/tmp/libs # Scan for extra libraries not formally declared as dependencies
+copy_libs /tmp/libs # Copy the libraries to CODE_PATH and generate cmd-elf-lib
+patch_binaries /tmp/cmd-elf-bin # Patch cmd-elf-bin interpreter
+patch_elf_binaries_and_libs /tmp/cmd-elf-bin /tmp/cmd-elf-lib # Patch cmd-elf-bin and cmd-elf-lib rpath
+write_digest # Write a summary of binaries and libraries to CODE_PATH
 
 # Check the full list for any library dependencies being inadvertently resolved outside the install location.
 # Returns true if OK, false on any problems.
