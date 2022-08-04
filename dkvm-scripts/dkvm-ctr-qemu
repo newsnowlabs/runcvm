@@ -67,7 +67,7 @@ ARGS=(
   -device vhost-user-fs-pci,queue-size=1024,chardev=char0,tag=myfs,ats=on
   -kernel $DKVM_KERNEL_PATH
   -initrd $DKVM_KERNEL_INITRAMFS_PATH
-  -append "rootfstype=virtiofs root=myfs rw nomodeset $BREAK $INIT ${APPEND[@]} net.ifnames=0 $PANIC $OPTS $DKVM_KERNEL_ARGS"
+  -append "rootfstype=virtiofs root=myfs rw nomodeset $BREAK $INIT ${APPEND[@]} net.ifnames=0 $PANIC $DKVM_KERNEL_ARGS"
   -object memory-backend-file,id=mem,size="$DKVM_MEM_SIZE",mem-path=/dev/shm,share=on
   -numa node,memdev=mem
   -nic tap,id=qemu0,model=virtio-net-pci,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN,mac=$MAC
