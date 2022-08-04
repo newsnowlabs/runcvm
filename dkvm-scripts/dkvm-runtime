@@ -60,7 +60,8 @@ load_env_from_file() {
     local value="${LINE#*=}"
     
     if [ "$name" != "$LINE" ] && [ "$value" != "$LINE" ] && [ "$name" = "$var" ]; then
-      echo "$value"
+      # We found variable $name: return it, removing any leading/trailing double quotes
+      echo "$value" | sed 's/^"//;s/"$//'
       return 0
     fi
   done <"$file"
