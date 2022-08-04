@@ -5,21 +5,22 @@ FROM alpine:edge as binaries
 RUN apk update && \
     apk add --no-cache file bash qemu-system-x86_64 qemu-virtiofsd qemu-ui-curses qemu-guest-agent \
         jq iproute2 netcat-openbsd e2fsprogs blkid util-linux \
-        s6 dnsmasq iptables nftables
+        s6 dnsmasq iptables nftables \
+        ncurses
 
 RUN apk add --no-cache patchelf --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community
 
 # Patch all binaries and dynamic libraries for full portability.
 COPY build-utils/elf-patcher.sh /usr/local/bin/elf-patcher.sh
 
-ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/*"
+ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/* tput"
 ENV EXTRA_LIBS="/usr/lib/xtables"
 ENV CODE_PATH="/opt/dkvm"
 
 RUN /usr/local/bin/elf-patcher.sh
 
 # Add needed busybox symlinks
-RUN bash -c 'cd /opt/dkvm/bin; for cmd in sh cat cut awk chmod grep head mount route sysctl ps init poweroff mkdir ls hostname tr getty login touch rm base64; do ln -s busybox $cmd; done'
+RUN bash -c 'cd /opt/dkvm/bin; for cmd in awk base64 cat chmod cut grep head hostname init ln ls mkdir mount poweroff ps rm route sh sysctl tr touch; do ln -s busybox $cmd; done'
 
 RUN mkdir -p /opt/dkvm/usr/share && cp -a /usr/share/qemu /opt/dkvm/usr/share
 
