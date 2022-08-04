@@ -59,7 +59,8 @@ XTABLES_LIBDIR=/opt/dkvm/lib64/usr/lib/xtables/ /opt/dkvm/sbin/xtables-nft-multi
 # Ensure all outgoing traffic via the QEMU bridge from the bridge's own IP is masqueraded as if from the VM
 XTABLES_LIBDIR=/opt/dkvm/lib64/usr/lib/xtables/ /opt/dkvm/sbin/xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -j SNAT --to-source $DOCKER_IP
 
-#cat /vm/etc/resolv.conf >/etc/resolv.conf
+# FIXME: Bind-mount /etc/resolv.conf as well as /vm/etc/resolv.conf to prevent them showing in 'docker diff'
+cat /vm/etc/resolv.conf >/etc/resolv.conf
 RESOLV_CONF_NEW=$(busybox sed -r 's/127.0.0.11/169.254.169.254/' /vm/etc/resolv.conf)
 echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
 
