@@ -38,7 +38,15 @@ log() {
 }
 
 error() {
-  echo "$1" >&2
+
+  # Skip past any docker error ending in CR
+  (echo; echo) >&2
+
+  # Dump message to stderr
+  echo "DKVM: Error: $1" >&2
+
+  # Dump error also to the logfile
+  log "DKVM: Error: $1"
   exit -1
 }
 
