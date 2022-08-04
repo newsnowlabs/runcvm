@@ -268,18 +268,22 @@ if [ "$COMMAND" = "create" ]; then
       case "$DKVM_KERNEL_OS_ID" in
           debian) DKVM_KERNEL_OS_KERNEL="/vmlinuz"
                   DKVM_KERNEL_OS_INITRAMFS="/initrd.img"
-                  DKVM_KERNEL_ARGS="noresume"
+                  DKVM_KERNEL_ARGS="rootfstype=virtiofs root=myfs noresume nomodeset"
                   ;;
           ubuntu) DKVM_KERNEL_OS_KERNEL="/boot/vmlinuz"
                   DKVM_KERNEL_OS_INITRAMFS="/boot/initrd.img"
-                  DKVM_KERNEL_ARGS="noresume"
+                  DKVM_KERNEL_ARGS="rootfstype=virtiofs root=myfs noresume nomodeset"
+                  ;;
+              ol) DKVM_KERNEL_OS_KERNEL="/boot/vmlinuz"
+                  DKVM_KERNEL_OS_INITRAMFS="/boot/initramfs"
+                  DKVM_KERNEL_ARGS="root=virtiofs:myfs noresume nomodeset"
                   ;;
           alpine) DKVM_KERNEL_OS_KERNEL="/boot/vmlinuz-virt"
                   DKVM_KERNEL_OS_INITRAMFS="/boot/initramfs-virt"
-                  DKVM_KERNEL_ARGS="resume="
+                  DKVM_KERNEL_ARGS="rootfstype=virtiofs root=myfs resume= nomodeset"
                   ;;
 
-               *) ;;
+               *) error "Unrecognised image O/S '$DKVM_KERNEL_OS_ID'; specify --env=DKVM_KERNEL=<dist> or --env=DKVM_KERNEL=<dist>/<version>"; ;;
       esac
     
       if [[ -f "$ROOT/$DKVM_KERNEL_OS_KERNEL" && -f "$ROOT/$DKVM_KERNEL_OS_INITRAMFS" ]]; then
