@@ -1,5 +1,7 @@
 #!/opt/dkvm/bin/sh
 
+. /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
+
 # dkvm-init execs this script when it exits.
 # It:
 # - performs any post-VM tests.
@@ -14,5 +16,8 @@ if [ -f /.dkvm/exitcode ]; then
 elif [ -n "$1" ]; then
   CODE=$(( ($1+1)/2 ))
 fi
+
+# Workaround for https://github.com/cirosantilli/linux-kernel-module-cheat/issues/110
+tput smam
 
 exit ${CODE:-0}
