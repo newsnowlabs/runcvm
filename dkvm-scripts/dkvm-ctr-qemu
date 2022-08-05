@@ -42,6 +42,10 @@ if [ -n "$DKVM_DISKS" ]; then
   do_disk "$DKVM_DISKS"
 fi
 
+if [ -n "$DKVM_TMPFS" ]; then
+  echo "$DKVM_TMPFS" >>/.dkvm/fstab
+fi
+
 # echo "DISKS: ${DISKS[@]}"; bash && exit 0
 
 # TODO:

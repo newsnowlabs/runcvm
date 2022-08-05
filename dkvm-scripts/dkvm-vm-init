@@ -48,7 +48,7 @@ hostname -F /etc/hostname
 # Mount filesystems defined in /etc/fstab OR as defined in DKVM_DISKS
 if [ -f /.dkvm/fstab ]; then
   busybox modprobe ext4
-  mount -av --fstab /.dkvm/fstab
+  mount -av --fstab /.dkvm/fstab -o X-mount.mkdir
 fi
 
 # Load original environment

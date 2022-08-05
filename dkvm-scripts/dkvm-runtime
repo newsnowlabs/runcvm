@@ -218,7 +218,12 @@ if [ "$COMMAND" = "create" ]; then
   # CONFIGURE MOUNTS
   set_config_env "DKVM_VM_MOUNTPOINT" "$DKVM_VM_MOUNTPOINT"
 
-  # First, rewrite all pre-existing bind/volume mounts to mount to $DKVM_VM_MOUNTPOINT instead of /
+  # First extract list of tmpfs mounts in fstab form, then delete them from the config
+  DKVM_TMPFS=$(jq_get "$CFG" '( .mounts[] | select(.type == "tmpfs" and (.destination | test("^/dev(/|$)") | not) ) ) | [.source + " " + .destination + " tmpfs " + (.options | map(select(. != "rprivate" and . != "private")) | join(",")) + " 0 0"] | .[0]')
+  jq_set "$CFG" -r 'del( .mounts[] | select(.type == "tmpfs" and (.destination | test("^/dev(/|$)") | not) ) )'
+  set_config_env "DKVM_TMPFS" "$DKVM_TMPFS"
+
+  # Rewrite all pre-existing bind/volume mounts to mount to $DKVM_VM_MOUNTPOINT instead of /
   # If we excluded /etc/(resolv.conf,hosts,hostname), and moved these to top of the array
   # (by promoting them at the end of the below statements), they would be present in both
   # container and VM.
