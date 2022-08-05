@@ -5,14 +5,15 @@ DKVM=/opt/dkvm
 PATH=$DKVM/sbin:$DKVM/bin:$DKVM/usr/bin
 unset DKVM
 
+OPTS=(--retry-path --statedir /.dkvm)
+
 if [ -f "/dev/virtio-ports/org.qemu.guest_agent.0" ]; then
   DEV="/dev/virtio-ports/org.qemu.guest_agent.0"
-  OPTS=()
 else
   DEV=$(ls /dev/vport* | head -n 1)
   
   if [ -n "$DEV" ] && [ -c "$DEV" ]; then  
-    OPTS=(-p "$DEV")
+    OPTS+=(-p "$DEV")
   fi
 fi
 
