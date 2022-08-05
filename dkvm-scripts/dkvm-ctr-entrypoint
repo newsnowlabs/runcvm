@@ -16,7 +16,7 @@ export >/.dkvm/config
 . /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
 
 # DEBUG
-if [[ "$DKVM_BREAK" =~ prenet ]]; then /bin/bash; fi
+if [[ "$DKVM_BREAK" =~ prenet ]]; then bash; fi
 
 # SAVE NETWORKING CONFIG
 DOCKER_IF=$(ip -json route show | jq -r '.[] | select(.dst == "default") | .dev')
@@ -73,7 +73,7 @@ dnsmasq -u root --no-hosts
 /opt/dkvm/scripts/dkvm-ctr-virtiofsd &
 
 # DEBUG
-if [[ "$DKVM_BREAK" =~ postnet ]]; then /bin/bash; fi
+if [[ "$DKVM_BREAK" =~ postnet ]]; then bash; fi
 
 # LAUNCH INIT SUPERVISING QEMU
 # FIXME: Add -v to debug

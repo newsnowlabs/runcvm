@@ -80,6 +80,6 @@ ARGS=(
   -device virtserialport,chardev=charchannel0,name=org.qemu.guest_agent.0
 )
 
-if [[ "$DKVM_BREAK" =~ preqemu ]]; then /bin/bash; fi
+if [[ "$DKVM_BREAK" =~ preqemu ]]; then bash; fi
 
 exec $CMD "${ARGS[@]}"
