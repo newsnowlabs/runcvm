@@ -18,6 +18,6 @@ elif [ -n "$1" ]; then
 fi
 
 # Workaround for https://github.com/cirosantilli/linux-kernel-module-cheat/issues/110
-tput smam
+tput smam 2>/dev/null
 
 exit ${CODE:-0}
