@@ -215,6 +215,11 @@ if [ "$COMMAND" = "create" ]; then
   set_config_env "DKVM_UIDGID" "$DKVM_UIDGID"
   jq_set "$CFG" '.process.user = {"uid":0, "gid":0}'
 
+  # CONFIGURE CPUS
+  DKVM_CPUS=$(( $(jq_get "$CFG" '.linux.resources.cpu.quota') / 100000))
+  set_config_env "DKVM_CPUS" "$DKVM_CPUS"
+  log "DKVM_CPUS=$DKVM_CPUS"
+
   # CONFIGURE MOUNTS
   set_config_env "DKVM_VM_MOUNTPOINT" "$DKVM_VM_MOUNTPOINT"
 
