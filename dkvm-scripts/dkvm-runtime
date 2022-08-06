@@ -388,14 +388,15 @@ if [ "$COMMAND" = "create" ]; then
     jq_set "$CFG" --arg field "bounding" '.process.capabilities[$field] |= (.+ ["CAP_NET_ADMIN","CAP_NET_RAW","CAP_MKNOD","CAP_AUDIT_WRITE"] | unique)'
   done
   
-  debug && cp -a $CFG /tmp/config.json-$$-2
-  
   # Filter for DKVM_SYS_ADMIN=1
   DKVM_SYS_ADMIN=$(get_config_env "DKVM_SYS_ADMIN")
   if [ "$DKVM_SYS_ADMIN" = "1" ]; then
     # TODO use 'unique'
     jq_set "$CFG" '.process.capabilities.bounding += ["CAP_SYS_ADMIN"] | .process.capabilities.effective += ["CAP_SYS_ADMIN"] | .process.capabilities.permitted += ["CAP_SYS_ADMIN"]'
   fi
+
+  debug && cp -a $CFG /tmp/config.json-$$-2
+  bash -i
   
 elif [ "$COMMAND" = "exec" ]; then
 
