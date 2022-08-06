@@ -75,7 +75,7 @@ ARGS=(
   -device vhost-user-fs-pci,queue-size=1024,chardev=char0,tag=myfs,ats=on
   -kernel $DKVM_KERNEL_PATH
   -initrd $DKVM_KERNEL_INITRAMFS_PATH
-  -append "$DKVM_KERNEL_ARGS $BREAK $INIT ${APPEND[@]} rw net.ifnames=0 $PANIC"
+  -append "$DKVM_KERNEL_ARGS $BREAK $INIT ${APPEND[@]} rw $PANIC"
   -object memory-backend-file,id=mem,size="$DKVM_MEM_SIZE",mem-path=/dev/shm,share=on
   -numa node,memdev=mem
   -smp $DKVM_CPUS
