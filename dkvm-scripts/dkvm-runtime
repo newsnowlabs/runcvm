@@ -396,7 +396,6 @@ if [ "$COMMAND" = "create" ]; then
   fi
 
   debug && cp -a $CFG /tmp/config.json-$$-2
-  bash -i
   
 elif [ "$COMMAND" = "exec" ]; then
 
