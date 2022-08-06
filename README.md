@@ -160,10 +160,6 @@ docker run --runtime=dkvm --rm -p 8080:80 nginx
 Options are specified using `--env=<DKVM_KEY>=<VALUE>` on the `docker run`
 command line.
 
-### Memory
-
-- `DKVM_MEM_SIZE=<size>`
-
 ### Kernel
 
 DKVM will examine the image to try and determine a suitable kernel to boot the VM with. The process is as follows:

@@ -367,15 +367,17 @@ if [ "$COMMAND" = "create" ]; then
   # later, we can work out the minimal seccomp permissions required.
   jq_set "$CFG" '.linux.seccomp |= empty'
   
+  # CONFIGURE MEMORY
   # Set /dev/shm to DKVM_MEM_SIZE env var, or to default
   # - it should be large enough to support VM memory
-  DKVM_MEM_SIZE=$(get_config_env "DKVM_MEM_SIZE")
-  if [ -z "$DKVM_MEM_SIZE" ]; then
+  DKVM_MEM_SIZE=$(jq_get "$CFG" '.linux.resources.memory.limit')
+  if [ -n "$DKVM_MEM_SIZE" ]; then
+    DKVM_MEM_SIZE="$(( $DKVM_MEM_SIZE/1024/1024 ))M"
+  else
     DKVM_MEM_SIZE="$DKVM_MEM_SIZE_DEFAULT"
-    set_config_env "DKVM_MEM_SIZE" "$DKVM_MEM_SIZE"
   fi
-  
   log "DKVM_MEM_SIZE=$DKVM_MEM_SIZE"
+  set_config_env "DKVM_MEM_SIZE" "$DKVM_MEM_SIZE"
   jq_set "$CFG" --arg size "$DKVM_MEM_SIZE" '( .mounts[] | select(.destination == "/dev/shm") ) = {"destination": "/dev/shm","type": "tmpfs","source": "shm","options": ["nosuid","noexec","nodev","mode=1777","size=" + $size]}'
   
   # Add non-default capabilities needed by:
