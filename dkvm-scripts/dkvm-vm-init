@@ -55,13 +55,17 @@ if [ -f /.dkvm/fstab ]; then
   mount -av --fstab /.dkvm/fstab -o X-mount.mkdir
 fi
 
+# FIXME: THIS IS NOT RELIABLE!
+# IT OVERRIDES PATH CAUSING cat and rm etc to break if not present in the image
+# SAFER WOULD BE TO ADDRESS EVERY TOOL WITH AN ABSOLUTE PATH
+
 # Load original environment
 . /.dkvm/config
 
 if [ "$DKVM_INIT" = "1" ]; then
   # If launched with '--init' (or --env=DKVM_INIT=1) then run our own init in place of Docker's/Podman's.
 
-  cat >/etc/inittab <<_EOE_
+  $DKVM/bin/cat >/etc/inittab <<_EOE_
 ttyS0::respawn:-/opt/dkvm/scripts/dkvm-vm-start
 ::respawn:/opt/dkvm/scripts/dkvm-vm-qemu-ga
 ::ctrlaltdel:/opt/dkvm/bin/poweroff
@@ -69,22 +73,19 @@ ttyS0::respawn:-/opt/dkvm/scripts/dkvm-vm-start
 _EOE_
 
   # Allow dkvm-vm-start to runs once (and only once)
-  rm -f /.dkvm/once
+  $DKVM/bin/rm -f /.dkvm/once
 
   # Clear the environment, and run our own init
   exec -c /opt/dkvm/bin/init
 else
   # If not, assume the user knows what they're doing: launch qemu-ga and just run their entrypoint.
 
-  # Load original entrypoint
-  mapfile -t ARGS <<< $(cat /.dkvm/entrypoint)
-
   # Clean DKVM env vars
   clean_env
 
   # Run the qemu guest agent, needed to support 'docker exec'
-  /opt/dkvm/scripts/dkvm-vm-qemu-ga &
+  $DKVM/scripts/dkvm-vm-qemu-ga &
 
   # Run init from the image
-  exec "${ARGS[@]}"
+  exec -c $DKVM/scripts/dkvm-vm-start
 fi

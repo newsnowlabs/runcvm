@@ -13,7 +13,7 @@ fi
 . /.dkvm/config
 
 # Load original entrypoint
-mapfile -t ARGS <<< $(cat /.dkvm/entrypoint)
+mapfile -t ARGS </.dkvm/entrypoint
 
 # Clean DKVM env vars
 clean_env
