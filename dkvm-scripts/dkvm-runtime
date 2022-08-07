@@ -90,13 +90,6 @@ jq_get() {
   jq -r "$@" $file
 }
 
-jq_get_join() {
-  local file="$1"
-  shift
-  
-  jq -j "$@" $file
-}
-
 get_config_env() {
   local var="$1"
   local default="$2"
@@ -211,9 +204,10 @@ if [ "$COMMAND" = "create" ]; then
 
   # CONFIGURE USER
   # - Must be root to run container
-  DKVM_UIDGID=$(jq_get_join "$CFG" '.process.user.uid, ":", .process.user.gid')
+  DKVM_UIDGID=$(jq_get "$CFG" '(.process.user.uid | tostring) + ":" + (.process.user.gid | tostring)')
   set_config_env "DKVM_UIDGID" "$DKVM_UIDGID"
   jq_set "$CFG" '.process.user = {"uid":0, "gid":0}'
+  log "DKVM_UIDGID=$DKVM_UIDGID"
 
   # CONFIGURE CPUS
   DKVM_CPUS=$(( $(jq_get "$CFG" '.linux.resources.cpu.quota') / 100000))
@@ -442,7 +436,7 @@ elif [ "$COMMAND" = "exec" ]; then
   if [ "$ARG1" = "---" ]; then
     jq_set "$PROCESS" 'del(.args[0])'
   else
-    uidgid=$(jq_get_join "$PROCESS" '.user.uid, ":", .user.gid')
+    uidgid=$(jq_get "$PROCESS" '(.user.uid | tostring) + ":" + (.user.gid | tostring)')
     cwd=$(jq_get "$PROCESS" '.cwd')
 
     jq_set "$PROCESS" --arg exec "$DKVM_EXEC" --arg uidgid "$uidgid" --arg cwd "$cwd" '.args |= [$exec, $uidgid, $cwd] + .'
