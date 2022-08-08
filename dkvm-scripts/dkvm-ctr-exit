@@ -6,7 +6,8 @@
 # It:
 # - performs any post-VM tests.
 # - retrieves any saved exit code.
-# - 
+# - resets terminal readline horizontal scroll
+# - exits with exit code
 
 if [ -f /.dkvm/exitcode ]; then
   read CODE </.dkvm/exitcode
