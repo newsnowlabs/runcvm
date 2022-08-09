@@ -57,12 +57,23 @@ fi
 
 if [ "$DKVM_ARCH" = "arm64" ]; then
   CMD="qemu-system-aarch64"
-  OPTS=(-display curses -cpu max -machine virt,gic-version=max,usb=off)
+  OPTS=(-cpu max -machine virt,gic-version=max,usb=off)
 else
   CMD="qemu-system-x86_64"
-  OPTS=(-enable-kvm -nographic -cpu host -machine q35,accel=kvm,usb=off -device isa-debug-exit )
+  OPTS=(-enable-kvm -cpu host -machine q35,accel=kvm,usb=off,sata=off -device isa-debug-exit)
+fi
+
+if [ -n "$DKVM_QEMU_DISPLAY" ]; then
+  OPTS+=(-display $DKVM_QEMU_DISPLAY)
+else
+  OPTS+=(-nographic)
+fi
+
+if [ -n "$DKVM_QEMU_BOOT_DEBUG" ]; then
   APPEND=("console=ttyS0")
-  # APPEND+=("cgroup_enable=memory swapaccount=1 apparmor=0 systemd.unified_cgroup_hierarchy=0")
+else
+  # Disable patched SEABIOS serial console using modified config option, to avoid QEMU warning.
+  OPTS+=(-fw_cfg opt/org.seabios/etc/sercon-port,string=0)
 fi
 
 ARGS=(
@@ -79,7 +90,8 @@ ARGS=(
   -object memory-backend-file,id=mem,size="$DKVM_MEM_SIZE",mem-path=/dev/shm,share=on
   -numa node,memdev=mem
   -smp $DKVM_CPUS
-  -nic tap,id=qemu0,model=virtio-net-pci,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN,mac=$MAC
+  # Configure host/container tap device with PXE roms disabled
+  -netdev tap,id=qemu0,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN -device virtio-net-pci,netdev=qemu0,mac=$MAC,rombar=0
   -no-reboot
   ${DISKS[@]}
   -action panic=none -action reboot=shutdown
@@ -87,6 +99,7 @@ ARGS=(
   -chardev socket,id=charchannel0,path=$QEMU_GUEST_AGENT,server=on,wait=off
   -device virtio-serial
   -device virtserialport,chardev=charchannel0,name=org.qemu.guest_agent.0
+#   -nic 'user,id=sock0,ipv6=off,model=virtio-net-pci,restrict=off,net=10.0.0.0/24,guestfwd=tcp:10.0.0.1:2375-cmd:/opt/dkvm/usr/bin/nc -U /docker.sock'
 )
 
 if [[ "$DKVM_BREAK" =~ preqemu ]]; then bash; fi
