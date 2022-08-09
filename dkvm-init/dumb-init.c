@@ -22,7 +22,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-// dumb-init.c modifications (c) NewsNow Publishing Limited 2022
+// dumb-init.c modifications (c) 2022 NewsNow Publishing Limited
 
 /*
  * dumb-init is a simple wrapper program designed to run as PID 1 and pass
@@ -71,6 +71,7 @@ char signal_temporary_ignores[MAXSIG + 1] = {[0 ... MAXSIG] = 0};
 pid_t child_pid = -1;
 char debug = 0;
 char use_setsid = 1;
+char no_fork = 0;
 
 int translate_signal(int signum) {
     if (signum <= 0 || signum > MAXSIG) {
@@ -207,6 +208,7 @@ void print_help(char *argv[]) {
         "   -v, --verbose        Print debugging information to stderr.\n"
         "   -h, --help           Print this help message and exit.\n"
         "   -V, --version        Print the current version and exit.\n"
+        "   -F, --no-fork        Don't fork, just set up signals and tty\n"
         "\n",
         VERSION_len, VERSION,
         argv[0]
@@ -252,9 +254,10 @@ char **parse_command(int argc, char *argv[]) {
         {"rewrite",      required_argument, NULL, 'r'},
         {"verbose",      no_argument,       NULL, 'v'},
         {"version",      no_argument,       NULL, 'V'},
+        {"no-fork",      no_argument,       NULL, 'F'},
         {NULL,                     0,       NULL,   0},
     };
-    while ((opt = getopt_long(argc, argv, "+hvVcr:", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "+hvVcFr:", long_options, NULL)) != -1) {
         switch (opt) {
             case 'h':
                 print_help(argv);
@@ -270,6 +273,9 @@ char **parse_command(int argc, char *argv[]) {
                 break;
             case 'r':
                 parse_rewrite_signum(optarg);
+                break;
+            case 'F':
+                no_fork = 1;
                 break;
             default:
                 exit(1);
@@ -356,7 +362,13 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    child_pid = fork();
+    if(no_fork) {
+        child_pid = 0;
+    }
+    else {
+        child_pid = fork();
+    }
+    
     if (child_pid < 0) {
         PRINTERR("Unable to fork. Exiting.\n");
         return 1;
