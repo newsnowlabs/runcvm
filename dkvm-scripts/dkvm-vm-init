@@ -87,5 +87,9 @@ else
   $DKVM/scripts/dkvm-vm-qemu-ga &
 
   # Run init from the image
-  exec -c $DKVM/scripts/dkvm-vm-start
+  # Pipe input/output from/to serial console
+  exec </dev/ttyS0 &>/dev/ttyS0
+  # Invoke dkvm-init with --no-fork purely to create controlling tty,
+  # then exec dkvm-vm-start
+  exec -c $DKVM/sbin/dkvm-init --no-fork $DKVM/scripts/dkvm-vm-start
 fi
