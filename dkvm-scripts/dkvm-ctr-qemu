@@ -72,7 +72,9 @@ fi
 if [ -n "$DKVM_QEMU_BOOT_DEBUG" ]; then
   APPEND=("console=ttyS0")
 else
-  # Disable patched SEABIOS serial console using modified config option, to avoid QEMU warning.
+  # Disable SeaBIOS serial console.
+  # This -cfw_cfg path is modified from the SeaBIOS default (to avoid an otherwise-inevitable QEMU
+  # warning being emitted) and so requires patched bios.bin file(s) (see Dockerfile)
   OPTS+=(-fw_cfg opt/org.seabios/etc/sercon-port,string=0)
 fi
 
