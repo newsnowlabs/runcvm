@@ -1,4 +1,6 @@
-# Build the package of distribution-independent binaries and libraries
+# syntax=docker/dockerfile:1.3-labs
+
+# BUILD DIST-INDEPENDENT BINARIES AND LIBRARIES
 
 FROM alpine:edge as binaries
 
@@ -6,23 +8,72 @@ RUN apk update && \
     apk add --no-cache file bash qemu-system-x86_64 qemu-virtiofsd qemu-ui-curses qemu-guest-agent \
         jq iproute2 netcat-openbsd e2fsprogs blkid util-linux \
         s6 dnsmasq iptables nftables \
-        ncurses
+        ncurses coreutils && \
+    apk add --no-cache patchelf --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community
 
-RUN apk add --no-cache patchelf --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community
+RUN apk add --no-cache strace
 
-# Patch all binaries and dynamic libraries for full portability.
+# Build patched SeaBIOS packages
+# to allow disabling of BIOS output by QEMU
+# (without triggering QEMU warnings)
+ARG SEABIOS_PATH=/root/aports/main/seabios
+RUN <<EOF
+apk add --no-cache alpine-sdk
+abuild-keygen -an
+git clone --depth 1 --single-branch --filter=blob:none --sparse https://gitlab.alpinelinux.org/alpine/aports.git ~/aports
+cd ~/aports/
+git sparse-checkout set main/seabios
+cd $SEABIOS_PATH
+cat <<_EOE_ >0003-qemu-fw-cfg-fix.patch
+diff --git a/src/sercon.c b/src/sercon.c
+index 3019d9b..988c2a2 100644
+--- a/src/sercon.c
++++ b/src/sercon.c
+@@ -516,7 +516,7 @@ void sercon_setup(void)
+     struct segoff_s seabios, vgabios;
+     u16 addr;
+ 
+-    addr = romfile_loadint("etc/sercon-port", 0);
++    addr = romfile_loadint("opt/org.seabios/etc/sercon-port", 0);
+     if (!addr)
+         return;
+     dprintf(1, "sercon: using ioport 0x%x\n", addr);
+diff --git a/src/fw/paravirt.c b/src/fw/paravirt.c
+index fba4e52..9a346d9 100644
+--- a/src/fw/paravirt.c
++++ b/src/fw/paravirt.c
+diff --git a/src/fw/paravirt.c b/src/fw/paravirt.c
+index fba4e52..9a346d9 100644
+--- a/src/fw/paravirt.c
++++ b/src/fw/paravirt.c
+@@ -652,9 +652,9 @@ void qemu_cfg_init(void)
+     // serial console
+     u16 nogfx = 0;
+     qemu_cfg_read_entry(&nogfx, QEMU_CFG_NOGRAPHIC, sizeof(nogfx));
+-    if (nogfx && !romfile_find("etc/sercon-port")
++    if (nogfx && !romfile_find("opt/org.seabios/etc/sercon-port")
+         && !romfile_find("vgaroms/sgabios.bin"))
+-        const_romfile_add_int("etc/sercon-port", PORT_SERIAL1);
++        const_romfile_add_int("opt/org.seabios/etc/sercon-port", PORT_SERIAL1);
+ }
+ 
+ /*
+_EOE_
+echo 'sha512sums="${sha512sums}7bab39dfbe442da27b37728179283ba97fff32db8ecfc51cd950daf4f463234efba7080a304edb0800ca9008e66c257c7d48f46c09044655dc3e0ff563d3734f  0003-qemu-fw-cfg-fix.patch"' >>APKBUILD
+echo 'source="${source}0003-qemu-fw-cfg-fix.patch"' >>APKBUILD
+abuild -rFf
+apk add --allow-untrusted ~/packages/main/x86_64/*.apk
+cp -a /usr/share/seabios/bios*.bin /usr/share/qemu/
+EOF
+
+# Patch the binaries and set up symlinks
 COPY build-utils/elf-patcher.sh /usr/local/bin/elf-patcher.sh
-
-ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/* tput"
-ENV EXTRA_LIBS="/usr/lib/xtables"
+ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/* tput stdbuf coreutils strace"
+ENV EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils"
 ENV CODE_PATH="/opt/dkvm"
-
-RUN /usr/local/bin/elf-patcher.sh
-
-# Add needed busybox symlinks
-RUN bash -c 'cd /opt/dkvm/bin; for cmd in awk base64 cat chmod cut grep head hostname init ln ls mkdir mount poweroff ps rm route sh sysctl tr touch; do ln -s busybox $cmd; done'
-
-RUN mkdir -p /opt/dkvm/usr/share && cp -a /usr/share/qemu /opt/dkvm/usr/share
+RUN /usr/local/bin/elf-patcher.sh && \
+    bash -c 'cd /opt/dkvm/bin; for cmd in awk base64 cat chmod cut grep head hostname init ln ls mkdir mount poweroff ps rm route sh sysctl tr touch; do ln -s busybox $cmd; done' && \
+    mkdir -p /opt/dkvm/usr/share && cp -a /usr/share/qemu /opt/dkvm/usr/share
 
 # BUILD CONTAINER INIT
 FROM alpine:edge as init
