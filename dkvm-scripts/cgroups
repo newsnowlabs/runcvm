@@ -1,9 +1,0 @@
-mount -t tmpfs -o uid=0,gid=0,mode=0755 cgroup /sys/fs/cgroup
-cd /sys/fs/cgroup
-for sys in $(awk '!/^#/ { if ($4 == 1) print $1 }' /proc/cgroups); do mkdir -p $sys; mount -n -t cgroup -o $sys cgroup $sys; done
-mkdir /sys/fs/cgroup/unified
-mount -t cgroup2 cgroup2 /sys/fs/cgroup/unified
-mkfs.ext4 /dev/sda
-mkdir /var/lib/docker
-mount /dev/sda /var/lib/docker
-dockerd >/tmp/log 2>&1 &
