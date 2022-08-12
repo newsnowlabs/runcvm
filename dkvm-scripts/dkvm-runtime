@@ -364,16 +364,23 @@ if [ "$COMMAND" = "create" ]; then
   # CONFIGURE MEMORY
   # Set /dev/shm to DKVM_MEM_SIZE env var, or to default
   # - it should be large enough to support VM memory
-  DKVM_MEM_SIZE=$(jq_get "$CFG" '.linux.resources.memory.limit')
-  if [ -n "$DKVM_MEM_SIZE" ]; then
-    DKVM_MEM_SIZE="$(( $DKVM_MEM_SIZE/1024/1024 ))M"
+  DKVM_MEM_LIMIT=$(jq_get "$CFG" '.linux.resources.memory.limit')
+  log "DKVM_MEM_LIMIT=$DKVM_MEM_LIMIT"
+  if [ "$DKVM_MEM_LIMIT" != "null" ]; then
+    DKVM_MEM_SIZE="$(( $DKVM_MEM_LIMIT/1024/1024 ))M"
   else
     DKVM_MEM_SIZE="$DKVM_MEM_SIZE_DEFAULT"
   fi
   log "DKVM_MEM_SIZE=$DKVM_MEM_SIZE"
   set_config_env "DKVM_MEM_SIZE" "$DKVM_MEM_SIZE"
   jq_set "$CFG" --arg size "$DKVM_MEM_SIZE" '( .mounts[] | select(.destination == "/dev/shm") ) = {"destination": "/dev/shm","type": "tmpfs","source": "shm","options": ["nosuid","noexec","nodev","mode=1777","size=" + $size]}'
-  
+
+  # In future, set the container memory limit to something reasonable to support
+  # QEMU + virtiofsd + dnsmasq. Perhaps $DKVM_MEM_LIMIT+K (or vice-versa, reduce
+  # DKVM_MEM_SIZE by K), where K is the memory requirement for the container's processes
+  # over and above QEMU.
+  # jq_set "$CFG" --arg size $(($DKVM_MEM_LIMIT + )) '.linux.resources.memory.limit |= ($size | tonumber)'
+
   # Add non-default capabilities needed by:
   # - Docker: CAP_NET_ADMIN
   # - Podman: CAP_NET_ADMIN, CAP_NET_RAW, CAP_MKNOD, CAP_AUDIT_WRITE
