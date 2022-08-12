@@ -74,6 +74,10 @@ Applications for DKVM include:
 
 DKVM's 'wrapper' runtime, `dkvm-runtime`, intercepts container create commands, and modifies the configuration of the requested container - in such a way that the created container will launch a VM that boots from the container's filesystem - before passing the request on to the standard container runtime (`runc`) to actually create and start the container.
 
+## System requirements
+
+DKVM should run on any amd64 (x86_64) Linux host that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com).
+
 ## Installation
 
 Install the DKVM software package at `/opt/dkvm` (it cannot be installed elsewhere):
@@ -110,10 +114,11 @@ As a general rule, `docker run` and `docker exec` arguments will _not_ all have 
 Here is a summary of DKVM's current main features and limitations:
 
 - `docker run`
-   - Mounts
+   - Mounts and I/O
       - [+] `--mount` (or `-v`) is supported for volume mounts, tmpfs mounts, and host file and directory bind-mounts
-      - [-] Host sockets and devices cannot be bind-mounted
-      - [-] `--device` is unsupported
+      - [+] No mountpoints required for casual disk I/O
+      - [-] Volume or disk mountpoints required for running dockerd or heavy disk I/O
+      - [-] Bind-mounting host sockets or devices, and `--device` is unsupported
    - Networking
       - [+] The default bridge network is supported
       - [+] `--network` user-defined networks are supported, including full Docker DNS resolution of container names
@@ -141,10 +146,14 @@ Here is a summary of DKVM's current main features and limitations:
    - Exit code
       - [+] Returning the entrypoint's exit code is supported
       - [-] However it currently requires application support: your application may either write its exit code to `/.dkvm/exit-code` (supported exit codes 0-255) or call `/opt/dkvm/sbin/qemu-exit <code>` (supported exit codes 0-127). Automatic handling of exit codes from the entrypoint will be provided in a later version.
+   - stdio
+      - [+] Stdin, Stdout and Stderr behaviour should closely match that from traditional `runc` containers
+      - [-] Stdout and Stderr sent immediately before VM shutdown might not always be fully flushed
 - `docker exec`
    - [+] `--user` (or `-u`), `--workdir` (or `-w`), `--env` (or `-e`), `--env-file`, `--detach` (or `-d`) are supported
    - [-] `--interactive` (or `-i`) and `--tty` (or `-t`) are not currently supported (there currently being no support for interactive terminals other than the container's launch terminal)
-- The DKVM software package at `/opt/dkvm` is mounted read-only within DKVM containers. Container applications cannot compromise DKVM software, but they can execute programs within the DKVM package. This may be fixed in a later version.
+- Security
+   - The DKVM software package at `/opt/dkvm` is mounted read-only within DKVM containers. Container applications cannot compromise DKVM, but they can execute binaries within the DKVM package. The set of binaries available to the VM may be reduced to a minimum in a later version.
 
 ## Options
 
