@@ -13,17 +13,17 @@ RUN apk update && \
 
 RUN apk add --no-cache strace
 
-# Build patched SeaBIOS packages
-# to allow disabling of BIOS output by QEMU
-# (without triggering QEMU warnings)
-ARG SEABIOS_PATH=/root/aports/main/seabios
 RUN <<EOF
 apk add --no-cache alpine-sdk
 abuild-keygen -an
 git clone --depth 1 --single-branch --filter=blob:none --sparse https://gitlab.alpinelinux.org/alpine/aports.git ~/aports
 cd ~/aports/
-git sparse-checkout set main/seabios
-cd $SEABIOS_PATH
+git sparse-checkout set main/seabios main/dnsmasq
+
+# Build patched SeaBIOS packages
+# to allow disabling of BIOS output by QEMU
+# (without triggering QEMU warnings)
+cd /root/aports/main/seabios
 cat <<_EOE_ >0003-qemu-fw-cfg-fix.patch
 diff --git a/src/sercon.c b/src/sercon.c
 index 3019d9b..988c2a2 100644
@@ -64,6 +64,35 @@ echo 'source="${source}0003-qemu-fw-cfg-fix.patch"' >>APKBUILD
 abuild -rFf
 apk add --allow-untrusted ~/packages/main/x86_64/*.apk
 cp -a /usr/share/seabios/bios*.bin /usr/share/qemu/
+
+# Build patched dnsmasq that does not require
+# /etc/passwd file to run
+cd /root/aports/main/dnsmasq
+cat <<_EOE_ >9999-Remove-passwd-requirement.patch
+--- a/src/dnsmasq.c.orig
++++ b/src/dnsmasq.c
+@@ -481,6 +481,7 @@
+     }
+ #endif
+   
++#if 0
+   if (daemon->username && !(ent_pw = getpwnam(daemon->username)))
+     baduser = daemon->username;
+   else if (daemon->groupname && !(gp = getgrnam(daemon->groupname)))
+@@ -488,6 +489,7 @@
+ 
+   if (baduser)
+     die(_("unknown user or group: %s"), baduser, EC_BADCONF);
++#endif
+ 
+   /* implement group defaults, "dip" if available, or group associated with uid */
+   if (!daemon->group_set && !gp)
+_EOE_
+
+echo 'sha512sums="${sha512sums}368572f4c9e702b55367ea49a6cabbbd786e6aaf9708b5e24e624da7eed1c317a55d683656b40b75aaed19c3eac13826eaf81b4ff062df118683149295746863  9999-Remove-passwd-requirement.patch"' >>APKBUILD
+echo 'source="${source}9999-Remove-passwd-requirement.patch"' >>APKBUILD
+abuild -rFf
+apk add --allow-untrusted ~/packages/main/x86_64/dnsmasq-2*.apk ~/packages/main/x86_64/dnsmasq-common*.apk 
 EOF
 
 # Patch the binaries and set up symlinks
