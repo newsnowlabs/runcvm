@@ -69,9 +69,11 @@ else
   OPTS+=(-nographic)
 fi
 
-if [ -n "$DKVM_QEMU_BOOT_DEBUG" ]; then
+if [ "$DKVM_KERNEL_DEBUG" = "1" ]; then
   APPEND=("console=ttyS0")
-else
+fi
+
+if [ "$DKVM_BIOS_DEBUG" != "1" ]; then
   # Disable SeaBIOS serial console.
   # This -cfw_cfg path is modified from the SeaBIOS default (to avoid an otherwise-inevitable QEMU
   # warning being emitted) and so requires patched bios.bin file(s) (see Dockerfile)
