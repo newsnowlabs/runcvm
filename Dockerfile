@@ -162,6 +162,8 @@ COPY --from=init /root/dkvm-init/dkvm-init /root/qemu-exit/qemu-exit /opt/dkvm/s
 
 RUN for d in /opt/dkvm/kernels/*; do cd $d && ln -s $(ls -d * | sort | head -n 1) latest; done
 
+RUN apk update && apk add --no-cache rsync
+
 ADD dkvm-scripts/* /opt/dkvm/scripts/
 
 ADD build-utils/entrypoint-install.sh /

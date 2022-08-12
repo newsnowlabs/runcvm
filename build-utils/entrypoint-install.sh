@@ -5,8 +5,9 @@ REPO=newsnowlabs/dkvm
 
 if mountpoint $MNT >/dev/null; then
 
-  rm -rf $MNT/*
-  cp -a /opt/dkvm/* $MNT/
+  #rm -rf $MNT/*
+  #cp -a /opt/dkvm/* $MNT/
+  rsync -aR --delete /opt/dkvm/./ $MNT/
 
   echo "DKVM install/upgrade successful!" >&2
   echo >&2
