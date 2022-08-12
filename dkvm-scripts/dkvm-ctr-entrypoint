@@ -15,6 +15,9 @@ export >/.dkvm/config
 # NOW LOAD DEFAULT ENV AND PATH
 . /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
 
+# SAVE PWD
+busybox pwd >/.dkvm/pwd
+
 # DEBUG
 if [[ "$DKVM_BREAK" =~ prenet ]]; then bash; fi
 

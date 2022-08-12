@@ -9,6 +9,9 @@ else
   touch /.dkvm/once
 fi
 
+# Change to saved PWD
+cd $(cat /.dkvm/pwd)
+
 # Load original environment
 . /.dkvm/config
 
