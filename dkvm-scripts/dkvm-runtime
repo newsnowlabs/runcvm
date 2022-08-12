@@ -26,7 +26,8 @@ DKVM_VM_MOUNTPOINT="/vm"
 DKVM_ENTRYPOINT=$DKVM/scripts/dkvm-ctr-entrypoint
 DKVM_EXEC=$DKVM/scripts/dkvm-ctr-exec
 DKVM_KERNELS=$DKVM/kernels
-DKVM_MEM_SIZE_DEFAULT="1G"
+DKVM_KERNEL_DEFAULT=debian
+DKVM_MEM_SIZE_DEFAULT="512M"
 DKVM_DEBUG=1
 
 debug() {
@@ -249,61 +250,22 @@ if [ "$COMMAND" = "create" ]; then
   # DETERMINE LAUNCH KERNEL:
   #
   # 1. If DKVM_KERNEL specified:
-  #    - <dist> or <dist>/latest - use latest DKVM kernel available for this dist
-  #    - <dist>/<version> - use specific DKVM kernel version for this dist
+  #    - <dist> or <dist>/latest - use latest DKVM kernel available for this dist *and* ARGS
+  #    - <dist>/<version> - use specific DKVM kernel version for this dist *and* ARGS
   # 2. Else, check /etc/os-release and:
-  #    a. Use builtin kernel for this dist (if present in the expected location)
+  #    a. Use builtin kernel for this dist (if present in the expected location) *and* ARGS
   #    b. Use latest DKVM kernel available for the dist:
   #      - ID=alpine, VERSION_ID=3.16.0 => alpine/latest
   #      - ID=debian, VERSION_ID=11     => debian/latest
   #      - ID=ubuntu, VERSION_ID=22.04  => ubuntu/latest
   
+  # Look for DKVM_KERNEL env var
   DKVM_KERNEL=$(get_config_env 'DKVM_KERNEL')
-  log "DKVM_KERNEL #1=$DKVM_KERNEL"
-  if [ -z "$DKVM_KERNEL" ]; then
-    
-    DKVM_KERNEL_OS_ID=$(load_env_from_file "$ROOT/etc/os-release" "ID")
-    
-    # Currently unused
-    # DKVM_KERNEL_OS_VERSION_ID=$(load_var_from_env "$ROOT/etc/os-release" "VERSION_ID")
-    
-    if [ -n "$DKVM_KERNEL_OS_ID" ]; then
-    
-      case "$DKVM_KERNEL_OS_ID" in
-          debian) DKVM_KERNEL_OS_KERNEL="/vmlinuz"
-                  DKVM_KERNEL_OS_INITRAMFS="/initrd.img"
-                  DKVM_KERNEL_ARGS="rootfstype=virtiofs root=myfs noresume nomodeset"
-                  ;;
-          ubuntu) DKVM_KERNEL_OS_KERNEL="/boot/vmlinuz"
-                  DKVM_KERNEL_OS_INITRAMFS="/boot/initrd.img"
-                  DKVM_KERNEL_ARGS="rootfstype=virtiofs root=myfs noresume nomodeset"
-                  ;;
-              ol) DKVM_KERNEL_OS_KERNEL="/boot/vmlinuz"
-                  DKVM_KERNEL_OS_INITRAMFS="/boot/initramfs"
-                  DKVM_KERNEL_ARGS="root=virtiofs:myfs noresume nomodeset"
-                  ;;
-          alpine) DKVM_KERNEL_OS_KERNEL="/boot/vmlinuz-virt"
-                  DKVM_KERNEL_OS_INITRAMFS="/boot/initramfs-virt"
-                  DKVM_KERNEL_ARGS="rootfstype=virtiofs root=myfs resume= nomodeset"
-                  ;;
+  log "DKVM_KERNEL=$DKVM_KERNEL (1)"
 
-               *) error "Unrecognised image O/S '$DKVM_KERNEL_OS_ID'; specify --env=DKVM_KERNEL=<dist> or --env=DKVM_KERNEL=<dist>/<version>"; ;;
-      esac
-    
-      if [[ -f "$ROOT/$DKVM_KERNEL_OS_KERNEL" && -f "$ROOT/$DKVM_KERNEL_OS_INITRAMFS" ]]; then
-        DKVM_KERNEL_PATH="$DKVM_KERNEL_OS_KERNEL"
-        DKVM_KERNEL_INITRAMFS_PATH="$DKVM_KERNEL_OS_INITRAMFS"
-      else
-        # If we can't find a kernel and initramfs at the expected paths, just select the latest DKVM kernel
-        # for this distribution (assuming we have one).
-        DKVM_KERNEL="$DKVM_KERNEL_OS_ID/latest"
-        log "DKVM_KERNEL #2=$DKVM_KERNEL"
-      fi
-    fi
-  fi  
- 
   if [ -n "$DKVM_KERNEL" ]; then
-  
+    # If found, validate
+
     if [[ "$DKVM_KERNEL" =~ ^[a-z]+$ ]]; then
       DKVM_KERNEL+="/latest"
     fi
@@ -312,8 +274,8 @@ if [ "$COMMAND" = "create" ]; then
       error "Kernel '$DKVM_KERNEL' invalid (contains '..')"
     fi
   
-    if ! [[ "$DKVM_KERNEL" =~ ^[a-z]+/[^/]+$ ]]; then
-      error "Kernel '$DKVM_KERNEL' invalid (should match ^[a-z]+/[^/]++$)"
+    if ! [[ "$DKVM_KERNEL" =~ ^[a-z]+(/[^/]+)?$ ]]; then
+      error "Kernel '$DKVM_KERNEL' invalid (should match ^[a-z]+(/[^/]+)?$)"
     fi
   
     if ! [ -d "$DKVM_KERNELS/$DKVM_KERNEL" ]; then
@@ -321,6 +283,57 @@ if [ "$COMMAND" = "create" ]; then
     fi
 
     DKVM_KERNEL_ID=$(dirname "$DKVM_KERNEL") # Returns e.g. alpine, debian, ubuntu
+
+  else
+    # If not found, look for value from /etc/os-release in the container image
+    
+    DKVM_KERNEL_ID=$(load_env_from_file "$ROOT/etc/os-release" "ID")
+
+    # Currently unused
+    # DKVM_KERNEL_OS_VERSION_ID=$(load_var_from_env "$ROOT/etc/os-release" "VERSION_ID")
+
+    # If still not found, assign a default
+    if [ -z "$DKVM_KERNEL_ID" ]; then
+      DKVM_KERNEL_ID="${DKVM_KERNEL_DEFAULT:-debian}"
+    fi
+
+    DKVM_KERNEL="$DKVM_KERNEL_ID/latest"
+  fi
+  
+  log "DKVM_KERNEL=$DKVM_KERNEL (2)"
+  log "DKVM_KERNEL_ID=$DKVM_KERNEL_ID"
+  log "DKVM_KERNEL_VERSION=$DKVM_KERNEL_VERSION"
+  
+  # Now look up the default kernel and initramfs paths and args for this kernel
+  case "$DKVM_KERNEL_ID" in
+      debian) DKVM_KERNEL_OS_KERNEL_PATH="/vmlinuz"
+              DKVM_KERNEL_OS_INITRAMFS_PATH="/initrd.img"
+              DKVM_KERNEL_ARGS="rootfstype=virtiofs root=myfs noresume nomodeset"
+              ;;
+      ubuntu) DKVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
+              DKVM_KERNEL_OS_INITRAMFS_PATH="/boot/initrd.img"
+              DKVM_KERNEL_ARGS="rootfstype=virtiofs root=myfs noresume nomodeset"
+              ;;
+          ol) DKVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
+              DKVM_KERNEL_OS_INITRAMFS_PATH="/boot/initramfs"
+              DKVM_KERNEL_ARGS="root=virtiofs:myfs noresume nomodeset"
+              ;;
+      alpine) DKVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz-virt"
+              DKVM_KERNEL_OS_INITRAMFS_PATH="/boot/initramfs-virt"
+              DKVM_KERNEL_ARGS="rootfstype=virtiofs root=myfs resume= nomodeset"
+              ;;
+
+           *) error "Unrecognised image O/S '$DKVM_KERNEL'; specify --env=DKVM_KERNEL=<dist> or --env=DKVM_KERNEL=<dist>/<version>"; ;;
+  esac
+  
+  # Look for a kernel and initramfs at the expected paths in the container image.
+  if [[ -f "$ROOT/$DKVM_KERNEL_OS_KERNEL_PATH" && -f "$ROOT/$DKVM_KERNEL_OS_INITRAMFS_PATH" ]]; then
+    DKVM_KERNEL_PATH="$DKVM_KERNEL_OS_KERNEL_PATH"
+    DKVM_KERNEL_INITRAMFS_PATH="$DKVM_KERNEL_OS_INITRAMFS_PATH"
+  else
+    # If we didn't find a kernel and initramfs at the expected paths in the container image,
+    # select the latest DKVM kernel version and arrange to mount it.
+
     DKVM_KERNEL_VERSION=$(basename $(readlink -f "$DKVM_KERNELS/$DKVM_KERNEL")) # Returns e.g. 5.15.53-0-virt
 
     DKVM_KERNEL_MOUNT_LIB_MODULES=$(get_config_env 'DKVM_KERNEL_MOUNT_LIB_MODULES')
@@ -334,20 +347,20 @@ if [ "$COMMAND" = "create" ]; then
     
     DKVM_KERNEL_PATH="$DKVM_KERNELS/$DKVM_KERNEL_ID/$DKVM_KERNEL_VERSION/vmlinuz"
     DKVM_KERNEL_INITRAMFS_PATH="$DKVM_KERNELS/$DKVM_KERNEL_ID/$DKVM_KERNEL_VERSION/initrd"
-  
+
     jq_set "$CFG" --arg modules_dst "$DKVM_VM_MOUNTPOINT$DKVM_KERNEL_MODULES_DST" --arg modules_src "$DKVM_KERNEL_MODULES_SRC" '.mounts += [{"destination":$modules_dst,"type":"bind","source":$modules_src,"options":["bind","private","ro"]}]'
   fi
 
   log "DKVM_KERNEL=$DKVM_KERNEL"
   log "DKVM_KERNEL_ID=$DKVM_KERNEL_ID"
   log "DKVM_KERNEL_VERSION=$DKVM_KERNEL_VERSION"
-  log "DKVM_KERNEL_OS_ID=$DKVM_KERNEL_OS_ID"
-  log "DKVM_KERNEL_OS_VERSION_ID=$DKVM_KERNEL_OS_VERSION_ID"
-  log "DKVM_KERNEL_OS_KERNEL=$DKVM_KERNEL_OS_KERNEL"
-  log "DKVM_KERNEL_OS_INITRAMFS=$DKVM_KERNEL_OS_INITRAMFS"
+  log "DKVM_KERNEL_OS_KERNEL_PATH=$DKVM_KERNEL_OS_KERNEL_PATH"
+  log "DKVM_KERNEL_OS_INITRAMFS_PATH=$DKVM_KERNEL_OS_INITRAMFS_PATH"
   log "DKVM_KERNEL_PATH=$DKVM_KERNEL_PATH"
   log "DKVM_KERNEL_INITRAMFS_PATH=$DKVM_KERNEL_INITRAMFS_PATH"
   log "DKVM_KERNEL_ARGS=$DKVM_KERNEL_ARGS"
+  log "DKVM_KERNEL_MODULES_SRC=$DKVM_KERNEL_MODULES_SRC"
+  log "DKVM_KERNEL_MODULES_DST=$DKVM_KERNEL_MODULES_DST"
   
   set_config_env "DKVM_KERNEL_PATH" "$DKVM_KERNEL_PATH"
   set_config_env "DKVM_KERNEL_INITRAMFS_PATH" "$DKVM_KERNEL_INITRAMFS_PATH"
