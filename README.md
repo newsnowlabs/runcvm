@@ -42,7 +42,9 @@ DKVM was born out of difficulties experienced getting the Docker and Podman CLIs
 - [Features and Limitations](#features-and-limitations)
 - [Upgrading](#upgrading)
 - [DKVM deep dive](#dkvm-deep-dive)
+- [Building](#building)
 - [Contributing](#contributing)
+- [Support](#support)
 - [Uninstallation](#uninstallation)
 - [Legals](#Legals)
 
@@ -61,6 +63,7 @@ DKVM is free and open-source, licensed under the Apache Licence, Version 2.0. Se
 - Efficient container startup, by using virtiofs to serve the container's filesystem to the VM
 - Improved security compared to the standard container runtime, and as much security as possible without compromising the simplicity of the implementation
 - Command-line and image-embedded options for customising the a container's VM specifications, devices, kernel
+- No external dependencies, except Docker/Podman
 
 Applications for DKVM include:
 
@@ -76,7 +79,9 @@ DKVM's 'wrapper' runtime, `dkvm-runtime`, receives container create commands tri
 
 ## System requirements
 
-DKVM should run on any amd64 (x86_64) Linux host that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). If your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run DKVM.
+DKVM should run on any amd64 (x86_64) Linux hardware (or VM) that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run DKVM.
+
+DKVM has no external dependencies (except Docker) and is packaged with its own QEMU binary.
 
 ## Installation
 
@@ -332,19 +337,29 @@ The `/opt/dkvm/bin/init` process:
 - Supervises `dkvm-vm-qemu-ga`, restarting it if it fails.
 - Launches `dkvm-vm-start`, which restores the saved environment variables, and execs the container's pre-existing entrypoint _within the VM_. When it exits, it is respawned to power down the VM.
 
+## Building
+
+Building DKVM requires Docker. To build DKVM, first clone the repo, then run the build script, as follows:
+
+```console
+git clone https://github.com/newsnowlabs/dkvm.git
+cd dkvm
+./build/build.sh
+```
+
+The build script creates a Docker image named `newsnowlabs/dkvm:latest`.
+
+Follow the main [installation instructions](#installation) to install your built DKVM from the Docker image.
+
 ## Contributing
+
+If you would like to contribute a feature or bugfix, please raise an issue to discuss, or submit a pull request.
+
+## Support
 
 If you are experiencing an issue, please [raise an issue](https://github.com/newsnowlabs/dkvm/issues) or reach out to us on the [NewsNow Labs Slack Workspace](https://join.slack.com/t/newsnowlabs/shared_invite/zt-wp54l05w-0DTxuc_n8uISJRtks3Xw3A).
 
-If you would like to contribute a bugfix, patch or feature, please raise an issue or submit a pull request.
-
-## Contact
-
-Github: [Raise an issue](https://github.com/newsnowlabs/dkvm/issues/new)
-
-Slack: [NewsNow Labs Slack Workspace](https://join.slack.com/t/newsnowlabs/shared_invite/zt-wp54l05w-0DTxuc_n8uISJRtks3Xw3A)
-
-We are typically available to respond to queries Monday-Friday, 9am-5pm UK time.
+We are typically available to respond to queries Monday-Friday, 9am-5pm UK time, and will be happy to help.
 
 ## Uninstallation
 
