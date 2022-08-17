@@ -52,8 +52,8 @@ DKVM is free and open-source, licensed under the Apache Licence, Version 2.0. Se
 
 ## Project aims
 
-- Run any standard container workload in a VM using `docker run` with no command line customisation, and no need to create customised container images. Just add `--runtime=dkvm`.
-- Maintain a similar experience within a DKVM VM as within a container: process table, network interfaces, exit code handling should broadly "look the same"
+- Run any standard container workload in a VM using `docker run` with no need to customise images or the command line (except adding `--runtime=dkvm`)
+- Maintain a similar experience within a DKVM VM as within a container: process table, network interfaces, stdio, exit code handling should broadly "look the same"
 - Container start/stop/kill semantics respected, where possible providing clean VM shutdown on stop
 - VM console accessible as one would expect using `docker run -it`, `docker start -ai` and `docker attach`
 - Support for `docker exec` (but no `-i`, `-t` for now - see [Features and Limitations](#features-and-limitations))
@@ -72,11 +72,11 @@ Applications for DKVM include:
 
 ## How DKVM works
 
-DKVM's 'wrapper' runtime, `dkvm-runtime`, intercepts container create commands, and modifies the configuration of the requested container - in such a way that the created container will launch a VM that boots from the container's filesystem - before passing the request on to the standard container runtime (`runc`) to actually create and start the container.
+DKVM's 'wrapper' runtime, `dkvm-runtime`, receives container create commands triggered by `docker run`, modifies the configuration of the requested container in such a way that the created container will launch a VM that boots from the container's filesystem, and then passes the request on to the standard container runtime (`runc`) to actually create and start the container.
 
 ## System requirements
 
-DKVM should run on any amd64 (x86_64) Linux host that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com).
+DKVM should run on any amd64 (x86_64) Linux host that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). If your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run DKVM.
 
 ## Installation
 
@@ -109,15 +109,11 @@ docker run --runtime=dkvm --rm -it hello-world
 
 ## Features and limitations
 
-As a general rule, `docker run` and `docker exec` arguments will _not_ all have the expected (or even a supported) effect on the VM launched by DKVM.
-
-Here is a summary of DKVM's current main features and limitations:
+Here is a summary of DKVM's current main features and limitations. Please note, `docker run` and `docker exec` options not listed below are unsupported and their effect, if used, is unspecified.
 
 - `docker run`
-   - Mounts and I/O
+   - Mounts
       - [+] `--mount` (or `-v`) is supported for volume mounts, tmpfs mounts, and host file and directory bind-mounts
-      - [+] No mountpoints required for casual disk I/O
-      - [-] Volume or disk mountpoints required for running dockerd or heavy disk I/O
       - [-] Bind-mounting host sockets or devices, and `--device` is unsupported
    - Networking
       - [+] The default bridge network is supported
@@ -134,49 +130,126 @@ Here is a summary of DKVM's current main features and limitations:
       - [+] `--env` (or `-e`), `--env-file` is supported
       - [+] `--entrypoint` is supported
       - [+] `--init` - is supported (but running DKVM's own init process rather than Docker's default, `tini`)
-   - Input/Output/Terminals
+   - stdio/Terminals
       - [+] `--detach` (or `-d`) is supported
       - [+] `--interactive` (or `-i`) is supported
       - [+] `--tty` (or `-t`) is supported
       - [+] `--attach` (or `-a`) is supported
+      - [+] Stdin, Stdout and Stderr behaviour should closely match that from traditional `runc` containers
+      - [-] Stdout and Stderr sent immediately before VM shutdown might not always be fully flushed
    - Resource allocation and limits
-      - [+] `--cpus` is supported
-      - [+] `--memory` (or `-m`) is supported
-      - [-] Other container resource limit options such as (`--cpu-*`), block IO (`--blkio-*`), kernel memory (`--kernel-memory`) are unsupported
+      - [+] `--cpus` is supported to specify number of VM CPUs
+      - [+] `--memory` (or `-m`) is supported to specify VM memory
+      - [-] Other container resource limit options such as (`--cpu-*`), block IO (`--blkio-*`), kernel memory (`--kernel-memory`) are unsupported or untested
    - Exit code
       - [+] Returning the entrypoint's exit code is supported
       - [-] However it currently requires application support: your application may either write its exit code to `/.dkvm/exit-code` (supported exit codes 0-255) or call `/opt/dkvm/sbin/qemu-exit <code>` (supported exit codes 0-127). Automatic handling of exit codes from the entrypoint will be provided in a later version.
-   - stdio
-      - [+] Stdin, Stdout and Stderr behaviour should closely match that from traditional `runc` containers
-      - [-] Stdout and Stderr sent immediately before VM shutdown might not always be fully flushed
+   - Disk performance
+      - [+] No mountpoints required for basic operation, but volumes or disk mountpoints may be needed for running dockerd or for performance reasons
 - `docker exec`
    - [+] `--user` (or `-u`), `--workdir` (or `-w`), `--env` (or `-e`), `--env-file`, `--detach` (or `-d`) are supported
    - [-] `--interactive` (or `-i`) and `--tty` (or `-t`) are not currently supported (there currently being no support for interactive terminals other than the container's launch terminal)
 - Security
    - The DKVM software package at `/opt/dkvm` is mounted read-only within DKVM containers. Container applications cannot compromise DKVM, but they can execute binaries within the DKVM package. The set of binaries available to the VM may be reduced to a minimum in a later version.
+- Kernels
+   - [+] Use any kernel, either one pre-packaged with DKVM or roll your own
+   - [+] DKVM will try to select an appropriate kernel to use based on examination of the image being launched.
 
-## Options
+## Kernel selection
 
-Options are specified using `--env=<DKVM_KEY>=<VALUE>` on the `docker run`
-command line.
+When creating a container, DKVM will examine the image being launched to try to determine a suitable kernel to boot the VM with. Its process is as follows:
 
-### Kernel
+1. If `--env=DKVM_KERNEL=<dist>[/<version>]` specified, use the indicated kernel
+2. Otherwise, identify distro from `/etc/os-release`
+   1. If one is found in the appropriate distro-specific location in the image, select an in-image kernel. The locations are:
+      - Debian: `/vmlinuz` and `/initrd.img`
+      - Ubuntu: `/boot/vmlinuz` and `/boot/initrd.img`
+      - Alpine: `/boot/vmlinuz-virt` `/boot/initramfs-virt`
+   2. Otherwise, if found in the DKVM package, select the latest kernel compatible with the distro
+   3. Finally, use the Debian kernel from the DKVM package
 
-DKVM will examine the image to try and determine a suitable kernel to boot the VM with. The process is as follows:
+## Environment option reference
 
-1. Identify distro from `/etc/os-release`
-2. Select an in-image kernel, if found in the following distro-specific location:
-   - Debian: `/vmlinuz` and `/initrd.img`
-   - Ubuntu: `/boot/vmlinuz` and `/boot/initrd.img`
-   - Alpine: `/boot/vmlinuz-virt` `/boot/initramfs-virt`
-3. Select the latest DKVM kernel for the distro, if available
-4. Select the kernel indicated by setting the `DKVM_KERNEL` environment variable for the container,
-   which may be set to `<distro>` (indicating the latest DKVM kernel for that distro)
-   or to `<distro>/<version>` (indicating a specific version).
-   - Look in `/opt/dkvm/kernels` to see the bundled DKVM kernels
-   - Example values for `DKVM_KERNEL` are `alpine/latest`, `alpine/5.15.55-0-virt`, `debian/latest`
+DKVM options are specified either via standard `docker run` options or via  `--env=<DKVM_KEY>=<VALUE>` options on the `docker run`
+command line. The following env options are user-configurable:
 
-- `DKVM_KERNEL_MOUNT_LIB_MODULES=1` - mount DKVM kernel modules over `/lib/modules` instead of (the default) `/lib/modules/<kernel-version>`
+### `--env=DKVM_KERNEL=<dist>[/<version>]`
+
+Specify with which DKVM kernel (from `/opt/dkvm/kernels`) to boot the VM. Values must be of the form `<dist>/<version>`, where `<dist>` is a directory under `/opt/dkvm/kernels` and `<version>` is a subdirectory (or symlink to a subdirectory) under that. If `<version>` is omitted, `latest` will be assumed. Here is an example command that will list available values of `<dist>/<version>` on your installation.
+
+```console
+$ find /opt/dkvm/kernels/ -maxdepth 2 | sed 's!^/opt/dkvm/kernels/!!; /^$/d'
+debian
+debian/latest
+debian/5.10.0-16-amd64
+alpine
+alpine/latest
+alpine/5.15.59-0-virt
+ubuntu
+ubuntu/latest
+ubuntu/5.15.0-43-generic
+ol
+ol/5.14.0-70.22.1.0.1.el9_0.x86_64
+ol/latest
+```
+
+Example:
+
+```console
+docker run --rm --runtime=dkvm --env=DKVM_KERNEL=ol hello-world
+```
+
+### `--env=DKVM_KERNEL_DEBUG=1`
+
+Enable kernel logging (sets kernel `console=ttyS0`).
+
+### `--env=DKVM_BREAK=<values>`
+
+Enable breakpoints (falling to bash shell) during the DKVM container/VM boot process.
+
+`<values>` must be a comma-separated list of: `prenet`, `postnet`, `preqemu`.
+
+### `--env=DKVM_DISKS=<disk1>[;<disk2>;...]`
+
+Automatically create, format and mount backing files as virtual disks on the VM.
+
+Each `<diskN>` should be a comma-separated list of values of the form: `<src>,<dst>,<filesystem>,<size>`.
+
+`<src>` is the path within the container where the virtual disk backing file should be located. This may be in the container's overlayfs or within a volume (mounted using `--mount=type=volume`).
+
+`<dst>` is the path within the VM where the virtual disk should be mounted.
+
+`<filesystem>` is the filesystem with which the backing disk should be formatted (using `mke2fs`) when first created.
+
+`<size>` is the size of the backing file (in `truncate` format).
+
+When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs`. When DKVM creates a container/VM, fstab entries will be drafted. After the VM boots, the fstab entries will be mounted.
+
+**Example:**
+
+```console
+docker run --runtime=dkvm --env=DKVM_DISKS=/disk1,/home,ext4,5G -it <docker-image>
+```
+
+In this example, DKVM will check for existence of a file at `/volume/disk1`, and if it doesn't find it will create a 5G disk with an ext4 filesystem. It will add the disk to `/etc/fstab` and mount it.
+
+### `--env=DKVM_QEMU_DISPLAY=<value>`
+
+Select a specific QEMU display. Currently only `curses` is supported, but others may trivially be added by customising the build.
+
+### `--env=DKVM_BIOS_DEBUG=1`
+
+By default BIOS console output is hidden. Enable it with this option.
+
+### `--env=DKVM_SYS_ADMIN=1`
+
+By default, `virtiofsd` is not launched with `-o modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.
+
+### `--env=DKVM_KERNEL_MOUNT_LIB_MODULES=1`
+
+If a DKVM kernel (as opposed to an in-image kernel) is chosen to launch a VM, by default that kernel's modules will be mounted at `/lib/modules/<version>` in the VM. If this variables is set, that kernel's modules will instead be mounted over `/lib/modules`.
+
+## Advanced usage
 
 ### Running Docker in a VM
 
