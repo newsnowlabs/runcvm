@@ -22,13 +22,15 @@ Launch a vanilla ubuntu VM, with interactive terminal:
 docker run --runtime=dkvm --name ubuntu1 --rm -it ubuntu
 ```
 
-DKVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualisation technology as a second layer of defence. In this sense, DKVM has similar aims to [Kata Containers](https://katacontainers.io/).
+DKVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualisation technology. In this sense, DKVM has similar aims to [Kata Containers](https://katacontainers.io/).
 
 However, DKVM:
 
-- Uses a lightweight 'wrapper' runtime technology that makes its code footprint and external dependencies extremely small, its internals extremely simple and easy to tailor for specific purposes. Written almost entirely in shell script. Builds quickly with `docker build`
-- Is compatible with `docker run` (with experimental support for `podman run` today)
-- Has some [limitations](#features-and-limitations)
+- Uses a lightweight 'wrapper' runtime technology that makes its code footprint and external dependencies extremely small, its internals extremely simple and easy to tailor for specific purposes.
+- Is written almost entirely in shell script, for ease of comprehension and modification.
+- Is compatible with `docker run` (with experimental support for `podman run` today).
+
+(See the full list of [features and limitations](#features-and-limitations).)
 
 DKVM was born out of difficulties experienced getting the Docker and Podman CLIs to launch Kata Containers, and a belief that launching containerised workloads VMs needn't be so complicated.
 
@@ -38,8 +40,12 @@ DKVM was born out of difficulties experienced getting the Docker and Podman CLIs
 - [Licence](#licence)
 - [Project aims](#project-aims)
 - [How DKVM works](#how-dkvm-works)
+- [System requirements](#system-requirements)
 - [Installation](#installation)
 - [Features and Limitations](#features-and-limitations)
+- [Kernel selection](#kernel-selection)
+- [Option reference](#option-reference)
+- [Advanced usage](#advanced-usage)
 - [Upgrading](#upgrading)
 - [DKVM deep dive](#dkvm-deep-dive)
 - [Building](#building)
@@ -81,7 +87,7 @@ DKVM's 'wrapper' runtime, `dkvm-runtime`, receives container create commands tri
 
 DKVM should run on any amd64 (x86_64) Linux hardware (or VM) that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run DKVM.
 
-DKVM has no external dependencies (except Docker) and is packaged with its own QEMU binary.
+DKVM has no external dependencies (except Docker) and is packaged with its own QEMU binary along with all other binaries and libraries it needs to run.
 
 ## Installation
 
@@ -173,7 +179,7 @@ When creating a container, DKVM will examine the image being launched to try to 
    2. Otherwise, if found in the DKVM package, select the latest kernel compatible with the distro
    3. Finally, use the Debian kernel from the DKVM package
 
-## Environment option reference
+## Option reference
 
 DKVM options are specified either via standard `docker run` options or via  `--env=<DKVM_KEY>=<VALUE>` options on the `docker run`
 command line. The following env options are user-configurable:
