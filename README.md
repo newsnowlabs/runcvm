@@ -239,6 +239,10 @@ docker run --rm --runtime=dkvm --env=DKVM_KERNEL=ol hello-world
 
 Enable kernel logging (sets kernel `console=ttyS0`).
 
+### `--env=DKVM_KERNEL_APPEND=1`
+
+Any custom kernel command line options e.g. `apparmor=0` or `systemd.unified_cgroup_hierarchy=0`.
+
 ### `--env=DKVM_BREAK=<values>`
 
 Enable breakpoints (falling to bash shell) during the DKVM container/VM boot process.

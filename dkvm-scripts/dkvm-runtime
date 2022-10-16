@@ -316,19 +316,19 @@ if [ "$COMMAND" = "create" ]; then
   case "$DKVM_KERNEL_ID" in
       debian) DKVM_KERNEL_OS_KERNEL_PATH="/vmlinuz"
               DKVM_KERNEL_OS_INITRAMFS_PATH="/initrd.img"
-              DKVM_KERNEL_ARGS="rootfstype=virtiofs root=myfs noresume nomodeset"
+              DKVM_KERNEL_ROOT="rootfstype=virtiofs root=myfs noresume nomodeset"
               ;;
       ubuntu) DKVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
               DKVM_KERNEL_OS_INITRAMFS_PATH="/boot/initrd.img"
-              DKVM_KERNEL_ARGS="rootfstype=virtiofs root=myfs noresume nomodeset"
+              DKVM_KERNEL_ROOT="rootfstype=virtiofs root=myfs noresume nomodeset"
               ;;
           ol) DKVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
               DKVM_KERNEL_OS_INITRAMFS_PATH="/boot/initramfs"
-              DKVM_KERNEL_ARGS="root=virtiofs:myfs noresume nomodeset"
+              DKVM_KERNEL_ROOT="root=virtiofs:myfs noresume nomodeset"
               ;;
       alpine) DKVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz-virt"
               DKVM_KERNEL_OS_INITRAMFS_PATH="/boot/initramfs-virt"
-              DKVM_KERNEL_ARGS="rootfstype=virtiofs root=myfs resume= nomodeset"
+              DKVM_KERNEL_ROOT="rootfstype=virtiofs root=myfs resume= nomodeset"
               ;;
 
            *) error "Unrecognised image O/S '$DKVM_KERNEL'; specify --env=DKVM_KERNEL=<dist> or --env=DKVM_KERNEL=<dist>/<version>"; ;;
@@ -366,13 +366,13 @@ if [ "$COMMAND" = "create" ]; then
   log "DKVM_KERNEL_OS_INITRAMFS_PATH=$DKVM_KERNEL_OS_INITRAMFS_PATH"
   log "DKVM_KERNEL_PATH=$DKVM_KERNEL_PATH"
   log "DKVM_KERNEL_INITRAMFS_PATH=$DKVM_KERNEL_INITRAMFS_PATH"
-  log "DKVM_KERNEL_ARGS=$DKVM_KERNEL_ARGS"
+  log "DKVM_KERNEL_ROOT=$DKVM_KERNEL_ROOT"
   log "DKVM_KERNEL_MODULES_SRC=$DKVM_KERNEL_MODULES_SRC"
   log "DKVM_KERNEL_MODULES_DST=$DKVM_KERNEL_MODULES_DST"
   
   set_config_env "DKVM_KERNEL_PATH" "$DKVM_KERNEL_PATH"
   set_config_env "DKVM_KERNEL_INITRAMFS_PATH" "$DKVM_KERNEL_INITRAMFS_PATH"
-  set_config_env "DKVM_KERNEL_ARGS" "$DKVM_KERNEL_ARGS"
+  set_config_env "DKVM_KERNEL_ROOT" "$DKVM_KERNEL_ROOT"
 
   # Configure devices
   jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":232,"access":"rwm"},{"allow":true,"type":"c","major":10,"minor":200,"access":"rwm"}]'
