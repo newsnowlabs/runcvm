@@ -184,13 +184,7 @@ RUN mkdir -p /opt/dkvm/kernels/ol/$(basename $(ls -d /lib/modules/*)) && \
 FROM alpine
 
 COPY --from=binaries /opt/dkvm /opt/dkvm
-COPY --from=alpine-kernel /opt/dkvm/kernels/alpine /opt/dkvm/kernels/alpine
-COPY --from=debian-kernel /opt/dkvm/kernels/debian /opt/dkvm/kernels/debian
-COPY --from=ubuntu-kernel /opt/dkvm/kernels/ubuntu /opt/dkvm/kernels/ubuntu
-COPY --from=oracle-kernel /opt/dkvm/kernels/ol     /opt/dkvm/kernels/ol
 COPY --from=init /root/dkvm-init/dkvm-init /root/qemu-exit/qemu-exit /opt/dkvm/sbin/
-
-RUN for d in /opt/dkvm/kernels/*; do cd $d && ln -s $(ls -d * | sort | head -n 1) latest; done
 
 RUN apk update && apk add --no-cache rsync
 
@@ -198,3 +192,11 @@ ADD dkvm-scripts/* /opt/dkvm/scripts/
 
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]
+
+# Install needed kernels.
+# Comment out any kernels that are unneeded.
+COPY --from=alpine-kernel /opt/dkvm/kernels/alpine /opt/dkvm/kernels/alpine
+COPY --from=debian-kernel /opt/dkvm/kernels/debian /opt/dkvm/kernels/debian
+COPY --from=ubuntu-kernel /opt/dkvm/kernels/ubuntu /opt/dkvm/kernels/ubuntu
+COPY --from=oracle-kernel /opt/dkvm/kernels/ol     /opt/dkvm/kernels/ol
+RUN for d in /opt/dkvm/kernels/*; do cd $d && ln -s $(ls -d * | sort | head -n 1) latest; done
