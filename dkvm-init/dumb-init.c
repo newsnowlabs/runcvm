@@ -376,8 +376,8 @@ int main(int argc, char *argv[]) {
         /* child */
         sigprocmask(SIG_UNBLOCK, &all_signals, NULL);
         if (use_setsid) {
-            # Don't throw error if setsid() fails in no_fork mode;
-            # we don't want this to prevent startup.
+            // Don't throw error if setsid() fails in no_fork mode;
+            // we don't want this to prevent startup.
             if (setsid() == -1 && !no_fork) {
                 PRINTERR(
                     "Unable to setsid (errno=%d %s). Exiting.\n",
