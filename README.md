@@ -35,6 +35,9 @@ DKVM makes some trade-offs in return for this simplicity. See the full list of [
 
 DKVM was born out of difficulties experienced getting the Docker and Podman CLIs to launch Kata Containers, and a belief that launching containerised workloads in VMs needn't be so complicated.
 
+> **Support launching images:** If you encounter any Docker image that launches in a standard container runtime that does not launch in DKVM,
+or launches but with unexpected behaviour, please [raise an issue](https://github.com/newsnowlabs/dkvm/issues) titled _Launch failure for image `<image>`_ or _Unexpected behaviour for image `<image>`_.
+
 ## Contents
 
 - [Introduction](#introduction)
@@ -249,7 +252,7 @@ Each `<diskN>` should be a comma-separated list of values of the form: `<src>,<d
 - `<filesystem>` is the filesystem with which the backing disk should be formatted (using `mke2fs`) when first created.
 - `<size>` is the size of the backing file (in `truncate` format).
 
-When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs`. When DKVM creates a container/VM, fstab entries will be drafted. After the VM boots, the fstab entries will be mounted.
+When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs`. When DKVM creates a container/VM, fstab entries will be drafted. After the VM boots, the fstab entries will be mounted. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on.
 
 #### Example #1
 
@@ -267,7 +270,8 @@ docker run -it --runtime=dkvm --mount=type=volume,src=dkvm-disks,dst=/disks --en
 
 This example behaves similarly, except that the `dkvm-disks` persistent Docker volume is first mounted at `/disks` within the container's filesystem, and therefore the backing file at `/disks/disk1` is stored in the persistent volume (and bypassing overlay2).
 
-> N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints, these is *NOT* mounted into the VM but only into the container,
+> N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints,
+these are *NOT* mounted into the VM but only into the container,
 and are therefore suitable for use for mounting backing files for use as VM disks.
 
 ### `--env=DKVM_QEMU_DISPLAY=<value>`
@@ -292,7 +296,7 @@ If a DKVM kernel (as opposed to an in-image kernel) is chosen to launch a VM, by
 
 If running Docker within a VM, it is recommended that you make `/var/lib/docker` a dedicated mountpoint. Using DKVM, this can be either a Docker volume, or an ext4, btrfs, or xfs disk.
 
-#### Docker volume mountpoint
+#### Docker volume mounted at /var/lib/docker
 
 To launch a VM with a volume mount, run:
 
@@ -300,7 +304,7 @@ To launch a VM with a volume mount, run:
 docker run --runtime=dkvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker <docker-image>
 ```
 
-### ext4/btrfs/xfs disk mountpoint
+#### ext4/btrfs/xfs disk backing file mounted at /var/lib/docker
 
 To launch a VM with a disk mount, backed by a 5G file in the `mydocker2` volume, run:
 
@@ -310,11 +314,15 @@ docker run -it --runtime=dkvm --mount=type=volume,src=mydocker2,dst=/volume --en
 
 DKVM will check for existence of /volume/disk1, and if it doesn't find it will create a 5G disk with an ext4 filesystem. It will add the disk to `/etc/fstab`.
 
-### Running overlayfs in the VM without a volume mount - NOT RECOMMENDED
+For full documentation of `DKVM_DISKS`, see above.
 
-`virtiofsd` must be launched with `-o modcaps=+sys_admin` to allow the VM to mount an overlayfs2 filesystem that is backed by the underlying overlayfs2 filesystem. Doing this is _not recommended_, but can be enabled by launching with this option, which also adds `CAP_SYS_ADMIN` capabilities to the container:
+#### No mountpoint at /var/lib/docker (NOT RECOMMENDED)
 
-- `--env=DKVM_SYS_ADMIN=1`
+Without a volume or disk mounted at `/var/lib/docker`, Docker will attempt to run overlayfs2 in the VM _backed the overlayfs2 filesystem in the container_. This is not normally supported, for security and performance reasons, and `dockerd` will normally complain and exit.
+
+Doing this is _not recommended_, but support for this can be enabled (at the cost of security) by launching with `--env=DKVM_SYS_ADMIN=1`.
+
+> N.B. This option adds `CAP_SYS_ADMIN` capabilities to the container and then launches `virtiofsd` with `-o modcaps=+sys_admin`. 
 
 ## Upgrading
 
@@ -389,7 +397,10 @@ If you would like to contribute a feature or bugfix, please raise an issue to di
 
 ## Support
 
-If you are experiencing an issue, please [raise an issue](https://github.com/newsnowlabs/dkvm/issues) or reach out to us on the [NewsNow Labs Slack Workspace](https://join.slack.com/t/newsnowlabs/shared_invite/zt-wp54l05w-0DTxuc_n8uISJRtks3Xw3A).
+If you encounter a Docker image that launches in a standard container runtime that does not launch in DKVM,
+or launches but with unexpected behaviour, please [raise an issue](https://github.com/newsnowlabs/dkvm/issues) titled _Launch failure for image `<image>`_ or _Unexpected behaviour for image `<image>`_ and include log excerpts and an explanation of the failure, or expected and unexpected behaviour.
+
+For all other issues, please still [raise an issue](https://github.com/newsnowlabs/dkvm/issues) or reach out to us on the [NewsNow Labs Slack Workspace](https://join.slack.com/t/newsnowlabs/shared_invite/zt-wp54l05w-0DTxuc_n8uISJRtks3Xw3A).
 
 We are typically available to respond to queries Monday-Friday, 9am-5pm UK time, and will be happy to help.
 
