@@ -55,6 +55,11 @@ load_env_from_file() {
   local file="$1"
   local var="$2"
 
+  # Return gracefully if no $file exists
+  if ! [ -f "$file" ]; then
+    return 0
+  fi
+
   while read LINE
   do
     local name="${LINE%%=*}"
