@@ -123,6 +123,7 @@ RUN cd /root/qemu-exit && cc -o /root/qemu-exit/qemu-exit -std=gnu99 -static -s 
 FROM alpine:edge as alpine-kernel
 
 RUN apk add --no-cache linux-virt
+ADD initramfs-init /usr/share/mkinitfs/initramfs-init
 RUN echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules && \
     sed -ri 's/\b(ata|nvme|raid|scsi|usb|cdrom|kms|mmc)\b//g; s/[ ]+/ /g' /etc/mkinitfs/mkinitfs.conf && \
     mkinitfs $(basename $(ls -d /lib/modules/*))
