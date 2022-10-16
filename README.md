@@ -26,9 +26,9 @@ DKVM aims to be a secure container runtime with lightweight virtual machines tha
 
 However, DKVM:
 
-- Uses a lightweight 'wrapper-runtime' technology that makes its code footprint and external dependencies extremely small, its internals extremely simple and easy to tailor for specific purposes.
-- Is written almost entirely in shell script, for ease of comprehension and modification.
-- Is compatible with `docker run` (with experimental support for `podman run` today).
+- Uses a lightweight 'wrapper-runtime' technology that piggybacks the standard container runtime `runc`, making its code footprint and external dependencies extremely small, and its internals extremely simple and easy to tailor for specific purposes.
+- Is written almost entirely in shell script, for simplicity, portability and ease of development.
+- Is compatible with `docker run` (with experimental support for `podman run`).
 - Has no external dependencies (except for Docker/Podman).
 
 DKVM makes some trade-offs in return for this simplicity. See the full list of [features and limitations](#features-and-limitations).
@@ -94,7 +94,7 @@ DKVM is free and open-source, licensed under the Apache Licence, Version 2.0. Se
 The main applications for DKVM are:
 
 1. Running and testing applications that:
-   - don't work with (or require enhanced privileges to work with) standard container runtimes (e.g. `systemd`, `dockerd`, Docker swarm services, Kubernetes)
+   - don't work with (or require enhanced privileges to work with) standard container runtimes (e.g. `systemd`, `dockerd`, Docker swarm services, [Kubernetes](https://kubernetes.io/))
    - require a running kernel, or a kernel version or modules not available on the host
    - require specific hardware that can be emulated e.g. disks, graphics displays
 2. Running existing container workloads with increased security
@@ -103,7 +103,9 @@ The main applications for DKVM are:
 
 ## How DKVM works
 
-DKVM's 'wrapper' runtime, `dkvm-runtime`, receives container create commands triggered by `docker run`, modifies the configuration of the requested container in such a way that the created container will launch a VM that boots from the container's filesystem, and then passes the request on to the standard container runtime (`runc`) to actually create and start the container.
+DKVM's 'wrapper' runtime, `dkvm-runtime`, receives container create commands triggered by `docker` `run`/`create` commands, modifies the configuration of the requested container in such a way that the created container will launch a VM that boots from the container's filesystem, and then passes the request on to the standard container runtime (`runc`) to actually create and start the container.
+
+For a deep dive into DKVM's internals, see the section on [Developing DKVM](#developing).
 
 ## System requirements
 
@@ -356,7 +358,7 @@ The modifications to `create` are designed to make the created container launch 
 
 The modifications to `exec` are designed to run commands with the VM instead of the container.
 
-#### `dkvm-runtime` `create` command
+#### `dkvm-runtime` - `create` command
 
 In more detail, the DKVM runtime `create` process:
 - Modifies the `config.json` file to:
@@ -407,7 +409,7 @@ The `dkvm-vm-init` process:
 The `dkvm-vm-start` script:
 - Restores the container's originally-intended environment variables, `<uid>`, `<gid>` and `<cwd>`, and execs that entrypoint.
 
-#### `dkvm-runtime` `exec` command
+#### `dkvm-runtime` - `exec` command
 
 The DKVM runtime `exec` process:
 
