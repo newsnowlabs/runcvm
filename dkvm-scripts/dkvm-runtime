@@ -223,13 +223,16 @@ if [ "$COMMAND" = "create" ]; then
   jq_set "$CFG" -r 'del( .mounts[] | select(.type == "tmpfs" and (.destination | test("^/dev(/|$)") | not) ) )'
   set_config_env "DKVM_TMPFS" "$DKVM_TMPFS"
 
-  # Rewrite all pre-existing bind/volume mounts to mount to $DKVM_VM_MOUNTPOINT instead of /
+  # Rewrite all pre-existing bind/volume mounts (except those at or below /disks) to mount
+  # below $DKVM_VM_MOUNTPOINT instead of below /.
+  #
+  # TODO TO CONSIDER:
   # If we excluded /etc/(resolv.conf,hosts,hostname), and moved these to top of the array
   # (by promoting them at the end of the below statements), they would be present in both
   # container and VM.
   #
-  # N.B. A mount at /disks will not be mapped to /vm/disks - this path reserved for mounting disk files to the container
-  jq_set "$CFG" --arg vm "$DKVM_VM_MOUNTPOINT" '( .mounts[] | select(.type == "bind" and .destination != "/disks") ).destination |= $vm + .'
+  # N.B. A mount at or underneath /disks will NOT be mapped to /vm/disks - this path is reserved for mounting disk files to the container
+  jq_set "$CFG" --arg vm "$DKVM_VM_MOUNTPOINT" '( .mounts[] | select(.type == "bind" and (.destination | test("^/disks(/|$)") | not) ) ).destination |= $vm + .'
 
   # Mount / from container to $DKVM_VM_MOUNTPOINT, recursively binding all pre-existing mount points
   # (these being only the ones defined ahead of this item in the mounts[] array - so order matters!)
