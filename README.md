@@ -43,6 +43,8 @@ or launches but with unexpected behaviour, please [raise an issue](https://githu
 - [Introduction](#introduction)
 - [Licence](#licence)
 - [Project aims](#project-aims)
+- [Project ambitions](#project-ambitions)
+- [Applications for DKVM](#applications-for-dkvm)
 - [How DKVM works](#how-dkvm-works)
 - [System requirements](#system-requirements)
 - [Installation](#installation)
@@ -51,7 +53,7 @@ or launches but with unexpected behaviour, please [raise an issue](https://githu
 - [Option reference](#option-reference)
 - [Advanced usage](#advanced-usage)
 - [Upgrading](#upgrading)
-- [DKVM deep dive](#dkvm-deep-dive)
+- [Developing](#developing)
 - [Building](#building)
 - [Contributing](#contributing)
 - [Support](#support)
@@ -77,7 +79,7 @@ DKVM is free and open-source, licensed under the Apache Licence, Version 2.0. Se
 - Intelligent kernel selection, according to the distribution used in the image being launched
 - No external dependencies, except for Docker/Podman
 
-Project ambition:
+## Project ambitions
 
 - Support multiple network interfaces, when attached to a created (but not yet running) container using `docker network connect`
 - Support running foreign-architecture VMs by using QEMU dynamic CPU emulation for the entire VM (instead of the approach used by [https://github.com/multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static) which uses dynamic CPU emulation for each individual binary)
@@ -85,20 +87,27 @@ Project ambition:
 - More natural console support with independent stdout and stderr channels for `docker run -it`
 - Support for piping input to `docker exec -i <command>`
 - Improve VM boot time and other behaviours using custom kernel
+- Support for specific hardware e.g. graphics display served via VNC
 
-Applications for DKVM include:
+## Applications for DKVM
 
-- Running and testing applications, like `dockerd` (Docker daemon), Docker swarm, and `systemd`, that don't work with (or require enhanced privileges to work with) standard container runtimes like `runc`, that require a running kernel, or kernel modules not available on the host
-- Running existing container workloads with increased security
-- Testing container workloads that are already intended to launch in VM environments, such as on [fly.io](https://fly.io)
-- Developing any of the above applications, using [Dockside](https://dockside.io/)
+The main applications for DKVM are:
+
+1. Running and testing applications, like `dockerd` (Docker daemon), Docker swarm, and `systemd`, that don't work with (or require enhanced privileges to work with) standard container runtimes like `runc`, that require a running kernel, kernel modules not available on the host (or, in future, specific hardware e.g. a graphics display)
+2. Running existing container workloads with increased security
+3. Testing container workloads that are already intended to launch in VM environments, such as on [fly.io](https://fly.io)
+4. Developing any of the above applications in [Dockside](https://dockside.io/)
 
 ## DKVM and Dockside
 
 DKVM and [Dockside](https://dockside.io/) are designed to work together in two very different ways.
 
 1. Dockside can be used to launch devtainers (development environments) in DKVM VMs, allowing you to provision containerised online IDEs for developing applications like `dockerd`, Docker swarm, and kernel modules. Follow the instructions for adding a runtime to your [Dockside profiles](https://github.com/newsnowlabs/dockside/blob/main/docs/setup.md#profiles).
-2. Dockside can be launched inside a DKVM VM with its own `dockerd` to provide increased security and compartmentalisation from the host. e.g. `docker run --rm -it --runtime=dkvm  --memory=2g --name=docksidevm -p 443:443 -p 80:80 --mount=type=volume,src=dockside-data,dst=/data --mount=type=volume,src=dockside-disks,dst=/disks --env=DKVM_DISKS=/disks/disk1,/var/lib/docker,ext4,5G newsnowlabs/dockside --run-dockerd --ssl-builtin`
+2. Dockside can be launched inside a DKVM VM with its own `dockerd` to provide increased security and compartmentalisation from the host. e.g.
+
+```
+docker run --rm -it --runtime=dkvm  --memory=2g --name=docksidevm -p 443:443 -p 80:80 --mount=type=volume,src=dockside-data,dst=/data --mount=type=volume,src=dockside-disks,dst=/disks --env=DKVM_DISKS=/disks/disk1,/var/lib/docker,ext4,5G newsnowlabs/dockside --run-dockerd --ssl-builtin
+```
 
 ## How DKVM works
 
@@ -112,13 +121,13 @@ DKVM has no host dependencies, apart from Docker (or experimentally, Podman) and
 
 ## Installation
 
-Install the DKVM software package at `/opt/dkvm` (installation elsewhere is currently unsupported):
+1. Install the DKVM software package at `/opt/dkvm` (installation elsewhere is currently unsupported):
 
 ```console
 docker run --rm -v /opt/dkvm:/dkvm newsnowlabs/dkvm
 ```
 
-Patch `/etc/docker/daemon.json` to enable the DKVM runtime:
+2. Enable the DKVM runtime, but patching `/etc/docker/daemon.json`:
 
 ```console
 sudo /opt/dkvm/scripts/dkvm-install-runtime.sh
@@ -126,14 +135,14 @@ sudo /opt/dkvm/scripts/dkvm-install-runtime.sh
 
 (The above command adds `"dkvm": {"path": "/opt/dkvm/scripts/dkvm-runtime"}` to the `runtimes` property of `/etc/docker/daemon.json`.)
 
-Lastly, restart docker, and confirm DKVM is recognised:
+3. Restart docker and verify that DKVM is recognised:
 
 ```console
 $ docker info | grep -i dkvm
  Runtimes: runc dkvm io.containerd.runc.v2 io.containerd.runtime.v1.linux
 ```
 
-Then run a test DKVM container:
+Run a test DKVM container:
 
 ```console
 docker run --runtime=dkvm --rm -it hello-world
@@ -341,11 +350,13 @@ To upgrade, follow this procedure:
 2. Run `/opt/dkvm/scripts/dkvm-upgrade.sh`
 3. Start any DKVM containers.
 
-## DKVM deep dive
+## Developing
+
+The following deep dive should help explain the inner workings of DKVM, and which files to modify to implement fixes, improvements and extensions.
 
 ### dkvm-runtime
 
-DKVM's 'wrapper' runtime, `dkvm-runtime`, intercepts container `create` and `exec` commands and their specifications in JSON format (`config.json` and `process.json`, respectively) normally provided (by `docker` `run`/`create` and `docker exec`, respectively) to a standard container runtime like `runc`.
+DKVM's 'wrapper' runtime, `dkvm-runtime`, intercepts container `create` and `exec` commands and their specifications in JSON format (`config.json` and `process.json` respectively) that are normally provided (by `docker` `run`/`create` and `docker exec` respectively) to a standard container runtime like `runc`.
 
 The JSON file is parsed to retrieve properties of the command, and is modified to allow DKVM to piggyback by overriding the originally intended behaviour with new behaviour.
 
