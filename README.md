@@ -96,18 +96,7 @@ The main applications for DKVM are:
 1. Running and testing applications, like `dockerd` (Docker daemon), Docker swarm, and `systemd`, that don't work with (or require enhanced privileges to work with) standard container runtimes like `runc`, that require a running kernel, kernel modules not available on the host (or, in future, specific hardware e.g. a graphics display)
 2. Running existing container workloads with increased security
 3. Testing container workloads that are already intended to launch in VM environments, such as on [fly.io](https://fly.io)
-4. Developing any of the above applications in [Dockside](https://dockside.io/)
-
-## DKVM and Dockside
-
-DKVM and [Dockside](https://dockside.io/) are designed to work together in two very different ways.
-
-1. Dockside can be used to launch devtainers (development environments) in DKVM VMs, allowing you to provision containerised online IDEs for developing applications like `dockerd`, Docker swarm, and kernel modules. Follow the instructions for adding a runtime to your [Dockside profiles](https://github.com/newsnowlabs/dockside/blob/main/docs/setup.md#profiles).
-2. Dockside can be launched inside a DKVM VM with its own `dockerd` to provide increased security and compartmentalisation from the host. e.g.
-
-```
-docker run --rm -it --runtime=dkvm  --memory=2g --name=docksidevm -p 443:443 -p 80:80 --mount=type=volume,src=dockside-data,dst=/data --mount=type=volume,src=dockside-disks,dst=/disks --env=DKVM_DISKS=/disks/disk1,/var/lib/docker,ext4,5G newsnowlabs/dockside --run-dockerd --ssl-builtin
-```
+4. Developing any of the above applications in [Dockside](https://dockside.io/) - see [DKVM and Dockside](#dkvm-and-dockside)
 
 ## How DKVM works
 
@@ -460,6 +449,17 @@ If you would like to contribute a feature suggestion or code, please raise an is
 Shut down any DKVM containers.
 
 Then run `sudo rm -f /opt/dkvm`.
+
+## DKVM and Dockside
+
+DKVM and [Dockside](https://dockside.io/) are designed to work together in two alternative ways.
+
+1. Dockside can be used to launch devtainers (development environments) in DKVM VMs, allowing you to provision containerised online IDEs for developing applications like `dockerd`, Docker swarm, `systemd`, applications that require a running kernel, or kernel modules not available on the host, or specific hardware e.g. a graphics display. Follow the instructions for adding a runtime to your [Dockside profiles](https://github.com/newsnowlabs/dockside/blob/main/docs/setup.md#profiles).
+2. Dockside can itself be launched inside a DKVM VM with its own `dockerd` to provide increased security and compartmentalisation from a host. e.g.
+
+```
+docker run --rm -it --runtime=dkvm  --memory=2g --name=docksidevm -p 443:443 -p 80:80 --mount=type=volume,src=dockside-data,dst=/data --mount=type=volume,src=dockside-disks,dst=/disks --env=DKVM_DISKS=/disks/disk1,/var/lib/docker,ext4,5G newsnowlabs/dockside --run-dockerd --ssl-builtin
+```
 
 ## Legals
 
