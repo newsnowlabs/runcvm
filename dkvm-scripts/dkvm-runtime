@@ -245,7 +245,7 @@ if [ "$COMMAND" = "create" ]; then
 
   # Mount a tmpfs at /.dkvm in container
   # Define this at top of mounts[] so it is recursively mounted
-  jq_set "$CFG" --arg dkvm "$DKVM" '.mounts |= [{"destination":"/.dkvm","type":"tmpfs","source":"dkvm","options":["nosuid","noexec","nodev","size=1M","mode=700"]}] + .'
+  jq_set "$CFG" '.mounts |= [{"destination":"/.dkvm","type":"tmpfs","source":"dkvm","options":["nosuid","noexec","nodev","size=1M","mode=700"]}] + .'
 
   # Mount /opt/dkvm from host to container
   # Define this at top of mounts[] so it is recursively mounted
