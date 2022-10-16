@@ -93,10 +93,13 @@ DKVM is free and open-source, licensed under the Apache Licence, Version 2.0. Se
 
 The main applications for DKVM are:
 
-1. Running and testing applications, like `dockerd` (Docker daemon), Docker swarm, and `systemd`, that don't work with (or require enhanced privileges to work with) standard container runtimes like `runc`, that require a running kernel, kernel modules not available on the host (or, in future, specific hardware e.g. a graphics display)
+1. Running and testing applications that:
+   - don't work with (or require enhanced privileges to work with) standard container runtimes (e.g. `systemd`, `dockerd`, Docker swarm services, Kubernetes)
+   - require a running kernel, or a kernel version or modules not available on the host
+   - require specific hardware that can be emulated e.g. disks, graphics displays
 2. Running existing container workloads with increased security
 3. Testing container workloads that are already intended to launch in VM environments, such as on [fly.io](https://fly.io)
-4. Developing any of the above applications in [Dockside](https://dockside.io/) - see [DKVM and Dockside](#dkvm-and-dockside)
+4. Developing any of the above applications in [Dockside](https://dockside.io/) (see [DKVM and Dockside](#dkvm-and-dockside))
 
 ## How DKVM works
 
