@@ -26,14 +26,14 @@ DKVM aims to be a secure container runtime with lightweight virtual machines tha
 
 However, DKVM:
 
-- Uses a lightweight 'wrapper' runtime technology that makes its code footprint and external dependencies extremely small, its internals extremely simple and easy to tailor for specific purposes.
+- Uses a lightweight 'wrapper-runtime' technology that makes its code footprint and external dependencies extremely small, its internals extremely simple and easy to tailor for specific purposes.
 - Is written almost entirely in shell script, for ease of comprehension and modification.
 - Is compatible with `docker run` (with experimental support for `podman run` today).
 - Has no external dependencies (except for Docker/Podman).
 
 DKVM makes some trade-offs in return for this simplicity. See the full list of [features and limitations](#features-and-limitations).
 
-DKVM was born out of difficulties experienced getting the Docker and Podman CLIs to launch Kata Containers, and a belief that launching containerised workloads VMs needn't be so complicated.
+DKVM was born out of difficulties experienced getting the Docker and Podman CLIs to launch Kata Containers, and a belief that launching containerised workloads in VMs needn't be so complicated.
 
 ## Contents
 
@@ -62,24 +62,35 @@ DKVM is free and open-source, licensed under the Apache Licence, Version 2.0. Se
 ## Project aims
 
 - Run any standard container workload in a VM using `docker run` with no need to customise images or the command line (except adding `--runtime=dkvm`)
-- Maintain a similar experience within a DKVM VM as within a container: process table, network interfaces, stdio, exit code handling should broadly "look the same"
+- Run unusual container workloads, like `dockerd` and `systemd` that will not run in standard container runtimes
+- Maintain a similar experience within a DKVM VM as within a container: process table, network interfaces, stdio, exit code handling should broadly similar to maximise compatibility
 - Container start/stop/kill semantics respected, where possible providing clean VM shutdown on stop
-- VM console accessible as one would expect using `docker run -it`, `docker start -ai` and `docker attach`
+- VM console accessible as one would expect using `docker run -it`, `docker start -ai` and `docker attach` (but stderr is not yet separated from stdout)
 - Support for `docker exec` (but no `-i`, `-t` for now - see [Features and Limitations](#features-and-limitations))
 - Good support for most other `docker container` subcommands
-- Efficient container startup, by using virtiofs to serve the container's filesystem to the VM
+- Efficient container startup, by using virtiofs to serve a container's filesystem directly to a VM (instead of unpacking an image into a backing file)
 - Improved security compared to the standard container runtime, and as much security as possible without compromising the simplicity of the implementation
 - Command-line and image-embedded options for customising the a container's VM specifications, devices, kernel
 - Intelligent kernel selection, according to the distribution used in the image being launched
 - No external dependencies, except for Docker/Podman
 
+Project ambitions:
+
+- Run foreign-architecture VMs by using QEMU dynamic CPU emulation for the entire VM (instead of the approach used by [https://github.com/multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static) which uses dynamic CPU emulation for each individual binary)
+
 Applications for DKVM include:
 
-- Running container workloads that require increased security
-- Running container workloads that require a running kernel
-- Running applications, like Docker daemon, Docker swarm, and systemd, and kernel modules, that don't play nicely with the default container runtime `runc`
-- Automated testing of kernels, kernel modules, or any application that must run in VMs. e.g. A load-balancing Docker swarm.
-- Developing applications that require a VM to run. [Dockside](https://dockside.io/) can be used to launch DKVM 'devtainers'. Follow the Dockside instructions for adding the DKVM runtime to your profiles.
+- Running and testing applications, like `dockerd` (Docker daemon), Docker swarm, and `systemd`, that don't work with (or require enhanced privileges to work with) standard container runtimes like `runc`, that require a running kernel, or kernel modules not available on the host
+- Running existing container workloads with increased security
+- Testing container workloads that are already intended to launch in VM environments, such as on [fly.io](https://fly.io)
+- Developing any of the above applications, using [Dockside](https://dockside.io/)
+
+## DKVM and Dockside
+
+DKVM and [Dockside](https://dockside.io/) are designed to work together in two very different ways.
+
+1. Dockside can be used to launch devtainers (development environments) in DKVM VMs, allowing you to provision containerised online IDEs for developing applications like `dockerd`, Docker swarm, and kernel modules. Follow the instructions for adding a runtime to your [Dockside profiles](https://github.com/newsnowlabs/dockside/blob/main/docs/setup.md#profiles).
+2. Dockside can be launched inside a DKVM VM with its own `dockerd` to provide increased security and compartmentalisation from the host. e.g. `docker run --rm -it --runtime=dkvm  --memory=2g --name=docksidevm -p 443:443 -p 80:80 --mount=type=volume,src=dockside-data,dst=/data --mount=type=volume,src=dockside-disks,dst=/disks --env=DKVM_DISKS=/disks/disk1,/var/lib/docker,ext4,5G newsnowlabs/dockside --run-dockerd --ssl-builtin`
 
 ## How DKVM works
 
@@ -89,23 +100,23 @@ DKVM's 'wrapper' runtime, `dkvm-runtime`, receives container create commands tri
 
 DKVM should run on any amd64 (x86_64) Linux hardware (or VM) that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run DKVM.
 
-DKVM has no external dependencies (except Docker) and is packaged with its own QEMU binary along with all other binaries and libraries it needs to run.
+DKVM has no host dependencies, apart from Docker (or experimentally, Podman) and comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
 ## Installation
 
-Install the DKVM software package at `/opt/dkvm` (it cannot be installed elsewhere):
+Install the DKVM software package at `/opt/dkvm` (installation elsewhere is currently unsupported):
 
 ```console
 docker run --rm -v /opt/dkvm:/dkvm newsnowlabs/dkvm
 ```
 
-Enable the DKVM runtime for Docker:
+Patch `/etc/docker/daemon.json` to enable the DKVM runtime:
 
 ```console
 sudo /opt/dkvm/scripts/dkvm-install-runtime.sh
 ```
 
-The above command adds `"dkvm": {"path": "/opt/dkvm/scripts/dkvm-runtime"}` to the `runtimes` property of `/etc/docker/daemon.json`.
+(The above command adds `"dkvm": {"path": "/opt/dkvm/scripts/dkvm-runtime"}` to the `runtimes` property of `/etc/docker/daemon.json`.)
 
 Lastly, restart docker, and confirm DKVM is recognised:
 
@@ -122,11 +133,13 @@ docker run --runtime=dkvm --rm -it hello-world
 
 ## Features and limitations
 
-Here is a summary of DKVM's current main features and limitations. Please note, `docker run` and `docker exec` options not listed below are unsupported and their effect, if used, is unspecified.
+In the below summary of DKVM's current main features and limitations, [+] is used to indicate an area of compatibility with standard container runtimes and [-] is used indicate a feature of standard container runtimes that is unsupported.
+
+> N.B. `docker run` and `docker exec` options not listed below are unsupported and their effect, if used, is unspecified.
 
 - `docker run`
    - Mounts
-      - [+] `--mount` (or `-v`) is supported for volume mounts, tmpfs mounts, and host file and directory bind-mounts
+      - [+] `--mount` (or `-v`) is supported for volume mounts, tmpfs mounts, and host file and directory bind-mounts (the `dst` mount path `/disks` is reserved)
       - [-] Bind-mounting host sockets or devices, and `--device` is unsupported
    - Networking
       - [+] The default bridge network is supported
