@@ -77,9 +77,13 @@ DKVM is free and open-source, licensed under the Apache Licence, Version 2.0. Se
 - Intelligent kernel selection, according to the distribution used in the image being launched
 - No external dependencies, except for Docker/Podman
 
-Project ambitions:
+Project ambition:
 
-- Run foreign-architecture VMs by using QEMU dynamic CPU emulation for the entire VM (instead of the approach used by [https://github.com/multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static) which uses dynamic CPU emulation for each individual binary)
+- Support multiple network interfaces, when attached to a created (but not yet running) container using `docker network connect`
+- Support running foreign-architecture VMs by using QEMU dynamic CPU emulation for the entire VM (instead of the approach used by [https://github.com/multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static) which uses dynamic CPU emulation for each individual binary)
+- Support for QEMU [microvm](https://qemu.readthedocs.io/en/latest/system/i386/microvm.html) or Amazon Firecracker
+- More natural console support with independent stdout and stderr channels
+- Improve VM boot time and other behaviours using custom kernel
 
 Applications for DKVM include:
 
