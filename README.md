@@ -29,8 +29,9 @@ However, DKVM:
 - Uses a lightweight 'wrapper' runtime technology that makes its code footprint and external dependencies extremely small, its internals extremely simple and easy to tailor for specific purposes.
 - Is written almost entirely in shell script, for ease of comprehension and modification.
 - Is compatible with `docker run` (with experimental support for `podman run` today).
+- Has no external dependencies (except for Docker/Podman).
 
-(See the full list of [features and limitations](#features-and-limitations).)
+DKVM makes some trade-offs in return for this simplicity. See the full list of [features and limitations](#features-and-limitations).
 
 DKVM was born out of difficulties experienced getting the Docker and Podman CLIs to launch Kata Containers, and a belief that launching containerised workloads VMs needn't be so complicated.
 
@@ -69,7 +70,8 @@ DKVM is free and open-source, licensed under the Apache Licence, Version 2.0. Se
 - Efficient container startup, by using virtiofs to serve the container's filesystem to the VM
 - Improved security compared to the standard container runtime, and as much security as possible without compromising the simplicity of the implementation
 - Command-line and image-embedded options for customising the a container's VM specifications, devices, kernel
-- No external dependencies, except Docker/Podman
+- Intelligent kernel selection, according to the distribution used in the image being launched
+- No external dependencies, except for Docker/Podman
 
 Applications for DKVM include:
 
@@ -242,7 +244,16 @@ When first created, the backing file will be created as a sparse file to the spe
 docker run --runtime=dkvm --env=DKVM_DISKS=/disk1,/home,ext4,5G -it <docker-image>
 ```
 
-In this example, DKVM will check for existence of a file at `/volume/disk1`, and if it doesn't find it will create a 5G disk with an ext4 filesystem. It will add the disk to `/etc/fstab` and mount it.
+In this example, DKVM will check for existence of a file at `/disk1`, and if it doesn't find it will create a 5G backing file with an ext4 filesystem. It will add the disk to `/etc/fstab` and mount it.
+
+```console
+docker run --runtime=dkvm --mount=type=volume,src=dkvm-disks,dst=/disks --env=DKVM_DISKS=/disks/disk1,/home,ext4,5G -it <docker-image>
+```
+
+This example behaves the same as the previous one, except that the `dkvm-disks` volume is first mounted at `/disks`, meaning that `/disks/disk1` is stored in the volume.
+
+> N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints, these is *NOT* mounted into the VM but only into the container,
+and are therefore suitable for use for mounting backing files for use as VM disks.
 
 ### `--env=DKVM_QEMU_DISPLAY=<value>`
 
@@ -264,22 +275,22 @@ If a DKVM kernel (as opposed to an in-image kernel) is chosen to launch a VM, by
 
 ### Running Docker in a VM
 
-If running Docker within a VM, it is recommended that `/var/lib/docker` is a dedicated mountpoint. Using DKVM, this can be either a Docker volume, or an ext4, btrfs, or xfs disk.
+If running Docker within a VM, it is recommended that you make `/var/lib/docker` a dedicated mountpoint. Using DKVM, this can be either a Docker volume, or an ext4, btrfs, or xfs disk.
 
 #### Docker volume mountpoint
 
 To launch a VM with a volume mount, run:
 
 ```console
-docker run --runtime=dkvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker -it <docker-image>
+docker run --runtime=dkvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker <docker-image>
 ```
 
 ### ext4/btrfs/xfs disk mountpoint
 
-To launch a VM with a disk mount, run:
+To launch a VM with a disk mount, backed by a 5G file in the `mydocker2` volume, run:
 
 ```console
-docker run --runtime=dkvm --mount=type=volume,src=mydocker1,dst=/volume --env=DKVM_DISKS=ext4,5G,/volume/disk1 -it <docker-image>
+docker run -it --runtime=dkvm --mount=type=volume,src=mydocker2,dst=/volume --env=DKVM_DISKS=/volume/disk1,/var/lib/docker,ext4,5G <docker-image>
 ```
 
 DKVM will check for existence of /volume/disk1, and if it doesn't find it will create a 5G disk with an ext4 filesystem. It will add the disk to `/etc/fstab`.
