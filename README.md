@@ -143,7 +143,7 @@ In the below summary of DKVM's current main features and limitations, [+] is use
       - [-] Bind-mounting host sockets or devices, and `--device` is unsupported
    - Networking
       - [+] The default bridge network is supported
-      - [+] `--network` user-defined networks are supported, including full Docker DNS resolution of container names
+      - [+] Custom/user-defined networks specified using `--network` are supported, including Docker DNS resolution of container names
       - [+] `--publish` (or `-p`) is supported
       - [+] `--dns`, `--dns-option`, `--dns-search` are supported
       - [+] `--ip` is supported
@@ -155,23 +155,26 @@ In the below summary of DKVM's current main features and limitations, [+] is use
       - [?] `--workdir` (or `-w`) is supported FIXME
       - [+] `--env` (or `-e`), `--env-file` is supported
       - [+] `--entrypoint` is supported
-      - [+] `--init` - is supported (but running DKVM's own init process rather than Docker's default, `tini`)
+      - [+] `--init` - is supported (but runs DKVM's own VM init process rather than Docker's default, `tini`)
    - stdio/Terminals
       - [+] `--detach` (or `-d`) is supported
       - [+] `--interactive` (or `-i`) is supported
       - [+] `--tty` (or `-t`) is supported
       - [+] `--attach` (or `-a`) is supported
-      - [+] Stdin, Stdout and Stderr behaviour should closely match that from traditional `runc` containers
+      - [+] Stdout and Stderr output should be broadly similar to running the same workload in a standard `runc` container
+      - [-] Stdout and Stderr are not independently multiplexed so `docker run --runtime=dkvm debian bash -c 'echo stdout; echo stderr >&2' >/tmp/stdout 2>/tmp/stderr` does not produce the expected result
+      - [-] Stdout and Stderr sent very soon after VM launch might be corrupted due to serial console issues
       - [-] Stdout and Stderr sent immediately before VM shutdown might not always be fully flushed
    - Resource allocation and limits
       - [+] `--cpus` is supported to specify number of VM CPUs
       - [+] `--memory` (or `-m`) is supported to specify VM memory
       - [-] Other container resource limit options such as (`--cpu-*`), block IO (`--blkio-*`), kernel memory (`--kernel-memory`) are unsupported or untested
    - Exit code
-      - [+] Returning the entrypoint's exit code is supported
-      - [-] However it currently requires application support: your application may either write its exit code to `/.dkvm/exit-code` (supported exit codes 0-255) or call `/opt/dkvm/sbin/qemu-exit <code>` (supported exit codes 0-127). Automatic handling of exit codes from the entrypoint will be provided in a later version.
+      - [+] Returning the entrypoint's exit code is supported, but it currently requires application support
+      - [-] To return an exit code, your entrypoint may either write its exit code to `/.dkvm/exit-code` (supported exit codes 0-255) or call `/opt/dkvm/sbin/qemu-exit <code>` (supported exit codes 0-127). Automatic handling of exit codes from the entrypoint will be provided in a later version.
    - Disk performance
-      - [+] No mountpoints required for basic operation, but volumes or disk mountpoints may be needed for running dockerd or for performance reasons
+      - [+] No mountpoints are required for basic operation for most applications. Volume or disk mountpoints may be needed for running `dockerd` or to improve disk performance
+      - [-] `dockerd` mileage will vary unless a volume or disk is mounted over `/var/lib/docker`
 - `docker exec`
    - [+] `--user` (or `-u`), `--workdir` (or `-w`), `--env` (or `-e`), `--env-file`, `--detach` (or `-d`) are supported
    - [-] `--interactive` (or `-i`) and `--tty` (or `-t`) are not currently supported (there currently being no support for interactive terminals other than the container's launch terminal)
@@ -179,9 +182,9 @@ In the below summary of DKVM's current main features and limitations, [+] is use
    - The DKVM software package at `/opt/dkvm` is mounted read-only within DKVM containers. Container applications cannot compromise DKVM, but they can execute binaries within the DKVM package. The set of binaries available to the VM may be reduced to a minimum in a later version.
 - Kernels
    - [+] Use any kernel, either one pre-packaged with DKVM or roll your own
-   - [+] DKVM will try to select an appropriate kernel to use based on examination of the image being launched.
+   - [+] DKVM will try to select an appropriate kernel to use based on examination of `/etc/os-release` within the image being launched.
 
-## Kernel selection
+## Kernel auto-detection
 
 When creating a container, DKVM will examine the image being launched to try to determine a suitable kernel to boot the VM with. Its process is as follows:
 
@@ -241,29 +244,28 @@ Automatically create, format and mount backing files as virtual disks on the VM.
 
 Each `<diskN>` should be a comma-separated list of values of the form: `<src>,<dst>,<filesystem>,<size>`.
 
-`<src>` is the path within the container where the virtual disk backing file should be located. This may be in the container's overlayfs or within a volume (mounted using `--mount=type=volume`).
-
-`<dst>` is the path within the VM where the virtual disk should be mounted.
-
-`<filesystem>` is the filesystem with which the backing disk should be formatted (using `mke2fs`) when first created.
-
-`<size>` is the size of the backing file (in `truncate` format).
+- `<src>` is the path _within the container_ where the virtual disk backing file should be located. This may be in the container's overlayfs or within a volume (mounted using `--mount=type=volume`).
+- `<dst>` is the path within the VM where the virtual disk should be mounted.
+- `<filesystem>` is the filesystem with which the backing disk should be formatted (using `mke2fs`) when first created.
+- `<size>` is the size of the backing file (in `truncate` format).
 
 When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs`. When DKVM creates a container/VM, fstab entries will be drafted. After the VM boots, the fstab entries will be mounted.
 
-**Example:**
+#### Example #1
 
 ```console
-docker run --runtime=dkvm --env=DKVM_DISKS=/disk1,/home,ext4,5G -it <docker-image>
+docker run -it --runtime=dkvm --env=DKVM_DISKS=/disk1,/home,ext4,5G <docker-image>
 ```
 
-In this example, DKVM will check for existence of a file at `/disk1`, and if it doesn't find it will create a 5G backing file with an ext4 filesystem. It will add the disk to `/etc/fstab` and mount it.
+In this example, DKVM will check for existence of a file at `/disk1` within <docker-image>, and if not found create a 5G backing file (in the container's filesystem, typically overlay2) with an ext4 filesystem, then add the disk to `/etc/fstab` and mount it within the VM.
+
+#### Example #2
 
 ```console
-docker run --runtime=dkvm --mount=type=volume,src=dkvm-disks,dst=/disks --env=DKVM_DISKS=/disks/disk1,/home,ext4,5G -it <docker-image>
+docker run -it --runtime=dkvm --mount=type=volume,src=dkvm-disks,dst=/disks --env=DKVM_DISKS=/disks/disk1,/home,ext4,5G <docker-image>
 ```
 
-This example behaves the same as the previous one, except that the `dkvm-disks` volume is first mounted at `/disks`, meaning that `/disks/disk1` is stored in the volume.
+This example behaves similarly, except that the `dkvm-disks` persistent Docker volume is first mounted at `/disks` within the container's filesystem, and therefore the backing file at `/disks/disk1` is stored in the persistent volume (and bypassing overlay2).
 
 > N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints, these is *NOT* mounted into the VM but only into the container,
 and are therefore suitable for use for mounting backing files for use as VM disks.
