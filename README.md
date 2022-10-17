@@ -170,7 +170,7 @@ In the below summary of DKVM's current main features and limitations, [+] is use
    - stdio/Terminals
       - [+] `--detach` (or `-d`) is supported
       - [+] `--interactive` (or `-i`) is supported
-      - [+] `--tty` (or `-t`) is supported
+      - [+] `--tty` (or `-t`) is supported (but to enter CTRL-A one must press CTRL-A twice)
       - [+] `--attach` (or `-a`) is supported
       - [+] Stdout and Stderr output should be broadly similar to running the same workload in a standard `runc` container
       - [-] Stdout and Stderr are not independently multiplexed so `docker run --runtime=dkvm debian bash -c 'echo stdout; echo stderr >&2' >/tmp/stdout 2>/tmp/stderr` does not produce the expected result
