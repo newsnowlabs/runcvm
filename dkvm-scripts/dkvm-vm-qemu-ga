@@ -1,11 +1,11 @@
-#!/opt/dkvm/bin/bash
+#!/opt/runcvm/bin/bash
 
 # TODO Rationalise these into defaults
-DKVM=/opt/dkvm
-PATH=$DKVM/sbin:$DKVM/bin:$DKVM/usr/bin
-unset DKVM
+RUNCVM=/opt/runcvm
+PATH=$RUNCVM/sbin:$RUNCVM/bin:$RUNCVM/usr/bin
+unset RUNCVM
 
-OPTS=(--retry-path --statedir /.dkvm)
+OPTS=(--retry-path --statedir /.runcvm)
 
 if [ -f "/dev/virtio-ports/org.qemu.guest_agent.0" ]; then
   DEV="/dev/virtio-ports/org.qemu.guest_agent.0"

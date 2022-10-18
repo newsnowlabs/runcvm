@@ -1,16 +1,16 @@
-#!/opt/dkvm/bin/sh
+#!/opt/runcvm/bin/sh
 
-. /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
+. /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
 
-# dkvm-init execs this script when it exits.
+# runcvm-init execs this script when it exits.
 # It:
 # - performs any post-VM tests.
 # - retrieves any saved exit code.
 # - resets terminal readline horizontal scroll
 # - exits with exit code
 
-if [ -f /.dkvm/exitcode ]; then
-  read CODE </.dkvm/exitcode
+if [ -f /.runcvm/exitcode ]; then
+  read CODE </.runcvm/exitcode
 
   # Convert negative codes to positive and ensure in acceptable range (0-255)
   CODE=$(( $CODE & 255 ))

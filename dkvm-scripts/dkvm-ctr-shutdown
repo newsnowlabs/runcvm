@@ -1,16 +1,16 @@
-#!/opt/dkvm/bin/bash
+#!/opt/runcvm/bin/bash
 
-# dkvm-init forks and execs this script when it receives a SIGTERM
+# runcvm-init forks and execs this script when it receives a SIGTERM
 
 poweroff() {
   # Try ACPI poweroff
-  /opt/dkvm/scripts/dkvm-ctr-qemu-poweroff
+  /opt/runcvm/scripts/runcvm-ctr-qemu-poweroff
   
   # Try running busybox poweroff
-  /opt/dkvm/scripts/dkvm-ctr-exec 0:0 / /opt/dkvm/bin/poweroff
+  /opt/runcvm/scripts/runcvm-ctr-exec 0:0 / /opt/runcvm/bin/poweroff
 
   # Try killing the VM's PID 1
-  /opt/dkvm/scripts/dkvm-ctr-exec 0:0 / /opt/dkvm/bin/busybox kill 1
+  /opt/runcvm/scripts/runcvm-ctr-exec 0:0 / /opt/runcvm/bin/busybox kill 1
 }
 
 poweroff

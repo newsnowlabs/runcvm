@@ -1,6 +1,6 @@
-#!/opt/dkvm/bin/bash
+#!/opt/runcvm/bin/bash
 
-. /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
+. /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
 
 # FIXME: -o posix_acl works with alpine kernel, but not debian kernel
 # virtiofsd -o posix_acl -o xattr --socket-path=$SOCKET -o cache=always -o source=/ -o sandbox=chroot >/tmp/virtiofsd.log 2>&1 &
@@ -14,9 +14,9 @@
 # Also add sys_admin (req. --cap-add=SYS_ADMIN) to allow overlayfs2 ?!?
 # virtiofsd -o modcaps=+sys_admin -o announce_submounts -o xattr --socket-path=$SOCKET -o cache=always -o source=/ -o sandbox=chroot >/tmp/virtiofsd.log 2>&1 &
 
-if [ "$DKVM_SYS_ADMIN" = "1" ]; then
+if [ "$RUNCVM_SYS_ADMIN" = "1" ]; then
   OPTS+=(-o modcaps=+sys_admin)
 fi
 
 # Send logs to /run in container (not in VM)
-exec virtiofsd "${OPTS[@]}" -o announce_submounts -o xattr --socket-path=$QEMU_VIRTIOFSD_SOCKET -o cache=always -o source=$DKVM_VM_MOUNTPOINT -o sandbox=chroot >/run/.virtiofsd.log 2>&1
+exec virtiofsd "${OPTS[@]}" -o announce_submounts -o xattr --socket-path=$QEMU_VIRTIOFSD_SOCKET -o cache=always -o source=$RUNCVM_VM_MOUNTPOINT -o sandbox=chroot >/run/.virtiofsd.log 2>&1

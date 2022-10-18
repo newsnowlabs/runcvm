@@ -48,7 +48,7 @@
 #include "VERSION.h"
 
 #define PRINTERR(...) do { \
-    fprintf(stderr, "[dkvm-init] " __VA_ARGS__); \
+    fprintf(stderr, "[runcvm-init] " __VA_ARGS__); \
 } while (0)
 
 #define DEBUG(...) do { \
@@ -99,7 +99,7 @@ void forward_signal(int signum) {
 
 pid_t shutdown() {   
    pid_t my_child_pid;
-   char *shutdown_cmd[] = {"/opt/dkvm/scripts/dkvm-ctr-shutdown", NULL};
+   char *shutdown_cmd[] = {"/opt/runcvm/scripts/runcvm-ctr-shutdown", NULL};
    
     my_child_pid = fork();
     if (my_child_pid < 0) {
@@ -123,7 +123,7 @@ pid_t shutdown() {
 
 void quit(int exit_status) {
     char exit_status_string[4];
-    char *exit_cmd[] = {"/opt/dkvm/scripts/dkvm-ctr-exit", exit_status_string, NULL};
+    char *exit_cmd[] = {"/opt/runcvm/scripts/runcvm-ctr-exit", exit_status_string, NULL};
 
     sprintf(exit_status_string, "%d", exit_status & 0xFF);
 
@@ -192,10 +192,10 @@ void handle_signal(int signum) {
 
 void print_help(char *argv[]) {
     fprintf(stderr,
-        "dkvm-init v%.*s"
+        "runcvm-init v%.*s"
         "Usage: %s [option] command [[arg] ...]\n"
         "\n"
-        "dkvm-init is a simple process supervisor that forwards signals to children.\n"
+        "runcvm-init is a simple process supervisor that forwards signals to children.\n"
         "It is designed to run as PID1 in minimal container environments.\n"
         "\n"
         "Optional arguments:\n"

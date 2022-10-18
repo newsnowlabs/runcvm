@@ -99,10 +99,10 @@ EOF
 COPY build-utils/elf-patcher.sh /usr/local/bin/elf-patcher.sh
 ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/* tput stdbuf coreutils strace"
 ENV EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils"
-ENV CODE_PATH="/opt/dkvm"
+ENV CODE_PATH="/opt/runcvm"
 RUN /usr/local/bin/elf-patcher.sh && \
-    bash -c 'cd /opt/dkvm/bin; for cmd in awk base64 cat chmod cut grep head hostname init ln ls mkdir mount poweroff ps rm route sh sysctl tr touch; do ln -s busybox $cmd; done' && \
-    mkdir -p /opt/dkvm/usr/share && cp -a /usr/share/qemu /opt/dkvm/usr/share
+    bash -c 'cd /opt/runcvm/bin; for cmd in awk base64 cat chmod cut grep head hostname init ln ls mkdir mount poweroff ps rm route sh sysctl tr touch; do ln -s busybox $cmd; done' && \
+    mkdir -p /opt/runcvm/usr/share && cp -a /usr/share/qemu /opt/runcvm/usr/share
 
 # BUILD CONTAINER INIT
 FROM alpine:edge as init
@@ -110,8 +110,8 @@ FROM alpine:edge as init
 RUN apk update && \
     apk add --no-cache gcc musl-dev
 
-ADD dkvm-init /root/dkvm-init
-RUN cd /root/dkvm-init && cc -o /root/dkvm-init/dkvm-init -std=gnu99 -static -s -Wall -Werror -O3 dumb-init.c
+ADD runcvm-init /root/runcvm-init
+RUN cd /root/runcvm-init && cc -o /root/runcvm-init/runcvm-init -std=gnu99 -static -s -Wall -Werror -O3 dumb-init.c
 
 # Build qemu-exit while we're here
 
@@ -126,11 +126,11 @@ RUN apk add --no-cache linux-virt
 RUN echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules && \
     sed -ri 's/\b(ata|nvme|raid|scsi|usb|cdrom|kms|mmc)\b//g; s/[ ]+/ /g' /etc/mkinitfs/mkinitfs.conf && \
     mkinitfs $(basename $(ls -d /lib/modules/*))
-RUN mkdir -p /opt/dkvm/kernels/alpine/$(basename $(ls -d /lib/modules/*)) && \
-    cp -a /boot/vmlinuz-virt /opt/dkvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
-    cp -a /boot/initramfs-virt /opt/dkvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/initrd && \
-    cp -a /lib/modules/ /opt/dkvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/ && \
-    chmod -R u+rwX,g+rX,o+rX /opt/dkvm/kernels/alpine
+RUN mkdir -p /opt/runcvm/kernels/alpine/$(basename $(ls -d /lib/modules/*)) && \
+    cp -a /boot/vmlinuz-virt /opt/runcvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
+    cp -a /boot/initramfs-virt /opt/runcvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/initrd && \
+    cp -a /lib/modules/ /opt/runcvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/ && \
+    chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/alpine
 
 # Build Debian bullseye kernel and initramfs with virtiofs module
 
@@ -142,11 +142,11 @@ RUN apt update && apt install -y linux-image-amd64:amd64 && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
-RUN mkdir -p /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*)) && \
-    cp -aL /vmlinuz /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
-    cp -aL /initrd.img /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/initrd && \
-    cp -a /lib/modules/ /opt/dkvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/ && \
-    chmod -R u+rwX,g+rX,o+rX /opt/dkvm/kernels/debian
+RUN mkdir -p /opt/runcvm/kernels/debian/$(basename $(ls -d /lib/modules/*)) && \
+    cp -aL /vmlinuz /opt/runcvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
+    cp -aL /initrd.img /opt/runcvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/initrd && \
+    cp -a /lib/modules/ /opt/runcvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/ && \
+    chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/debian
 
 # Build Ubuntu bullseye kernel and initramfs with virtiofs module
 
@@ -158,11 +158,11 @@ RUN apt update && apt install -y linux-generic:amd64 && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
-RUN mkdir -p /opt/dkvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*)) && \
-    cp -aL /boot/vmlinuz /opt/dkvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
-    cp -aL /boot/initrd.img /opt/dkvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/initrd && \
-    cp -a /lib/modules/ /opt/dkvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/ && \
-    chmod -R u+rwX,g+rX,o+rX /opt/dkvm/kernels/ubuntu
+RUN mkdir -p /opt/runcvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*)) && \
+    cp -aL /boot/vmlinuz /opt/runcvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
+    cp -aL /boot/initrd.img /opt/runcvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/initrd && \
+    cp -a /lib/modules/ /opt/runcvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/ && \
+    chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/ubuntu
 
 # Build Oracle Linux kernel and initramfs with virtiofs module
 
@@ -172,30 +172,30 @@ RUN dnf install -y kernel
 ADD ./kernels/oraclelinux/addvirtiofs.conf /etc/dracut.conf.d/addvirtiofs.conf
 ADD ./kernels/oraclelinux/95virtiofs /usr/lib/dracut/modules.d/95virtiofs
 RUN dracut --force --kver $(basename /lib/modules/*) --kmoddir /lib/modules/*
-RUN mkdir -p /opt/dkvm/kernels/ol/$(basename $(ls -d /lib/modules/*)) && \
-    mv /lib/modules/*/vmlinuz /opt/dkvm/kernels/ol/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
-    cp -aL /boot/initramfs* /opt/dkvm/kernels/ol/$(basename $(ls -d /lib/modules/*))/initrd && \
-    cp -a /lib/modules/ /opt/dkvm/kernels/ol/$(basename $(ls -d /lib/modules/*))/ && \
-    chmod -R u+rwX,g+rX,o+rX /opt/dkvm/kernels/ol
+RUN mkdir -p /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*)) && \
+    mv /lib/modules/*/vmlinuz /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
+    cp -aL /boot/initramfs* /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*))/initrd && \
+    cp -a /lib/modules/ /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*))/ && \
+    chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/ol
 
-# Build DKVM installation
+# Build RUNCVM installation
 
 FROM alpine
 
-COPY --from=binaries /opt/dkvm /opt/dkvm
-COPY --from=init /root/dkvm-init/dkvm-init /root/qemu-exit/qemu-exit /opt/dkvm/sbin/
+COPY --from=binaries /opt/runcvm /opt/runcvm
+COPY --from=init /root/runcvm-init/runcvm-init /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
 
 RUN apk update && apk add --no-cache rsync
 
-ADD dkvm-scripts/* /opt/dkvm/scripts/
+ADD runcvm-scripts/* /opt/runcvm/scripts/
 
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]
 
 # Install needed kernels.
 # Comment out any kernels that are unneeded.
-COPY --from=alpine-kernel /opt/dkvm/kernels/alpine /opt/dkvm/kernels/alpine
-COPY --from=debian-kernel /opt/dkvm/kernels/debian /opt/dkvm/kernels/debian
-COPY --from=ubuntu-kernel /opt/dkvm/kernels/ubuntu /opt/dkvm/kernels/ubuntu
-COPY --from=oracle-kernel /opt/dkvm/kernels/ol     /opt/dkvm/kernels/ol
-RUN for d in /opt/dkvm/kernels/*; do cd $d && ln -s $(ls -d * | sort | head -n 1) latest; done
+COPY --from=alpine-kernel /opt/runcvm/kernels/alpine /opt/runcvm/kernels/alpine
+COPY --from=debian-kernel /opt/runcvm/kernels/debian /opt/runcvm/kernels/debian
+COPY --from=ubuntu-kernel /opt/runcvm/kernels/ubuntu /opt/runcvm/kernels/ubuntu
+COPY --from=oracle-kernel /opt/runcvm/kernels/ol     /opt/runcvm/kernels/ol
+RUN for d in /opt/runcvm/kernels/*; do cd $d && ln -s $(ls -d * | sort | head -n 1) latest; done

@@ -1,20 +1,20 @@
-#!/opt/dkvm/bin/bash
+#!/opt/runcvm/bin/bash
 
 # TODO: Clean up ENV vars
-. /.dkvm/config
+. /.runcvm/config
 
 # Load defaults after exports (so that PATH is overridden)
-. /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
+. /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
 
 # BREAK="break=mountroot"
 PANIC="panic=-1"
 
-INIT="init=/opt/dkvm/scripts/dkvm-vm-init"
+INIT="init=/opt/runcvm/scripts/runcvm-vm-init"
 
 SERIAL="mon:stdio"
 # SERIAL="stdio"
 
-DOCKER_IP=$(cat /.dkvm/net)
+DOCKER_IP=$(cat /.runcvm/net)
 MAC=$(printf "52:54:00:%02x:%02x:%02x" $(echo $DOCKER_IP | cut -d'/' -f1 | cut -d'.' -f2,3,4 | tr '.' ' '))
 
 # e.g. /volume/disk1,/var/lib/docker,ext4,5G
@@ -31,23 +31,23 @@ do_disk() {
 
   if [[ -n "$src" && -f "$src" ]]; then
     UUID=$(blkid -o value "$src" | head -n 1)
-    mkdir -p "$DKVM_VM_MOUNTPOINT/$dst" >&2
-    echo "UUID=$UUID $dst $fs defaults,noatime 0 0" >>/.dkvm/fstab
+    mkdir -p "$RUNCVM_VM_MOUNTPOINT/$dst" >&2
+    echo "UUID=$UUID $dst $fs defaults,noatime 0 0" >>/.runcvm/fstab
     DISKS+=("-drive file=$src,format=raw,if=virtio,media=disk")
   fi
 }
 
 DISKS=()
-if [ -n "$DKVM_DISKS" ]; then
-  do_disk "$DKVM_DISKS"
+if [ -n "$RUNCVM_DISKS" ]; then
+  do_disk "$RUNCVM_DISKS"
 fi
 
-if [ -n "$DKVM_TMPFS" ]; then
-  echo "$DKVM_TMPFS" >>/.dkvm/fstab
+if [ -n "$RUNCVM_TMPFS" ]; then
+  echo "$RUNCVM_TMPFS" >>/.runcvm/fstab
 fi
 
-if [[ -z "$DKVM_CPUS" || "$DKVM_CPUS" -le 0 ]]; then
-  DKVM_CPUS=$(busybox nproc)
+if [[ -z "$RUNCVM_CPUS" || "$RUNCVM_CPUS" -le 0 ]]; then
+  RUNCVM_CPUS=$(busybox nproc)
 fi
 
 # echo "DISKS: ${DISKS[@]}"; bash && exit 0
@@ -55,7 +55,7 @@ fi
 # TODO:
 # - Consider using '-device pvpanic'
 
-if [ "$DKVM_ARCH" = "arm64" ]; then
+if [ "$RUNCVM_ARCH" = "arm64" ]; then
   CMD="qemu-system-aarch64"
   OPTS=(-cpu max -machine virt,gic-version=max,usb=off)
 else
@@ -63,17 +63,17 @@ else
   OPTS=(-enable-kvm -cpu host -machine q35,accel=kvm,usb=off,sata=off -device isa-debug-exit)
 fi
 
-if [ -n "$DKVM_QEMU_DISPLAY" ]; then
-  OPTS+=(-display $DKVM_QEMU_DISPLAY)
+if [ -n "$RUNCVM_QEMU_DISPLAY" ]; then
+  OPTS+=(-display $RUNCVM_QEMU_DISPLAY)
 else
   OPTS+=(-nographic)
 fi
 
-if [ "$DKVM_KERNEL_DEBUG" = "1" ]; then
+if [ "$RUNCVM_KERNEL_DEBUG" = "1" ]; then
   APPEND=("console=ttyS0")
 fi
 
-if [ "$DKVM_BIOS_DEBUG" != "1" ]; then
+if [ "$RUNCVM_BIOS_DEBUG" != "1" ]; then
   # Disable SeaBIOS serial console.
   # This -cfw_cfg path is modified from the SeaBIOS default (to avoid an otherwise-inevitable QEMU
   # warning being emitted) and so requires patched bios.bin file(s) (see Dockerfile)
@@ -85,15 +85,15 @@ ARGS=(
   -no-user-config
   -nodefaults
   -serial $SERIAL
-  -m "$DKVM_MEM_SIZE"
+  -m "$RUNCVM_MEM_SIZE"
   -chardev socket,id=char0,path=$QEMU_VIRTIOFSD_SOCKET
   -device vhost-user-fs-pci,queue-size=1024,chardev=char0,tag=myfs,ats=on
-  -kernel $DKVM_KERNEL_PATH
-  -initrd $DKVM_KERNEL_INITRAMFS_PATH
-  -append "$DKVM_KERNEL_ROOT $INIT rw ${APPEND[@]} $PANIC $DKVM_KERNEL_APPEND $BREAK"
-  -object memory-backend-file,id=mem,size="$DKVM_MEM_SIZE",mem-path=/dev/shm,share=on
+  -kernel $RUNCVM_KERNEL_PATH
+  -initrd $RUNCVM_KERNEL_INITRAMFS_PATH
+  -append "$RUNCVM_KERNEL_ROOT $INIT rw ${APPEND[@]} $PANIC $RUNCVM_KERNEL_APPEND $BREAK"
+  -object memory-backend-file,id=mem,size="$RUNCVM_MEM_SIZE",mem-path=/dev/shm,share=on
   -numa node,memdev=mem
-  -smp $DKVM_CPUS
+  -smp $RUNCVM_CPUS
   # Configure host/container tap device with PXE roms disabled
   -netdev tap,id=qemu0,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN -device virtio-net-pci,netdev=qemu0,mac=$MAC,rombar=0
   -no-reboot
@@ -105,6 +105,6 @@ ARGS=(
   -device virtserialport,chardev=charchannel0,name=org.qemu.guest_agent.0
 )
 
-if [[ "$DKVM_BREAK" =~ preqemu ]]; then bash; fi
+if [[ "$RUNCVM_BREAK" =~ preqemu ]]; then bash; fi
 
 exec $CMD "${ARGS[@]}"

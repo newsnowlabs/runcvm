@@ -1,4 +1,4 @@
-#!/opt/dkvm/bin/bash
+#!/opt/runcvm/bin/bash
 
 log() {
     echo "$@" >&2
@@ -22,7 +22,7 @@ usage() {
   cat <<"_EOE_" >&2
 Usage: sudo $0
 
-Installs DKVM runtime for Docker / Podman
+Installs RUNCVM runtime for Docker / Podman
 _EOE_
   exit 1
 }
@@ -36,15 +36,15 @@ _EOE_
   usage
 fi
 
-log "DKVM Runtime Installer"
+log "RUNCVM Runtime Installer"
 log "======================"
 log
 
 if [ -f "/etc/docker/daemon.json" ]; then
   log "1 Detected /etc/docker/daemon.json:"
-  log "  - Adding dkvm to runtimes property ..."
+  log "  - Adding runcvm to runtimes property ..."
 
-  if jq_set  "/etc/docker/daemon.json" '.runtimes.dkvm.path |= "/opt/dkvm/scripts/dkvm-runtime"'; then
+  if jq_set  "/etc/docker/daemon.json" '.runtimes.runcvm.path |= "/opt/runcvm/scripts/runcvm-runtime"'; then
     log "  - Done"
     log "  - Now restart docker in the usual way for your system, e.g."
     log
@@ -60,9 +60,9 @@ fi
 if [ -n "$(which podman)" ]; then
   log "2 Detected podman binary"
   cat <<_EOE_ >&2
-  - To enable experimental DKVM support for Podman, add the following
+  - To enable experimental RUNCVM support for Podman, add the following
     to /etc/containers/containers.conf in the [engine.runtimes] section:
 
-    dkvm = [ "/opt/dkvm/scripts/dkvm-runtime" ]
+    runcvm = [ "/opt/runcvm/scripts/runcvm-runtime" ]
 _EOE_
 fi

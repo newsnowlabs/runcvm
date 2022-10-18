@@ -1,15 +1,15 @@
-#!/opt/dkvm/bin/bash -e
+#!/opt/runcvm/bin/bash -e
 
 # See https://qemu-project.gitlab.io/qemu/interop/qemu-ga-ref.html
 
-. /opt/dkvm/scripts/dkvm-ctr-defaults
+. /opt/runcvm/scripts/runcvm-ctr-defaults
 
 jq() {
-  $DKVM/usr/bin/jq "$@"
+  $RUNCVM/usr/bin/jq "$@"
 }
 
 busybox() {
-  $DKVM/bin/busybox "$@"
+  $RUNCVM/bin/busybox "$@"
 }
 
 env() {
@@ -17,8 +17,8 @@ env() {
 }
 
 nc() {
-  # FIXME: Only redirect logs if DKVM_DEBUG_EXEC set
-  /opt/dkvm/usr/bin/nc -U $QEMU_GUEST_AGENT "$@" 2>>/tmp/exec.log
+  # FIXME: Only redirect logs if RUNCVM_DEBUG_EXEC set
+  /opt/runcvm/usr/bin/nc -U $QEMU_GUEST_AGENT "$@" 2>>/tmp/exec.log
 }
 
 # https://blog.dhampir.no/content/sleeping-without-a-subprocess-in-bash-and-how-to-sleep-forever
@@ -44,7 +44,7 @@ snore() {
 # $2 <cwd>
 # $3... <command> <args>
 
-command="$DKVM/scripts/dkvm-vm-exec"
+command="$RUNCVM/scripts/runcvm-vm-exec"
 IFS=':' read -r uid gid <<< "$1"
 args=($uid $gid "$2")
 shift 2

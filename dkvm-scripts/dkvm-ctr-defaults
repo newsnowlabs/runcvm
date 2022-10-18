@@ -1,8 +1,8 @@
-DKVM=/opt/dkvm
-DKVM_PATH=$DKVM/usr/sbin:$DKVM/usr/bin:$DKVM/sbin:$DKVM/bin:$DKVM/usr/lib/qemu
+RUNCVM=/opt/runcvm
+RUNCVM_PATH=$RUNCVM/usr/sbin:$RUNCVM/usr/bin:$RUNCVM/sbin:$RUNCVM/bin:$RUNCVM/usr/lib/qemu
 
-QEMU_IFUP="$DKVM/scripts/dkvm-ctr-qemu-ifup"
-QEMU_IFDOWN="$DKVM/scripts/dkvm-ctr-qemu-ifdown"
+QEMU_IFUP="$RUNCVM/scripts/runcvm-ctr-qemu-ifup"
+QEMU_IFDOWN="$RUNCVM/scripts/runcvm-ctr-qemu-ifdown"
 QEMU_BRIDGE='q0'
 
 QEMU_VIRTIOFSD_SOCKET=/run/.virtiofs.sock
@@ -10,10 +10,10 @@ QEMU_GUEST_AGENT=/run/.qemu-guest-agent
 QEMU_MONITOR_SOCKET=/run/.qemu-monitor-socket
 
 clean_env() {
-    export -n DKVM_BREAK DKVM_INIT \
-    DKVM_KERNEL DKVM_KERNEL_DEBUG DKVM_KERNEL_ROOT DKVM_KERNEL_APPEND DKVM_KERNEL_INITRAMFS_PATH DKVM_KERNEL_PATH DKVM_DISKS \
-    DKVM_UIDGID DKVM_VM_MOUNTPOINT DKVM_TMPFS \
-    DKVM_CPUS DKVM_MEM_SIZE
+    export -n RUNCVM_BREAK RUNCVM_INIT \
+    RUNCVM_KERNEL RUNCVM_KERNEL_DEBUG RUNCVM_KERNEL_ROOT RUNCVM_KERNEL_APPEND RUNCVM_KERNEL_INITRAMFS_PATH RUNCVM_KERNEL_PATH RUNCVM_DISKS \
+    RUNCVM_UIDGID RUNCVM_VM_MOUNTPOINT RUNCVM_TMPFS \
+    RUNCVM_CPUS RUNCVM_MEM_SIZE
 
     # May be set in VM by busybox init process
     export -n USER

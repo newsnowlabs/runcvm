@@ -1,4 +1,4 @@
-#!/opt/dkvm/bin/bash
+#!/opt/runcvm/bin/bash
 
 # REFERENCES
 
@@ -20,18 +20,18 @@
 # - https://www.kernel.org/doc/Documentation/filesystems/sharedsubtree.txt
 # - https://www.redhat.com/sysadmin/mount-namespaces
 
-LOG=/tmp/dkvm.log
-DKVM=/opt/dkvm
-DKVM_VM_MOUNTPOINT="/vm"
-DKVM_ENTRYPOINT=$DKVM/scripts/dkvm-ctr-entrypoint
-DKVM_EXEC=$DKVM/scripts/dkvm-ctr-exec
-DKVM_KERNELS=$DKVM/kernels
-DKVM_KERNEL_DEFAULT=debian
-DKVM_MEM_SIZE_DEFAULT="512M"
-DKVM_DEBUG=1
+LOG=/tmp/runcvm.log
+RUNCVM=/opt/runcvm
+RUNCVM_VM_MOUNTPOINT="/vm"
+RUNCVM_ENTRYPOINT=$RUNCVM/scripts/runcvm-ctr-entrypoint
+RUNCVM_EXEC=$RUNCVM/scripts/runcvm-ctr-exec
+RUNCVM_KERNELS=$RUNCVM/kernels
+RUNCVM_KERNEL_DEFAULT=debian
+RUNCVM_MEM_SIZE_DEFAULT="512M"
+RUNCVM_DEBUG=1
 
 debug() {
-  [ -n "$DKVM_DEBUG" ] && true || false
+  [ -n "$RUNCVM_DEBUG" ] && true || false
 }
 
 log() {
@@ -44,10 +44,10 @@ error() {
   (echo; echo) >&2
 
   # Dump message to stderr
-  echo "DKVM: Error: $1" >&2
+  echo "RUNCVM: Error: $1" >&2
 
   # Dump error also to the logfile
-  log "DKVM: Error: $1"
+  log "RUNCVM: Error: $1"
   exit -1
 }
 
@@ -195,41 +195,41 @@ if [ "$COMMAND" = "create" ]; then
     jq_set "$CFG" --arg init "$ARG0" '(.mounts[] | select(.destination == $init)) |= empty'
     
     # Replace the first argument with our own entrypoint; and remove the second, '--' (for now, #TODO)
-    jq_set "$CFG" --arg entrypoint "$DKVM_ENTRYPOINT" '.process.args[0] = $entrypoint | del(.process.args[1])'
+    jq_set "$CFG" --arg entrypoint "$RUNCVM_ENTRYPOINT" '.process.args[0] = $entrypoint | del(.process.args[1])'
     
     # We know the user intended an init process to be run in the container.
     # TODO: We might want to indicate this, so that our entrypoint does not skip doing this
     # if the original entrypoint also looks like an init process.
-    set_config_env "DKVM_INIT" "1"
+    set_config_env "RUNCVM_INIT" "1"
   else
     # We don't know if the original entrypoint is an init process or not.
     # Run our entrypoint first to work this out and do the right thing.
     
-    jq_set "$CFG" --arg entrypoint "$DKVM_ENTRYPOINT" '.process.args |= [$entrypoint] + .'
+    jq_set "$CFG" --arg entrypoint "$RUNCVM_ENTRYPOINT" '.process.args |= [$entrypoint] + .'
   fi
 
   # CONFIGURE USER
   # - Must be root to run container
-  DKVM_UIDGID=$(jq_get "$CFG" '(.process.user.uid | tostring) + ":" + (.process.user.gid | tostring)')
-  set_config_env "DKVM_UIDGID" "$DKVM_UIDGID"
+  RUNCVM_UIDGID=$(jq_get "$CFG" '(.process.user.uid | tostring) + ":" + (.process.user.gid | tostring)')
+  set_config_env "RUNCVM_UIDGID" "$RUNCVM_UIDGID"
   jq_set "$CFG" '.process.user = {"uid":0, "gid":0}'
-  log "DKVM_UIDGID=$DKVM_UIDGID"
+  log "RUNCVM_UIDGID=$RUNCVM_UIDGID"
 
   # CONFIGURE CPUS
-  DKVM_CPUS=$(( $(jq_get "$CFG" '.linux.resources.cpu.quota') / 100000))
-  set_config_env "DKVM_CPUS" "$DKVM_CPUS"
-  log "DKVM_CPUS=$DKVM_CPUS"
+  RUNCVM_CPUS=$(( $(jq_get "$CFG" '.linux.resources.cpu.quota') / 100000))
+  set_config_env "RUNCVM_CPUS" "$RUNCVM_CPUS"
+  log "RUNCVM_CPUS=$RUNCVM_CPUS"
 
   # CONFIGURE MOUNTS
-  set_config_env "DKVM_VM_MOUNTPOINT" "$DKVM_VM_MOUNTPOINT"
+  set_config_env "RUNCVM_VM_MOUNTPOINT" "$RUNCVM_VM_MOUNTPOINT"
 
   # First extract list of tmpfs mounts in fstab form, then delete them from the config
-  DKVM_TMPFS=$(jq_get "$CFG" '( .mounts[] | select(.type == "tmpfs" and (.destination | test("^/dev(/|$)") | not) ) ) | [.source + " " + .destination + " tmpfs " + (.options | map(select(. != "rprivate" and . != "private")) | join(",")) + " 0 0"] | .[0]')
+  RUNCVM_TMPFS=$(jq_get "$CFG" '( .mounts[] | select(.type == "tmpfs" and (.destination | test("^/dev(/|$)") | not) ) ) | [.source + " " + .destination + " tmpfs " + (.options | map(select(. != "rprivate" and . != "private")) | join(",")) + " 0 0"] | .[0]')
   jq_set "$CFG" -r 'del( .mounts[] | select(.type == "tmpfs" and (.destination | test("^/dev(/|$)") | not) ) )'
-  set_config_env "DKVM_TMPFS" "$DKVM_TMPFS"
+  set_config_env "RUNCVM_TMPFS" "$RUNCVM_TMPFS"
 
   # Rewrite all pre-existing bind/volume mounts (except those at or below /disks) to mount
-  # below $DKVM_VM_MOUNTPOINT instead of below /.
+  # below $RUNCVM_VM_MOUNTPOINT instead of below /.
   #
   # TODO TO CONSIDER:
   # If we excluded /etc/(resolv.conf,hosts,hostname), and moved these to top of the array
@@ -237,19 +237,19 @@ if [ "$COMMAND" = "create" ]; then
   # container and VM.
   #
   # N.B. A mount at or underneath /disks will NOT be mapped to /vm/disks - this path is reserved for mounting disk files to the container
-  jq_set "$CFG" --arg vm "$DKVM_VM_MOUNTPOINT" '( .mounts[] | select(.type == "bind" and (.destination | test("^/disks(/|$)") | not) ) ).destination |= $vm + .'
+  jq_set "$CFG" --arg vm "$RUNCVM_VM_MOUNTPOINT" '( .mounts[] | select(.type == "bind" and (.destination | test("^/disks(/|$)") | not) ) ).destination |= $vm + .'
 
-  # Mount / from container to $DKVM_VM_MOUNTPOINT, recursively binding all pre-existing mount points
+  # Mount / from container to $RUNCVM_VM_MOUNTPOINT, recursively binding all pre-existing mount points
   # (these being only the ones defined ahead of this item in the mounts[] array - so order matters!)
-  jq_set "$CFG" --arg root "$ROOT" --arg vm "$DKVM_VM_MOUNTPOINT" '.mounts |= [{"destination":$vm,"type":"bind","source":$root,"options":["rbind","private","rw"]}] + .'
+  jq_set "$CFG" --arg root "$ROOT" --arg vm "$RUNCVM_VM_MOUNTPOINT" '.mounts |= [{"destination":$vm,"type":"bind","source":$root,"options":["rbind","private","rw"]}] + .'
 
-  # Mount a tmpfs at /.dkvm in container
+  # Mount a tmpfs at /.runcvm in container
   # Define this at top of mounts[] so it is recursively mounted
-  jq_set "$CFG" '.mounts |= [{"destination":"/.dkvm","type":"tmpfs","source":"dkvm","options":["nosuid","noexec","nodev","size=1M","mode=700"]}] + .'
+  jq_set "$CFG" '.mounts |= [{"destination":"/.runcvm","type":"tmpfs","source":"runcvm","options":["nosuid","noexec","nodev","size=1M","mode=700"]}] + .'
 
-  # Mount /opt/dkvm from host to container
+  # Mount /opt/runcvm from host to container
   # Define this at top of mounts[] so it is recursively mounted
-  jq_set "$CFG" --arg dkvm "$DKVM" '.mounts |= [{"destination":$dkvm,"type":"bind","source":$dkvm,"options":["bind","private","ro"]}] + .'
+  jq_set "$CFG" --arg runcvm "$RUNCVM" '.mounts |= [{"destination":$runcvm,"type":"bind","source":$runcvm,"options":["bind","private","ro"]}] + .'
 
   # Mount a tmpfs at /run in container
   # Define this at bottom of mounts[] so it is not recursively mounted to /vm
@@ -257,122 +257,122 @@ if [ "$COMMAND" = "create" ]; then
 
   # DETERMINE LAUNCH KERNEL:
   #
-  # 1. If DKVM_KERNEL specified:
-  #    - <dist> or <dist>/latest - use latest DKVM kernel available for this dist *and* ARGS
-  #    - <dist>/<version> - use specific DKVM kernel version for this dist *and* ARGS
+  # 1. If RUNCVM_KERNEL specified:
+  #    - <dist> or <dist>/latest - use latest RUNCVM kernel available for this dist *and* ARGS
+  #    - <dist>/<version> - use specific RUNCVM kernel version for this dist *and* ARGS
   # 2. Else, check /etc/os-release and:
   #    a. Use builtin kernel for this dist (if present in the expected location) *and* ARGS
-  #    b. Use latest DKVM kernel available for the dist:
+  #    b. Use latest RUNCVM kernel available for the dist:
   #      - ID=alpine, VERSION_ID=3.16.0 => alpine/latest
   #      - ID=debian, VERSION_ID=11     => debian/latest
   #      - ID=ubuntu, VERSION_ID=22.04  => ubuntu/latest
   
-  # Look for DKVM_KERNEL env var
-  DKVM_KERNEL=$(get_config_env 'DKVM_KERNEL')
-  log "DKVM_KERNEL=$DKVM_KERNEL (1)"
+  # Look for RUNCVM_KERNEL env var
+  RUNCVM_KERNEL=$(get_config_env 'RUNCVM_KERNEL')
+  log "RUNCVM_KERNEL=$RUNCVM_KERNEL (1)"
 
-  if [ -n "$DKVM_KERNEL" ]; then
+  if [ -n "$RUNCVM_KERNEL" ]; then
     # If found, validate
 
-    if [[ "$DKVM_KERNEL" =~ ^[a-z]+$ ]]; then
-      DKVM_KERNEL+="/latest"
+    if [[ "$RUNCVM_KERNEL" =~ ^[a-z]+$ ]]; then
+      RUNCVM_KERNEL+="/latest"
     fi
   
-    if [[ "$DKVM_KERNEL" =~ \.\. ]]; then
-      error "Kernel '$DKVM_KERNEL' invalid (contains '..')"
+    if [[ "$RUNCVM_KERNEL" =~ \.\. ]]; then
+      error "Kernel '$RUNCVM_KERNEL' invalid (contains '..')"
     fi
   
-    if ! [[ "$DKVM_KERNEL" =~ ^[a-z]+(/[^/]+)?$ ]]; then
-      error "Kernel '$DKVM_KERNEL' invalid (should match ^[a-z]+(/[^/]+)?$)"
+    if ! [[ "$RUNCVM_KERNEL" =~ ^[a-z]+(/[^/]+)?$ ]]; then
+      error "Kernel '$RUNCVM_KERNEL' invalid (should match ^[a-z]+(/[^/]+)?$)"
     fi
   
-    if ! [ -d "$DKVM_KERNELS/$DKVM_KERNEL" ]; then
-      error "Kernel '$DKVM_KERNEL' not found (check $DKVM_KERNELS)"
+    if ! [ -d "$RUNCVM_KERNELS/$RUNCVM_KERNEL" ]; then
+      error "Kernel '$RUNCVM_KERNEL' not found (check $RUNCVM_KERNELS)"
     fi
 
-    DKVM_KERNEL_ID=$(dirname "$DKVM_KERNEL") # Returns e.g. alpine, debian, ubuntu
+    RUNCVM_KERNEL_ID=$(dirname "$RUNCVM_KERNEL") # Returns e.g. alpine, debian, ubuntu
 
   else
     # If not found, look for value from /etc/os-release in the container image
     
-    DKVM_KERNEL_ID=$(load_env_from_file "$ROOT/etc/os-release" "ID")
+    RUNCVM_KERNEL_ID=$(load_env_from_file "$ROOT/etc/os-release" "ID")
 
     # Currently unused
-    # DKVM_KERNEL_OS_VERSION_ID=$(load_var_from_env "$ROOT/etc/os-release" "VERSION_ID")
+    # RUNCVM_KERNEL_OS_VERSION_ID=$(load_var_from_env "$ROOT/etc/os-release" "VERSION_ID")
 
     # If still not found, assign a default
-    if [ -z "$DKVM_KERNEL_ID" ]; then
-      DKVM_KERNEL_ID="${DKVM_KERNEL_DEFAULT:-debian}"
+    if [ -z "$RUNCVM_KERNEL_ID" ]; then
+      RUNCVM_KERNEL_ID="${RUNCVM_KERNEL_DEFAULT:-debian}"
     fi
 
-    DKVM_KERNEL="$DKVM_KERNEL_ID/latest"
+    RUNCVM_KERNEL="$RUNCVM_KERNEL_ID/latest"
   fi
   
-  log "DKVM_KERNEL=$DKVM_KERNEL (2)"
-  log "DKVM_KERNEL_ID=$DKVM_KERNEL_ID"
-  log "DKVM_KERNEL_VERSION=$DKVM_KERNEL_VERSION"
+  log "RUNCVM_KERNEL=$RUNCVM_KERNEL (2)"
+  log "RUNCVM_KERNEL_ID=$RUNCVM_KERNEL_ID"
+  log "RUNCVM_KERNEL_VERSION=$RUNCVM_KERNEL_VERSION"
   
   # Now look up the default kernel and initramfs paths and args for this kernel
-  case "$DKVM_KERNEL_ID" in
-      debian) DKVM_KERNEL_OS_KERNEL_PATH="/vmlinuz"
-              DKVM_KERNEL_OS_INITRAMFS_PATH="/initrd.img"
-              DKVM_KERNEL_ROOT="rootfstype=virtiofs root=myfs noresume nomodeset"
+  case "$RUNCVM_KERNEL_ID" in
+      debian) RUNCVM_KERNEL_OS_KERNEL_PATH="/vmlinuz"
+              RUNCVM_KERNEL_OS_INITRAMFS_PATH="/initrd.img"
+              RUNCVM_KERNEL_ROOT="rootfstype=virtiofs root=myfs noresume nomodeset"
               ;;
-      ubuntu) DKVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
-              DKVM_KERNEL_OS_INITRAMFS_PATH="/boot/initrd.img"
-              DKVM_KERNEL_ROOT="rootfstype=virtiofs root=myfs noresume nomodeset"
+      ubuntu) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
+              RUNCVM_KERNEL_OS_INITRAMFS_PATH="/boot/initrd.img"
+              RUNCVM_KERNEL_ROOT="rootfstype=virtiofs root=myfs noresume nomodeset"
               ;;
-          ol) DKVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
-              DKVM_KERNEL_OS_INITRAMFS_PATH="/boot/initramfs"
-              DKVM_KERNEL_ROOT="root=virtiofs:myfs noresume nomodeset"
+          ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
+              RUNCVM_KERNEL_OS_INITRAMFS_PATH="/boot/initramfs"
+              RUNCVM_KERNEL_ROOT="root=virtiofs:myfs noresume nomodeset"
               ;;
-      alpine) DKVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz-virt"
-              DKVM_KERNEL_OS_INITRAMFS_PATH="/boot/initramfs-virt"
-              DKVM_KERNEL_ROOT="rootfstype=virtiofs root=myfs resume= nomodeset"
+      alpine) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz-virt"
+              RUNCVM_KERNEL_OS_INITRAMFS_PATH="/boot/initramfs-virt"
+              RUNCVM_KERNEL_ROOT="rootfstype=virtiofs root=myfs resume= nomodeset"
               ;;
 
-           *) error "Unrecognised image O/S '$DKVM_KERNEL'; specify --env=DKVM_KERNEL=<dist> or --env=DKVM_KERNEL=<dist>/<version>"; ;;
+           *) error "Unrecognised image O/S '$RUNCVM_KERNEL'; specify --env=RUNCVM_KERNEL=<dist> or --env=RUNCVM_KERNEL=<dist>/<version>"; ;;
   esac
   
   # Look for a kernel and initramfs at the expected paths in the container image.
-  if [[ -f "$ROOT/$DKVM_KERNEL_OS_KERNEL_PATH" && -f "$ROOT/$DKVM_KERNEL_OS_INITRAMFS_PATH" ]]; then
-    DKVM_KERNEL_PATH="$DKVM_KERNEL_OS_KERNEL_PATH"
-    DKVM_KERNEL_INITRAMFS_PATH="$DKVM_KERNEL_OS_INITRAMFS_PATH"
+  if [[ -f "$ROOT/$RUNCVM_KERNEL_OS_KERNEL_PATH" && -f "$ROOT/$RUNCVM_KERNEL_OS_INITRAMFS_PATH" ]]; then
+    RUNCVM_KERNEL_PATH="$RUNCVM_KERNEL_OS_KERNEL_PATH"
+    RUNCVM_KERNEL_INITRAMFS_PATH="$RUNCVM_KERNEL_OS_INITRAMFS_PATH"
   else
     # If we didn't find a kernel and initramfs at the expected paths in the container image,
-    # select the latest DKVM kernel version and arrange to mount it.
+    # select the latest RUNCVM kernel version and arrange to mount it.
 
-    DKVM_KERNEL_VERSION=$(basename $(readlink -f "$DKVM_KERNELS/$DKVM_KERNEL")) # Returns e.g. 5.15.53-0-virt
+    RUNCVM_KERNEL_VERSION=$(basename $(readlink -f "$RUNCVM_KERNELS/$RUNCVM_KERNEL")) # Returns e.g. 5.15.53-0-virt
 
-    DKVM_KERNEL_MOUNT_LIB_MODULES=$(get_config_env 'DKVM_KERNEL_MOUNT_LIB_MODULES')
-    if [ -n "$DKVM_KERNEL_MOUNT_LIB_MODULES" ]; then
-      DKVM_KERNEL_MODULES_SRC="$DKVM_KERNELS/$DKVM_KERNEL_ID/$DKVM_KERNEL_VERSION/modules"
-      DKVM_KERNEL_MODULES_DST="/lib/modules"
+    RUNCVM_KERNEL_MOUNT_LIB_MODULES=$(get_config_env 'RUNCVM_KERNEL_MOUNT_LIB_MODULES')
+    if [ -n "$RUNCVM_KERNEL_MOUNT_LIB_MODULES" ]; then
+      RUNCVM_KERNEL_MODULES_SRC="$RUNCVM_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/modules"
+      RUNCVM_KERNEL_MODULES_DST="/lib/modules"
     else
-      DKVM_KERNEL_MODULES_SRC="$DKVM_KERNELS/$DKVM_KERNEL_ID/$DKVM_KERNEL_VERSION/modules/$DKVM_KERNEL_VERSION"
-      DKVM_KERNEL_MODULES_DST="/lib/modules/$DKVM_KERNEL_VERSION"
+      RUNCVM_KERNEL_MODULES_SRC="$RUNCVM_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/modules/$RUNCVM_KERNEL_VERSION"
+      RUNCVM_KERNEL_MODULES_DST="/lib/modules/$RUNCVM_KERNEL_VERSION"
     fi
     
-    DKVM_KERNEL_PATH="$DKVM_KERNELS/$DKVM_KERNEL_ID/$DKVM_KERNEL_VERSION/vmlinuz"
-    DKVM_KERNEL_INITRAMFS_PATH="$DKVM_KERNELS/$DKVM_KERNEL_ID/$DKVM_KERNEL_VERSION/initrd"
+    RUNCVM_KERNEL_PATH="$RUNCVM_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/vmlinuz"
+    RUNCVM_KERNEL_INITRAMFS_PATH="$RUNCVM_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/initrd"
 
-    jq_set "$CFG" --arg modules_dst "$DKVM_VM_MOUNTPOINT$DKVM_KERNEL_MODULES_DST" --arg modules_src "$DKVM_KERNEL_MODULES_SRC" '.mounts += [{"destination":$modules_dst,"type":"bind","source":$modules_src,"options":["bind","private","ro"]}]'
+    jq_set "$CFG" --arg modules_dst "$RUNCVM_VM_MOUNTPOINT$RUNCVM_KERNEL_MODULES_DST" --arg modules_src "$RUNCVM_KERNEL_MODULES_SRC" '.mounts += [{"destination":$modules_dst,"type":"bind","source":$modules_src,"options":["bind","private","ro"]}]'
   fi
 
-  log "DKVM_KERNEL=$DKVM_KERNEL"
-  log "DKVM_KERNEL_ID=$DKVM_KERNEL_ID"
-  log "DKVM_KERNEL_VERSION=$DKVM_KERNEL_VERSION"
-  log "DKVM_KERNEL_OS_KERNEL_PATH=$DKVM_KERNEL_OS_KERNEL_PATH"
-  log "DKVM_KERNEL_OS_INITRAMFS_PATH=$DKVM_KERNEL_OS_INITRAMFS_PATH"
-  log "DKVM_KERNEL_PATH=$DKVM_KERNEL_PATH"
-  log "DKVM_KERNEL_INITRAMFS_PATH=$DKVM_KERNEL_INITRAMFS_PATH"
-  log "DKVM_KERNEL_ROOT=$DKVM_KERNEL_ROOT"
-  log "DKVM_KERNEL_MODULES_SRC=$DKVM_KERNEL_MODULES_SRC"
-  log "DKVM_KERNEL_MODULES_DST=$DKVM_KERNEL_MODULES_DST"
+  log "RUNCVM_KERNEL=$RUNCVM_KERNEL"
+  log "RUNCVM_KERNEL_ID=$RUNCVM_KERNEL_ID"
+  log "RUNCVM_KERNEL_VERSION=$RUNCVM_KERNEL_VERSION"
+  log "RUNCVM_KERNEL_OS_KERNEL_PATH=$RUNCVM_KERNEL_OS_KERNEL_PATH"
+  log "RUNCVM_KERNEL_OS_INITRAMFS_PATH=$RUNCVM_KERNEL_OS_INITRAMFS_PATH"
+  log "RUNCVM_KERNEL_PATH=$RUNCVM_KERNEL_PATH"
+  log "RUNCVM_KERNEL_INITRAMFS_PATH=$RUNCVM_KERNEL_INITRAMFS_PATH"
+  log "RUNCVM_KERNEL_ROOT=$RUNCVM_KERNEL_ROOT"
+  log "RUNCVM_KERNEL_MODULES_SRC=$RUNCVM_KERNEL_MODULES_SRC"
+  log "RUNCVM_KERNEL_MODULES_DST=$RUNCVM_KERNEL_MODULES_DST"
   
-  set_config_env "DKVM_KERNEL_PATH" "$DKVM_KERNEL_PATH"
-  set_config_env "DKVM_KERNEL_INITRAMFS_PATH" "$DKVM_KERNEL_INITRAMFS_PATH"
-  set_config_env "DKVM_KERNEL_ROOT" "$DKVM_KERNEL_ROOT"
+  set_config_env "RUNCVM_KERNEL_PATH" "$RUNCVM_KERNEL_PATH"
+  set_config_env "RUNCVM_KERNEL_INITRAMFS_PATH" "$RUNCVM_KERNEL_INITRAMFS_PATH"
+  set_config_env "RUNCVM_KERNEL_ROOT" "$RUNCVM_KERNEL_ROOT"
 
   # Configure devices
   jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":232,"access":"rwm"},{"allow":true,"type":"c","major":10,"minor":200,"access":"rwm"}]'
@@ -383,24 +383,24 @@ if [ "$COMMAND" = "create" ]; then
   jq_set "$CFG" '.linux.seccomp |= empty'
   
   # CONFIGURE MEMORY
-  # Set /dev/shm to DKVM_MEM_SIZE env var, or to default
+  # Set /dev/shm to RUNCVM_MEM_SIZE env var, or to default
   # - it should be large enough to support VM memory
-  DKVM_MEM_LIMIT=$(jq_get "$CFG" '.linux.resources.memory.limit')
-  log "DKVM_MEM_LIMIT=$DKVM_MEM_LIMIT"
-  if [ "$DKVM_MEM_LIMIT" != "null" ]; then
-    DKVM_MEM_SIZE="$(( $DKVM_MEM_LIMIT/1024/1024 ))M"
+  RUNCVM_MEM_LIMIT=$(jq_get "$CFG" '.linux.resources.memory.limit')
+  log "RUNCVM_MEM_LIMIT=$RUNCVM_MEM_LIMIT"
+  if [ "$RUNCVM_MEM_LIMIT" != "null" ]; then
+    RUNCVM_MEM_SIZE="$(( $RUNCVM_MEM_LIMIT/1024/1024 ))M"
   else
-    DKVM_MEM_SIZE="$DKVM_MEM_SIZE_DEFAULT"
+    RUNCVM_MEM_SIZE="$RUNCVM_MEM_SIZE_DEFAULT"
   fi
-  log "DKVM_MEM_SIZE=$DKVM_MEM_SIZE"
-  set_config_env "DKVM_MEM_SIZE" "$DKVM_MEM_SIZE"
-  jq_set "$CFG" --arg size "$DKVM_MEM_SIZE" '( .mounts[] | select(.destination == "/dev/shm") ) = {"destination": "/dev/shm","type": "tmpfs","source": "shm","options": ["nosuid","noexec","nodev","mode=1777","size=" + $size]}'
+  log "RUNCVM_MEM_SIZE=$RUNCVM_MEM_SIZE"
+  set_config_env "RUNCVM_MEM_SIZE" "$RUNCVM_MEM_SIZE"
+  jq_set "$CFG" --arg size "$RUNCVM_MEM_SIZE" '( .mounts[] | select(.destination == "/dev/shm") ) = {"destination": "/dev/shm","type": "tmpfs","source": "shm","options": ["nosuid","noexec","nodev","mode=1777","size=" + $size]}'
 
   # In future, set the container memory limit to something reasonable to support
-  # QEMU + virtiofsd + dnsmasq. Perhaps $DKVM_MEM_LIMIT+K (or vice-versa, reduce
-  # DKVM_MEM_SIZE by K), where K is the memory requirement for the container's processes
+  # QEMU + virtiofsd + dnsmasq. Perhaps $RUNCVM_MEM_LIMIT+K (or vice-versa, reduce
+  # RUNCVM_MEM_SIZE by K), where K is the memory requirement for the container's processes
   # over and above QEMU.
-  # jq_set "$CFG" --arg size $(($DKVM_MEM_LIMIT + )) '.linux.resources.memory.limit |= ($size | tonumber)'
+  # jq_set "$CFG" --arg size $(($RUNCVM_MEM_LIMIT + )) '.linux.resources.memory.limit |= ($size | tonumber)'
 
   # Add non-default capabilities needed by:
   # - Docker: CAP_NET_ADMIN
@@ -410,9 +410,9 @@ if [ "$COMMAND" = "create" ]; then
     jq_set "$CFG" --arg field "bounding" '.process.capabilities[$field] |= (.+ ["CAP_NET_ADMIN","CAP_NET_RAW","CAP_MKNOD","CAP_AUDIT_WRITE"] | unique)'
   done
   
-  # Filter for DKVM_SYS_ADMIN=1
-  DKVM_SYS_ADMIN=$(get_config_env "DKVM_SYS_ADMIN")
-  if [ "$DKVM_SYS_ADMIN" = "1" ]; then
+  # Filter for RUNCVM_SYS_ADMIN=1
+  RUNCVM_SYS_ADMIN=$(get_config_env "RUNCVM_SYS_ADMIN")
+  if [ "$RUNCVM_SYS_ADMIN" = "1" ]; then
     # TODO use 'unique'
     jq_set "$CFG" '.process.capabilities.bounding += ["CAP_SYS_ADMIN"] | .process.capabilities.effective += ["CAP_SYS_ADMIN"] | .process.capabilities.permitted += ["CAP_SYS_ADMIN"]'
   fi
@@ -467,7 +467,7 @@ elif [ "$COMMAND" = "exec" ]; then
     uidgid=$(jq_get "$PROCESS" '(.user.uid | tostring) + ":" + (.user.gid | tostring)')
     cwd=$(jq_get "$PROCESS" '.cwd')
 
-    jq_set "$PROCESS" --arg exec "$DKVM_EXEC" --arg uidgid "$uidgid" --arg cwd "$cwd" '.args |= [$exec, $uidgid, $cwd] + .'
+    jq_set "$PROCESS" --arg exec "$RUNCVM_EXEC" --arg uidgid "$uidgid" --arg cwd "$cwd" '.args |= [$exec, $uidgid, $cwd] + .'
 
     # Force root (or whatever user qemu runs as)
     # Force cwd in the container to / 

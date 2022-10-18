@@ -1,25 +1,25 @@
-#!/opt/dkvm/bin/bash
+#!/opt/runcvm/bin/bash
 
-. /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
+. /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
 
-if [ -f /.dkvm/once ]; then
+if [ -f /.runcvm/once ]; then
   poweroff
   exit 0
 else
-  touch /.dkvm/once
+  touch /.runcvm/once
 fi
 
 # Change to saved PWD
-cd $(cat /.dkvm/pwd)
+cd $(cat /.runcvm/pwd)
 
 # Load original environment
-. /.dkvm/config
+. /.runcvm/config
 
 # Load original entrypoint
-mapfile -t ARGS </.dkvm/entrypoint
+mapfile -t ARGS </.runcvm/entrypoint
 
-# Clean DKVM env vars
+# Clean RUNCVM env vars
 clean_env
 
-IFS=':' read -r uid gid <<< "$DKVM_UIDGID"
-exec $DKVM/bin/s6-applyuidgid -u $uid -g $gid -G "" "${ARGS[@]}"
+IFS=':' read -r uid gid <<< "$RUNCVM_UIDGID"
+exec $RUNCVM/bin/s6-applyuidgid -u $uid -g $gid -G "" "${ARGS[@]}"

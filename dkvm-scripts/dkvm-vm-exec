@@ -1,4 +1,4 @@
-#!/opt/dkvm/bin/bash
+#!/opt/runcvm/bin/bash
 
 uid="$1"
 gid="$2"
@@ -7,4 +7,4 @@ shift 3
 
 cd "$cwd"
 
-exec /opt/dkvm/bin/s6-applyuidgid -u $uid -g $gid -G "" "$@"
+exec /opt/runcvm/bin/s6-applyuidgid -u $uid -g $gid -G "" "$@"

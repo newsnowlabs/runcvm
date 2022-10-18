@@ -1,6 +1,6 @@
-#!/opt/dkvm/bin/bash
+#!/opt/runcvm/bin/bash
 
-REPO=${REPO:-newsnowlabs/dkvm}
+REPO=${REPO:-newsnowlabs/runcvm}
 
 log() {
     echo "$@" >&2
@@ -14,6 +14,6 @@ _EOE_
 }
 
 # TODO:
-# - Check for any running DKVM containers, and if found, throw error
+# - Check for any running RUNCVM containers, and if found, throw error
 
-docker run --rm -v /opt/dkvm:/dkvm $REPO
+docker run --rm -v /opt/runcvm:/runcvm $REPO

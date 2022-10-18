@@ -1,25 +1,25 @@
-#!/opt/dkvm/bin/bash
+#!/opt/runcvm/bin/bash
 
 # DEBUG
-if [[ "$DKVM_BREAK" =~ (prenet|postnet) ]]; then set -x; fi
+if [[ "$RUNCVM_BREAK" =~ (prenet|postnet) ]]; then set -x; fi
 
 # SAVE ENTRYPOINT
 args=("$@")
-printf "%s\n" "${args[@]}" >/.dkvm/entrypoint
+printf "%s\n" "${args[@]}" >/.runcvm/entrypoint
 
 # SAVE ENVIRONMENT
 export -n SHLVL OLDPWD
 
-export >/.dkvm/config
+export >/.runcvm/config
 
 # NOW LOAD DEFAULT ENV AND PATH
-. /opt/dkvm/scripts/dkvm-ctr-defaults && PATH="$DKVM_PATH"
+. /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
 
 # SAVE PWD
-busybox pwd >/.dkvm/pwd
+busybox pwd >/.runcvm/pwd
 
 # DEBUG
-if [[ "$DKVM_BREAK" =~ prenet ]]; then bash; fi
+if [[ "$RUNCVM_BREAK" =~ prenet ]]; then bash; fi
 
 # SAVE NETWORKING CONFIG
 DOCKER_IF=$(ip -json route show | jq -r '.[] | select(.dst == "default") | .dev')
@@ -29,10 +29,10 @@ DOCKER_IP_NET=$(ip addr show dev $DOCKER_IF | grep inet | head -n 1 | awk '{prin
 DOCKER_IP=$(echo $DOCKER_IP_NET | cut -d'/' -f1)
 
 QEMU_BRIDGE_IP=169.254.1.1
-DKVM_DNS_IP=169.254.169.254
+RUNCVM_DNS_IP=169.254.169.254
 
-echo $DOCKER_IP_NET >/.dkvm/net
-echo $DOCKER_GW >/.dkvm/netgw
+echo $DOCKER_IP_NET >/.runcvm/net
+echo $DOCKER_GW >/.runcvm/netgw
 
 # RECONFIGURE CONTAINER NETWORK
 ip addr flush dev $DOCKER_IF
@@ -56,11 +56,11 @@ ip link set dev $QEMU_BRIDGE up
 ip route add $DOCKER_NET dev $QEMU_BRIDGE
 ip route add default via $DOCKER_GW dev $QEMU_BRIDGE
 
-# Accept DNS requests for $DKVM_DNS_IP; these will be passed to dnsmasq
-XTABLES_LIBDIR=/opt/dkvm/lib64/usr/lib/xtables/ /opt/dkvm/sbin/xtables-nft-multi iptables -t nat -A PREROUTING -d $DKVM_DNS_IP/32 -p udp -m udp --dport 53 -j REDIRECT
+# Accept DNS requests for $RUNCVM_DNS_IP; these will be passed to dnsmasq
+XTABLES_LIBDIR=/opt/runcvm/lib64/usr/lib/xtables/ /opt/runcvm/sbin/xtables-nft-multi iptables -t nat -A PREROUTING -d $RUNCVM_DNS_IP/32 -p udp -m udp --dport 53 -j REDIRECT
 
 # Ensure all outgoing traffic via the QEMU bridge from the bridge's own IP is masqueraded as if from the VM
-XTABLES_LIBDIR=/opt/dkvm/lib64/usr/lib/xtables/ /opt/dkvm/sbin/xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -j SNAT --to-source $DOCKER_IP
+XTABLES_LIBDIR=/opt/runcvm/lib64/usr/lib/xtables/ /opt/runcvm/sbin/xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -j SNAT --to-source $DOCKER_IP
 
 # FIXME: Bind-mount /etc/resolv.conf as well as /vm/etc/resolv.conf to prevent them showing in 'docker diff'
 cat /vm/etc/resolv.conf >/etc/resolv.conf
@@ -69,15 +69,15 @@ echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
 
 # LAUNCH DNSMASQ
 # It will receive local DNS requests (within the container, on 127.0.0.1)
-# and requests redirected locally (via the iptables PREROUTING REDIRECT rule) for $DKVM_DNS_IP.
+# and requests redirected locally (via the iptables PREROUTING REDIRECT rule) for $RUNCVM_DNS_IP.
 dnsmasq -u root --no-hosts
 
 # LAUNCH VIRTIOFSD
-/opt/dkvm/scripts/dkvm-ctr-virtiofsd &
+/opt/runcvm/scripts/runcvm-ctr-virtiofsd &
 
 # DEBUG
-if [[ "$DKVM_BREAK" =~ postnet ]]; then bash; fi
+if [[ "$RUNCVM_BREAK" =~ postnet ]]; then bash; fi
 
 # LAUNCH INIT SUPERVISING QEMU
 # FIXME: Add -v to debug
-exec /opt/dkvm/sbin/dkvm-init -c /opt/dkvm/scripts/dkvm-ctr-qemu
+exec /opt/runcvm/sbin/runcvm-init -c /opt/runcvm/scripts/runcvm-ctr-qemu
