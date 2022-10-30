@@ -2,7 +2,7 @@
 
 ## Introduction
 
-RunCVM is an experimental open-source Docker container runtime for Linux, created by Struan Bartlett at NewsNow Labs, that makes launching standard containerised workloads in VMs as easy as launching them in containers e.g.:
+RunCVM (Run Container Virtual Machine) is an experimental open-source Docker container runtime for Linux, created by Struan Bartlett at NewsNow Labs, that makes launching standard containerised workloads in VMs as easy as launching them in containers e.g.:
 
 Launch an nginx VM listening on port 8080:
 
