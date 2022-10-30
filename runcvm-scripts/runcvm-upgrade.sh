@@ -14,6 +14,6 @@ _EOE_
 }
 
 # TODO:
-# - Check for any running RUNCVM containers, and if found, throw error
+# - Check for any running RunCVM containers, and if found, throw error
 
 docker run --rm -v /opt/runcvm:/runcvm $REPO

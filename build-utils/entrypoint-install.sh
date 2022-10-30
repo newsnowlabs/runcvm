@@ -9,7 +9,7 @@ if mountpoint $MNT >/dev/null; then
   #cp -a /opt/runcvm/* $MNT/
   rsync -aR --delete /opt/runcvm/./ $MNT/
 
-  echo "RUNCVM install/upgrade successful!" >&2
+  echo "RunCVM install/upgrade successful!" >&2
   echo >&2
 else
 

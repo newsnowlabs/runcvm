@@ -44,10 +44,10 @@ error() {
   (echo; echo) >&2
 
   # Dump message to stderr
-  echo "RUNCVM: Error: $1" >&2
+  echo "RunCVM: Error: $1" >&2
 
   # Dump error also to the logfile
-  log "RUNCVM: Error: $1"
+  log "RunCVM: Error: $1"
   exit -1
 }
 

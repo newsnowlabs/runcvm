@@ -178,7 +178,7 @@ RUN mkdir -p /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*)) && \
     cp -a /lib/modules/ /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*))/ && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/ol
 
-# Build RUNCVM installation
+# Build RunCVM installation
 
 FROM alpine
 

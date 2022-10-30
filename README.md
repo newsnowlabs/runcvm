@@ -1,8 +1,8 @@
-# RUNCVM Container Runtime
+# RunCVM Container Runtime
 
 ## Introduction
 
-RUNCVM (DocKer VM) is an experimental open-source Docker container runtime for Linux, created by Struan Bartlett at NewsNow Labs, that makes launching standard containerised workloads in VMs as easy as launching them in containers e.g.:
+RunCVM is an experimental open-source Docker container runtime for Linux, created by Struan Bartlett at NewsNow Labs, that makes launching standard containerised workloads in VMs as easy as launching them in containers e.g.:
 
 Launch an nginx VM listening on port 8080:
 
@@ -22,20 +22,20 @@ Launch a vanilla ubuntu VM, with interactive terminal:
 docker run --runtime=runcvm --name ubuntu1 --rm -it ubuntu
 ```
 
-RUNCVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualisation technology. In this sense, RUNCVM has similar aims to [Kata Containers](https://katacontainers.io/).
+RunCVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualisation technology. In this sense, RunCVM has similar aims to [Kata Containers](https://katacontainers.io/).
 
-However, RUNCVM:
+However, RunCVM:
 
 - Uses a lightweight 'wrapper-runtime' technology that piggybacks the standard container runtime `runc`, making its code footprint and external dependencies extremely small, and its internals extremely simple and easy to tailor for specific purposes.
 - Is written almost entirely in shell script, for simplicity, portability and ease of development.
 - Is compatible with `docker run` (with experimental support for `podman run`).
 - Has no external dependencies (except for Docker/Podman).
 
-RUNCVM makes some trade-offs in return for this simplicity. See the full list of [features and limitations](#features-and-limitations).
+RunCVM makes some trade-offs in return for this simplicity. See the full list of [features and limitations](#features-and-limitations).
 
-RUNCVM was born out of difficulties experienced getting the Docker and Podman CLIs to launch Kata Containers, and a belief that launching containerised workloads in VMs needn't be so complicated.
+RunCVM was born out of difficulties experienced getting the Docker and Podman CLIs to launch Kata Containers, and a belief that launching containerised workloads in VMs needn't be so complicated.
 
-> **Support launching images:** If you encounter any Docker image that launches in a standard container runtime that does not launch in RUNCVM,
+> **Support launching images:** If you encounter any Docker image that launches in a standard container runtime that does not launch in RunCVM,
 or launches but with unexpected behaviour, please [raise an issue](https://github.com/newsnowlabs/runcvm/issues) titled _Launch failure for image `<image>`_ or _Unexpected behaviour for image `<image>`_.
 
 ## Contents
@@ -44,8 +44,8 @@ or launches but with unexpected behaviour, please [raise an issue](https://githu
 - [Licence](#licence)
 - [Project aims](#project-aims)
 - [Project ambitions](#project-ambitions)
-- [Applications for RUNCVM](#applications-for-runcvm)
-- [How RUNCVM works](#how-runcvm-works)
+- [Applications for RunCVM](#applications-for-runcvm)
+- [How RunCVM works](#how-runcvm-works)
 - [System requirements](#system-requirements)
 - [Installation](#installation)
 - [Features and Limitations](#features-and-limitations)
@@ -62,13 +62,13 @@ or launches but with unexpected behaviour, please [raise an issue](https://githu
 
 ## Licence
 
-RUNCVM is free and open-source, licensed under the Apache Licence, Version 2.0. See the [LICENSE](LICENSE) file for details.
+RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. See the [LICENSE](LICENSE) file for details.
 
 ## Project aims
 
 - Run any standard container workload in a VM using `docker run` with no need to customise images or the command line (except adding `--runtime=runcvm`)
 - Run unusual container workloads, like `dockerd` and `systemd` that will not run in standard container runtimes
-- Maintain a similar experience within a RUNCVM VM as within a container: process table, network interfaces, stdio, exit code handling should broadly similar to maximise compatibility
+- Maintain a similar experience within a RunCVM VM as within a container: process table, network interfaces, stdio, exit code handling should broadly similar to maximise compatibility
 - Container start/stop/kill semantics respected, where possible providing clean VM shutdown on stop
 - VM console accessible as one would expect using `docker run -it`, `docker start -ai` and `docker attach` (but stderr is not yet separated from stdout)
 - Support for `docker exec` (but no `-i`, `-t` for now - see [Features and Limitations](#features-and-limitations))
@@ -89,9 +89,9 @@ RUNCVM is free and open-source, licensed under the Apache Licence, Version 2.0. 
 - Improve VM boot time and other behaviours using custom kernel
 - Support for specific hardware e.g. graphics display served via VNC
 
-## Applications for RUNCVM
+## Applications for RunCVM
 
-The main applications for RUNCVM are:
+The main applications for RunCVM are:
 
 1. Running and testing applications that:
    - don't work with (or require enhanced privileges to work with) standard container runtimes (e.g. `systemd`, `dockerd`, Docker swarm services, [Kubernetes](https://kubernetes.io/))
@@ -99,29 +99,31 @@ The main applications for RUNCVM are:
    - require specific hardware that can be emulated e.g. disks, graphics displays
 2. Running existing container workloads with increased security
 3. Testing container workloads that are already intended to launch in VM environments, such as on [fly.io](https://fly.io)
-4. Developing any of the above applications in [Dockside](https://dockside.io/) (see [RUNCVM and Dockside](#runcvm-and-dockside))
+4. Developing any of the above applications in [Dockside](https://dockside.io/) (see [RunCVM and Dockside](#runcvm-and-dockside))
 
-## How RUNCVM works
+## How RunCVM works
 
-RUNCVM's 'wrapper' runtime, `runcvm-runtime`, receives container create commands triggered by `docker` `run`/`create` commands, modifies the configuration of the requested container in such a way that the created container will launch a VM that boots from the container's filesystem, and then passes the request on to the standard container runtime (`runc`) to actually create and start the container.
+RunCVM's 'wrapper' runtime, `runcvm-runtime`, receives container create commands triggered by `docker` `run`/`create` commands, modifies the configuration of the requested container in such a way that the created container will launch a VM that boots from the container's filesystem, and then passes the request on to the standard container runtime (`runc`) to actually create and start the container.
 
-For a deep dive into RUNCVM's internals, see the section on [Developing RUNCVM](#developing).
+For a deep dive into RunCVM's internals, see the section on [Developing RunCVM](#developing).
 
 ## System requirements
 
-RUNCVM should run on any amd64 (x86_64) Linux hardware (or VM) that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RUNCVM.
+RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM.
 
-RUNCVM has no host dependencies, apart from Docker (or experimentally, Podman) and comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
+RunCVM has no host dependencies, apart from Docker (or experimentally, Podman) and the `virtiofs` and `tun` kernel modules.
+
+Apart from the above, RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
 ## Installation
 
-1. Install the RUNCVM software package at `/opt/runcvm` (installation elsewhere is currently unsupported):
+1. Install the RunCVM software package at `/opt/runcvm` (installation elsewhere is currently unsupported):
 
 ```console
 docker run --rm -v /opt/runcvm:/runcvm newsnowlabs/runcvm
 ```
 
-2. Enable the RUNCVM runtime, but patching `/etc/docker/daemon.json`:
+2. Enable the RunCVM runtime, but patching `/etc/docker/daemon.json`:
 
 ```console
 sudo /opt/runcvm/scripts/runcvm-install-runtime.sh
@@ -129,14 +131,14 @@ sudo /opt/runcvm/scripts/runcvm-install-runtime.sh
 
 (The above command adds `"runcvm": {"path": "/opt/runcvm/scripts/runcvm-runtime"}` to the `runtimes` property of `/etc/docker/daemon.json`.)
 
-3. Restart docker and verify that RUNCVM is recognised:
+3. Restart docker and verify that RunCVM is recognised:
 
 ```console
 $ docker info | grep -i runcvm
  Runtimes: runc runcvm io.containerd.runc.v2 io.containerd.runtime.v1.linux
 ```
 
-Run a test RUNCVM container:
+Run a test RunCVM container:
 
 ```console
 docker run --runtime=runcvm --rm -it hello-world
@@ -144,7 +146,7 @@ docker run --runtime=runcvm --rm -it hello-world
 
 ## Features and limitations
 
-In the below summary of RUNCVM's current main features and limitations, [+] is used to indicate an area of compatibility with standard container runtimes and [-] is used indicate a feature of standard container runtimes that is unsupported.
+In the below summary of RunCVM's current main features and limitations, [+] is used to indicate an area of compatibility with standard container runtimes and [-] is used indicate a feature of standard container runtimes that is unsupported.
 
 > N.B. `docker run` and `docker exec` options not listed below are unsupported and their effect, if used, is unspecified.
 
@@ -166,7 +168,7 @@ In the below summary of RUNCVM's current main features and limitations, [+] is u
       - [?] `--workdir` (or `-w`) is supported FIXME
       - [+] `--env` (or `-e`), `--env-file` is supported
       - [+] `--entrypoint` is supported
-      - [+] `--init` - is supported (but runs RUNCVM's own VM init process rather than Docker's default, `tini`)
+      - [+] `--init` - is supported (but runs RunCVM's own VM init process rather than Docker's default, `tini`)
    - stdio/Terminals
       - [+] `--detach` (or `-d`) is supported
       - [+] `--interactive` (or `-i`) is supported
@@ -190,14 +192,14 @@ In the below summary of RUNCVM's current main features and limitations, [+] is u
    - [+] `--user` (or `-u`), `--workdir` (or `-w`), `--env` (or `-e`), `--env-file`, `--detach` (or `-d`) are supported
    - [-] `--interactive` (or `-i`) and `--tty` (or `-t`) are not currently supported (there currently being no support for interactive terminals other than the container's launch terminal)
 - Security
-   - The RUNCVM software package at `/opt/runcvm` is mounted read-only within RUNCVM containers. Container applications cannot compromise RUNCVM, but they can execute binaries within the RUNCVM package. The set of binaries available to the VM may be reduced to a minimum in a later version.
+   - The RunCVM software package at `/opt/runcvm` is mounted read-only within RunCVM containers. Container applications cannot compromise RunCVM, but they can execute binaries from within the RunCVM package. The set of binaries available to the VM may be reduced to a minimum in a later version.
 - Kernels
-   - [+] Use any kernel, either one pre-packaged with RUNCVM or roll your own
-   - [+] RUNCVM will try to select an appropriate kernel to use based on examination of `/etc/os-release` within the image being launched.
+   - [+] Use any kernel, either one pre-packaged with RunCVM or roll your own
+   - [+] RunCVM will try to select an appropriate kernel to use based on examination of `/etc/os-release` within the image being launched.
 
 ## Kernel auto-detection
 
-When creating a container, RUNCVM will examine the image being launched to try to determine a suitable kernel to boot the VM with. Its process is as follows:
+When creating a container, RunCVM will examine the image being launched to try to determine a suitable kernel to boot the VM with. Its process is as follows:
 
 1. If `--env=RUNCVM_KERNEL=<dist>[/<version>]` specified, use the indicated kernel
 2. Otherwise, identify distro from `/etc/os-release`
@@ -205,17 +207,17 @@ When creating a container, RUNCVM will examine the image being launched to try t
       - Debian: `/vmlinuz` and `/initrd.img`
       - Ubuntu: `/boot/vmlinuz` and `/boot/initrd.img`
       - Alpine: `/boot/vmlinuz-virt` `/boot/initramfs-virt`
-   2. Otherwise, if found in the RUNCVM package, select the latest kernel compatible with the distro
-   3. Finally, use the Debian kernel from the RUNCVM package
+   2. Otherwise, if found in the RunCVM package, select the latest kernel compatible with the distro
+   3. Finally, use the Debian kernel from the RunCVM package
 
 ## Option reference
 
-RUNCVM options are specified either via standard `docker run` options or via  `--env=<RUNCVM_KEY>=<VALUE>` options on the `docker run`
+RunCVM options are specified either via standard `docker run` options or via  `--env=<RUNCVM_KEY>=<VALUE>` options on the `docker run`
 command line. The following env options are user-configurable:
 
 ### `--env=RUNCVM_KERNEL=<dist>[/<version>]`
 
-Specify with which RUNCVM kernel (from `/opt/runcvm/kernels`) to boot the VM. Values must be of the form `<dist>/<version>`, where `<dist>` is a directory under `/opt/runcvm/kernels` and `<version>` is a subdirectory (or symlink to a subdirectory) under that. If `<version>` is omitted, `latest` will be assumed. Here is an example command that will list available values of `<dist>/<version>` on your installation.
+Specify with which RunCVM kernel (from `/opt/runcvm/kernels`) to boot the VM. Values must be of the form `<dist>/<version>`, where `<dist>` is a directory under `/opt/runcvm/kernels` and `<version>` is a subdirectory (or symlink to a subdirectory) under that. If `<version>` is omitted, `latest` will be assumed. Here is an example command that will list available values of `<dist>/<version>` on your installation.
 
 ```console
 $ find /opt/runcvm/kernels/ -maxdepth 2 | sed 's!^/opt/runcvm/kernels/!!; /^$/d'
@@ -249,7 +251,7 @@ Any custom kernel command line options e.g. `apparmor=0` or `systemd.unified_cgr
 
 ### `--env=RUNCVM_BREAK=<values>`
 
-Enable breakpoints (falling to bash shell) during the RUNCVM container/VM boot process.
+Enable breakpoints (falling to bash shell) during the RunCVM container/VM boot process.
 
 `<values>` must be a comma-separated list of: `prenet`, `postnet`, `preqemu`.
 
@@ -264,7 +266,7 @@ Each `<diskN>` should be a comma-separated list of values of the form: `<src>,<d
 - `<filesystem>` is the filesystem with which the backing disk should be formatted (using `mke2fs`) when first created.
 - `<size>` is the size of the backing file (in `truncate` format).
 
-When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs`. When RUNCVM creates a container/VM, fstab entries will be drafted. After the VM boots, the fstab entries will be mounted. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on.
+When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs`. When RunCVM creates a container/VM, fstab entries will be drafted. After the VM boots, the fstab entries will be mounted. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on.
 
 #### Example #1
 
@@ -272,7 +274,7 @@ When first created, the backing file will be created as a sparse file to the spe
 docker run -it --runtime=runcvm --env=RUNCVM_DISKS=/disk1,/home,ext4,5G <docker-image>
 ```
 
-In this example, RUNCVM will check for existence of a file at `/disk1` within <docker-image>, and if not found create a 5G backing file (in the container's filesystem, typically overlay2) with an ext4 filesystem, then add the disk to `/etc/fstab` and mount it within the VM.
+In this example, RunCVM will check for existence of a file at `/disk1` within <docker-image>, and if not found create a 5G backing file (in the container's filesystem, typically overlay2) with an ext4 filesystem, then add the disk to `/etc/fstab` and mount it within the VM.
 
 #### Example #2
 
@@ -300,13 +302,13 @@ By default, `virtiofsd` is not launched with `-o modcaps=+sys_admin` (and contai
 
 ### `--env=RUNCVM_KERNEL_MOUNT_LIB_MODULES=1`
 
-If a RUNCVM kernel (as opposed to an in-image kernel) is chosen to launch a VM, by default that kernel's modules will be mounted at `/lib/modules/<version>` in the VM. If this variables is set, that kernel's modules will instead be mounted over `/lib/modules`.
+If a RunCVM kernel (as opposed to an in-image kernel) is chosen to launch a VM, by default that kernel's modules will be mounted at `/lib/modules/<version>` in the VM. If this variables is set, that kernel's modules will instead be mounted over `/lib/modules`.
 
 ## Advanced usage
 
 ### Running Docker in a VM
 
-If running Docker within a VM, it is recommended that you make `/var/lib/docker` a dedicated mountpoint. Using RUNCVM, this can be either a Docker volume, or an ext4, btrfs, or xfs disk.
+If running Docker within a VM, it is recommended that you make `/var/lib/docker` a dedicated mountpoint. Using RunCVM, this can be either a Docker volume, or an ext4, btrfs, or xfs disk.
 
 #### Docker volume mounted at /var/lib/docker
 
@@ -324,7 +326,7 @@ To launch a VM with a disk mount, backed by a 5G file in the `mydocker2` volume,
 docker run -it --runtime=runcvm --mount=type=volume,src=mydocker2,dst=/volume --env=RUNCVM_DISKS=/volume/disk1,/var/lib/docker,ext4,5G <docker-image>
 ```
 
-RUNCVM will check for existence of /volume/disk1, and if it doesn't find it will create a 5G disk with an ext4 filesystem. It will add the disk to `/etc/fstab`.
+RunCVM will check for existence of /volume/disk1, and if it doesn't find it will create a 5G disk with an ext4 filesystem. It will add the disk to `/etc/fstab`.
 
 For full documentation of `RUNCVM_DISKS`, see above.
 
@@ -340,19 +342,19 @@ Doing this is _not recommended_, but support for this can be enabled (at the cos
 
 To upgrade, follow this procedure:
 
-1. Stop all RUNCVM containers.
+1. Stop all RunCVM containers.
 2. Run `/opt/runcvm/scripts/runcvm-upgrade.sh`
-3. Start any RUNCVM containers.
+3. Start any RunCVM containers.
 
 ## Developing
 
-The following deep dive should help explain the inner workings of RUNCVM, and which files to modify to implement fixes, improvements and extensions.
+The following deep dive should help explain the inner workings of RunCVM, and which files to modify to implement fixes, improvements and extensions.
 
 ### runcvm-runtime
 
-RUNCVM's 'wrapper' runtime, `runcvm-runtime`, intercepts container `create` and `exec` commands and their specifications in JSON format (`config.json` and `process.json` respectively) that are normally provided (by `docker` `run`/`create` and `docker exec` respectively) to a standard container runtime like `runc`.
+RunCVM's 'wrapper' runtime, `runcvm-runtime`, intercepts container `create` and `exec` commands and their specifications in JSON format (`config.json` and `process.json` respectively) that are normally provided (by `docker` `run`/`create` and `docker exec` respectively) to a standard container runtime like `runc`.
 
-The JSON file is parsed to retrieve properties of the command, and is modified to allow RUNCVM to piggyback by overriding the originally intended behaviour with new behaviour.
+The JSON file is parsed to retrieve properties of the command, and is modified to allow RunCVM to piggyback by overriding the originally intended behaviour with new behaviour.
 
 The modifications to `create` are designed to make the created container launch a VM that boots off the container's filesystem, served using `virtiofsd`.
 
@@ -360,7 +362,7 @@ The modifications to `exec` are designed to run commands with the VM instead of 
 
 #### `runcvm-runtime` - `create` command
 
-In more detail, the RUNCVM runtime `create` process:
+In more detail, the RunCVM runtime `create` process:
 - Modifies the `config.json` file to:
    - Modify the container's entrypoint, to prepend `runcvm-ctr-entrypoint` to the container's original entrypoint and if an `--init` argument was detected, remove any init process and set the container env var `RUNCVM_INIT` to `1`
    - Set the container env var `RUNCVM_UIDGID` to `<uid>:<gid>` for the intended `<uid>` and `<gid>` for the container, and resets both the `<uid>` and `<gid>` to `0`.
@@ -371,7 +373,7 @@ In more detail, the RUNCVM runtime `create` process:
       - A tmpfs mounted at `/.runcvm`
    - Add a tmpfs at `/run` in the container only.
    - Map all requested bind mounts from their original mountpoint `<mnt>` to `/vm/<mnt>` (except where `<mnt>` is at or below `/disks`).
-   - Determine a suitable VM launch kernel by looking for one inside the container's image, choosing a stock RUNCVM kernel matching the image, or according to an env var argument.
+   - Determine a suitable VM launch kernel by looking for one inside the container's image, choosing a stock RunCVM kernel matching the image, or according to an env var argument.
       - Add a bind mount to `/vm/lib/modules/<version>` for the kernel's modules
       - Set container env vars `RUNCVM_KERNEL_PATH`, `RUNCVM_KERNEL_INITRAMFS_PATH` and `RUNCVM_KERNEL_ROOT`
    - Add device mounts for `/dev/kvm` and `/dev/net/tun`.
@@ -388,10 +390,10 @@ The `runcvm-ctr-entrypoint`:
 - Launches `virtiofsd` to serve the container's root filesystem.
 - Configures `/etc/resolv.conf` in the container.
 - Adds container firewall rules, launches `dnsmasq` and modifies `/vm/etc/resolv.conf` to proxy DNS requests from the VM to Docker's DNS.
-- Execs RUNCVM's own `runcvm-init` init process to supervise `runcvm-ctr-qemu` to launch the VM.
+- Execs RunCVM's own `runcvm-init` init process to supervise `runcvm-ctr-qemu` to launch the VM.
 
 The `runcvm-init` process:
-- Is RUNCVM's custom init process, that takes over as PID1 within the container, supervising `runcvm-ctr-qemu` to launch the VM.
+- Is RunCVM's custom init process, that takes over as PID1 within the container, supervising `runcvm-ctr-qemu` to launch the VM.
 - Waits for a TERM signal. On receiving one, it spawns `runcvm-ctr-shutdown`, which cycles through a number of methods to try to shut down the VM cleanly.
 - Waits for its child (QEMU) to exit. When it does, execs `runcvm-ctr-exit` to retrieve any saved exit code (written by the application to `/.runcvm/exit-code`) and exit with this code.
 
@@ -411,7 +413,7 @@ The `runcvm-vm-start` script:
 
 #### `runcvm-runtime` - `exec` command
 
-The RUNCVM runtime `exec` process:
+The RunCVM runtime `exec` process:
 
 - Modifies the `process.json` file to:
    - Retrieve the intended `<uid>` and `<gid>` and `<cwd>` for the command, and resets both the `<uid>` and `<gid>` to `0` and the `<cwd>` to `/`.
@@ -424,7 +426,7 @@ The `runcvm-ctr-exec` script:
 
 ## Building
 
-Building RUNCVM requires Docker. To build RUNCVM, first clone the repo, then run the build script, as follows:
+Building RunCVM requires Docker. To build RunCVM, first clone the repo, then run the build script, as follows:
 
 ```console
 git clone https://github.com/newsnowlabs/runcvm.git
@@ -434,11 +436,11 @@ cd runcvm
 
 The build script creates a Docker image named `newsnowlabs/runcvm:latest`.
 
-Follow the main [installation instructions](#installation) to install your built RUNCVM from the Docker image.
+Follow the main [installation instructions](#installation) to install your built RunCVM from the Docker image.
 
 ## Support
 
-If you encounter a Docker image that launches in a standard container runtime that does not launch in RUNCVM,
+If you encounter a Docker image that launches in a standard container runtime that does not launch in RunCVM,
 or launches but with unexpected behaviour, please [raise an issue](https://github.com/newsnowlabs/runcvm/issues) titled _Launch failure for image `<image>`_ or _Unexpected behaviour for image `<image>`_ and include log excerpts and an explanation of the failure, or expected and unexpected behaviour.
 
 For all other issues, please still [raise an issue](https://github.com/newsnowlabs/runcvm/issues) or reach out to us on the [NewsNow Labs Slack Workspace](https://join.slack.com/t/newsnowlabs/shared_invite/zt-wp54l05w-0DTxuc_n8uISJRtks3Xw3A).
@@ -451,16 +453,16 @@ If you would like to contribute a feature suggestion or code, please raise an is
 
 ## Uninstallation
 
-Shut down any RUNCVM containers.
+Shut down any RunCVM containers.
 
 Then run `sudo rm -f /opt/runcvm`.
 
-## RUNCVM and Dockside
+## RunCVM and Dockside
 
-RUNCVM and [Dockside](https://dockside.io/) are designed to work together in two alternative ways.
+RunCVM and [Dockside](https://dockside.io/) are designed to work together in two alternative ways.
 
-1. Dockside can be used to launch devtainers (development environments) in RUNCVM VMs, allowing you to provision containerised online IDEs for developing applications like `dockerd`, Docker swarm, `systemd`, applications that require a running kernel, or kernel modules not available on the host, or specific hardware e.g. a graphics display. Follow the instructions for adding a runtime to your [Dockside profiles](https://github.com/newsnowlabs/dockside/blob/main/docs/setup.md#profiles).
-2. Dockside can itself be launched inside a RUNCVM VM with its own `dockerd` to provide increased security and compartmentalisation from a host. e.g.
+1. Dockside can be used to launch devtainers (development environments) in RunCVM VMs, allowing you to provision containerised online IDEs for developing applications like `dockerd`, Docker swarm, `systemd`, applications that require a running kernel, or kernel modules not available on the host, or specific hardware e.g. a graphics display. Follow the instructions for adding a runtime to your [Dockside profiles](https://github.com/newsnowlabs/dockside/blob/main/docs/setup.md#profiles).
+2. Dockside can itself be launched inside a RunCVM VM with its own `dockerd` to provide increased security and compartmentalisation from a host. e.g.
 
 ```
 docker run --rm -it --runtime=runcvm  --memory=2g --name=docksidevm -p 443:443 -p 80:80 --mount=type=volume,src=dockside-data,dst=/data --mount=type=volume,src=dockside-disks,dst=/disks --env=RUNCVM_DISKS=/disks/disk1,/var/lib/docker,ext4,5G newsnowlabs/dockside --run-dockerd --ssl-builtin
@@ -468,12 +470,12 @@ docker run --rm -it --runtime=runcvm  --memory=2g --name=docksidevm -p 443:443 -
 
 ## Legals
 
-This project (known as "RUNCVM"), comprising the files in this Git repository
+This project (known as "RunCVM"), comprising the files in this Git repository
 (but excluding files containing a conflicting copyright notice and licence),
 is copyright 2022 NewsNow Publishing Limited and contributors.
 
-RUNCVM is an open-source project licensed under the Apache License, Version 2.0
-(the "License"); you may not use RUNCVM or its constituent files except in
+RunCVM is an open-source project licensed under the Apache License, Version 2.0
+(the "License"); you may not use RunCVM or its constituent files except in
 compliance with the License.
 
 You may obtain a copy of the License at [http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0).
@@ -484,9 +486,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-> N.B. In order to run, RUNCVM relies upon other third-party open-source software dependencies that are separate to and independent from RUNCVM and published under their own independent licences.
+> N.B. In order to run, RunCVM relies upon other third-party open-source software dependencies that are separate to and independent from RunCVM and published under their own independent licences.
 >
-> RUNCVM Docker images made available at [https://hub.docker.com/repository/docker/newsnowlabs/runcvm](https://hub.docker.com/repository/docker/newsnowlabs/runcvm) are distributions
-> designed to run RUNCVM that comprise: (a) the RUNCVM project source and/or object code; and
-> (b) third-party dependencies that RUNCVM needs to run; and which are each distributed under the terms
+> RunCVM Docker images made available at [https://hub.docker.com/repository/docker/newsnowlabs/runcvm](https://hub.docker.com/repository/docker/newsnowlabs/runcvm) are distributions
+> designed to run RunCVM that comprise: (a) the RunCVM project source and/or object code; and
+> (b) third-party dependencies that RunCVM needs to run; and which are each distributed under the terms
 > of their respective licences.

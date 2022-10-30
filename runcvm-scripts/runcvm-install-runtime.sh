@@ -36,8 +36,8 @@ _EOE_
   usage
 fi
 
-log "RUNCVM Runtime Installer"
-log "======================"
+log "RunCVM Runtime Installer"
+log "========================"
 log
 
 if [ -f "/etc/docker/daemon.json" ]; then
