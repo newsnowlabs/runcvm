@@ -33,7 +33,7 @@ do_disk() {
     UUID=$(blkid -o value "$src" | head -n 1)
     mkdir -p "$RUNCVM_VM_MOUNTPOINT/$dst" >&2
     echo "UUID=$UUID $dst $fs defaults,noatime 0 0" >>/.runcvm/fstab
-    DISKS+=("-drive file=$src,format=raw,if=virtio,media=disk")
+    DISKS+=("-drive file=$src,format=raw,if=virtio,media=disk,cache=directsync,aio=native")
   fi
 }
 
