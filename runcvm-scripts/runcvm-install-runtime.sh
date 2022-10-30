@@ -10,7 +10,7 @@ jq_set() {
   
   local tmp="/tmp/$$.json"
 
-  if jq "$@" $file >$tmp; then
+  if /opt/runcvm/usr/bin/jq "$@" $file >$tmp; then
     mv $tmp $file
   else
     echo "Failed to update $(basename $file); aborting!" 2>&1

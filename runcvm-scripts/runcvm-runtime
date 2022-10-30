@@ -22,6 +22,7 @@
 
 LOG=/tmp/runcvm.log
 RUNCVM=/opt/runcvm
+RUNCVM_JQ=$RUNCVM/usr/bin/jq
 RUNCVM_VM_MOUNTPOINT="/vm"
 RUNCVM_ENTRYPOINT=$RUNCVM/scripts/runcvm-ctr-entrypoint
 RUNCVM_EXEC=$RUNCVM/scripts/runcvm-ctr-exec
@@ -73,6 +74,10 @@ load_env_from_file() {
   done <"$file"
   
   return 1
+}
+
+jq() {
+    $RUNCVM_JQ "$@"
 }
 
 jq_set() {
