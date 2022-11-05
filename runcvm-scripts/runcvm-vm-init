@@ -55,10 +55,6 @@ if [ -f /.runcvm/fstab ]; then
   mount -av --fstab /.runcvm/fstab -o X-mount.mkdir
 fi
 
-# FIXME: THIS IS NOT RELIABLE!
-# IT OVERRIDES PATH CAUSING cat and rm etc to break if not present in the image
-# SAFER WOULD BE TO ADDRESS EVERY TOOL WITH AN ABSOLUTE PATH
-
 # Load original environment
 . /.runcvm/config
 
