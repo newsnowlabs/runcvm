@@ -108,6 +108,6 @@ do
   fi
   
   # if .return.exited = false, sleep a short while then loop
-  snore 0.2
+  snore 0.1
 
 done
