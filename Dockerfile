@@ -1,15 +1,18 @@
 # syntax=docker/dockerfile:1.3-labs
 
+# Alpine version to build with
+ARG ALPINE_VERSION=3.16
+
 # BUILD DIST-INDEPENDENT BINARIES AND LIBRARIES
 
-FROM alpine:edge as binaries
+FROM alpine:$ALPINE_VERSION as binaries
 
 RUN apk update && \
     apk add --no-cache file bash qemu-system-x86_64 qemu-virtiofsd qemu-ui-curses qemu-guest-agent \
         jq iproute2 netcat-openbsd e2fsprogs blkid util-linux \
         s6 dnsmasq iptables nftables \
-        ncurses coreutils && \
-    apk add --no-cache patchelf --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community
+        ncurses coreutils \
+        patchelf
 
 RUN <<EOF
 apk add --no-cache alpine-sdk
@@ -103,7 +106,7 @@ RUN /usr/local/bin/elf-patcher.sh && \
     mkdir -p /opt/runcvm/usr/share && cp -a /usr/share/qemu /opt/runcvm/usr/share
 
 # BUILD CONTAINER INIT
-FROM alpine:edge as init
+FROM alpine:$ALPINE_VERSION as init
 
 RUN apk update && \
     apk add --no-cache gcc musl-dev
@@ -178,7 +181,7 @@ RUN mkdir -p /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*)) && \
 
 # Build RunCVM installation
 
-FROM alpine
+FROM alpine:$ALPINE_VERSION as final
 
 COPY --from=binaries /opt/runcvm /opt/runcvm
 COPY --from=init /root/runcvm-init/runcvm-init /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
