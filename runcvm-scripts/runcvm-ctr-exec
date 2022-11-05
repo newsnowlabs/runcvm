@@ -21,7 +21,6 @@ nc() {
   /opt/runcvm/usr/bin/nc -U $QEMU_GUEST_AGENT "$@" 2>>/tmp/exec.log
 }
 
-# https://blog.dhampir.no/content/sleeping-without-a-subprocess-in-bash-and-how-to-sleep-forever
 # From https://blog.dhampir.no/content/sleeping-without-a-subprocess-in-bash-and-how-to-sleep-forever
 
 snore() {
@@ -80,9 +79,11 @@ do
   snore 1
 done
 
-# {"return": {"pid": 1056}}
+# If $RESPONSE looks like e.g.
+#  {"return": {"pid": 1056}}
 pid=$(echo "$RESPONSE" | jq -r '.return.pid')
 
+# If $RESPONSE looks like e.g.
 # {"error": {"class": "GenericError", "desc": "Guest agent command failed, error was 'Failed to execute child process u201Clsqu201D (No such file or directory)'}
 if [ -z "$pid" ] || [ "$pid" = "null" ]; then
   echo "$RESPONSE" | jq -r '.error.desc' >&2
@@ -93,6 +94,7 @@ while true
 do
   read RESPONSE < <(echo "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$pid}}" | nc -w 1)
   
+  # If $RESPONSE looks like e.g.
   # {"return": {"exitcode": 0, "out-data": "YTI4ZTYxODdiMTJjCg==", "exited": true}}
 
   if [ "$(echo $RESPONSE | jq -r '.return.exited')" = 'true' ]; then
@@ -105,7 +107,7 @@ do
     exit $(echo "$RESPONSE" | jq -r '.return.exitcode')
   fi
   
-  # .return.exited = false
+  # if .return.exited = false, sleep a short while then loop
   snore 0.2
 
 done
