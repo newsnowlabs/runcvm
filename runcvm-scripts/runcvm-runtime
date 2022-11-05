@@ -189,13 +189,6 @@ if [ "$COMMAND" = "create" ]; then
     jq -r . <$CFG >/tmp/config.json-$$-1
     
   fi
-
-  # [UNIMPLEMENTED] LAUNCH virtiofsd ON HOST INSTEAD OF CONTAINER
-  #
-  # Optionally, launch virtiofsd on host and bind-mount socket into container
-  # HOST_SOCKET="/tmp/.virtiofs-$ID.sock"
-  # touch $HOST_SOCKET
-  # /usr/lib/qemu/virtiofsd --socket-path=$HOST_SOCKET -o cache=always -o source=$ROOT >/tmp/virtiofsd.log 2>&1 &  
   
   ARG0=$(jq_get "$CFG" '.process.args[0]')
   # Now look in mounts for destination == $ARG0 (this works for Docker and Podman)
