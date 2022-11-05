@@ -21,5 +21,5 @@ mapfile -t ARGS </.runcvm/entrypoint
 # Clean RUNCVM env vars
 clean_env
 
-IFS=':' read -r uid gid <<< "$RUNCVM_UIDGID"
-exec $RUNCVM/bin/s6-applyuidgid -u $uid -g $gid -G "" "${ARGS[@]}"
+IFS=':' read -r uid gid additionalGids <<< "$RUNCVM_UIDGID"
+exec $RUNCVM/bin/s6-applyuidgid -u $uid -g $gid -G "$additionalGids" "${ARGS[@]}"

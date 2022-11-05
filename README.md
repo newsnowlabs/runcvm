@@ -365,7 +365,7 @@ The modifications to `exec` are designed to run commands with the VM instead of 
 In more detail, the RunCVM runtime `create` process:
 - Modifies the `config.json` file to:
    - Modify the container's entrypoint, to prepend `runcvm-ctr-entrypoint` to the container's original entrypoint and if an `--init` argument was detected, remove any init process and set the container env var `RUNCVM_INIT` to `1`
-   - Set the container env var `RUNCVM_UIDGID` to `<uid>:<gid>` for the intended `<uid>` and `<gid>` for the container, and resets both the `<uid>` and `<gid>` to `0`.
+   - Set the container env var `RUNCVM_UIDGID` to `<uid>:<gid>:<additionalGids>` as intended for the container, then resets both the `<uid>` and `<gid>` to `0`.
    - Set the container env var `RUNCVM_CPUS` to the intended `--cpus` count so it can be passed to the VM
    - Extract and delete all requested tmpfs mounts (these will be independently mounted by the VM).
    - Add a bind mount from `/` to `/vm` that will recursively mount the following preceding mounts:
@@ -409,19 +409,19 @@ The `runcvm-vm-init` process:
    2. Else, it backgrounds `runcvm-vm-qemu-ga`, then execs (via `runcvm-init`, purely to create a controlling tty) `runcvm-vm-start`, which runs as the VM's PID1.
 
 The `runcvm-vm-start` script:
-- Restores the container's originally-intended environment variables, `<uid>`, `<gid>` and `<cwd>`, and execs that entrypoint.
+- Restores the container's originally-intended environment variables, `<uid>`, `<gid>`, `<additionalGids>` and `<cwd>`, and execs that entrypoint.
 
 #### `runcvm-runtime` - `exec` command
 
 The RunCVM runtime `exec` process:
 
 - Modifies the `process.json` file to:
-   - Retrieve the intended `<uid>` and `<gid>` and `<cwd>` for the command, and resets both the `<uid>` and `<gid>` to `0` and the `<cwd>` to `/`.
-   - Prepend `runcvm-ctr-exec '<uid>:<gid>' '<cwd>'` to the originally intended command.
+   - Retrieve the intended `<uid>`, `<gid>`, `<additionalGids>` and `<cwd>` for the command, and resets both the `<uid>` and `<gid>` to `0` and the `<cwd>` to `/`.
+   - Prepend `runcvm-ctr-exec '<uid>:<gid>:<additionalGids>' '<cwd>'` to the originally intended command.
 - Executes the standard container runtime `runc` with the modified `process.json`.
 
 The `runcvm-ctr-exec` script:
-- Uses the QEMU Guest Agent protocol to execute the intended command, with the intended `<uid>`, `<gid>` and `<cwd>` within the VM, and emit the returned stdout and stderr.
+- Uses the QEMU Guest Agent protocol to execute the intended command, with the intended `<uid>`, `<gid>`, `<additionalGids> and `<cwd>` within the VM, via the `runcvm-vm-exec` process, propagate the returned stdout and stderr and return the command's exit code.
 - No stdin or interactivity is currently supported.
 
 ## Building

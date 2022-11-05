@@ -215,7 +215,7 @@ if [ "$COMMAND" = "create" ]; then
 
   # CONFIGURE USER
   # - Must be root to run container
-  RUNCVM_UIDGID=$(jq_get "$CFG" '(.process.user.uid | tostring) + ":" + (.process.user.gid | tostring)')
+  RUNCVM_UIDGID=$(jq_get "$CFG" '(.process.user.uid | tostring) + ":" + (.process.user.gid | tostring) + ":" + ((.process.user.additionalGids // []) | join(","))')
   set_config_env "RUNCVM_UIDGID" "$RUNCVM_UIDGID"
   jq_set "$CFG" '.process.user = {"uid":0, "gid":0}'
   log "RUNCVM_UIDGID=$RUNCVM_UIDGID"
@@ -469,7 +469,7 @@ elif [ "$COMMAND" = "exec" ]; then
   if [ "$ARG1" = "---" ]; then
     jq_set "$PROCESS" 'del(.args[0])'
   else
-    uidgid=$(jq_get "$PROCESS" '(.user.uid | tostring) + ":" + (.user.gid | tostring)')
+    uidgid=$(jq_get "$PROCESS" '(.user.uid | tostring) + ":" + (.user.gid | tostring) + ":" + ((.user.additionalGids // []) | join(","))')
     cwd=$(jq_get "$PROCESS" '.cwd')
 
     jq_set "$PROCESS" --arg exec "$RUNCVM_EXEC" --arg uidgid "$uidgid" --arg cwd "$cwd" '.args |= [$exec, $uidgid, $cwd] + .'

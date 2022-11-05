@@ -2,9 +2,10 @@
 
 uid="$1"
 gid="$2"
-cwd="$3"
-shift 3
+additionalGids="$3"
+cwd="$4"
+shift 4
 
 cd "$cwd"
 
-exec /opt/runcvm/bin/s6-applyuidgid -u $uid -g $gid -G "" "$@"
+exec /opt/runcvm/bin/s6-applyuidgid -u $uid -g $gid -G "$additionalGids" "$@"
