@@ -101,6 +101,14 @@ jq_get() {
   jq -r "$@" $file
 }
 
+get_process_env_boolean() {
+  local file="$1"
+  local var="$2"
+  local value=$(jq_get "$file" --arg env "$var" '.env[] | select(match("^" + $env + "=")) | match("^" + $env + "=(.*)") | .captures[] | .string')
+  
+  [ -n "$value" ] && echo "1" || echo "0"
+}
+
 get_config_env() {
   local var="$1"
   local default="$2"
@@ -211,6 +219,19 @@ if [ "$COMMAND" = "create" ]; then
     # Run our entrypoint first to work this out and do the right thing.
     
     jq_set "$CFG" --arg entrypoint "$RUNCVM_ENTRYPOINT" '.process.args |= [$entrypoint] + .'
+  fi
+
+  # SET RUNCVM_HAS_HOME
+  # 
+  # If the HOME env var was not set either in the image, or via docker run, 
+  # then it will be missing in the config env. Detect this case for communication to runcvm-ctr-entrypoint
+  # so that HOME can be set to the requested user's default homedir.
+  #
+  # - See runcvm-ctr-entrypoint for full details of how/why hasHome is needed and HOME gets set.
+  if [ -n "$(get_config_env HOME)" ]; then
+    set_config_env "RUNCVM_HAS_HOME" "1"
+  else
+    set_config_env "RUNCVM_HAS_HOME" "0"
   fi
 
   # CONFIGURE USER
@@ -471,8 +492,9 @@ elif [ "$COMMAND" = "exec" ]; then
   else
     uidgid=$(jq_get "$PROCESS" '(.user.uid | tostring) + ":" + (.user.gid | tostring) + ":" + ((.user.additionalGids // []) | join(","))')
     cwd=$(jq_get "$PROCESS" '.cwd')
+    hasHome=$(get_process_env_boolean "$PROCESS" 'HOME')
 
-    jq_set "$PROCESS" --arg exec "$RUNCVM_EXEC" --arg uidgid "$uidgid" --arg cwd "$cwd" '.args |= [$exec, $uidgid, $cwd] + .'
+    jq_set "$PROCESS" --arg exec "$RUNCVM_EXEC" --arg uidgid "$uidgid" --arg cwd "$cwd" --arg hasHome "$hasHome" '.args |= [$exec, $uidgid, $cwd, $hasHome] + .'
 
     # Force root (or whatever user qemu runs as)
     # Force cwd in the container to / 

@@ -39,15 +39,27 @@ snore() {
 }
 
 # Expects:
-# $1 <uid:gid>
-# $2 <cwd>
-# $3... <command> <args>
+# - To be run as root
+# - To be given arguments
+#   $1 <uid>:<gid>:<additionalGids>
+#   $2 <cwd>
+#   $3 <ENV-HOME-boolean>
+#   $(4...) <command> <args>
 
 command="$RUNCVM/scripts/runcvm-vm-exec"
-IFS=':' read -r uid gid <<< "$1"
-args=($uid $gid "$2")
-shift 2
+uidgid="$1"
+cwd="$2"
+hasHome="$3"
+shift 3
 
+# Parse uidgid and construct args array for the call to $command within the VM:
+# $1 <uid>
+# $2 <gid>
+# $3 <cwd>
+# $(4...) <command> <args>
+
+IFS=':' read -r uid gid additionalGids <<< "$uidgid"
+args=("$uid" "$gid" "$additionalGids" "$cwd")
 args+=("$@")
 
 if [ ${#args[@]} -gt 0 ]; then
@@ -56,8 +68,18 @@ else
   args_json='[]'
 fi
 
+# If the HOME env var was not set either in the image, or via docker run, or via docker exec,
+# then set HOME to the requested user's default homedir.
+#
+# - See runcvm-ctr-entrypoint for full details of how/why hasHome is needed and HOME gets set.
+
+if [ "$hasHome" != "1" ]; then
+  # Either this script needs to look up uid's HOME or else runcvm-vm-exec does; for now, we do it here.
+  HOME=$(getent passwd "$uid" | cut -d':' -f6)
+fi
+
 # N.B. Only exported env vars will be returned and sent
-mapfile -t env < <(env -u _ -u SHLVL -u HOME -u PWD -u HOSTNAME)
+mapfile -t env < <(env -u _ -u SHLVL -u PWD)
 
 if [ ${#env[@]} -gt 0 ]; then
   env_json=$(printf '%s\n' "${env[@]}" | jq -R . | jq -s .)
@@ -65,7 +87,11 @@ else
   env_json='[]'
 fi
 
+# Enable these lines for debug
+#
 # echo "- uidgid: $uidgid"
+# echo "- cwd: $cwd"
+# echo "- hasHome: $hasHome"
 # echo "- command: $command"
 # echo "- args: $args_json"
 # echo "- env: $env_json"

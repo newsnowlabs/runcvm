@@ -97,7 +97,7 @@ EOF
 
 # Patch the binaries and set up symlinks
 COPY build-utils/elf-patcher.sh /usr/local/bin/elf-patcher.sh
-ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/* tput stdbuf coreutils strace"
+ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/* tput stdbuf coreutils strace getent"
 ENV EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils"
 ENV CODE_PATH="/opt/runcvm"
 RUN /usr/local/bin/elf-patcher.sh && \

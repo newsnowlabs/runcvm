@@ -7,6 +7,57 @@ if [[ "$RUNCVM_BREAK" =~ (prenet|postnet) ]]; then set -x; fi
 args=("$@")
 printf "%s\n" "${args[@]}" >/.runcvm/entrypoint
 
+# SET HOME ENV VAR IF NEEDED
+
+# - See https://github.com/moby/moby/issues/2968#issuecomment-35822318
+#   for details of how Docker sets HOME.
+#
+# - What this means is that:
+#   1. if HOME is defined in the image and
+#      docker run:
+#      a. does not define HOME
+#         - config.json process.env[] will show the image-defined value and this value will be used
+#         - docker exec
+#           - does not define HOME, then process.json env[] will show the image-defined value and this value will be used
+#           - does define HOME, then process.json env[] will show the exec-defined value and this value will be used
+#      b. does define HOME, config.json process.env[] will show the docker run-defined value and this value will be used
+#         - docker exec
+#           - does not define HOME, then process.json env[] will show the docker run-defined value and this value will be used
+#           - does define HOME, then process.json env[] will show the exec-defined value and this value will be used
+#   (the above is irrespective of -u setting)
+#
+#   2. if HOME is not defined in the image and
+#      docker run:
+#      a. does not define HOME
+#         - config.json process.env[] will show no HOME value and the user's default homedir will be used
+#         - docker exec
+#           - does not define HOME, then process.json env[] will show no HOME value and the user's default homedir will be used
+#           - does define HOME, then process.json env[] will show the exec-defined value and this value will be used
+#      b. does define HOME, config.json process.env[] will show the docker run-defined value and this value will be used
+#         - docker exec
+#           - does not define HOME, then process.json env[] will show the docker run-defined value and this value will be used
+#           - does define HOME, then process.json env[] will show the exec-defined value and this value will be used
+
+# Problem in 2a for us with docker run and docker exec is that while we save the requested uid:gid, we set the actual uid:gid to 0:0
+# to allow us to run virtiofsd (and, today, qemu) (in the docker run case) and access the qemu guest agent socket (in the docker exec case).
+#
+# Where HOME is not explicitly defined, this leads to docker setting HOME to root's default homedir (typically /root),
+# for the calls to runcvm-ctr-entrypoint and runcvm-ctr-exec (respectively).
+#
+# How then do we distinguish this case from the case where HOME is explicitly set to /root?
+# The answer is that runcvm-runtime must check for HOME in env[] and indicate its presence in the calls to runcvm-ctr-entrypoint and runcvm-ctr-exec.
+#
+# runcvm-runtime does this:
+# - in the docker run case, via the RUNCVM_HAS_HOME env var
+# - in the docker exec case, via an argument to runcvm-ctr-exec
+
+# Here we check RUNCVM_HAS_HOME to determine whether the HOME env var was set either in the image, or via docker run.
+# If not, then we set HOME to the requested user's default homedir in accordance with https://github.com/moby/moby/issues/2968.
+
+if [ "$RUNCVM_HAS_HOME" == "0" ]; then
+  HOME=$(getent passwd "${RUNCVM_UIDGID%%:*}" | cut -d':' -f6)
+fi
+
 # SAVE ENVIRONMENT
 export -n SHLVL OLDPWD
 
