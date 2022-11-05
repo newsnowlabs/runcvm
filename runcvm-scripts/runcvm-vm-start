@@ -10,7 +10,7 @@ else
 fi
 
 # Change to saved PWD
-cd $(cat /.runcvm/pwd)
+cd $(cat /.runcvm/pwd) && unset OLDPWD
 
 # Load original environment
 . /.runcvm/config

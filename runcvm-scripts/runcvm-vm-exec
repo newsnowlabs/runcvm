@@ -6,6 +6,6 @@ additionalGids="$3"
 cwd="$4"
 shift 4
 
-cd "$cwd"
+cd "$cwd" && unset OLDPWD
 
 exec /opt/runcvm/bin/s6-applyuidgid -u $uid -g $gid -G "$additionalGids" "$@"
