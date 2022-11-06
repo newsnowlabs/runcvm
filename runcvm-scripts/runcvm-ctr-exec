@@ -75,7 +75,7 @@ fi
 
 if [ "$hasHome" != "1" ]; then
   # Either this script needs to look up uid's HOME or else runcvm-vm-exec does; for now, we do it here.
-  HOME=$(getent passwd "$uid" | cut -d':' -f6)
+  HOME=$($RUNCVM/usr/bin/getent passwd "$uid" | $RUNCVM/bin/cut -d':' -f6)
 fi
 
 # N.B. Only exported env vars will be returned and sent

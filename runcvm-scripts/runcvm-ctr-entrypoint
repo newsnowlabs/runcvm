@@ -55,7 +55,7 @@ printf "%s\n" "${args[@]}" >/.runcvm/entrypoint
 # If not, then we set HOME to the requested user's default homedir in accordance with https://github.com/moby/moby/issues/2968.
 
 if [ "$RUNCVM_HAS_HOME" == "0" ]; then
-  HOME=$(getent passwd "${RUNCVM_UIDGID%%:*}" | cut -d':' -f6)
+  HOME=$(/opt/runcvm/usr/bin/getent passwd "${RUNCVM_UIDGID%%:*}" | /opt/runcvm/bin/cut -d':' -f6)
 fi
 
 # SAVE ENVIRONMENT
