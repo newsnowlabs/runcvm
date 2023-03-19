@@ -116,8 +116,6 @@ patch_elf_binaries_and_libs() {
   done
 }
 
-#   find $CODE_PATH/apps/$app -type f ! -name '*.o' -exec hexdump -n 4 -e '4/1 "%2x" " {}\n"' {} \; | sed '/^7f454c46/!d; s/^7f454c46 //' | xargs -n 1 -P 4 file | grep dynamically >/tmp/theia-elf-file
-
 write_digest() {
   # Prepare full and unique list of ELF binaries and libs for reference purposes and for checking
   sort -u /tmp/cmd-elf-bin >$CODE_PATH/.binelfs
