@@ -123,7 +123,7 @@ Apart from the above, RunCVM comes packaged with all binaries and libraries it n
 docker run --rm -v /opt/runcvm:/runcvm newsnowlabs/runcvm
 ```
 
-2. Enable the RunCVM runtime, but patching `/etc/docker/daemon.json`:
+2. Enable the RunCVM runtime, by patching `/etc/docker/daemon.json`:
 
 ```console
 sudo /opt/runcvm/scripts/runcvm-install-runtime.sh
@@ -131,7 +131,7 @@ sudo /opt/runcvm/scripts/runcvm-install-runtime.sh
 
 (The above command adds `"runcvm": {"path": "/opt/runcvm/scripts/runcvm-runtime"}` to the `runtimes` property of `/etc/docker/daemon.json`.)
 
-3. Restart docker and verify that RunCVM is recognised:
+3. Restart docker in the usual way for your system (e.g. `systemctl restart docker`) and verify that RunCVM is recognised:
 
 ```console
 $ docker info | grep -i runcvm
@@ -255,7 +255,7 @@ Enable breakpoints (falling to bash shell) during the RunCVM container/VM boot p
 
 `<values>` must be a comma-separated list of: `prenet`, `postnet`, `preqemu`.
 
-### `--env=RUNCVM_DISKS=<disk1>[;<disk2>;...]`
+### `--env='RUNCVM_DISKS=<disk1>[;<disk2>;...]'`
 
 Automatically create, format and mount backing files as virtual disks on the VM.
 
@@ -274,15 +274,15 @@ When first created, the backing file will be created as a sparse file to the spe
 docker run -it --runtime=runcvm --env=RUNCVM_DISKS=/disk1,/home,ext4,5G <docker-image>
 ```
 
-In this example, RunCVM will check for existence of a file at `/disk1` within <docker-image>, and if not found create a 5G backing file (in the container's filesystem, typically overlay2) with an ext4 filesystem, then add the disk to `/etc/fstab` and mount it within the VM.
+In this example, RunCVM will check for existence of a file at `/disk1` within `<docker-image>`, and if not found create a 5G backing file (in the container's filesystem, typically overlay2) with an ext4 filesystem, then add the disk to `/etc/fstab` and mount it within the VM at `/home`.
 
 #### Example #2
 
 ```console
-docker run -it --runtime=runcvm --mount=type=volume,src=runcvm-disks,dst=/disks --env=RUNCVM_DISKS=/disks/disk1,/home,ext4,5G <docker-image>
+docker run -it --runtime=runcvm --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=/disks/disk1,/home,ext4,5G;/disks/disk2,/opt,ext4,2G' <docker-image>
 ```
 
-This example behaves similarly, except that the `runcvm-disks` persistent Docker volume is first mounted at `/disks` within the container's filesystem, and therefore the backing file at `/disks/disk1` is stored in the persistent volume (and bypassing overlay2).
+This example behaves similarly, except that the `runcvm-disks` persistent Docker volume is first mounted at `/disks` within the container's filesystem, and therefore the backing files at `/disks/disk1` and `/disks/disk2` (mounted in the VM at `/home` and `/opt` respectively) are stored in the _persistent volume_ (typically stored in `/var/lib/docker` on the host, bypassing overlay2).
 
 > N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints,
 these are *NOT* mounted into the VM but only into the container,
@@ -332,7 +332,7 @@ For full documentation of `RUNCVM_DISKS`, see above.
 
 #### No mountpoint at /var/lib/docker (NOT RECOMMENDED)
 
-Without a volume or disk mounted at `/var/lib/docker`, Docker will attempt to run overlayfs2 in the VM _backed the overlayfs2 filesystem in the container_. This is not normally supported, for security and performance reasons, and `dockerd` will normally complain and exit.
+Without a volume or disk mounted at `/var/lib/docker`, Docker will attempt to run overlayfs2 in the VM _backed by the overlayfs2 filesystem in the container_. This is not normally supported, for security and performance reasons, and `dockerd` will normally complain and exit.
 
 Doing this is _not recommended_, but support for this can be enabled (at the cost of security) by launching with `--env=RUNCVM_SYS_ADMIN=1`.
 
@@ -358,7 +358,7 @@ The JSON file is parsed to retrieve properties of the command, and is modified t
 
 The modifications to `create` are designed to make the created container launch a VM that boots off the container's filesystem, served using `virtiofsd`.
 
-The modifications to `exec` are designed to run commands with the VM instead of the container.
+The modifications to `exec` are designed to run commands within the VM instead of the container.
 
 #### `runcvm-runtime` - `create` command
 
