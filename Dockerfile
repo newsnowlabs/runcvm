@@ -143,7 +143,7 @@ RUN cd /root/qemu-exit && cc -o /root/qemu-exit/qemu-exit -std=gnu99 -static -s 
 
 # --- BUILD STAGE ---
 # Build alpine kernel and initramfs with virtiofs module
-FROM alpine:edge as alpine-kernel
+FROM alpine:3.16 as alpine-kernel
 
 RUN apk add --no-cache linux-virt
 RUN echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules && \
