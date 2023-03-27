@@ -111,7 +111,7 @@ For a deep dive into RunCVM's internals, see the section on [Developing RunCVM](
 
 RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM.
 
-RunCVM has no host dependencies, apart from Docker (or experimentally, Podman) and the `virtiofs` and `tun` kernel modules.
+RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and the `virtiofs` and `tun` kernel modules.
 
 Apart from the above, RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
@@ -165,7 +165,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [-] `--network=host` and `--network=container:name|id` are not supported
    - Execution environment
       - [+] `--user` (or `-u`) is supported
-      - [?] `--workdir` (or `-w`) is supported FIXME
+      - [?] `--workdir` (or `-w`) is supported
       - [+] `--env` (or `-e`), `--env-file` is supported
       - [+] `--entrypoint` is supported
       - [+] `--init` - is supported (but runs RunCVM's own VM init process rather than Docker's default, `tini`)
@@ -472,7 +472,7 @@ docker run --rm -it --runtime=runcvm  --memory=2g --name=docksidevm -p 443:443 -
 
 This project (known as "RunCVM"), comprising the files in this Git repository
 (but excluding files containing a conflicting copyright notice and licence),
-is copyright 2022 NewsNow Publishing Limited and contributors.
+is copyright 2023 NewsNow Publishing Limited, Struan Bartlett, and contributors.
 
 RunCVM is an open-source project licensed under the Apache License, Version 2.0
 (the "License"); you may not use RunCVM or its constituent files except in
