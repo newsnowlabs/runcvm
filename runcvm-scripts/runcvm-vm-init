@@ -53,6 +53,9 @@ hostname -F /etc/hostname
 if [ -f /.runcvm/fstab ]; then
   busybox modprobe ext4
   mount -av --fstab /.runcvm/fstab -o X-mount.mkdir
+
+  # Now mount our fstab over /etc/fstab
+  mount --bind /.runcvm/fstab /etc/fstab
 fi
 
 # Load original environment
