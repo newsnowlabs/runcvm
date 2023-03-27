@@ -17,29 +17,63 @@ SERIAL="mon:stdio"
 DOCKER_IP=$(cat /.runcvm/net)
 MAC=$(printf "52:54:00:%02x:%02x:%02x" $(echo $DOCKER_IP | cut -d'/' -f1 | cut -d'.' -f2,3,4 | tr '.' ' '))
 
-# e.g. /volume/disk1,/var/lib/docker,ext4,5G
+error() {
+  echo "$1" >&2
+  exit 1
+}
+
+# Argument e.g. /volume/disk1,/var/lib/docker,ext4,5G
 do_disk() {
   local spec="$1"
   local src dst fs size
 
-  read src dst fs size <<< $(echo "$spec" | tr ',' ' ')
+  local IFS=','
+  read src dst fs size <<< $(echo "$spec")
 
-  if [[ -n "$src" && ! -f "$src" ]]; then
-    busybox truncate -s "$size" "$src" >&2
-    mke2fs -F -t "$fs" "$src" >&2
+  if [[ -z "$src" || -z "$dst" || -z "$fs" ]]; then
+    error "Error: disk spec '$spec' invalid: src, dst and fs must all be specified"
   fi
 
-  if [[ -n "$src" && -f "$src" ]]; then
-    UUID=$(blkid -o value "$src" | head -n 1)
-    mkdir -p "$RUNCVM_VM_MOUNTPOINT/$dst" >&2
-    echo "UUID=$UUID $dst $fs defaults,noatime 0 0" >>/.runcvm/fstab
-    DISKS+=("-drive file=$src,format=raw,if=virtio,media=disk,cache=directsync,aio=native")
+  if [[ "$src" = "$dst" ]]; then
+    error "Error: disk spec '$spec' invalid: src '$src' cannot be same as dst"
   fi
+
+  if [[ -e "$src" && ! -f "$src" ]]; then
+    error "Error: disk spec '$spec' invalid: src '$src' must be a plain file if it exists"
+  fi
+
+  if [[ -e "$dst" && ! -d "$dst" ]]; then
+    error "Error: disk spec '$spec' invalid: dst '$dst' must be a directory if it exists"
+  fi
+
+  if [[ ! -f "$src" ]]; then
+    
+    if [[ -z "$size" ]]; then
+      error "Error: disk spec '$spec' invalid: size must be specified if src '$src' does not exist"
+    fi
+
+    busybox truncate -s "$size" "$src" >&2 || error "Error: disk spec '$spec' invalid: truncate on '$src' with size '$size' failed"
+    mke2fs -F -t "$fs" "$src" >&2 || error "Error: disk spec '$spec' invalid: mke2fs on '$src' with fs '$fs' failed"
+  fi
+
+  UUID=$(blkid -o value "$src" | head -n 1)
+  mkdir -p "$RUNCVM_VM_MOUNTPOINT/$dst" >&2
+  echo "UUID=$UUID $dst $fs defaults,noatime 0 0" >>/.runcvm/fstab
+  DISKS+=("-drive file=$src,format=raw,if=virtio,media=disk,cache=directsync,aio=native")
+}
+
+# Argument e.g. /disk1,/home,ext4,5G;/disk2,/var,ext4,1G
+do_disks() {
+  local IFS=';'
+  for disk in $1
+  do
+    do_disk "$disk"
+  done
 }
 
 DISKS=()
 if [ -n "$RUNCVM_DISKS" ]; then
-  do_disk "$RUNCVM_DISKS"
+  do_disks "$RUNCVM_DISKS"
 fi
 
 if [ -n "$RUNCVM_TMPFS" ]; then
@@ -49,8 +83,6 @@ fi
 if [[ -z "$RUNCVM_CPUS" || "$RUNCVM_CPUS" -le 0 ]]; then
   RUNCVM_CPUS=$(busybox nproc)
 fi
-
-# echo "DISKS: ${DISKS[@]}"; bash && exit 0
 
 # TODO:
 # - Consider using '-device pvpanic'

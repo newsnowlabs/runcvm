@@ -259,12 +259,12 @@ Enable breakpoints (falling to bash shell) during the RunCVM container/VM boot p
 
 Automatically create, format and mount backing files as virtual disks on the VM.
 
-Each `<diskN>` should be a comma-separated list of values of the form: `<src>,<dst>,<filesystem>,<size>`.
+Each `<diskN>` should be a comma-separated list of values of the form: `<src>,<dst>,<filesystem>[,<size>]`.
 
 - `<src>` is the path _within the container_ where the virtual disk backing file should be located. This may be in the container's overlayfs or within a volume (mounted using `--mount=type=volume`).
 - `<dst>` is the path within the VM where the virtual disk should be mounted.
 - `<filesystem>` is the filesystem with which the backing disk should be formatted (using `mke2fs`) when first created.
-- `<size>` is the size of the backing file (in `truncate` format).
+- `<size>` is the size of the backing file (in `truncate` format), and must be specified if `<src>` does not exist.
 
 When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs`. When RunCVM creates a container/VM, fstab entries will be drafted. After the VM boots, the fstab entries will be mounted. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on.
 
