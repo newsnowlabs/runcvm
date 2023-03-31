@@ -1,2 +1,3 @@
 # Ignore files matching the following patterns within docker build
 **/*~
+depot.json
