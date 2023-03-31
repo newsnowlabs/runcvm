@@ -1,0 +1,97 @@
+#!/bin/bash -e
+
+NODE=00-http-docker-swarm-node
+
+nodes() {
+  seq 1 3 | sed "s/^/$NODE/"
+}
+
+volumes() {
+  echo swarm $(nodes)
+}
+
+networks() {
+  echo ''
+}
+
+quit() {
+  # Don't run a second time
+  trap '' TERM INT EXIT
+  
+  # Allow this to complete, even if we encounter errors
+  set +e
+
+  echo "> ($h) Cleaning up nodes ..."
+  docker rm -f $(nodes) 2>/dev/null
+  echo
+
+  if [ "$(volumes)" != "" ]; then
+    echo "> ($h) Cleaning up volumes ..."
+    docker volume rm -f $(volumes)
+  fi
+  echo
+
+  if [ -n "$IMAGE" ]; then
+    echo "> ($h) Cleaning up temporary image ..."
+    docker rmi $IMAGE
+    echo
+  fi
+  
+  rm -f /tmp/iid
+  
+  if [ "$(networks)" != "" ]; then
+    echo "> ($h) Cleaning up networks ..."
+    docker network rm $(networks)
+  fi
+  echo
+
+  echo "> ($h) Cleaned up"
+  echo "> ($h) Exiting with code $ERRORS"
+}
+
+trap quit TERM INT EXIT
+
+h=$(hostname)
+
+echo "> ($h) Build image ..."
+docker build --iidfile /tmp/iid -f node/Dockerfile node/
+
+IMAGE=$(cat /tmp/iid)
+
+echo "> ($h) Launch VM nodes with image $IMAGE ..."
+for n in 1 2 3
+do
+  docker run -d -it --runtime=runcvm -p $((8080+$n-1)):80 --rm --name=$NODE$n --hostname=$NODE$n --mount=type=volume,src=$NODE$n,dst=/var/lib/docker --env=RUNCVM_SYS_ADMIN=1 --mount=type=volume,src=swarm,dst=/swarm $IMAGE  
+done
+
+echo "> ($h) Monitoring ${NODE}1 logs for service launch ..."
+docker logs -f ${NODE}1 | sed '/service launched/ q'
+echo
+
+echo "> ($h) Monitoring ${NODE}1 logs ..."
+docker logs -f -t -n 0 ${NODE}1 &
+echo
+
+sleep 3
+
+# Allow final test to complete, even if we encounter errors
+set +e
+
+echo "> ($h) Running $NODE test ..."
+ERRORS=0
+TESTS=0
+for loop in $(seq 1 10)
+do
+  for a in $(nodes)
+  do
+    curl -s http://0.0.0.0:8080/ | grep '<title>hostname'
+    ERRORS=$((ERRORS+$?))
+    TESTS=$((TESTS+1))
+  done
+done
+echo
+
+echo "> ($h) Completed $NODE test $TESTS times, with $ERRORS errors"
+
+sleep 1
+exit $ERRORS
