@@ -306,35 +306,31 @@ If a RunCVM kernel (as opposed to an in-image kernel) is chosen to launch a VM, 
 
 ## Advanced usage
 
-### Running Docker in a VM
+### Running Docker in a RunCVM container/VM
 
-If running Docker within a VM, it is recommended that you make `/var/lib/docker` a dedicated mountpoint. Using RunCVM, this can be either a Docker volume, or an ext4, btrfs, or xfs disk.
+#### ext4 disk backing file mounted at `/var/lib/docker`
 
-#### Docker volume mounted at /var/lib/docker
+If running Docker within a VM, it is recommended that you make `/var/lib/docker` a dedicated disk mountpoint (currently only ext4), to avoid `dockerd` electing to use the extremely sub-performant `vfs` storage driver.
 
-To launch a VM with a volume mount, run:
+e.g. To launch a VM with a disk mount, backed by a 5G file in the `runcvm-disks` volume, run:
 
-```console
-docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker <docker-image>
+```sh
+docker run -it --runtime=runcvm --mount=type=volume,src=runcvm-disks,dst=/disks --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,5G <docker-image>
 ```
 
-#### ext4/btrfs/xfs disk backing file mounted at /var/lib/docker
-
-To launch a VM with a disk mount, backed by a 5G file in the `mydocker2` volume, run:
-
-```console
-docker run -it --runtime=runcvm --mount=type=volume,src=mydocker2,dst=/volume --env=RUNCVM_DISKS=/volume/disk1,/var/lib/docker,ext4,5G <docker-image>
-```
-
-RunCVM will check for existence of /volume/disk1, and if it doesn't find it will create a 5G disk with an ext4 filesystem. It will add the disk to `/etc/fstab`.
+RunCVM will check for existence of a file `/disks/docker` in the `runcvm-disks` volume, and if not found will create a 5G file-backed disk with an ext4 filesystem. It will add the disk to `/etc/fstab`.
 
 For full documentation of `RUNCVM_DISKS`, see above.
 
-#### No mountpoint at /var/lib/docker (NOT RECOMMENDED)
-
-Without a volume or disk mounted at `/var/lib/docker`, Docker will attempt to run overlayfs2 in the VM _backed by the overlayfs2 filesystem in the container_. This is not normally supported, for security and performance reasons, and `dockerd` will normally complain and exit.
+#### Docker volume mounted at `/var/lib/docker` (NOT RECOMMENDED)
 
 Doing this is _not recommended_, but support for this can be enabled (at the cost of security) by launching with `--env=RUNCVM_SYS_ADMIN=1`.
+
+e.g. 
+
+```sh
+docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker --env=RUNCVM_SYS_ADMIN=1 <docker-image>
+```
 
 > N.B. This option adds `CAP_SYS_ADMIN` capabilities to the container and then launches `virtiofsd` with `-o modcaps=+sys_admin`. 
 
