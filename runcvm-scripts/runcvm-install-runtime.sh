@@ -19,7 +19,7 @@ jq_set() {
 }
 
 usage() {
-  cat <<"_EOE_" >&2
+  cat <<_EOE_ >&2
 Usage: sudo $0
 
 Installs RUNCVM runtime for Docker / Podman
@@ -40,9 +40,16 @@ log "RunCVM Runtime Installer"
 log "========================"
 log
 
-if [ -f "/etc/docker/daemon.json" ]; then
-  log "1 Detected /etc/docker/daemon.json:"
-  log "  - Adding runcvm to runtimes property ..."
+if [ -d "/etc/docker" ]; then
+
+  log "1 Detected /etc/docker"
+
+  if ! [ -f "/etc/docker/daemon.json" ]; then
+    log "1.1 Creating empty /etc/docker/daemon.json"
+    echo '{}' >/etc/docker/daemon.json
+  fi
+
+  log "- Adding runcvm to runtimes property ..."
 
   if jq_set  "/etc/docker/daemon.json" '.runtimes.runcvm.path |= "/opt/runcvm/scripts/runcvm-runtime"'; then
     log "  - Done"
