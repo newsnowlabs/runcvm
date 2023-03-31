@@ -96,6 +96,33 @@ abuild -rFf
 EOF
 
 # --- BUILD STAGE ---
+# Build patched dropbear with epka plugin
+# that does not require /etc/passwd or PAM to run
+FROM alpine-sdk as alpine-dropbear
+
+ADD patches/dropbear/runcvm.patch /root/aports/main/dropbear/runcvm.patch
+
+RUN <<EOF
+cd /root/aports/main/dropbear
+sed -ri '/--disable-pututline/a --enable-plugin \\' APKBUILD
+echo 'sha512sums="${sha512sums}$(sha512sum runcvm.patch)"' >>APKBUILD
+echo 'source="${source}runcvm.patch"' >>APKBUILD
+abuild -rFf
+
+cd /root
+git clone https://github.com/fabriziobertocci/dropbear-epka.git
+cd dropbear-epka
+apk add --no-cache automake autoconf libtool
+libtoolize --force
+aclocal
+autoheader
+automake --force-missing --add-missing
+autoconf
+./configure
+make install
+EOF
+
+# --- BUILD STAGE ---
 # Build dist-independent dynamic binaries and libraries
 FROM alpine:$ALPINE_VERSION as binaries
 
@@ -106,16 +133,22 @@ RUN apk update && \
         ncurses coreutils \
         patchelf
 
+# Install patched SeaBIOS
 COPY --from=alpine-seabios /root/packages/main/x86_64 /tmp/seabios
 RUN apk add --allow-untrusted /tmp/seabios/*.apk && cp -a /usr/share/seabios/bios*.bin /usr/share/qemu/
 
+# Install patched dnsmasq
 COPY --from=alpine-dnsmasq /root/packages/main/x86_64 /tmp/dnsmasq
 RUN apk add --allow-untrusted /tmp/dnsmasq/dnsmasq-2*.apk /tmp/dnsmasq/dnsmasq-common*.apk
 
+# Install patched dropbear
+COPY --from=alpine-dropbear /root/packages/main/x86_64 /usr/local/lib/libepka_file.so /tmp/dropbear
+RUN apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/dropbear-dbclient*.apk /tmp/dropbear/dropbear-2*.apk
+
 # Patch the binaries and set up symlinks
 COPY build-utils/elf-patcher.sh /usr/local/bin/elf-patcher.sh
-ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/* tput stdbuf coreutils getent"
-ENV EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils"
+ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/* tput stdbuf coreutils getent dropbear dbclient dropbearkey"
+ENV EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so"
 ENV CODE_PATH="/opt/runcvm"
 RUN /usr/local/bin/elf-patcher.sh && \
     bash -c 'cd /opt/runcvm/bin; for cmd in awk base64 cat chmod cut grep head hostname init ln ls mkdir mount poweroff ps rm route sh sysctl tr touch; do ln -s busybox $cmd; done' && \

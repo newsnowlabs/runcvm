@@ -486,8 +486,12 @@ elif [ "$COMMAND" = "exec" ]; then
     uidgid=$(jq_get "$PROCESS" '(.user.uid | tostring) + ":" + (.user.gid | tostring) + ":" + ((.user.additionalGids // []) | join(","))')
     cwd=$(jq_get "$PROCESS" '.cwd')
     hasHome=$(get_process_env_boolean "$PROCESS" 'HOME')
+    wantsTerminal=$(jq_get "$PROCESS" '.terminal')
 
-    jq_set "$PROCESS" --arg exec "$RUNCVM_EXEC" --arg uidgid "$uidgid" --arg cwd "$cwd" --arg hasHome "$hasHome" '.args |= [$exec, $uidgid, $cwd, $hasHome] + .'
+    jq_set "$PROCESS" \
+      --arg exec "$RUNCVM_EXEC" --arg uidgid "$uidgid" --arg cwd "$cwd" \
+      --arg hasHome "$hasHome" --arg wantsTerminal "$wantsTerminal" \
+      '.args |= [$exec, $uidgid, $cwd, $hasHome, $wantsTerminal] + .'
 
     # Force root (or whatever user qemu runs as)
     # Force cwd in the container to / 

@@ -1,11 +1,27 @@
 #!/opt/runcvm/bin/bash
 
-uid="$1"
-gid="$2"
-additionalGids="$3"
-cwd="$4"
-shift 4
+from_bin() {
+  tr '\200\201\202\203\204\205' "\011\012\040\047\042\134"
+}
 
-cd "$cwd" && unset OLDPWD
+error() {
+  echo "OCI runtime exec failed: exec failed: unable to start container process: chdir to cwd (\"$cwd\") set in config.json failed: no such file or directory: unknown"
+  exit 126
+}
 
-exec /opt/runcvm/bin/s6-applyuidgid -u $uid -g $gid -G "$additionalGids" "$@"
+uidgid="$1"
+cwd_bin="$2"
+shift 2
+
+IFS=':' read -r uid gid additionalGids <<< "$uidgid"
+
+args_bin="$1"
+env_bin="$2"
+
+mapfile -t args < <(echo -n "$args_bin" | from_bin)
+mapfile -t env < <(echo -n "$env_bin" | from_bin)
+cwd=$(echo -n "$cwd_bin" | from_bin)
+
+cd "$cwd" 2>/dev/null && unset OLDPWD || error
+
+exec /opt/runcvm/bin/busybox env -i "${env[@]}" /opt/runcvm/bin/s6-applyuidgid -u $uid -g $gid -G "$additionalGids" "${args[@]}"

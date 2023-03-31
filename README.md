@@ -71,7 +71,7 @@ RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. 
 - Maintain a similar experience within a RunCVM VM as within a container: process table, network interfaces, stdio, exit code handling should broadly similar to maximise compatibility
 - Container start/stop/kill semantics respected, where possible providing clean VM shutdown on stop
 - VM console accessible as one would expect using `docker run -it`, `docker start -ai` and `docker attach` (but stderr is not yet separated from stdout)
-- Support for `docker exec` (but no `-i`, `-t` for now - see [Features and Limitations](#features-and-limitations))
+- Support for `docker exec`
 - Good support for most other `docker container` subcommands
 - Efficient container startup, by using virtiofs to serve a container's filesystem directly to a VM (instead of unpacking an image into a backing file)
 - Improved security compared to the standard container runtime, and as much security as possible without compromising the simplicity of the implementation
@@ -85,7 +85,6 @@ RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. 
 - Support running foreign-architecture VMs by using QEMU dynamic CPU emulation for the entire VM (instead of the approach used by [https://github.com/multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static) which uses dynamic CPU emulation for each individual binary)
 - Support for QEMU [microvm](https://qemu.readthedocs.io/en/latest/system/i386/microvm.html) or Amazon Firecracker
 - More natural console support with independent stdout and stderr channels for `docker run -it`
-- Support for piping input to `docker exec -i <command>`
 - Improve VM boot time and other behaviours using custom kernel
 - Support for specific hardware e.g. graphics display served via VNC
 
@@ -189,8 +188,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [+] No mountpoints are required for basic operation for most applications. Volume or disk mountpoints may be needed for running `dockerd` or to improve disk performance
       - [-] `dockerd` mileage will vary unless a volume or disk is mounted over `/var/lib/docker`
 - `docker exec`
-   - [+] `--user` (or `-u`), `--workdir` (or `-w`), `--env` (or `-e`), `--env-file`, `--detach` (or `-d`) are supported
-   - [-] `--interactive` (or `-i`) and `--tty` (or `-t`) are not currently supported (there currently being no support for interactive terminals other than the container's launch terminal)
+   - [+] `--user` (or `-u`), `--workdir` (or `-w`), `--env` (or `-e`), `--env-file`, `--detach` (or `-d`), `--interactive` (or `-i`) and `--tty` (or `-t`) are all supported
 - Security
    - The RunCVM software package at `/opt/runcvm` is mounted read-only within RunCVM containers. Container applications cannot compromise RunCVM, but they can execute binaries from within the RunCVM package. The set of binaries available to the VM may be reduced to a minimum in a later version.
 - Kernels
@@ -401,8 +399,8 @@ The `runcvm-vm-init` process:
 - Runs as PID1 within the VM.
 - Retrieves the container configuration - network, environment, disk and tmpfs mounts - saved by `runcvm-ctr-entrypoint` to `/.runcvm`, and reproduces it within the VM
 - Launches the container's pre-existing entrypoint, in one of two ways.
-   1. If `RUNCVM_INIT` is `1` (i.e. the container was originally intended to be launched with Docker's own init process) then it configures and execs busybox `init`, which becomes the VM's PID1, to supervise `runcvm-vm-qemu-ga`, run `runcvm-vm-start` and `poweroff` the VM if signalled to do so.
-   2. Else, it backgrounds `runcvm-vm-qemu-ga`, then execs (via `runcvm-init`, purely to create a controlling tty) `runcvm-vm-start`, which runs as the VM's PID1.
+   1. If `RUNCVM_INIT` is `1` (i.e. the container was originally intended to be launched with Docker's own init process) then it configures and execs busybox `init`, which becomes the VM's PID1, to supervise `dropbear`, run `runcvm-vm-start` and `poweroff` the VM if signalled to do so.
+   2. Else, it backgrounds `dropbear`, then execs (via `runcvm-init`, purely to create a controlling tty) `runcvm-vm-start`, which runs as the VM's PID1.
 
 The `runcvm-vm-start` script:
 - Restores the container's originally-intended environment variables, `<uid>`, `<gid>`, `<additionalGids>` and `<cwd>`, and execs that entrypoint.
@@ -412,13 +410,13 @@ The `runcvm-vm-start` script:
 The RunCVM runtime `exec` process:
 
 - Modifies the `process.json` file to:
-   - Retrieve the intended `<uid>`, `<gid>`, `<additionalGids>` and `<cwd>` for the command, and resets both the `<uid>` and `<gid>` to `0` and the `<cwd>` to `/`.
-   - Prepend `runcvm-ctr-exec '<uid>:<gid>:<additionalGids>' '<cwd>'` to the originally intended command.
+   - Retrieve the intended `<uid>`, `<gid>`, `<additionalGids>`, `<terminal>` and `<cwd>` for the command, as well as <hasHome> indicating the existence of a HOME environment variable.
+   - Resets both the `<uid>` and `<gid>` to `0` and the `<cwd>` to `/`.
+   - Prepend `runcvm-ctr-exec '<uid>:<gid>:<additionalGids>' '<cwd>' '<hasHome>' '<terminal>'` to the originally intended command.
 - Executes the standard container runtime `runc` with the modified `process.json`.
 
 The `runcvm-ctr-exec` script:
-- Uses the QEMU Guest Agent protocol to execute the intended command, with the intended `<uid>`, `<gid>`, `<additionalGids> and `<cwd>` within the VM, via the `runcvm-vm-exec` process, propagate the returned stdout and stderr and return the command's exit code.
-- No stdin or interactivity is currently supported.
+- Uses the Dropbear `dbclient` SSH client to execute the intended command, with the intended arguments within the VM, via the `runcvm-vm-exec` process, propagate the returned stdout and stderr and return the command's exit code.
 
 ## Building
 

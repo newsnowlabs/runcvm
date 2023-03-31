@@ -4,10 +4,6 @@
 
 . /opt/runcvm/scripts/runcvm-ctr-defaults
 
-jq() {
-  $RUNCVM/usr/bin/jq "$@"
-}
-
 busybox() {
   $RUNCVM/bin/busybox "$@"
 }
@@ -16,26 +12,9 @@ env() {
   busybox env "$@"
 }
 
-nc() {
-  # FIXME: Only redirect logs if RUNCVM_DEBUG_EXEC set
-  /opt/runcvm/usr/bin/nc -U $QEMU_GUEST_AGENT "$@" 2>>/tmp/exec.log
-}
-
-# From https://blog.dhampir.no/content/sleeping-without-a-subprocess-in-bash-and-how-to-sleep-forever
-
-snore() {
-  local IFS
-  [[ -n "${_snore_fd:-}" ]] || { exec {_snore_fd}<> <(:); } 2>/dev/null ||
-  {
-    # workaround for MacOS and similar systems
-    local fifo
-    fifo=$(mktemp -u)
-    mkfifo -m 700 "$fifo"
-    exec {_snore_fd}<>"$fifo"
-    rm "$fifo"
-  }
-  
-  read ${1:+-t "$1"} -u $_snore_fd || :
+to_bin() {
+  # tab, LF, space, ', ", \
+  tr "\011\012\040\047\042\134" '\200\201\202\203\204\205'
 }
 
 # Expects:
@@ -44,13 +23,15 @@ snore() {
 #   $1 <uid>:<gid>:<additionalGids>
 #   $2 <cwd>
 #   $3 <ENV-HOME-boolean>
-#   $(4...) <command> <args>
+#   $4 <wantsTerminal-boolean>
+#   $(5...) <command> <args>
 
 command="$RUNCVM/scripts/runcvm-vm-exec"
 uidgid="$1"
 cwd="$2"
 hasHome="$3"
-shift 3
+wantsTerminal="$4"
+shift 4
 
 # Parse uidgid and construct args array for the call to $command within the VM:
 # $1 <uid>
@@ -59,13 +40,10 @@ shift 3
 # $(4...) <command> <args>
 
 IFS=':' read -r uid gid additionalGids <<< "$uidgid"
-args=("$uid" "$gid" "$additionalGids" "$cwd")
-args+=("$@")
+args=("$@")
 
 if [ ${#args[@]} -gt 0 ]; then
-  args_json=$(printf '%s\n' "${args[@]}" | jq -R . | jq -s .)
-else
-  args_json='[]'
+  args_bin=$(printf '%s\n' "${args[@]}" | to_bin)
 fi
 
 # If the HOME env var was not set either in the image, or via docker run, or via docker exec,
@@ -82,58 +60,11 @@ fi
 mapfile -t env < <(env -u _ -u SHLVL -u PWD)
 
 if [ ${#env[@]} -gt 0 ]; then
-  env_json=$(printf '%s\n' "${env[@]}" | jq -R . | jq -s .)
-else
-  env_json='[]'
+  env_bin=$(printf '%s\n' "${env[@]}" | to_bin)
 fi
 
-# Enable these lines for debug
-#
-# echo "- uidgid: $uidgid"
-# echo "- cwd: $cwd"
-# echo "- hasHome: $hasHome"
-# echo "- command: $command"
-# echo "- args: $args_json"
-# echo "- env: $env_json"
-
-JSON=$(jq -r --arg command "$command" --argjson args_json "$args_json" --argjson env_json "$env_json" '{"execute":"guest-exec","arguments":{"path":$command,"arg":$args_json,"env":$env_json,"capture-output":true}}' <(echo '{}'))
-
-while true;
-do
-  read RESPONSE < <(echo "$JSON" | nc)
-  [ $? -eq 0 ] && break
-  snore 1
-done
-
-# If $RESPONSE looks like e.g.
-#  {"return": {"pid": 1056}}
-pid=$(echo "$RESPONSE" | jq -r '.return.pid')
-
-# If $RESPONSE looks like e.g.
-# {"error": {"class": "GenericError", "desc": "Guest agent command failed, error was 'Failed to execute child process u201Clsqu201D (No such file or directory)'}
-if [ -z "$pid" ] || [ "$pid" = "null" ]; then
-  echo "$RESPONSE" | jq -r '.error.desc' >&2
-  exit 127
+if [ "$wantsTerminal" = "true" ]; then
+  opts=(-t)
 fi
 
-while true
-do
-  read RESPONSE < <(echo "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$pid}}" | nc -w 1)
-  
-  # If $RESPONSE looks like e.g.
-  # {"return": {"exitcode": 0, "out-data": "YTI4ZTYxODdiMTJjCg==", "exited": true}}
-
-  if [ "$(echo $RESPONSE | jq -r '.return.exited')" = 'true' ]; then
-    stdout=$(echo "$RESPONSE" | jq -r '.return["out-data"]')
-    stderr=$(echo "$RESPONSE" | jq -r '.return["err-data"]')
-    
-    [ -n "$stderr" ] && [ "$stderr" != "null" ] && echo "$stderr" | busybox base64 -d >&2
-    [ -n "$stdout" ] && [ "$stdout" != "null" ] && echo "$stdout" | busybox base64 -d
-
-    exit $(echo "$RESPONSE" | jq -r '.return.exitcode')
-  fi
-  
-  # if .return.exited = false, sleep a short while then loop
-  snore 0.1
-
-done
+exec $RUNCVM/usr/bin/dbclient ${opts[@]} -y -y -i /.runcvm/dropbear/key root@$(cut -d'/' -f1 /.runcvm/net) "$command '$uidgid' '$(echo -n $cwd | to_bin)' '$args_bin' '$env_bin'"

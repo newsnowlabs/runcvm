@@ -39,7 +39,7 @@ printf "%s\n" "${args[@]}" >/.runcvm/entrypoint
 #           - does define HOME, then process.json env[] will show the exec-defined value and this value will be used
 
 # Problem in 2a for us with docker run and docker exec is that while we save the requested uid:gid, we set the actual uid:gid to 0:0
-# to allow us to run virtiofsd (and, today, qemu) (in the docker run case) and access the qemu guest agent socket (in the docker exec case).
+# to allow us to run virtiofsd (and, today, qemu) (in the docker run case) and access the qemu guest agent socket (in the docker exec case - though use of the agent is deprecated in favour of ssh).
 #
 # Where HOME is not explicitly defined, this leads to docker setting HOME to root's default homedir (typically /root),
 # for the calls to runcvm-ctr-entrypoint and runcvm-ctr-exec (respectively).
@@ -110,12 +110,20 @@ ip route add default via $DOCKER_GW dev $QEMU_BRIDGE
 # Accept DNS requests for $RUNCVM_DNS_IP; these will be passed to dnsmasq
 XTABLES_LIBDIR=/opt/runcvm/lib64/usr/lib/xtables/ /opt/runcvm/sbin/xtables-nft-multi iptables -t nat -A PREROUTING -d $RUNCVM_DNS_IP/32 -p udp -m udp --dport 53 -j REDIRECT
 
-# Ensure all outgoing traffic via the QEMU bridge from the bridge's own IP is masqueraded as if from the VM
-XTABLES_LIBDIR=/opt/runcvm/lib64/usr/lib/xtables/ /opt/runcvm/sbin/xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -j SNAT --to-source $DOCKER_IP
+# Match UDP port 53 traffic, outgoing via the QEMU bridge, from the bridge's own IP:
+# -> Masquerade as if from the VM's IP.
+#    This allows outgoing DNS requests from the VM to be received by dnsmasq running in the container.
+XTABLES_LIBDIR=/opt/runcvm/lib64/usr/lib/xtables/ /opt/runcvm/sbin/xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p udp -m udp --sport 53 -j SNAT --to-source $DOCKER_IP
+XTABLES_LIBDIR=/opt/runcvm/lib64/usr/lib/xtables/ /opt/runcvm/sbin/xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p udp -m udp --dport 53 -j SNAT --to-source $DOCKER_IP
+
+# Match TCP port 22 traffic, outgoing via the QEMU bridge, from the bridge's own IP:
+# -> Masquerade it as if from the DNS_IP.
+#    This is necessary to allow SSH from within the container to the VM.
+XTABLES_LIBDIR=/opt/runcvm/lib64/usr/lib/xtables/ /opt/runcvm/sbin/xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p tcp -m tcp --dport 22 -j SNAT --to-source $RUNCVM_DNS_IP
 
 # FIXME: Bind-mount /etc/resolv.conf as well as /vm/etc/resolv.conf to prevent them showing in 'docker diff'
 cat /vm/etc/resolv.conf >/etc/resolv.conf
-RESOLV_CONF_NEW=$(busybox sed -r 's/127.0.0.11/169.254.169.254/' /vm/etc/resolv.conf)
+RESOLV_CONF_NEW=$(busybox sed -r "s/127.0.0.11/$RUNCVM_DNS_IP/" /vm/etc/resolv.conf)
 echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
 
 # LAUNCH DNSMASQ
