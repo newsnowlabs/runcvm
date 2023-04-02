@@ -14,13 +14,7 @@ networks() {
   echo $NODE-network
 }
 
-quit() {
-  # Don't run a second time
-  trap '' TERM INT EXIT
-  
-  # Allow this to complete, even if we encounter errors
-  set +e
-
+_cleanup() {
   echo "> ($h) Cleaning up nodes ..."
   docker rm -f $(nodes) 2>/dev/null
   echo
@@ -46,6 +40,24 @@ quit() {
   echo
 
   echo "> ($h) Cleaned up"
+}
+
+cleanup() {
+  # Allow this to complete, even if we encounter errors
+  set +e
+
+  _cleanup
+  
+  # Restore setting to fail on error
+  set -e
+}
+
+quit() {
+  # Don't run a second time
+  trap '' TERM INT EXIT
+  
+  cleanup
+
   echo "> ($h) Exiting with code $ERRORS"
 }
 
@@ -53,12 +65,15 @@ trap quit TERM INT EXIT
 
 h=$(hostname)
 
+cleanup
+
 echo "> ($h) Creating network $NODE-network ..."
 docker network rm $(networks) 2>/dev/null || true
 docker network create $NODE-network
 
-echo "> ($h) Launch CVM mariadb server as $NODE-mysqld ..."
-docker run -d -it --rm --runtime=runcvm --name=$NODE-mysqld --hostname=$NODE-mysqld --network=$NODE-network --cpus=1 --memory=512M --env=MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb
+# Launch a mariadb VM using RunCVM
+echo "> ($h) Launch RunCVM mariadb server as $NODE-mysqld ..."
+docker run --runtime=runcvm -d --rm --name=$NODE-mysqld --hostname=$NODE-mysqld --network=$NODE-network --cpus=1 --memory=1G --env=MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb
 
 echo "> ($h) Monitoring mariadb logs ..."
 docker logs -f -t -n 0 $NODE-mysqld &
@@ -66,11 +81,14 @@ docker logs -f -t -n 0 $NODE-mysqld &
 # Allow final test to complete, even if we encounter errors
 set +e
 
-echo "> ($h) Waiting for mariadb startup and running test queries ..."
-docker run -it --rm --network=$NODE-network --name=$NODE-mysql --hostname=$NODE-mysql --env=host=$NODE-mysqld alpine ash -c 'apk update && apk add mariadb-client && for a in $(seq 20 -1 1); do if mysql -P 3306 -h $host mysql -e ""; then echo "> $(hostname) Connected to mysqld ..."; break; else echo "> $(hostname) Waiting for mysqld (#$a) ..."; sleep 1; fi; done && mysql -P 3306 -h $host mysql -e "select count(*) from user"'
+# Launch standard runc container to test connecting to the mariadb VM
+echo "> ($h) Waiting for mariadb startup and running test queries in runc container ..."
+docker run --rm --network=$NODE-network --name=$NODE-mysql --hostname=$NODE-mysql --env=host=$NODE-mysqld alpine ash -c 'apk update && apk add mariadb-client && for a in $(seq 40 -1 1); do if mysql -P 3306 -h $host mysql -e ""; then echo "> $(hostname) Connected to mysqld ..."; break; else echo "> $(hostname) Waiting for mysqld (#$a) ..."; sleep 1; fi; done && mysql -P 3306 -h $host mysql -e "select count(*) from user"'
 ERRORS=$?
 
 echo "> ($h) Completed $NODE test with $ERRORS errors"
+
+# bash -i
 
 sleep 1
 exit $ERRORS

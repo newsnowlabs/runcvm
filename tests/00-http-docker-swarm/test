@@ -14,13 +14,7 @@ networks() {
   echo ''
 }
 
-quit() {
-  # Don't run a second time
-  trap '' TERM INT EXIT
-  
-  # Allow this to complete, even if we encounter errors
-  set +e
-
+_cleanup() {
   echo "> ($h) Cleaning up nodes ..."
   docker rm -f $(nodes) 2>/dev/null
   echo
@@ -46,6 +40,24 @@ quit() {
   echo
 
   echo "> ($h) Cleaned up"
+}
+
+cleanup() {
+  # Allow this to complete, even if we encounter errors
+  set +e
+
+  _cleanup
+  
+  # Restore setting to fail on error
+  set -e
+}
+
+quit() {
+  # Don't run a second time
+  trap '' TERM INT EXIT
+  
+  cleanup
+
   echo "> ($h) Exiting with code $ERRORS"
 }
 
@@ -53,19 +65,21 @@ trap quit TERM INT EXIT
 
 h=$(hostname)
 
+cleanup
+
 echo "> ($h) Build image ..."
 docker build --iidfile /tmp/iid -f node/Dockerfile node/
 
 IMAGE=$(cat /tmp/iid)
 
-echo "> ($h) Launch VM nodes with image $IMAGE ..."
+echo "> ($h) Launch RunCVM nodes with image $IMAGE ..."
 for n in 1 2 3
 do
-  docker run -d -it --runtime=runcvm -p $((8080+$n-1)):80 --rm --name=$NODE$n --hostname=$NODE$n --mount=type=volume,src=$NODE$n,dst=/var/lib/docker --env=RUNCVM_SYS_ADMIN=1 --mount=type=volume,src=swarm,dst=/swarm $IMAGE  
+  docker run --runtime=runcvm -d -p $((8080+$n-1)):80 --rm --name=$NODE$n --hostname=$NODE$n --mount=type=volume,src=$NODE$n,dst=/var/lib/docker --env=RUNCVM_SYS_ADMIN=1 --mount=type=volume,src=swarm,dst=/swarm $IMAGE  
 done
 
 echo "> ($h) Monitoring ${NODE}1 logs for service launch ..."
-docker logs -f ${NODE}1 | sed '/service launched/ q'
+docker logs -f ${NODE}1 | sed '/service launched/q'
 echo
 
 echo "> ($h) Monitoring ${NODE}1 logs ..."

@@ -82,7 +82,6 @@ if [ "$NodeState" = "inactive" ] || [ "$NodeState" = "pending" ]; then
       echo
       
       echo "> ($h) Creating 'http' service (please be patient) ..."
-      # docker service create --name=nginx --mode=global -p 80:80 nginx
       docker service create --name=http --mode=global -p 80:80 \
         alpine ash -c 'apk update && apk add mini_httpd && mkdir -p /www && echo "<!DOCTYPE html>
         <html lang="en">

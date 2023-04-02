@@ -1,0 +1,32 @@
+#!/bin/bash -e
+
+ERRORS=0
+
+DIR=$(dirname $0)
+
+if [ -d "$DIR" ]; then
+  echo "Running RunCVM integration tests in '$DIR' ..."
+  cd $DIR
+else
+  echo "$0: Error: RunCVM integration test directory '$DIR' not found; aborting!"
+  exit -1
+fi
+
+for test in *
+do
+
+  [ -d "$test" ] || continue;
+
+  cd $test
+  ./test 2>&1 | sed "s/^/$test - /"
+  TEST_ERRORS=$?
+  ERRORS=$((ERRORS+$TEST_ERRORS))
+
+  cd ..
+  
+  echo "RunCVM test $test finished with $TEST_ERRORS errors"
+done
+
+echo "RunCVM integration tests completed with $ERRORS errors"
+
+exit $ERRORS
