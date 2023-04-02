@@ -1,0 +1,33 @@
+diff --git a/src/sercon.c b/src/sercon.c
+index 3019d9b..988c2a2 100644
+--- a/src/sercon.c
++++ b/src/sercon.c
+@@ -516,7 +516,7 @@ void sercon_setup(void)
+     struct segoff_s seabios, vgabios;
+     u16 addr;
+ 
+-    addr = romfile_loadint("etc/sercon-port", 0);
++    addr = romfile_loadint("opt/org.seabios/etc/sercon-port", 0);
+     if (!addr)
+         return;
+     dprintf(1, "sercon: using ioport 0x%x\n", addr);
+diff --git a/src/fw/paravirt.c b/src/fw/paravirt.c
+index fba4e52..9a346d9 100644
+--- a/src/fw/paravirt.c
++++ b/src/fw/paravirt.c
+diff --git a/src/fw/paravirt.c b/src/fw/paravirt.c
+index fba4e52..9a346d9 100644
+--- a/src/fw/paravirt.c
++++ b/src/fw/paravirt.c
+@@ -652,9 +652,9 @@ void qemu_cfg_init(void)
+     // serial console
+     u16 nogfx = 0;
+     qemu_cfg_read_entry(&nogfx, QEMU_CFG_NOGRAPHIC, sizeof(nogfx));
+-    if (nogfx && !romfile_find("etc/sercon-port")
++    if (nogfx && !romfile_find("opt/org.seabios/etc/sercon-port")
+         && !romfile_find("vgaroms/sgabios.bin"))
+-        const_romfile_add_int("etc/sercon-port", PORT_SERIAL1);
++        const_romfile_add_int("opt/org.seabios/etc/sercon-port", PORT_SERIAL1);
+ }
+ 
+ /*

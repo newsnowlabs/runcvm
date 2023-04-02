@@ -19,44 +19,11 @@ RUN apk update && apk add --no-cache alpine-sdk coreutils && \
 # (without triggering QEMU warnings)
 FROM alpine-sdk as alpine-seabios
 
+ADD patches/seabios/qemu-fw-cfg-fix.patch /root/aports/main/seabios/0003-qemu-fw-cfg-fix.patch
+
 RUN <<EOF
 cd /root/aports/main/seabios
-cat <<_EOE_ >0003-qemu-fw-cfg-fix.patch
-diff --git a/src/sercon.c b/src/sercon.c
-index 3019d9b..988c2a2 100644
---- a/src/sercon.c
-+++ b/src/sercon.c
-@@ -516,7 +516,7 @@ void sercon_setup(void)
-     struct segoff_s seabios, vgabios;
-     u16 addr;
- 
--    addr = romfile_loadint("etc/sercon-port", 0);
-+    addr = romfile_loadint("opt/org.seabios/etc/sercon-port", 0);
-     if (!addr)
-         return;
-     dprintf(1, "sercon: using ioport 0x%x\n", addr);
-diff --git a/src/fw/paravirt.c b/src/fw/paravirt.c
-index fba4e52..9a346d9 100644
---- a/src/fw/paravirt.c
-+++ b/src/fw/paravirt.c
-diff --git a/src/fw/paravirt.c b/src/fw/paravirt.c
-index fba4e52..9a346d9 100644
---- a/src/fw/paravirt.c
-+++ b/src/fw/paravirt.c
-@@ -652,9 +652,9 @@ void qemu_cfg_init(void)
-     // serial console
-     u16 nogfx = 0;
-     qemu_cfg_read_entry(&nogfx, QEMU_CFG_NOGRAPHIC, sizeof(nogfx));
--    if (nogfx && !romfile_find("etc/sercon-port")
-+    if (nogfx && !romfile_find("opt/org.seabios/etc/sercon-port")
-         && !romfile_find("vgaroms/sgabios.bin"))
--        const_romfile_add_int("etc/sercon-port", PORT_SERIAL1);
-+        const_romfile_add_int("opt/org.seabios/etc/sercon-port", PORT_SERIAL1);
- }
- 
- /*
-_EOE_
-echo 'sha512sums="${sha512sums}7bab39dfbe442da27b37728179283ba97fff32db8ecfc51cd950daf4f463234efba7080a304edb0800ca9008e66c257c7d48f46c09044655dc3e0ff563d3734f  0003-qemu-fw-cfg-fix.patch"' >>APKBUILD
+echo 'sha512sums="${sha512sums}$(sha512sum 0003-qemu-fw-cfg-fix.patch)"' >>APKBUILD
 echo 'source="${source}0003-qemu-fw-cfg-fix.patch"' >>APKBUILD
 abuild -rFf
 EOF
@@ -67,31 +34,12 @@ EOF
 # (needed for images such as hello-world)
 FROM alpine-sdk as alpine-dnsmasq
 
+ADD patches/dnsmasq/remove-passwd-requirement.patch /root/aports/main/dnsmasq/remove-passwd-requirement.patch
+
 RUN <<EOF
 cd /root/aports/main/dnsmasq
-cat <<_EOE_ >9999-Remove-passwd-requirement.patch
---- a/src/dnsmasq.c.orig
-+++ b/src/dnsmasq.c
-@@ -481,6 +481,7 @@
-     }
- #endif
-   
-+#if 0
-   if (daemon->username && !(ent_pw = getpwnam(daemon->username)))
-     baduser = daemon->username;
-   else if (daemon->groupname && !(gp = getgrnam(daemon->groupname)))
-@@ -488,6 +489,7 @@
- 
-   if (baduser)
-     die(_("unknown user or group: %s"), baduser, EC_BADCONF);
-+#endif
- 
-   /* implement group defaults, "dip" if available, or group associated with uid */
-   if (!daemon->group_set && !gp)
-_EOE_
-
-echo 'sha512sums="${sha512sums}368572f4c9e702b55367ea49a6cabbbd786e6aaf9708b5e24e624da7eed1c317a55d683656b40b75aaed19c3eac13826eaf81b4ff062df118683149295746863  9999-Remove-passwd-requirement.patch"' >>APKBUILD
-echo 'source="${source}9999-Remove-passwd-requirement.patch"' >>APKBUILD
+echo 'sha512sums="${sha512sums}$(sha512sum remove-passwd-requirement.patch)"' >>APKBUILD
+echo 'source="${source}remove-passwd-requirement.patch"' >>APKBUILD
 abuild -rFf
 EOF
 
