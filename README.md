@@ -7,19 +7,25 @@ RunCVM (Run Container Virtual Machine) is an experimental open-source Docker con
 Launch an nginx VM listening on port 8080:
 
 ```console
-docker run --runtime=runcvm --name nginx1 --rm -it -p 8080:80 nginx
+docker run --runtime=runcvm --name nginx1 --rm -p 8080:80 nginx
 ```
 
-Launch a MariaDB VM, with 4 cores and 2G memory, listening on port 13306:
+Launch a MariaDB VM, with 2 cpus and 2G memory, listening on port 3306:
 
 ```console
-docker run --runtime=runcvm --name mariadb1 --rm -it -p 13306:3306 --cpus 2 --memory 2G --env=MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb
+docker run --runtime=runcvm --name mariadb1 --rm -p 3306:3306 --cpus 2 --memory 2G --env=MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb
 ```
 
 Launch a vanilla ubuntu VM, with interactive terminal:
 
 ```console
 docker run --runtime=runcvm --name ubuntu1 --rm -it ubuntu
+```
+
+Gain another interactive console on `ubuntu1`:
+
+```console
+docker exec -it ubuntu1 bash
 ```
 
 RunCVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualisation technology. In this sense, RunCVM has similar aims to [Kata Containers](https://katacontainers.io/).
@@ -29,11 +35,10 @@ However, RunCVM:
 - Uses a lightweight 'wrapper-runtime' technology that piggybacks the standard container runtime `runc`, making its code footprint and external dependencies extremely small, and its internals extremely simple and easy to tailor for specific purposes.
 - Is written almost entirely in shell script, for simplicity, portability and ease of development.
 - Is compatible with `docker run` (with experimental support for `podman run`).
-- Has no external dependencies (except for Docker/Podman).
 
 RunCVM makes some trade-offs in return for this simplicity. See the full list of [features and limitations](#features-and-limitations).
 
-RunCVM was born out of difficulties experienced getting the Docker and Podman CLIs to launch Kata Containers, and a belief that launching containerised workloads in VMs needn't be so complicated.
+RunCVM was born out of difficulties experienced using the Docker and Podman CLIs to launch Kata Containers, and a belief that launching containerised workloads in VMs needn't be so complicated (see the ongoing effort to [re-add OCI CLI commands for docker/podman](https://github.com/kata-containers/kata-containers/issues/722) to Kata v2 to support Docker & Podman).
 
 > **Support launching images:** If you encounter any Docker image that launches in a standard container runtime that does not launch in RunCVM,
 or launches but with unexpected behaviour, please [raise an issue](https://github.com/newsnowlabs/runcvm/issues) titled _Launch failure for image `<image>`_ or _Unexpected behaviour for image `<image>`_.
@@ -77,7 +82,7 @@ RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. 
 - Improved security compared to the standard container runtime, and as much security as possible without compromising the simplicity of the implementation
 - Command-line and image-embedded options for customising the a container's VM specifications, devices, kernel
 - Intelligent kernel selection, according to the distribution used in the image being launched
-- No external dependencies, except for Docker/Podman
+- No external dependencies, except for Docker/Podman and relevant Linux kernel modules (`kvm`, `virtiofs` and `tun`)
 
 ## Project ambitions
 
@@ -110,7 +115,7 @@ For a deep dive into RunCVM's internals, see the section on [Developing RunCVM](
 
 RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM.
 
-RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and the `virtiofs` and `tun` kernel modules.
+RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and the `kvm`, `virtiofs` and `tun` kernel modules.
 
 Apart from the above, RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
@@ -423,14 +428,13 @@ The `runcvm-ctr-exec` script:
 Building RunCVM requires Docker. To build RunCVM, first clone the repo, then run the build script, as follows:
 
 ```console
-git clone https://github.com/newsnowlabs/runcvm.git
 cd runcvm
 ./build/build.sh
 ```
 
 The build script creates a Docker image named `newsnowlabs/runcvm:latest`.
 
-Follow the main [installation instructions](#installation) to install your built RunCVM from the Docker image.
+Now follow the main [installation instructions](#installation) to install your built RunCVM from the Docker image.
 
 ## Support
 
