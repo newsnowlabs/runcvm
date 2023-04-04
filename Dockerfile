@@ -200,9 +200,9 @@ ENTRYPOINT ["/entrypoint-install.sh"]
 # Install needed kernels.
 # Comment out any kernels that are unneeded.
 COPY --from=alpine-kernel /opt/runcvm/kernels/alpine /opt/runcvm/kernels/alpine
-#COPY --from=debian-kernel /opt/runcvm/kernels/debian /opt/runcvm/kernels/debian
+COPY --from=debian-kernel /opt/runcvm/kernels/debian /opt/runcvm/kernels/debian
 COPY --from=ubuntu-kernel /opt/runcvm/kernels/ubuntu /opt/runcvm/kernels/ubuntu
-#COPY --from=oracle-kernel /opt/runcvm/kernels/ol     /opt/runcvm/kernels/ol
+COPY --from=oracle-kernel /opt/runcvm/kernels/ol     /opt/runcvm/kernels/ol
 
 # Add 'latest' symlinks for available kernels
 RUN for d in /opt/runcvm/kernels/*; do cd $d && ln -s $(ls -d * | sort | head -n 1) latest; done
