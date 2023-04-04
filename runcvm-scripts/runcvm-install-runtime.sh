@@ -4,7 +4,7 @@ MNT=/runcvm
 REPO=${REPO:-newsnowlabs/runcvm}
 
 log() {
-    echo "$@" >&2
+    echo "$@"
 }
 
 jq_set() {
@@ -142,7 +142,7 @@ if [ -d "/etc/docker" ]; then
   # if [ $(docker info --format '{{ json .Runtimes.runcvm }}') = "{"path":"/opt/runcvm/scripts/runcvm-runtime"}" ]; then
     log "  - Verification of RunCVM runtime in Docker completed"
   else
-    log "  - Error: could not verify RunCVM runtime in Docker"
+    log "  - Warning: could not verify RunCVM runtime in Docker; perhaps you need to restart Docker manually"
   fi
 
 else
