@@ -125,7 +125,6 @@ Run:
 
 ```sh
 curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/codespace-struanb-legendary-bassoon-7545qg6pgfrwv5/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
-```
 
 This will:
 - Install the RunCVM software package to `/opt/runcvm` (installation elsewhere is currently unsupported)
