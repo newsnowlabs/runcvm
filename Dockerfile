@@ -82,15 +82,15 @@ RUN apk update && \
         patchelf
 
 # Install patched SeaBIOS
-COPY --from=alpine-seabios /root/packages/main/x86_64 /tmp/seabios
+COPY --from=alpine-seabios /root/packages/main/x86_64 /tmp/seabios/
 RUN apk add --allow-untrusted /tmp/seabios/*.apk && cp -a /usr/share/seabios/bios*.bin /usr/share/qemu/
 
 # Install patched dnsmasq
-COPY --from=alpine-dnsmasq /root/packages/main/x86_64 /tmp/dnsmasq
+COPY --from=alpine-dnsmasq /root/packages/main/x86_64 /tmp/dnsmasq/
 RUN apk add --allow-untrusted /tmp/dnsmasq/dnsmasq-2*.apk /tmp/dnsmasq/dnsmasq-common*.apk
 
 # Install patched dropbear
-COPY --from=alpine-dropbear /root/packages/main/x86_64 /usr/local/lib/libepka_file.so /tmp/dropbear
+COPY --from=alpine-dropbear /root/packages/main/x86_64 /usr/local/lib/libepka_file.so /tmp/dropbear/
 RUN apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/dropbear-dbclient*.apk /tmp/dropbear/dropbear-2*.apk
 
 # Patch the binaries and set up symlinks
