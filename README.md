@@ -38,7 +38,7 @@ However, RunCVM:
 
 RunCVM makes some trade-offs in return for this simplicity. See the full list of [features and limitations](#features-and-limitations).
 
-RunCVM was born out of difficulties experienced using the Docker and Podman CLIs to launch Kata Containers, and a belief that launching containerised workloads in VMs needn't be so complicated (see the ongoing effort to [re-add OCI CLI commands for docker/podman](https://github.com/kata-containers/kata-containers/issues/722) to Kata v2 to support Docker & Podman).
+RunCVM was born out of difficulties experienced using the Docker and Podman CLIs to launch Kata Containers v2, and a belief that launching containerised workloads in VMs needn't be so complicated (see the ongoing effort to [re-add OCI CLI commands for docker/podman](https://github.com/kata-containers/kata-containers/issues/722) to Kata v2 to support Docker & Podman; other Kata issues [#3358](https://github.com/kata-containers/kata-containers/issues/3358), [#1123](https://github.com/kata-containers/kata-containers/issues/1123), [#1133](https://github.com/kata-containers/kata-containers/issues/1133), [#3038](https://github.com/kata-containers/runtime/issues/3038); Podman issues [#8579](https://github.com/containers/podman/issues/8579) and [#17070](https://github.com/containers/podman/issues/17070); and Kubernetes issue [#40114](https://github.com/kubernetes/website/issues/40114)).
 
 > **Support launching images:** If you encounter any Docker image that launches in a standard container runtime that does not launch in RunCVM,
 or launches but with unexpected behaviour, please [raise an issue](https://github.com/newsnowlabs/runcvm/issues) titled _Launch failure for image `<image>`_ or _Unexpected behaviour for image `<image>`_.
