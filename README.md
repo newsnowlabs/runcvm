@@ -4,7 +4,15 @@
 
 RunCVM (Run Container Virtual Machine) is an experimental open-source Docker container runtime for Linux, created by Struan Bartlett at NewsNow Labs, that makes launching standard containerised workloads in VMs as easy as launching them in containers e.g.:
 
-Launch an nginx VM listening on port 8080:
+## Quick start
+
+Install:
+
+```sh
+curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
+```
+
+Now launch an nginx VM listening on port 8080:
 
 ```console
 docker run --runtime=runcvm --name nginx1 --rm -p 8080:80 nginx
@@ -28,20 +36,20 @@ Gain another interactive console on `ubuntu1`:
 docker exec -it ubuntu1 bash
 ```
 
-RunCVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualisation technology. In this sense, RunCVM has similar aims to [Kata Containers](https://katacontainers.io/).
+## Why?
 
-However, RunCVM:
+RunCVM was born out of difficulties experienced using the Docker and Podman CLIs to launch [Kata Containers v2](https://katacontainers.io/), and a belief that launching containerised workloads in VMs using Docker needn't be so complicated (see the ongoing effort to [re-add OCI CLI commands for docker/podman](https://github.com/kata-containers/kata-containers/issues/722) to Kata v2 to support Docker & Podman; other Kata issues [#3358](https://github.com/kata-containers/kata-containers/issues/3358), [#1123](https://github.com/kata-containers/kata-containers/issues/1123), [#1133](https://github.com/kata-containers/kata-containers/issues/1133), [#3038](https://github.com/kata-containers/runtime/issues/3038); Podman issues [#8579](https://github.com/containers/podman/issues/8579) and [#17070](https://github.com/containers/podman/issues/17070); and Kubernetes issue [#40114](https://github.com/kubernetes/website/issues/40114)).
 
-- Uses a lightweight 'wrapper-runtime' technology that piggybacks the standard container runtime `runc`, making its code footprint and external dependencies extremely small, and its internals extremely simple and easy to tailor for specific purposes.
+Like Kata, RunCVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualisation technology.
+
+However, unlike Kata, RunCVM:
+
+- Is compatible with `docker run` *today* (with experimental support for `podman run`).
 - Is written almost entirely in shell script, for simplicity, portability and ease of development.
-- Is compatible with `docker run` (with experimental support for `podman run`).
+- Uses a lightweight 'wrapper-runtime' technology that subverts the behaviour of the standard container runtime `runc`, making its code footprint and external dependencies extremely small, and its internals extremely simple and easy to understand and tailor for specific purposes.
+- Is highly portable among Linux distributions and development platforms providing KVM. It even installs on [GitHub Codespaces](https://github.com/features/codespaces)!
 
-RunCVM makes some trade-offs in return for this simplicity. See the full list of [features and limitations](#features-and-limitations).
-
-RunCVM was born out of difficulties experienced using the Docker and Podman CLIs to launch Kata Containers v2, and a belief that launching containerised workloads in VMs needn't be so complicated (see the ongoing effort to [re-add OCI CLI commands for docker/podman](https://github.com/kata-containers/kata-containers/issues/722) to Kata v2 to support Docker & Podman; other Kata issues [#3358](https://github.com/kata-containers/kata-containers/issues/3358), [#1123](https://github.com/kata-containers/kata-containers/issues/1123), [#1133](https://github.com/kata-containers/kata-containers/issues/1133), [#3038](https://github.com/kata-containers/runtime/issues/3038); Podman issues [#8579](https://github.com/containers/podman/issues/8579) and [#17070](https://github.com/containers/podman/issues/17070); and Kubernetes issue [#40114](https://github.com/kubernetes/website/issues/40114)).
-
-> **Support launching images:** If you encounter any Docker image that launches in a standard container runtime that does not launch in RunCVM,
-or launches but with unexpected behaviour, please [raise an issue](https://github.com/newsnowlabs/runcvm/issues) titled _Launch failure for image `<image>`_ or _Unexpected behaviour for image `<image>`_.
+> RunCVM makes some trade-offs in return for this simplicity. See the full list of [features and limitations](#features-and-limitations).
 
 ## Contents
 
@@ -53,11 +61,11 @@ or launches but with unexpected behaviour, please [raise an issue](https://githu
 - [How RunCVM works](#how-runcvm-works)
 - [System requirements](#system-requirements)
 - [Installation](#installation)
+- [Upgrading](#upgrading)
 - [Features and Limitations](#features-and-limitations)
 - [Kernel selection](#kernel-selection)
 - [Option reference](#option-reference)
 - [Advanced usage](#advanced-usage)
-- [Upgrading](#upgrading)
 - [Developing](#developing)
 - [Building](#building)
 - [Contributing](#contributing)
@@ -82,7 +90,7 @@ RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. 
 - Improved security compared to the standard container runtime, and as much security as possible without compromising the simplicity of the implementation
 - Command-line and image-embedded options for customising the a container's VM specifications, devices, kernel
 - Intelligent kernel selection, according to the distribution used in the image being launched
-- No external dependencies, except for Docker/Podman and relevant Linux kernel modules (`kvm`, `virtiofs` and `tun`)
+- No external dependencies, except for Docker/Podman and relevant Linux kernel modules (`kvm` and `tun`)
 
 ## Project ambitions
 
@@ -119,12 +127,15 @@ RunCVM has no other host dependencies, apart from Docker (or experimentally, Pod
 
 Apart from the above, RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
+RunCVM is tested on Debian Bullseye and [GitHub Codespaces](https://github.com/codespaces/new?hide_repo_select=true&ref=main&repo=514606231).
+
 ## Installation
 
 Run:
 
 ```sh
-curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/codespace-struanb-legendary-bassoon-7545qg6pgfrwv5/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
+curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
+```
 
 This will:
 - Install the RunCVM software package to `/opt/runcvm` (installation elsewhere is currently unsupported)
@@ -140,6 +151,14 @@ Following installation, launch a basic test RunCVM container/VM:
 ```console
 docker run --runtime=runcvm --rm -it hello-world
 ```
+
+## Upgrading
+
+To upgrade, follow this procedure:
+
+1. Stop all RunCVM containers.
+2. Run `/opt/runcvm/scripts/runcvm-install-runtime.sh` (or rerun the installation command - which runs the same script)
+3. Start any RunCVM containers.
 
 ## Features and limitations
 
@@ -187,6 +206,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [-] `dockerd` mileage will vary unless a volume or disk is mounted over `/var/lib/docker`
 - `docker exec`
    - [+] `--user` (or `-u`), `--workdir` (or `-w`), `--env` (or `-e`), `--env-file`, `--detach` (or `-d`), `--interactive` (or `-i`) and `--tty` (or `-t`) are all supported
+   - [+] Stdout and Stderr _are_ independently multiplexed so `docker exec <container> bash -c 'echo stdout; echo stderr >&2' >/tmp/stdout 2>/tmp/stderr` _does_ produce the expected result
 - Security
    - The RunCVM software package at `/opt/runcvm` is mounted read-only within RunCVM containers. Container applications cannot compromise RunCVM, but they can execute binaries from within the RunCVM package. The set of binaries available to the VM may be reduced to a minimum in a later version.
 - Kernels
@@ -330,14 +350,6 @@ docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docke
 
 > N.B. This option adds `CAP_SYS_ADMIN` capabilities to the container and then launches `virtiofsd` with `-o modcaps=+sys_admin`. 
 
-## Upgrading
-
-To upgrade, follow this procedure:
-
-1. Stop all RunCVM containers.
-2. Run `/opt/runcvm/scripts/runcvm-install-runtime.sh`
-3. Start any RunCVM containers.
-
 ## Developing
 
 The following deep dive should help explain the inner workings of RunCVM, and which files to modify to implement fixes, improvements and extensions.
@@ -431,10 +443,11 @@ Now follow the main [installation instructions](#installation) to install your b
 
 ## Support
 
-If you encounter a Docker image that launches in a standard container runtime that does not launch in RunCVM,
-or launches but with unexpected behaviour, please [raise an issue](https://github.com/newsnowlabs/runcvm/issues) titled _Launch failure for image `<image>`_ or _Unexpected behaviour for image `<image>`_ and include log excerpts and an explanation of the failure, or expected and unexpected behaviour.
+**Support launching images:** If you encounter any Docker image that launches in a standard container runtime that does not launch in RunCVM, or launches but with unexpected behaviour, please [raise an issue](https://github.com/newsnowlabs/runcvm/issues) titled _Launch failure for image `<image>`_ or _Unexpected behaviour for image `<image>`_ and include log excerpts and an explanation of the failure, or expected and unexpected behaviour.
 
-For all other issues, please still [raise an issue](https://github.com/newsnowlabs/runcvm/issues) or reach out to us on the [NewsNow Labs Slack Workspace](https://join.slack.com/t/newsnowlabs/shared_invite/zt-wp54l05w-0DTxuc_n8uISJRtks3Xw3A).
+**For all other issues:** please still [raise an issue](https://github.com/newsnowlabs/runcvm/issues)
+
+You can also reach out to us on the [NewsNow Labs Slack Workspace](https://join.slack.com/t/newsnowlabs/shared_invite/zt-wp54l05w-0DTxuc_n8uISJRtks3Xw3A).
 
 We are typically available to respond to queries Monday-Friday, 9am-5pm UK time, and will be happy to help.
 
