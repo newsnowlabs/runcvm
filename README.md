@@ -115,34 +115,28 @@ For a deep dive into RunCVM's internals, see the section on [Developing RunCVM](
 
 RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM.
 
-RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and the `kvm`, `virtiofs` and `tun` kernel modules.
+RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and the `kvm` and `tun` kernel modules.
 
 Apart from the above, RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
 ## Installation
 
-1. Install the RunCVM software package at `/opt/runcvm` (installation elsewhere is currently unsupported):
+Run:
 
-```console
-docker run --rm -v /opt/runcvm:/runcvm newsnowlabs/runcvm
+```sh
+curl -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sh
 ```
 
-2. Enable the RunCVM runtime, by patching `/etc/docker/daemon.json`:
+This will:
+- Install the RunCVM software package to `/opt/runcvm` (installation elsewhere is currently unsupported)
+- For Docker support:
+  - Enable the RunCVM runtime, by patching `/etc/docker/daemon.json` to add `runcvm` to the `runtimes` property
+  - Restart `dockerd`, if it can be detected how for your system (e.g. `systemctl restart docker`)
+  - Verify that RunCVM is recognised via `docker info`
+- For Podman support (experimental)
+  - Display instructions on patching `/etc/containers/containers.conf`
 
-```console
-sudo /opt/runcvm/scripts/runcvm-install-runtime.sh
-```
-
-(The above command adds `"runcvm": {"path": "/opt/runcvm/scripts/runcvm-runtime"}` to the `runtimes` property of `/etc/docker/daemon.json`.)
-
-3. Restart docker in the usual way for your system (e.g. `systemctl restart docker`) and verify that RunCVM is recognised:
-
-```console
-$ docker info | grep -i runcvm
- Runtimes: runc runcvm io.containerd.runc.v2 io.containerd.runtime.v1.linux
-```
-
-Run a test RunCVM container:
+Following installation, launch a basic test RunCVM container/VM:
 
 ```console
 docker run --runtime=runcvm --rm -it hello-world
@@ -342,7 +336,7 @@ docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docke
 To upgrade, follow this procedure:
 
 1. Stop all RunCVM containers.
-2. Run `/opt/runcvm/scripts/runcvm-upgrade.sh`
+2. Run `/opt/runcvm/scripts/runcvm-install-runtime.sh`
 3. Start any RunCVM containers.
 
 ## Developing
