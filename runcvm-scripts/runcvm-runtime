@@ -29,7 +29,7 @@ RUNCVM_EXEC=$RUNCVM/scripts/runcvm-ctr-exec
 RUNCVM_KERNELS=$RUNCVM/kernels
 RUNCVM_KERNEL_DEFAULT=debian
 RUNCVM_MEM_SIZE_DEFAULT="512M"
-RUNCVM_DEBUG=1
+RUNCVM_DEBUG=""
 
 debug() {
   [ -n "$RUNCVM_DEBUG" ] && true || false
