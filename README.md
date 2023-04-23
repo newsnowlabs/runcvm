@@ -312,6 +312,11 @@ Select a specific QEMU display. Currently only `curses` is supported, but others
 
 By default BIOS console output is hidden. Enable it with this option.
 
+### `--env=RUNCVM_RUNTIME_DEBUG=1`
+
+Enable debug logging for the runtime (the portion of RunCVM directly invoked by `docker run`, `docker exec` etc).
+Debug logs are written to files in `/tmp`.
+
 ### `--env=RUNCVM_SYS_ADMIN=1`
 
 By default, `virtiofsd` is not launched with `-o modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.

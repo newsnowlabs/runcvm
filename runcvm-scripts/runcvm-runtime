@@ -20,7 +20,6 @@
 # - https://www.kernel.org/doc/Documentation/filesystems/sharedsubtree.txt
 # - https://www.redhat.com/sysadmin/mount-namespaces
 
-LOG=/tmp/runcvm.log
 RUNCVM=/opt/runcvm
 RUNCVM_JQ=$RUNCVM/usr/bin/jq
 RUNCVM_VM_MOUNTPOINT="/vm"
@@ -36,7 +35,7 @@ debug() {
 }
 
 log() {
-  debug && echo "$@" >>$LOG
+  debug && echo "$@" >>/tmp/runcvm-$$.log
 }
 
 error() {
@@ -101,6 +100,15 @@ jq_get() {
   jq -r "$@" $file
 }
 
+get_process_env() {
+  local file="$1"
+  local var="$2"
+  local default="$3"
+  local value=$(jq_get "$file" --arg env "$var" '.env[] | select(match("^" + $env + "=")) | match("^" + $env + "=(.*)") | .captures[] | .string')
+  
+  [ -n "$value" ] && echo -n "$value" || echo -n "$default"
+}
+
 get_process_env_boolean() {
   local file="$1"
   local var="$2"
@@ -136,8 +144,9 @@ set_config_env() {
 
 COMMAND_LINE=("$@")
 
-debug && log "--- LOG BEGINS ---"
-echo "Command line: $0 ${COMMAND_LINE[@]@Q}" >>$LOG
+if debug; then
+  log "Command line: $0 ${COMMAND_LINE[@]@Q}"
+fi
 
 while true
 do
@@ -178,11 +187,16 @@ if [ "$COMMAND" = "create" ]; then
 
   ID="$1"
 
-
   CFG="$BUNDLE/config.json"
   ROOT=$(jq -r .root.path $CFG)
 
+  # Allow user to enable debug logging
+  if [ "$(get_config_env RUNCVM_RUNTIME_DEBUG)" = "1" ]; then
+    RUNCVM_DEBUG="1"
+  fi
+
   if debug; then
+    log "Command line: $0 ${COMMAND_LINE[@]@Q}"
     log "Command: create bundle=$BUNDLE id=$ID root=$ROOT"
     
     # Save formatted config.json
@@ -472,7 +486,13 @@ elif [ "$COMMAND" = "exec" ]; then
     esac
   done
 
+  # Allow user to enable debug logging
+  if [ "$(get_process_env "$PROCESS" 'RUNCVM_RUNTIME_DEBUG' '0')" = "1" ]; then
+    RUNCVM_DEBUG="1"
+  fi
+
   if debug; then
+    log "Command line: $0 ${COMMAND_LINE[@]@Q}"
     log "Command: exec process=$PROCESS"
     
     # Save formatted process.json
