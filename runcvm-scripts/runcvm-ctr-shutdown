@@ -7,10 +7,10 @@ poweroff() {
   /opt/runcvm/scripts/runcvm-ctr-qemu-poweroff
   
   # Try running busybox poweroff
-  /opt/runcvm/scripts/runcvm-ctr-exec 0:0 / /opt/runcvm/bin/poweroff
+  /opt/runcvm/scripts/runcvm-ctr-exec 0:0 / 0 0 /opt/runcvm/bin/poweroff &>/dev/null
 
   # Try killing the VM's PID 1
-  /opt/runcvm/scripts/runcvm-ctr-exec 0:0 / /opt/runcvm/bin/busybox kill 1
+  /opt/runcvm/scripts/runcvm-ctr-exec 0:0 / 0 0 /opt/runcvm/bin/busybox kill 1 &>/dev/null
 }
 
 poweroff
