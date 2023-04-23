@@ -257,19 +257,9 @@ Example:
 docker run --rm --runtime=runcvm --env=RUNCVM_KERNEL=ol hello-world
 ```
 
-### `--env=RUNCVM_KERNEL_DEBUG=1`
-
-Enable kernel logging (sets kernel `console=ttyS0`).
-
 ### `--env=RUNCVM_KERNEL_APPEND=1`
 
 Any custom kernel command line options e.g. `apparmor=0` or `systemd.unified_cgroup_hierarchy=0`.
-
-### `--env=RUNCVM_BREAK=<values>`
-
-Enable breakpoints (falling to bash shell) during the RunCVM container/VM boot process.
-
-`<values>` must be a comma-separated list of: `prenet`, `postnet`, `preqemu`.
 
 ### `--env='RUNCVM_DISKS=<disk1>[;<disk2>;...]'`
 
@@ -308,6 +298,18 @@ and are therefore suitable for use for mounting backing files for use as VM disk
 
 Select a specific QEMU display. Currently only `curses` is supported, but others may trivially be added by customising the build.
 
+### `--env=RUNCVM_SYS_ADMIN=1`
+
+By default, `virtiofsd` is not launched with `-o modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.
+
+### `--env=RUNCVM_KERNEL_MOUNT_LIB_MODULES=1`
+
+If a RunCVM kernel (as opposed to an in-image kernel) is chosen to launch a VM, by default that kernel's modules will be mounted at `/lib/modules/<version>` in the VM. If this variables is set, that kernel's modules will instead be mounted over `/lib/modules`.
+
+### `--env=RUNCVM_KERNEL_DEBUG=1`
+
+Enable kernel logging (sets kernel `console=ttyS0`).
+
 ### `--env=RUNCVM_BIOS_DEBUG=1`
 
 By default BIOS console output is hidden. Enable it with this option.
@@ -317,13 +319,11 @@ By default BIOS console output is hidden. Enable it with this option.
 Enable debug logging for the runtime (the portion of RunCVM directly invoked by `docker run`, `docker exec` etc).
 Debug logs are written to files in `/tmp`.
 
-### `--env=RUNCVM_SYS_ADMIN=1`
+### `--env=RUNCVM_BREAK=<values>`
 
-By default, `virtiofsd` is not launched with `-o modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.
+Enable breakpoints (falling to bash shell) during the RunCVM container/VM boot process.
 
-### `--env=RUNCVM_KERNEL_MOUNT_LIB_MODULES=1`
-
-If a RunCVM kernel (as opposed to an in-image kernel) is chosen to launch a VM, by default that kernel's modules will be mounted at `/lib/modules/<version>` in the VM. If this variables is set, that kernel's modules will instead be mounted over `/lib/modules`.
+`<values>` must be a comma-separated list of: `prenet`, `postnet`, `preqemu`.
 
 ## Advanced usage
 
