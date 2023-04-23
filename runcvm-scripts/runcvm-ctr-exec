@@ -56,6 +56,9 @@ if [ "$hasHome" != "1" ]; then
   HOME=$($RUNCVM/usr/bin/getent passwd "$uid" | $RUNCVM/bin/cut -d':' -f6)
 fi
 
+# Clean RUNCVM env vars
+clean_env
+
 # N.B. Only exported env vars will be returned and sent
 mapfile -t env < <(env -u _ -u SHLVL -u PWD)
 
