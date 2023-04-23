@@ -67,4 +67,9 @@ if [ "$wantsTerminal" = "true" ]; then
   opts=(-t)
 fi
 
+if ! [ -s /.runcvm/dropbear/key ] || ! [ -s /.runcvm/net ]; then
+  echo "Error: RunCVM container not fully started"
+  exit 1
+fi
+
 exec $RUNCVM/usr/bin/dbclient ${opts[@]} -y -y -i /.runcvm/dropbear/key root@$(cut -d'/' -f1 /.runcvm/net) "$command '$uidgid' '$(echo -n $cwd | to_bin)' '$args_bin' '$env_bin'"
