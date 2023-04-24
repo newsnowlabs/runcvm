@@ -137,6 +137,6 @@ ARGS=(
   -device virtserialport,chardev=charchannel0,name=org.qemu.guest_agent.0
 )
 
-if [[ "$RUNCVM_BREAK" =~ preqemu ]]; then bash; fi
+if [[ "$RUNCVM_BREAK" =~ preqemu ]]; then echo Preparing to run: $CMD "${ARGS[@]@Q}"; bash; fi
 
 exec $CMD "${ARGS[@]}"
