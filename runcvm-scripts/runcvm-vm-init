@@ -85,17 +85,17 @@ if [ "$RUNCVM_INIT" = "1" ]; then
 
   $RUNCVM/bin/cat >/etc/inittab <<_EOE_
 ttyS0::respawn:-/opt/runcvm/scripts/runcvm-vm-start
-::respawn:/opt/runcvm/scripts/runcvm-vm-qemu-ga
-::respawn:/opt/runcvm/usr/sbin/dropbear -REF -A /opt/runcvm/lib64/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
-::ctrlaltdel:/opt/runcvm/bin/poweroff
-::restart:/opt/runcvm/bin/poweroff
+null::respawn:/opt/runcvm/scripts/runcvm-vm-qemu-ga
+null::respawn:/opt/runcvm/usr/sbin/dropbear -REF -A /opt/runcvm/lib64/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
+null::ctrlaltdel:/opt/runcvm/bin/poweroff
+null::restart:/opt/runcvm/bin/poweroff
 _EOE_
 
   # Allow runcvm-vm-start to runs once (and only once)
   $RUNCVM/bin/rm -f /.runcvm/once
 
-  # Clear the environment, and run our own init
-  exec -c /opt/runcvm/bin/init
+  # Clear the environment, and run our own init, disconnecting stdout and stderr from terminal
+  exec -c /opt/runcvm/bin/init &>/dev/null
 else
   # If not, assume the user knows what they're doing: launch qemu-ga and just run their entrypoint.
 
@@ -103,7 +103,7 @@ else
   clean_env
 
   # Run the qemu guest agent, needed to support future functionality
-  $RUNCVM/scripts/runcvm-vm-qemu-ga &
+  $RUNCVM/scripts/runcvm-vm-qemu-ga &>/dev/null &
 
   # Run dropbear SSH server, needed to support 'docker exec'
   $RUNCVM/usr/sbin/dropbear -REF -A /opt/runcvm/lib64/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
