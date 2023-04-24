@@ -89,6 +89,7 @@ null::respawn:/opt/runcvm/scripts/runcvm-vm-qemu-ga
 null::respawn:/opt/runcvm/usr/sbin/dropbear -REF -A /opt/runcvm/lib64/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
 null::ctrlaltdel:/opt/runcvm/bin/poweroff
 null::restart:/opt/runcvm/bin/poweroff
+null::shutdown:/opt/runcvm/bin/poweroff
 _EOE_
 
   # Allow runcvm-vm-start to runs once (and only once)
