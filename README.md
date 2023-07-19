@@ -36,6 +36,10 @@ Gain another interactive console on `ubuntu1`:
 docker exec -it ubuntu1 bash
 ```
 
+## RunCVM-in-Portainer walk-through
+
+[![Playing around with RunCVM, a docker runtime plugin](https://i.ytimg.com/vi/OENaWDlCWKg/maxresdefault.jpg)](https://www.youtube.com/watch?v=OENaWDlCWKg "Playing around with RunCVM, a docker runtime plugin")
+
 ## Why?
 
 RunCVM was born out of difficulties experienced using the Docker and Podman CLIs to launch [Kata Containers v2](https://katacontainers.io/), and a belief that launching containerised workloads in VMs using Docker needn't be so complicated.
