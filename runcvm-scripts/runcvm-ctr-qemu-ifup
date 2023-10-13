@@ -2,6 +2,7 @@
 
 . /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
 
-ip link set dev "$1" up
-ip link set dev "$1" master $QEMU_BRIDGE
+load_network
+ip link set dev "$1" up mtu "${DOCKER_IF_MTU:=1500}" master "$QEMU_BRIDGE"
+
 exit 0

@@ -6,6 +6,9 @@
 # Load defaults after exports (so that PATH is overridden)
 . /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
 
+# Load network config
+load_network
+
 # BREAK="break=mountroot"
 PANIC="panic=-1"
 
@@ -14,8 +17,7 @@ INIT="init=/opt/runcvm/scripts/runcvm-vm-init"
 SERIAL="mon:stdio"
 # SERIAL="stdio"
 
-DOCKER_IP=$(cat /.runcvm/net)
-MAC=$(printf "52:54:00:%02x:%02x:%02x" $(echo $DOCKER_IP | cut -d'/' -f1 | cut -d'.' -f2,3,4 | tr '.' ' '))
+MAC=$(busybox sed -r 's/^..:..:../52:54:00/' <<<$DOCKER_IF_MAC)
 
 error() {
   echo "$1" >&2

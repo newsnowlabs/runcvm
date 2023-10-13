@@ -23,9 +23,6 @@ fi
 # FIXME: This must be run early enough, otherwise other interfaces like docker0 might have started
 IF=$(ls /sys/class/net/ | grep -vE '^(lo|docker)' | head -n 1)
 
-IP=$(cat /.runcvm/net)
-GW=$(cat /.runcvm/netgw)
-
 # https://bugzilla.redhat.com/show_bug.cgi?id=501934
 for i in all $IF
 do
@@ -36,15 +33,17 @@ done
 # Bring up local interface
 ip link set lo up
 
-# Rename the first deterministically named interface to eth0
-ip link set $IF name eth0 && IF=eth0
-ip addr add $IP dev $IF
-ip link set $IF up
+# Rename the first deterministically named interface to eth0 and configure it
+load_network
+ip link set $IF name $DOCKER_IF
+ip addr add $DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX dev $DOCKER_IF
+ip link set $DOCKER_IF up mtu "${DOCKER_IF_MTU:=1500}"
+
+# Establish default gateway
+ip route add default via $DOCKER_IF_IP_GW
 
 # TODO
-# - bind-mount or overwrite /etc/resolv.conf, /etc/hosts and /etc/hostname
-
-route add default gw $GW
+# - bind-mount or overwrite /etc/resolv.conf, /etc/hosts and /etc/hostname?
 
 # Setup hostname
 hostname -F /etc/hostname

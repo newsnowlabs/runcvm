@@ -20,3 +20,9 @@ clean_env() {
     # May be set in VM by busybox init process
     export -n USER
 }
+
+load_network() {
+    [ -s /.runcvm/network ] || return 1
+    read -r DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW </.runcvm/network
+    return 0
+}
