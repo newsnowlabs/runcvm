@@ -154,7 +154,7 @@ RUN mkdir -p /opt/runcvm/kernels/debian/$(basename $(ls -d /lib/modules/*)) && \
 
 # --- BUILD STAGE ---
 # Build Ubuntu bullseye kernel and initramfs with virtiofs module
-FROM amd64/ubuntu:latest as ubuntu-kernel
+FROM amd64/ubuntu:jammy as ubuntu-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt update && apt install -y linux-generic:amd64 && \
