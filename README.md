@@ -36,6 +36,14 @@ Gain another interactive console on `ubuntu1`:
 docker exec -it ubuntu1 bash
 ```
 
+Launch a 3-node Docker Swarm on a network with 9000 MTU and, on the swarm, an http global service:
+
+```console
+git clone https://github.com/newsnowlabs/runcvm.git && \
+cd runcvm/tests/00-http-docker-swarm && \
+./test
+```
+
 ## RunCVM-in-Portainer walk-through
 
 [![Playing around with RunCVM, a docker runtime plugin](https://i.ytimg.com/vi/OENaWDlCWKg/maxresdefault.jpg)](https://www.youtube.com/watch?v=OENaWDlCWKg "Playing around with RunCVM, a docker runtime plugin")
@@ -89,9 +97,7 @@ RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. 
 - Run unusual container workloads, like `dockerd` and `systemd` that will not run in standard container runtimes
 - Maintain a similar experience within a RunCVM VM as within a container: process table, network interfaces, stdio, exit code handling should broadly similar to maximise compatibility
 - Container start/stop/kill semantics respected, where possible providing clean VM shutdown on stop
-- VM console accessible as one would expect using `docker run -it`, `docker start -ai` and `docker attach` (but stderr is not yet separated from stdout)
-- Support for `docker exec`
-- Good support for most other `docker container` subcommands
+- VM console accessible as one would expect using `docker run -it`, `docker start -ai` and `docker attach` (and so on), generally good support for other `docker container` subcommands
 - Efficient container startup, by using virtiofs to serve a container's filesystem directly to a VM (instead of unpacking an image into a backing file)
 - Improved security compared to the standard container runtime, and as much security as possible without compromising the simplicity of the implementation
 - Command-line and image-embedded options for customising the a container's VM specifications, devices, kernel
@@ -178,7 +184,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [-] Bind-mounting host sockets or devices, and `--device` is unsupported
    - Networking
       - [+] The default bridge network is supported
-      - [+] Custom/user-defined networks specified using `--network` are supported, including Docker DNS resolution of container names
+      - [+] Custom/user-defined networks specified using `--network` are supported, including Docker DNS resolution of container names and respect for custom network MTU
       - [+] `--publish` (or `-p`) is supported
       - [+] `--dns`, `--dns-option`, `--dns-search` are supported
       - [+] `--ip` is supported
