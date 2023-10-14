@@ -71,7 +71,7 @@ if [ "$wantsTerminal" = "true" ]; then
 fi
 
 if ! [ -s /.runcvm/dropbear/key ] || ! load_network; then
-  echo "Error: RunCVM container not fully started"
+  echo "Error: RunCVM container not fully started" >&2
   exit 1
 fi
 
