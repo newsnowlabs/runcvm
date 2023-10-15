@@ -200,7 +200,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
    - stdio/Terminals
       - [+] `--detach` (or `-d`) is supported
       - [+] `--interactive` (or `-i`) is supported
-      - [+] `--tty` (or `-t`) is supported (but to enter CTRL-A one must press CTRL-A twice)
+      - [+] `--tty` (or `-t`) is supported (but to enter CTRL-T one must press CTRL-T twice)
       - [+] `--attach` (or `-a`) is supported
       - [+] Stdout and Stderr output should be broadly similar to running the same workload in a standard `runc` container
       - [-] Stdout and Stderr are not independently multiplexed so `docker run --runtime=runcvm debian bash -c 'echo stdout; echo stderr >&2' >/tmp/stdout 2>/tmp/stderr` does not produce the expected result

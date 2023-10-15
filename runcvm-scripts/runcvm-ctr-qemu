@@ -137,6 +137,9 @@ ARGS=(
   -chardev socket,id=charchannel0,path=$QEMU_GUEST_AGENT,server=on,wait=off
   -device virtio-serial
   -device virtserialport,chardev=charchannel0,name=org.qemu.guest_agent.0
+
+  # Set monitor escape key to CTRL-T to reduce risk of conflict (as default, CTRL-A, is  commonly used)
+  -echr 20
 )
 
 if [[ "$RUNCVM_BREAK" =~ preqemu ]]; then echo Preparing to run: $CMD "${ARGS[@]@Q}"; bash; fi
