@@ -191,6 +191,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [+] `--hostname` (or `-h`) is supported
       - [-] Only one network (that which is assigned during `docker run`) is supported per container. There is no support for `docker network connect`.
       - [-] `--network=host` and `--network=container:name|id` are not supported
+      - [-] IPv6 is not supported
    - Execution environment
       - [+] `--user` (or `-u`) is supported
       - [?] `--workdir` (or `-w`) is supported

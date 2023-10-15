@@ -114,6 +114,9 @@ if [ "$RUNCVM_BIOS_DEBUG" != "1" ]; then
   OPTS+=(-fw_cfg opt/org.seabios/etc/sercon-port,string=0)
 fi
 
+# Disable IPv6, which is currently unsupported, at kernel boot time
+APPEND+=(ipv6.disable=1)
+
 ARGS=(
   "${OPTS[@]}"
   -no-user-config
