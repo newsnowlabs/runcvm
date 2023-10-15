@@ -142,6 +142,19 @@ fi
 # Disable IPv6, which is currently unsupported, at kernel boot time
 APPEND+=(ipv6.disable=1)
 
+# 16-64 works well and is more performant than 1024 in some scenarios.
+# For now, stick with original figure.
+VIRTIOFS_QUEUE_SIZE=1024
+
+if [ "$RUNCVM_HUGETLB" != "1" ]; then
+  # Tests suggests prealloc=on slows down mem-path=/dev/shm
+  MEM_PATH=/dev/shm MEM_PREALLOC=off
+  MEM_BACKEND="-object memory-backend-file,id=mem,size=$RUNCVM_MEM_SIZE,mem-path=$MEM_PATH,share=on,prealloc=$MEM_PREALLOC"
+else
+  # Fastest performance: +15% CPU/net intensive; 3.5x disk intensive.
+  MEM_BACKEND="-object memory-backend-memfd,id=mem,size=$RUNCVM_MEM_SIZE,share=on,prealloc=on,hugetlb=on"
+fi
+
 ARGS=(
   "${OPTS[@]}"
   -no-user-config
@@ -149,11 +162,11 @@ ARGS=(
   -serial $SERIAL
   -m "$RUNCVM_MEM_SIZE"
   -chardev socket,id=char0,path=$QEMU_VIRTIOFSD_SOCKET
-  -device vhost-user-fs-pci,queue-size=1024,chardev=char0,tag=myfs,ats=on
+  -device vhost-user-fs-pci,queue-size=$VIRTIOFS_QUEUE_SIZE,chardev=char0,tag=myfs,ats=on
   -kernel $RUNCVM_KERNEL_PATH
   -initrd $RUNCVM_KERNEL_INITRAMFS_PATH
   -append "$RUNCVM_KERNEL_ROOT $INIT rw ${APPEND[*]} $PANIC $RUNCVM_KERNEL_APPEND $BREAK"
-  -object memory-backend-file,id=mem,size="$RUNCVM_MEM_SIZE",mem-path=/dev/shm,share=on
+  $MEM_BACKEND
   -numa node,memdev=mem
   -smp $RUNCVM_CPUS
   # Configure host/container tap device with PXE roms disabled

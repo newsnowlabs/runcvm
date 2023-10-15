@@ -427,7 +427,13 @@ if [ "$COMMAND" = "create" ]; then
   fi
   log "RUNCVM_MEM_SIZE=$RUNCVM_MEM_SIZE"
   set_config_env "RUNCVM_MEM_SIZE" "$RUNCVM_MEM_SIZE"
-  jq_set "$CFG" --arg size "$RUNCVM_MEM_SIZE" '( .mounts[] | select(.destination == "/dev/shm") ) = {"destination": "/dev/shm","type": "tmpfs","source": "shm","options": ["nosuid","noexec","nodev","mode=1777","size=" + $size]}'
+
+  RUNCVM_HUGETLB=$(get_config_env "RUNCVM_HUGETLB")
+  if [ "$RUNCVM_HUGETLB" != "1" ]; then
+    jq_set "$CFG" --arg size "$RUNCVM_MEM_SIZE" '( .mounts[] | select(.destination == "/dev/shm") ) = {"destination": "/dev/shm","type": "tmpfs","source": "shm","options": ["nosuid","noexec","nodev","mode=1777","size=" + $size]}'
+  # else
+    # --shm-size applies; default 64m.
+  fi
 
   # In future, set the container memory limit to something reasonable to support
   # QEMU + virtiofsd + dnsmasq. Perhaps $RUNCVM_MEM_LIMIT+K (or vice-versa, reduce

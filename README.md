@@ -339,6 +339,10 @@ Enable breakpoints (falling to bash shell) during the RunCVM container/VM boot p
 
 `<values>` must be a comma-separated list of: `prenet`, `postnet`, `preqemu`.
 
+### `--env=RUNCVM_HUGETLB=1`
+
+**[EXPERIMENTAL]** Enable use of preallocated hugetlb memory backend, which can improve performance in some scenarios.
+
 ## Advanced usage
 
 ### Running Docker in a RunCVM container/VM
