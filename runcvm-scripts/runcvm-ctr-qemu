@@ -152,7 +152,7 @@ ARGS=(
   -device vhost-user-fs-pci,queue-size=1024,chardev=char0,tag=myfs,ats=on
   -kernel $RUNCVM_KERNEL_PATH
   -initrd $RUNCVM_KERNEL_INITRAMFS_PATH
-  -append "$RUNCVM_KERNEL_ROOT $INIT rw ${APPEND[@]} $PANIC $RUNCVM_KERNEL_APPEND $BREAK"
+  -append "$RUNCVM_KERNEL_ROOT $INIT rw ${APPEND[*]} $PANIC $RUNCVM_KERNEL_APPEND $BREAK"
   -object memory-backend-file,id=mem,size="$RUNCVM_MEM_SIZE",mem-path=/dev/shm,share=on
   -numa node,memdev=mem
   -smp $RUNCVM_CPUS
