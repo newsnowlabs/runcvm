@@ -17,6 +17,8 @@ INIT="init=/opt/runcvm/scripts/runcvm-vm-init"
 SERIAL="mon:stdio"
 # SERIAL="stdio"
 
+MACHINE="pc" # || "microvm"
+
 error() {
   echo "$1" >&2
   exit 1
@@ -74,6 +76,7 @@ do_disks() {
 
 do_networks() {
   local id=0 ifpath if mac
+  local viodev opts
   local DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW
 
   for ifpath in /.runcvm/network/devices/*
@@ -86,9 +89,17 @@ do_networks() {
 
     mac=$(busybox sed -r 's/^..:..:../52:54:00/' <<<$DOCKER_IF_MAC)
 
+    if [ "$MACHINE" = "pc" ]; then
+      viodev="virtio-net-pci"
+      opts=",rombar=$id"
+    else
+      viodev="virtio-net-device"
+      opts=""
+    fi
+
     IFACES+=(
         -netdev tap,id=qemu$id,ifname=tap-$DOCKER_IF,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN
-        -device virtio-net-pci,netdev=qemu$id,mac=$mac,rombar=$id
+        -device $viodev,netdev=qemu$id,mac=$mac$opts
     )
 
     id=$((id+1))
@@ -114,12 +125,26 @@ fi
 # TODO:
 # - Consider using '-device pvpanic'
 
+# 16-64 works well and is more performant than 1024 in some scenarios.
+# For now, stick with original figure.
+VIRTIOFS_QUEUE_SIZE=1024
+
 if [ "$RUNCVM_ARCH" = "arm64" ]; then
   CMD="qemu-system-aarch64"
   OPTS=(-cpu max -machine virt,gic-version=max,usb=off)
 else
   CMD="qemu-system-x86_64"
-  OPTS=(-enable-kvm -cpu host -machine q35,accel=kvm,usb=off,sata=off -device isa-debug-exit)
+  OPTS=(-enable-kvm -cpu host -device isa-debug-exit)
+
+  if [ "$MACHINE" = "pc" ]; then
+    OPTS+=(-machine q35,accel=kvm,usb=off,sata=off)
+    DEV_VHOSTFS="-device vhost-user-fs-pci,queue-size=$VIRTIOFS_QUEUE_SIZE,chardev=char0,tag=myfs,ats=on"
+    DEV_SERIAL="-device virtio-serial-pci"
+  else
+    OPTS+=(-machine microvm,accel=kvm,usb=off)
+    DEV_VHOSTFS="-device vhost-user-fs-device,queue-size=$VIRTIOFS_QUEUE_SIZE,chardev=char0,tag=myfs"
+    DEV_SERIAL="-device virtio-serial-device"
+  fi
 fi
 
 if [ -n "$RUNCVM_QEMU_DISPLAY" ]; then
@@ -137,14 +162,11 @@ if [ "$RUNCVM_BIOS_DEBUG" != "1" ]; then
   # This -cfw_cfg path is modified from the SeaBIOS default (to avoid an otherwise-inevitable QEMU
   # warning being emitted) and so requires patched bios.bin file(s) (see Dockerfile)
   OPTS+=(-fw_cfg opt/org.seabios/etc/sercon-port,string=0)
+  [ "$MACHINE" = "microvm" ] && OPTS+=(-bios bios.bin)
 fi
 
 # Disable IPv6, which is currently unsupported, at kernel boot time
 APPEND+=(ipv6.disable=1)
-
-# 16-64 works well and is more performant than 1024 in some scenarios.
-# For now, stick with original figure.
-VIRTIOFS_QUEUE_SIZE=1024
 
 if [ "$RUNCVM_HUGETLB" != "1" ]; then
   # Tests suggests prealloc=on slows down mem-path=/dev/shm
@@ -162,7 +184,7 @@ ARGS=(
   -serial $SERIAL
   -m "$RUNCVM_MEM_SIZE"
   -chardev socket,id=char0,path=$QEMU_VIRTIOFSD_SOCKET
-  -device vhost-user-fs-pci,queue-size=$VIRTIOFS_QUEUE_SIZE,chardev=char0,tag=myfs,ats=on
+  $DEV_VHOSTFS
   -kernel $RUNCVM_KERNEL_PATH
   -initrd $RUNCVM_KERNEL_INITRAMFS_PATH
   -append "$RUNCVM_KERNEL_ROOT $INIT rw ${APPEND[*]} $PANIC $RUNCVM_KERNEL_APPEND $BREAK"
@@ -176,7 +198,7 @@ ARGS=(
   -action panic=none -action reboot=shutdown
   -monitor unix:$QEMU_MONITOR_SOCKET,server,nowait
   -chardev socket,id=charchannel0,path=$QEMU_GUEST_AGENT,server=on,wait=off
-  -device virtio-serial
+  $DEV_SERIAL
   -device virtserialport,chardev=charchannel0,name=org.qemu.guest_agent.0
 
   # Set monitor escape key to CTRL-T to reduce risk of conflict (as default, CTRL-A, is  commonly used)

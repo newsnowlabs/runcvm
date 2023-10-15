@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.3-labs
 
 # Alpine version to build with
-ARG ALPINE_VERSION=3.16
+ARG ALPINE_VERSION=3.18
 
 # --- BUILD STAGE ---
 # Build base alpine-sdk image for later build stages
