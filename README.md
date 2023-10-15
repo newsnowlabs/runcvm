@@ -95,7 +95,7 @@ RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. 
 
 - Run any standard container workload in a VM using `docker run` with no need to customise images or the command line (except adding `--runtime=runcvm`)
 - Run unusual container workloads, like `dockerd` and `systemd` that will not run in standard container runtimes
-- Maintain a similar experience within a RunCVM VM as within a container: process table, network interfaces, stdio, exit code handling should broadly similar to maximise compatibility
+- Maintain a similar experience within a RunCVM VM as within a container: process table, network interfaces, stdio, exit code handling should be broadly similar to maximise compatibility
 - Container start/stop/kill semantics respected, where possible providing clean VM shutdown on stop
 - VM console accessible as one would expect using `docker run -it`, `docker start -ai` and `docker attach` (and so on), generally good support for other `docker container` subcommands
 - Efficient container startup, by using virtiofs to serve a container's filesystem directly to a VM (instead of unpacking an image into a backing file)
@@ -106,7 +106,7 @@ RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. 
 
 ## Project ambitions
 
-- Support multiple network interfaces, when attached to a created (but not yet running) container using `docker network connect`
+- Support multiple network interfaces, when attached to a created (but not yet running) container using `docker network connect` (COMPLETE - excluding IPv6)
 - Support running foreign-architecture VMs by using QEMU dynamic CPU emulation for the entire VM (instead of the approach used by [https://github.com/multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static) which uses dynamic CPU emulation for each individual binary)
 - Support for QEMU [microvm](https://qemu.readthedocs.io/en/latest/system/i386/microvm.html) or Amazon Firecracker
 - More natural console support with independent stdout and stderr channels for `docker run -it`
@@ -185,11 +185,12 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
    - Networking
       - [+] The default bridge network is supported
       - [+] Custom/user-defined networks specified using `--network` are supported, including Docker DNS resolution of container names and respect for custom network MTU
+      - [+] Multiple network interfaces - when attached via `docker run --network` or `docker network connect` (but only to a created and not yet running container) - are supported (including `scope=overlay` networks and those with multiple subnets)
       - [+] `--publish` (or `-p`) is supported
       - [+] `--dns`, `--dns-option`, `--dns-search` are supported
       - [+] `--ip` is supported
       - [+] `--hostname` (or `-h`) is supported
-      - [-] Only one network (that which is assigned during `docker run`) is supported per container. There is no support for `docker network connect`.
+      - [-] `docker network connect` on a running container is not supported
       - [-] `--network=host` and `--network=container:name|id` are not supported
       - [-] IPv6 is not supported
    - Execution environment
@@ -408,7 +409,7 @@ In more detail, the RunCVM runtime `create` process:
 The `runcvm-ctr-entrypoint`:
 - Is always launched as PID1 within the standard Docker container.
 - Saves the container's originally-intended entrypoint and command line, environment variables and network configuration to files inside `/.runcvm`.
-- Creates a bridge for the primary container network interface, that will be joined to a VM network interface.
+- Creates a bridge (acting as a hub) for each container network interface, to join that interface to a VM tap network interface.
 - Launches `virtiofsd` to serve the container's root filesystem.
 - Configures `/etc/resolv.conf` in the container.
 - Adds container firewall rules, launches `dnsmasq` and modifies `/vm/etc/resolv.conf` to proxy DNS requests from the VM to Docker's DNS.
@@ -421,6 +422,7 @@ The `runcvm-init` process:
 
 The `runcvm-ctr-qemu` script:
 - Prepares disk backing files as specified by `--env=RUNCVM_DISKS=<disks>`
+- Prepares network configuration as saved from the container (modifying the MAC address of each container interface)
 - Launches [QEMU](https://www.qemu.org/) with the required kernel, network interfaces, disks, display, and with a root filesystem mounted via virtiofs from the container and with `runcvm-vm-init` as the VM's init process.
 
 The `runcvm-vm-init` process:

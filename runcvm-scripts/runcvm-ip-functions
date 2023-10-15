@@ -1,0 +1,40 @@
+#!/bin/bash
+
+cidr_to_int() {
+  echo "$(( 0xffffffff ^ ((1 << (32 - $1)) - 1) ))"
+}
+
+int_to_ip() {
+  local value="$1"
+  echo "$(( ($1 >> 24) & 0xff )).$(( ($1 >> 16) & 0xff )).$(( ($1 >> 8) & 0xff )).$(( $1 & 0xff ))"
+}
+
+cidr_to_netmask() {
+  local value=$(cidr_to_int "$1")
+  int_to_ip "$value"
+}
+
+ip_prefix_to_network() {
+  local IFS i1 i2 i3 i4 m1 m2 m3 m4
+  IFS=. read -r i1 i2 i3 i4 <<< "$1"
+
+  local mask=$(cidr_to_netmask "$2")
+  IFS=. read -r m1 m2 m3 m4 <<< "$mask"
+
+  printf "%d.%d.%d.%d\n" "$((i1 & m1))" "$((i2 & m2))" "$((i3 & m3))" "$((i4 & m4))"
+}
+
+cidr_to_bcastmask() {
+  local value=$(( (1 << 32) - $(cidr_to_int "$1") - 1 ))
+  int_to_ip "$value"
+}
+
+ip_prefix_to_bcast() {
+  local IFS i1 i2 i3 i4 m1 m2 m3 m4
+  IFS=. read -r i1 i2 i3 i4 <<< "$1"
+
+  local mask=$(cidr_to_bcastmask "$2")
+  IFS=. read -r m1 m2 m3 m4 <<< "$mask"
+
+  printf "%d.%d.%d.%d\n" "$((i1 | m1))" "$((i2 | m2))" "$((i3 | m3))" "$((i4 | m4))"
+}

@@ -1,28 +1,27 @@
+#!/bin/bash
+
 RUNCVM=/opt/runcvm
 RUNCVM_PATH=$RUNCVM/usr/sbin:$RUNCVM/usr/bin:$RUNCVM/sbin:$RUNCVM/bin:$RUNCVM/usr/lib/qemu
-
-QEMU_IFUP="$RUNCVM/scripts/runcvm-ctr-qemu-ifup"
-QEMU_IFDOWN="$RUNCVM/scripts/runcvm-ctr-qemu-ifdown"
-QEMU_BRIDGE='q0'
 
 QEMU_VIRTIOFSD_SOCKET=/run/.virtiofs.sock
 QEMU_GUEST_AGENT=/run/.qemu-guest-agent
 QEMU_MONITOR_SOCKET=/run/.qemu-monitor-socket
 
 clean_env() {
-    export -n \
-    RUNCVM_BREAK RUNCVM_INIT \
-    RUNCVM_RUNTIME_DEBUG RUNCVM_BIOS_DEBUG RUNCVM_KERNEL_DEBUG \
-    RUNCVM_KERNEL RUNCVM_KERNEL_ROOT RUNCVM_KERNEL_APPEND RUNCVM_KERNEL_INITRAMFS_PATH RUNCVM_KERNEL_PATH RUNCVM_DISKS \
-    RUNCVM_UIDGID RUNCVM_VM_MOUNTPOINT RUNCVM_TMPFS \
-    RUNCVM_CPUS RUNCVM_MEM_SIZE RUNCVM_HAS_HOME
+  export -n \
+  RUNCVM_BREAK RUNCVM_INIT \
+  RUNCVM_RUNTIME_DEBUG RUNCVM_BIOS_DEBUG RUNCVM_KERNEL_DEBUG \
+  RUNCVM_KERNEL RUNCVM_KERNEL_ROOT RUNCVM_KERNEL_APPEND RUNCVM_KERNEL_INITRAMFS_PATH RUNCVM_KERNEL_PATH RUNCVM_DISKS \
+  RUNCVM_UIDGID RUNCVM_VM_MOUNTPOINT RUNCVM_TMPFS \
+  RUNCVM_CPUS RUNCVM_MEM_SIZE RUNCVM_HAS_HOME
 
-    # May be set in VM by busybox init process
-    export -n USER
+  # May be set in VM by busybox init process
+  export -n USER
 }
 
 load_network() {
-    [ -s /.runcvm/network ] || return 1
-    read -r DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW </.runcvm/network
-    return 0
+  local if="${1:-default}"
+  [ -d /.runcvm/network/devices ] && [ -s /.runcvm/network/devices/$if ] || return 1
+  read -r DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX  DOCKER_IF_IP_GW </.runcvm/network/devices/$if
+  return 0
 }

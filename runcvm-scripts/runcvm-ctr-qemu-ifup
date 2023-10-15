@@ -2,7 +2,12 @@
 
 . /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
 
-load_network
-ip link set dev "$1" up mtu "${DOCKER_IF_MTU:=1500}" master "$QEMU_BRIDGE"
+tap="$1"
+if="$(busybox sed 's/tap-//' <<<$tap)"
+bri="$(busybox sed 's/tap-/br-/' <<<$tap)"
+
+load_network "$if"
+
+ip link set dev "$tap" up mtu "${DOCKER_IF_MTU:=1500}" master "$bri"
 
 exit 0

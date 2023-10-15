@@ -6,8 +6,8 @@
 # Load defaults after exports (so that PATH is overridden)
 . /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
 
-# Load network config
-load_network
+QEMU_IFUP="$RUNCVM/scripts/runcvm-ctr-qemu-ifup"
+QEMU_IFDOWN="$RUNCVM/scripts/runcvm-ctr-qemu-ifdown"
 
 # BREAK="break=mountroot"
 PANIC="panic=-1"
@@ -16,8 +16,6 @@ INIT="init=/opt/runcvm/scripts/runcvm-vm-init"
 
 SERIAL="mon:stdio"
 # SERIAL="stdio"
-
-MAC=$(busybox sed -r 's/^..:..:../52:54:00/' <<<$DOCKER_IF_MAC)
 
 error() {
   echo "$1" >&2
@@ -58,7 +56,7 @@ do_disk() {
     mke2fs -F -t "$fs" "$src" >&2 || error "Error: disk spec '$spec' invalid: mke2fs on '$src' with fs '$fs' failed"
   fi
 
-  UUID=$(blkid -o value "$src" | head -n 1)
+  local UUID=$(blkid -o value "$src" | head -n 1)
   mkdir -p "$RUNCVM_VM_MOUNTPOINT/$dst" >&2
   echo "UUID=$UUID $dst $fs defaults,noatime 0 0" >>/.runcvm/fstab
   DISKS+=("-drive file=$src,format=raw,if=virtio,media=disk,cache=directsync,aio=native")
@@ -67,9 +65,33 @@ do_disk() {
 # Argument e.g. /disk1,/home,ext4,5G;/disk2,/var,ext4,1G
 do_disks() {
   local IFS=';'
+  local disk
   for disk in $1
   do
     do_disk "$disk"
+  done
+}
+
+do_networks() {
+  local id=0 ifpath if mac
+  local DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW
+
+  for ifpath in /.runcvm/network/devices/*
+  do
+    if=$(busybox basename "$ifpath")
+
+    [ "$if" = "default" ] && continue
+
+    load_network "$if"
+
+    mac=$(busybox sed -r 's/^..:..:../52:54:00/' <<<$DOCKER_IF_MAC)
+
+    IFACES+=(
+        -netdev tap,id=qemu$id,ifname=tap-$DOCKER_IF,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN
+        -device virtio-net-pci,netdev=qemu$id,mac=$mac,rombar=$id
+    )
+
+    id=$((id+1))
   done
 }
 
@@ -77,6 +99,9 @@ DISKS=()
 if [ -n "$RUNCVM_DISKS" ]; then
   do_disks "$RUNCVM_DISKS"
 fi
+
+IFACES=()
+do_networks
 
 if [ -n "$RUNCVM_TMPFS" ]; then
   echo "$RUNCVM_TMPFS" >>/.runcvm/fstab
@@ -132,7 +157,7 @@ ARGS=(
   -numa node,memdev=mem
   -smp $RUNCVM_CPUS
   # Configure host/container tap device with PXE roms disabled
-  -netdev tap,id=qemu0,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN -device virtio-net-pci,netdev=qemu0,mac=$MAC,rombar=0
+  ${IFACES[@]}
   -no-reboot
   ${DISKS[@]}
   -action panic=none -action reboot=shutdown

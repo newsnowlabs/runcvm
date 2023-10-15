@@ -349,15 +349,15 @@ if [ "$COMMAND" = "create" ]; then
   case "$RUNCVM_KERNEL_ID" in
       debian) RUNCVM_KERNEL_OS_KERNEL_PATH="/vmlinuz"
               RUNCVM_KERNEL_OS_INITRAMFS_PATH="/initrd.img"
-              RUNCVM_KERNEL_ROOT="rootfstype=virtiofs root=myfs noresume nomodeset"
+              RUNCVM_KERNEL_ROOT="rootfstype=virtiofs root=myfs noresume nomodeset net.ifnames=1"
               ;;
       ubuntu) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
               RUNCVM_KERNEL_OS_INITRAMFS_PATH="/boot/initrd.img"
-              RUNCVM_KERNEL_ROOT="rootfstype=virtiofs root=myfs noresume nomodeset"
+              RUNCVM_KERNEL_ROOT="rootfstype=virtiofs root=myfs noresume nomodeset net.ifnames=1"
               ;;
           ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
               RUNCVM_KERNEL_OS_INITRAMFS_PATH="/boot/initramfs"
-              RUNCVM_KERNEL_ROOT="root=virtiofs:myfs noresume nomodeset"
+              RUNCVM_KERNEL_ROOT="root=virtiofs:myfs noresume nomodeset net.ifnames=1"
               ;;
       alpine) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz-virt"
               RUNCVM_KERNEL_OS_INITRAMFS_PATH="/boot/initramfs-virt"

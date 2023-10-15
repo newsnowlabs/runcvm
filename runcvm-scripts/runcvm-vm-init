@@ -33,14 +33,46 @@ done
 # Bring up local interface
 ip link set lo up
 
-# Rename the first deterministically named interface to eth0 and configure it
-load_network
-ip link set $IF name $DOCKER_IF
-ip addr add $DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX dev $DOCKER_IF
-ip link set $DOCKER_IF up mtu "${DOCKER_IF_MTU:=1500}"
+# Identify each interface by MAC address, then give each a temporary name
+# (as we might ultimately need to rename e.g. eth0->eth1 and eth1->eth0).
+for ifpath in /.runcvm/network/devices/*
+do
+  if=$(busybox basename "$ifpath")
 
-# Establish default gateway
-ip route add default via $DOCKER_IF_IP_GW
+  [ "$if" = "default" ] && continue
+
+  load_network "$if"
+
+  # Locate the actual network device by its MAC address.
+  mac=$(busybox sed -r 's/^..:..:../52:54:00/' <<<$DOCKER_IF_MAC)
+  device=$(ip -json link show | jq -r --arg mac "$mac" '.[] | select(.address == $mac) | .ifname')
+
+  ip link set $device name $DOCKER_IF-tmp
+done
+
+# Configure, rename and bring up all interfaces.
+for ifpath in /.runcvm/network/devices/*
+do
+  if=$(busybox basename "$ifpath")
+
+  [ "$if" = "default" ] && continue
+
+  load_network "$if"
+
+  ip link set $DOCKER_IF-tmp name $DOCKER_IF
+  ip addr add $DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX broadcast + dev $DOCKER_IF
+  ip link set $DOCKER_IF up mtu "${DOCKER_IF_MTU:=1500}"
+
+  # If this is the default gateway interface, establish the default gateway
+  [ -n "$DOCKER_IF_IP_GW" ] && ip route add default via $DOCKER_IF_IP_GW
+done
+
+# Read and install any supplementary routes.
+while read -r DOCKER_RT_NET DOCKER_RT_GW DOCKER_RT_DEV DOCKER_RT_PREFSRC
+do
+  [ -n "$DOCKER_RT_NET" ] && [ -n "$DOCKER_RT_GW" ] && [ -n "$DOCKER_RT_DEV" ] && \
+    ip route add "$DOCKER_RT_NET" via "$DOCKER_RT_GW" dev "$DOCKER_RT_DEV"
+done </.runcvm/network/routes
 
 # TODO
 # - bind-mount or overwrite /etc/resolv.conf, /etc/hosts and /etc/hostname?
