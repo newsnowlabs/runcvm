@@ -72,10 +72,10 @@ EOF
 
 # --- BUILD STAGE ---
 # Build dist-independent dynamic binaries and libraries
-FROM alpine:$ALPINE_VERSION as binaries
+FROM alpine:$ALPINE_VERSION as host-binaries
 
 RUN apk update && \
-    apk add --no-cache file bash qemu-system-x86_64 qemu-virtiofsd qemu-ui-curses qemu-guest-agent \
+    apk add --no-cache file bash qemu-system-x86_64 qemu-system-aarch64 qemu-virtiofsd qemu-ui-curses qemu-guest-agent \
         jq iproute2 netcat-openbsd e2fsprogs blkid util-linux \
         s6 dnsmasq iptables nftables \
         ncurses coreutils \
@@ -95,12 +95,37 @@ RUN apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/drop
 
 # Patch the binaries and set up symlinks
 COPY build-utils/elf-patcher.sh /usr/local/bin/elf-patcher.sh
-ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/* tput stdbuf coreutils getent dropbear dbclient dropbearkey"
+ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-system-aarch64 qemu-ga /usr/lib/qemu/* tput stdbuf coreutils getent dropbear dbclient dropbearkey"
 ENV EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so"
 ENV CODE_PATH="/opt/runcvm"
 RUN /usr/local/bin/elf-patcher.sh && \
     bash -c 'cd /opt/runcvm/bin; for cmd in awk base64 cat chmod cut grep head hostname init ln ls mkdir mount poweroff ps rm route sh sysctl tr touch; do ln -s busybox $cmd; done' && \
     mkdir -p /opt/runcvm/usr/share && cp -a /usr/share/qemu /opt/runcvm/usr/share
+
+# --- BUILD STAGE ---
+# Build dist-independent guest dynamic binaries and libraries
+FROM arm64v8/alpine:$ALPINE_VERSION as guest-binaries
+
+RUN apk update && \
+    apk add --no-cache file bash qemu-guest-agent \
+        jq iproute2 netcat-openbsd blkid util-linux \
+        s6 \
+        ncurses coreutils \
+        patchelf
+
+# Install patched dropbear
+#COPY --from=alpine-dropbear /root/packages/main/x86_64 /usr/local/lib/libepka_file.so /tmp/dropbear/
+#RUN apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/dropbear-dbclient*.apk /tmp/dropbear/dropbear-2*.apk
+
+# Patch the binaries and set up symlinks
+COPY build-utils/elf-patcher.sh /usr/local/bin/elf-patcher.sh
+ENV BINARIES="busybox bash jq ip blkid findmnt mount s6-applyuidgid qemu-ga tput stdbuf coreutils getent"
+# dropbear dbclient dropbearkey"
+ENV EXTRA_LIBS="/usr/libexec/coreutils"
+# /tmp/dropbear/libepka_file.so"
+ENV CODE_PATH="/opt/runcvm/guest"
+RUN /usr/local/bin/elf-patcher.sh && \
+    bash -c 'cd /opt/runcvm/guest/bin; for cmd in awk base64 cat chmod cut grep head hostname init ln ls mkdir mount poweroff ps rm route sh sysctl tr touch; do ln -s busybox $cmd; done'
 
 # --- BUILD STAGE ---
 # Build static runcvm-init
@@ -124,7 +149,7 @@ RUN cd /root/qemu-exit && cc -o /root/qemu-exit/qemu-exit -std=gnu99 -static -s 
 
 # --- BUILD STAGE ---
 # Build alpine kernel and initramfs with virtiofs module
-FROM alpine:3.16 as alpine-kernel
+FROM arm64v8/alpine:3.16 as alpine-kernel
 
 RUN apk add --no-cache linux-virt
 RUN echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules && \
@@ -154,10 +179,10 @@ RUN mkdir -p /opt/runcvm/kernels/debian/$(basename $(ls -d /lib/modules/*)) && \
 
 # --- BUILD STAGE ---
 # Build Ubuntu bullseye kernel and initramfs with virtiofs module
-FROM amd64/ubuntu:latest as ubuntu-kernel
+FROM arm64v8/ubuntu:latest as ubuntu-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
-RUN apt update && apt install -y linux-generic:amd64 && \
+RUN apt update && apt install -y linux-generic && \
     echo 'virtiofs' >>/etc/initramfs-tools/modules && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
@@ -186,7 +211,8 @@ RUN mkdir -p /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*)) && \
 # Build RunCVM installer
 FROM alpine:$ALPINE_VERSION as installer
 
-COPY --from=binaries /opt/runcvm /opt/runcvm
+COPY --from=host-binaries /opt/runcvm /opt/runcvm
+COPY --from=guest-binaries /opt/runcvm/guest /opt/runcvm/guest
 COPY --from=runcvm-init /root/runcvm-init/runcvm-init /opt/runcvm/sbin/
 COPY --from=qemu-exit /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
 
@@ -200,9 +226,9 @@ ENTRYPOINT ["/entrypoint-install.sh"]
 # Install needed kernels.
 # Comment out any kernels that are unneeded.
 COPY --from=alpine-kernel /opt/runcvm/kernels/alpine /opt/runcvm/kernels/alpine
-COPY --from=debian-kernel /opt/runcvm/kernels/debian /opt/runcvm/kernels/debian
-COPY --from=ubuntu-kernel /opt/runcvm/kernels/ubuntu /opt/runcvm/kernels/ubuntu
-COPY --from=oracle-kernel /opt/runcvm/kernels/ol     /opt/runcvm/kernels/ol
+#COPY --from=debian-kernel /opt/runcvm/kernels/debian /opt/runcvm/kernels/debian
+#COPY --from=ubuntu-kernel /opt/runcvm/kernels/ubuntu /opt/runcvm/kernels/ubuntu
+#COPY --from=oracle-kernel /opt/runcvm/kernels/ol     /opt/runcvm/kernels/ol
 
 # Add 'latest' symlinks for available kernels
 RUN for d in /opt/runcvm/kernels/*; do cd $d && ln -s $(ls -d * | sort | head -n 1) latest; done

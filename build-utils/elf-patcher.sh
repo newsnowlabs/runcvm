@@ -6,6 +6,10 @@
 # - BINARIES - list of additional system binaries 
 # - CODE_PATH - path to Theia version to be scanned and patched
 
+# Determine LD_MUSL filename, which is architecture-dependent
+# e.g. ld-musl-aarch64.so.1 (linux/arm64), ld-musl-armhf.so.1 (linux/arm/v7), ld-musl-x86_64.so.1 (linux/amd64)
+LD_MUSL_BIN=$(basename /lib/ld-musl-*)
+
 append() {
   while read line; do echo "${line}${1}"; done
 }
@@ -22,7 +26,7 @@ checkelfs() {
   for lib in $(cat $CODE_PATH/.binelfs $CODE_PATH/.libelfs)
   do
     printf "Checking %-60s ... " "$lib" >&2
-    $CODE_PATH/lib64/lib/ld-musl-x86_64.so.1 --list $lib 2>/dev/null | sed -nr '/=>/!d; s/^\s*(\S+)\s*=>\s*(.*?)(\s*\(0x[0-9a-f]+\))?$/\1 \2/;/^.+$/p;' | append " in $lib" | egrep -v "$CODE_PATH/lib64"
+    $CODE_PATH/lib64/lib/$LD_MUSL_BIN --list $lib 2>/dev/null | sed -nr '/=>/!d; s/^\s*(\S+)\s*=>\s*(.*?)(\s*\(0x[0-9a-f]+\))?$/\1 \2/;/^.+$/p;' | append " in $lib" | egrep -v "$CODE_PATH/lib64"
   
     # If any libraries do not match the expected pattern, grep returns true
     if [ $? -eq 0 ]; then
@@ -92,7 +96,7 @@ copy_libs() {
     # If needed, add a symlink from $lib to $(basename $dest)
     [ "$(basename $dest)" != "$lib" ] && cd $CODE_PATH/lib64/$(dirname $dest) && ln -s $(basename $dest) $lib && cd -
 
-    if [ "$dest" != "/lib/ld-musl-x86_64.so.1" ]; then
+    if [ "$dest" != "/lib/$LD_MUSL_BIN" ]; then
         echo "$CODE_PATH/lib64$dest" >>/tmp/cmd-elf-lib
     fi
   done
@@ -102,8 +106,8 @@ patch_binaries() {
   # For all ELF binaries, set the interpreter to our own.
   for bin in $(sort -u "$@")
   do
-    echo patchelf --set-interpreter $CODE_PATH/lib64/lib/ld-musl-x86_64.so.1 $bin >>/tmp/patchelf.log
-    patchelf --set-interpreter $CODE_PATH/lib64/lib/ld-musl-x86_64.so.1 $bin >>/tmp/patchelf.log 2>&1
+    echo patchelf --set-interpreter $CODE_PATH/lib64/lib/$LD_MUSL_BIN $bin >>/tmp/patchelf.log
+    patchelf --set-interpreter $CODE_PATH/lib64/lib/$LD_MUSL_BIN $bin >>/tmp/patchelf.log 2>&1
   done
 }
 

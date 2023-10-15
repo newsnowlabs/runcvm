@@ -1,9 +1,6 @@
 #!/opt/runcvm/bin/bash
 
-# TODO Rationalise these into defaults
-RUNCVM=/opt/runcvm
-PATH=$RUNCVM/sbin:$RUNCVM/bin:$RUNCVM/usr/bin
-unset RUNCVM
+. /opt/runcvm/scripts/runcvm-vm-defaults && PATH="$RUNCVM_PATH"
 
 OPTS=(--retry-path --statedir /.runcvm)
 
