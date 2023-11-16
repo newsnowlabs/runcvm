@@ -39,6 +39,21 @@ cgroupfs_mount() {
   true
 }
 
+detect_ingress_ip() {
+  local FILE="$1"
+  local IP
+  
+  for i in $(seq 1 30 | sort -nr)
+  do
+    IP=$(docker network inspect ingress --format '{{index (split (index .Containers "ingress-sbox").IPv4Address "/") 0}}' 2>/dev/null)
+    [ -n "$IP" ] && break
+    [ $i -eq 1 ] && log "Ingress IP detection for this node failed!" && exit 1
+    sleep 0.5
+  done
+  
+  echo -n "$IP" >$FILE
+}
+
 cgroupfs_mount
 
 ulimit -u unlimited
@@ -55,7 +70,7 @@ read -r DOCKER_IF_IP DOCKER_IF_MTU <<< \
 log "- DOCKER_IF_IP=$DOCKER_IF_IP DOCKER_IF_MTU=$DOCKER_IF_MTU"
 
 # Start dockerd and keep it running
-log "Launching dockerd ..."
+log "Launching 'dockerd --mtu $DOCKER_IF_MTU' ..."
 while true; do dockerd --mtu $DOCKER_IF_MTU >>/var/log/dockerd.log 2>&1; done &
 
 for i in $(seq 1 10 | sort -nr)
@@ -113,20 +128,23 @@ if [ "$NodeState" = "inactive" ] || [ "$NodeState" = "pending" ]; then
 
     log "Swarm initialised!"
     
-    log "Removing default ingress ..."
-    echo y | docker network rm ingress
+    if [ -n "$MTU" ] && [ "$MTU" -gt 0 ]; then
     
-    log "Creating new ingress with MTU $DOCKER_IF_MTU"
-    docker network create \
-    --driver=overlay \
-    --ingress \
-    --subnet=10.0.0.0/24 \
-    --gateway=10.0.0.2 \
-    --opt com.docker.network.driver.mtu=$DOCKER_IF_MTU \
-    ingress
+      log "Removing default ingress ..."
+      echo y | docker network rm ingress
     
-    log "Writing swarm 'join token' to shared storage and waiting for other nodes  ..."
-    docker swarm join-token worker | grep docker >/swarm/worker
+      log "Creating new ingress with MTU $DOCKER_IF_MTU"
+      docker network create \
+        --driver=overlay \
+	--ingress \
+	--subnet=10.0.0.0/24 \
+	--gateway=10.0.0.1 \
+	--opt com.docker.network.driver.mtu=$DOCKER_IF_MTU \
+	ingress
+    fi
+
+    log "Writing swarm 'join token' to shared storage and waiting for other nodes ..."
+    mkdir -p /swarm/nodes && docker swarm join-token worker | grep docker >/swarm/worker
 
     for i in $(seq 1 30 | sort -nr)
     do
@@ -140,11 +158,46 @@ if [ "$NodeState" = "inactive" ] || [ "$NodeState" = "pending" ]; then
     log "Swarm nodes started:"
     docker node ls
     echo
-
-    # Log this trigger line last.
-    log "Swarm complete!"
-        
+    
   fi
+
+  log "Log memory consumption ..."
+  free
+
+  # Log this trigger line last
+  # BUT before running DIRD.
+  log "Swarm complete!"
+  
+  # Optionally run DIRD.
+  # Do this after logging "Swarm complete" so that test script proceeds to launch the service;
+  # as, until the service is launched, the nodes' ingress network IPs will not yet be defined.
+  if [ "$DIRD" = "1" ]; then
+
+    log "Detecting node ingress network IP ..."
+    detect_ingress_ip /swarm/nodes/$NODE
+    log "Detected node ingress network IP '$(cat /swarm/nodes/$NODE)'"
+
+    log "Waiting for all nodes' ingress network IPs ..."
+    for i in $(seq 1 30 | sort -nr)
+    do
+      [ $(ls /swarm/nodes/ | wc -l) -eq $NODES ] && break
+      [ $i -eq 1 ] && log "Ingress IP detection for all nodes failed!" && exit 1
+      sleep 0.5
+    done
+
+    for n in $(ls /swarm/nodes)
+    do
+      IPs+="$(cat /swarm/nodes/$n),"
+      echo "$n: '$(cat /swarm/nodes/$n)'"
+    done
+  
+    IPs=$(echo $IPs | sed 's/,$//')
+
+    log "Running docker-ingress-routing-daemon --preexisting --ingress-gateway-ips $IPs --install ..."
+    while true; do /usr/local/bin/docker-ingress-routing-daemon --preexisting --ingress-gateway-ips "$IPs" --install; sleep 1; done &
+  
+  fi
+    
 fi
 
 node_state

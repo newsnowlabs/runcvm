@@ -1,13 +1,23 @@
 #!/bin/bash -e
 
 NODE=00-http-docker-swarm-node
-NODES=3
-MTU=9000
+
+# Number of nodes
+NODES=${NODES:-3}
+
+# Network MTU to deploy in Docker network, RunCVM container VM nodes, and on Docker and swarm ingress network running on those nodes.
+MTU=${MTU:-9000}
+
+# Set to "1" to enable installation of https://github.com/newsnowlabs/docker-ingress-routing-daemon on the swarm
+DIRD=${DIRD:-0}
+
+# Set to "1" to disable cleanup of Docker image
+NO_CLEAN_IMAGE=${NO_CLEAN_IMAGE:-0}
 
 log() {
   local opts
   if [ "$1" = "-n" ]; then opts="-n"; shift; fi
-  echo $opts "($h) > $1"
+  echo $opts "$(date +%Y%m%d.%H%M%S) ($h) > $1"
 }
 
 nodes() {
@@ -33,7 +43,7 @@ _cleanup() {
   fi
   echo
 
-  if [ -n "$IMAGE" ]; then
+  if [ -n "$IMAGE" ] && [ "$NO_CLEAN_IMAGE" != "1" ]; then
     log "Cleaning up temporary image ..."
     docker rmi $IMAGE
     echo
@@ -83,8 +93,13 @@ log "Build image ..."
 docker build --iidfile /tmp/iid -f node/Dockerfile node/
 IMAGE=$(cat /tmp/iid)
 
-log "Creating network 'runcvm-mtu' with MTU $MTU ..."
-docker network create --opt com.docker.network.driver.mtu=$MTU --scope=local runcvm-mtu
+if [ -n "$MTU" ] && [ "$MTU" -gt 0 ]; then
+  log "Creating network 'runcvm-mtu' with MTU $MTU ..."
+  docker network create --opt com.docker.network.driver.mtu=$MTU --scope=local runcvm-mtu
+else
+  log "Creating network 'runcvm-mtu' with default (unspecified) MTU ..."
+  docker network create --scope=local runcvm-mtu
+fi
 
 log "Launching $NODES x RunCVM nodes with image $IMAGE ..."
 for n in $(seq 1 $NODES)
@@ -101,11 +116,14 @@ do
     --rm \
     --runtime=runcvm \
     --network=runcvm-mtu \
-    -p $((8080+$n-1)):80 \
+    --publish=$((8080+$n-1)):80 \
     --name=$NODE$n \
     --hostname=$NODE$n \
+    --memory=256m \
     --env=NODE=$n \
     --env=NODES=$NODES \
+    --env=MTU=$MTU \
+    --env=DIRD=$DIRD \
     --mount=type=volume,src=swarm,dst=/swarm \
     $diskopt \
     $IMAGE
@@ -128,7 +146,7 @@ mini_httpd -d /www -D -l /dev/stdout -c '**.cgi'
 _EOE_
 )"
 
-for i in $(seq 1 20 | sort -nr)
+for i in $(seq 1 200 | sort -nr)
 do
   replicas=$(docker exec ${NODE}1 docker service ls --format='{{ .Replicas }}' --filter='Name=http')
   log "Waiting for remainder of $replicas replicas to launch (#$i) ..."
@@ -142,9 +160,14 @@ sleep 1
 # Allow final test to complete, even if we encounter errors
 set +e
 
-DOCKER_IPV4="10.0.0."
+if [ "$DIRD" = "1" ]; then
+  DOCKER_IPV4=$(docker network inspect runcvm-mtu --format='{{(index .IPAM.Config 0).Gateway}}')
+else
+  DOCKER_IPV4="10.0.0."
+fi
 
-log "Running $NODE test looking for $DOCKER_IPV4 at $(date) ..."
+log "Running $NODE test looking for '$DOCKER_IPV4' at $(date) ..."
+
 ERRORS=0
 TESTS=0
 for loop in $(seq 1 250)
@@ -156,7 +179,7 @@ do
   # Uncomment if running inside a Dockside devtainer (which must be preconnected to a precreated runcvm-mtu Docker network).
   # host=http://$NODE$((i+1)):80/
 
-  response=$(curl -is $host)
+  response=$(curl --max-time 1 -is $host)
   ERROR=$?
 
   if [ $ERROR -eq 0 ]; then
