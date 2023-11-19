@@ -113,8 +113,14 @@ for n in $(seq 1 $NODES)
 do
   log -n "Launching RunCVM node $n/$NODES ... "
 
-  diskopt="--mount=type=volume,src=$NODE$n,dst=/var/lib/docker"
-  # diskopt="--mount=type=volume,src=$NODE$n,dst=/disks --env=RUNCVM_DISKS=/disks/disk1,/var/lib/docker,ext4,1G"
+  # Enables Docker's use of overlay2 storage driver in a file-backed disk stored in a dedicated Docker volume
+  # diskopt="--mount=type=volume,src=$NODE$n,dst=/disks --env=RUNCVM_DISKS=/disks/disk1,/var/lib/docker,ext4,500M"
+
+  # Docker will fall back to using the vfs storage driver, as it detects /var/lib/docker is an overlay2 fs.
+  # diskopt="--mount=type=volume,src=$NODE$n,dst=/var/lib/docker"
+  
+  # Enables Docker's use of overlay2 storage driver in a file-backed disk stored in the container's overlayfs
+  diskopt="--env=RUNCVM_DISKS=/disks/disk1,/var/lib/docker,ext4,500M"
 
   # The swarm volume, mounted at /swarm within the RunCVM VMs, will be used to share swarm info
   # among the nodes.
