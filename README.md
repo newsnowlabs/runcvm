@@ -349,23 +349,27 @@ Enable breakpoints (falling to bash shell) during the RunCVM container/VM boot p
 
 #### ext4 disk backing file mounted at `/var/lib/docker`
 
-If running Docker within a VM, it is recommended that you make `/var/lib/docker` a dedicated disk mountpoint (currently only ext4), to avoid `dockerd` electing to use the extremely sub-performant `vfs` storage driver.
+If running Docker within a VM, it is recommended that you mount a disk backing file at `/var/lib/docker` to allow `dockerd` to use the preferred overlay filesystem and avoid it opting to use the extremely sub-performant `vfs` storage driver.
 
-e.g. To launch a VM with a disk mount, backed by a 5G file in the `runcvm-disks` volume, run:
+e.g. To launch a VM with a 1G ext4-formatted backing file, stored in the underlying container's overlay filesystem, and mounted at `/var/lib/docker`, run:
+
+```sh
+docker run -it --runtime=runcvm --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,1G <docker-image>
+```
+
+To launch a VM with a 5G ext4-formatted backing file, stored in a dedicated Docker volume on the host, and mounted at `/var/lib/docker`, run:
 
 ```sh
 docker run -it --runtime=runcvm --mount=type=volume,src=runcvm-disks,dst=/disks --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,5G <docker-image>
 ```
 
-RunCVM will check for existence of a file `/disks/docker` in the `runcvm-disks` volume, and if not found will create a 5G file-backed disk with an ext4 filesystem. It will add the disk to `/etc/fstab`.
+In both cases, RunCVM will check for existence of a file `/disks/docker` and, if not found, will create the disk backing file of the given size and format as an ext4 filesystem. It will add the disk to `/etc/fstab`.
 
 For full documentation of `RUNCVM_DISKS`, see above.
 
 #### Docker volume mounted at `/var/lib/docker` (NOT RECOMMENDED)
 
-Doing this is _not recommended_, but support for this can be enabled (at the cost of security) by launching with `--env=RUNCVM_SYS_ADMIN=1`.
-
-e.g. 
+Doing this is _not recommended_, but if running Docker within a VM, you can enable `dockerd` to use the overlay filesystem (at the cost of security) by launching with `--env=RUNCVM_SYS_ADMIN=1`. e.g. 
 
 ```sh
 docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker --env=RUNCVM_SYS_ADMIN=1 <docker-image>
