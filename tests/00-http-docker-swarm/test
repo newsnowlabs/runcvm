@@ -89,6 +89,13 @@ h=$(hostname)
 
 cleanup
 
+if [ -n "$REGISTRY_MIRROR" ]; then
+  log "REGISTRY_MIRROR '$REGISTRY_MIRROR' detected."
+else
+  log "No REGISTRY_MIRROR detected: recommend setting REGISTRY_MIRROR=http://localhost:5000 and launching:"
+  log "- docker run -d --name=registry --network=host -e REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io registry:2"
+fi
+
 log "Build image ..."
 docker build --iidfile /tmp/iid -f node/Dockerfile node/
 IMAGE=$(cat /tmp/iid)
@@ -124,6 +131,7 @@ do
     --env=NODES=$NODES \
     --env=MTU=$MTU \
     --env=DIRD=$DIRD \
+    --env=REGISTRY_MIRROR=$REGISTRY_MIRROR \
     --mount=type=volume,src=swarm,dst=/swarm \
     $diskopt \
     $IMAGE

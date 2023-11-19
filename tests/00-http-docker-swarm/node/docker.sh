@@ -63,15 +63,24 @@ modprobe ip_vs
 h=$(hostname)
 
 log "Checking network ..."
-DOCKER_IF=$(ip -json route show | jq -j '.[] | select(.dst == "default") | .dev')
+read -r DOCKER_IF DOCKER_IF_GW \
+  <<< $(ip -json route show | jq -j '.[] | select(.dst == "default") | .dev, " ", .gateway')
+
 read -r DOCKER_IF_IP DOCKER_IF_MTU <<< \
   $(ip -json addr show eth0 | jq -j '.[0] | .addr_info[0].local, " ", .mtu')
 
-log "- DOCKER_IF_IP=$DOCKER_IF_IP DOCKER_IF_MTU=$DOCKER_IF_MTU"
+log "- DOCKER_IF=$DOCKER_IF DOCKER_IF_IP=$DOCKER_IF_IP DOCKER_IF_GW=$DOCKER_IF_GW DOCKER_IF_MTU=$DOCKER_IF_MTU"
 
 # Start dockerd and keep it running
-log "Launching 'dockerd --mtu $DOCKER_IF_MTU' ..."
-while true; do dockerd --mtu $DOCKER_IF_MTU >>/var/log/dockerd.log 2>&1; done &
+DOCKER_OPTS=(--mtu=$DOCKER_IF_MTU)
+
+if [ -n "$REGISTRY_MIRROR" ]; then
+  # Replace localhost with custom network gateway, if desired to reach registry running on host network
+  DOCKER_OPTS+=(--registry-mirror=$(sed "s|/localhost\b|/$DOCKER_IF_GW|" <<< $REGISTRY_MIRROR))
+fi
+
+log "Launching YYY 'dockerd ${DOCKER_OPTS[*]}' ... XXX"
+while true; do dockerd "${DOCKER_OPTS[@]}" >>/var/log/dockerd.log 2>&1; done &
 
 for i in $(seq 1 10 | sort -nr)
 do
@@ -82,6 +91,8 @@ do
 done
 
 log "dockerd started"
+
+docker info
 
 node_state
 log "docker swarm: node state = $NodeState; manager=$IsManager"
