@@ -75,4 +75,4 @@ if ! [ -s /.runcvm/dropbear/key ] || ! load_network; then
   exit 1
 fi
 
-exec $RUNCVM/usr/bin/dbclient ${opts[@]} -y -y -i /.runcvm/dropbear/key root@$DOCKER_IF_IP "$command '$uidgid' '$(echo -n $cwd | to_bin)' '$args_bin' '$env_bin'"
+exec $RUNCVM/usr/bin/dbclient ${opts[@]} -p $SSHD_PORT -y -y -i /.runcvm/dropbear/key root@$DOCKER_IF_IP "$command '$uidgid' '$(echo -n $cwd | to_bin)' '$args_bin' '$env_bin'"

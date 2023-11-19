@@ -146,10 +146,10 @@ do
     XTABLES_LIBDIR=/opt/runcvm/lib64/usr/lib/xtables/ /opt/runcvm/sbin/xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p udp -m udp --sport 53 -j SNAT --to-source $DOCKER_IF_IP
     XTABLES_LIBDIR=/opt/runcvm/lib64/usr/lib/xtables/ /opt/runcvm/sbin/xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p udp -m udp --dport 53 -j SNAT --to-source $DOCKER_IF_IP
 
-    # Match TCP port 22 traffic, outgoing via the QEMU bridge, from the bridge's own IP:
+    # Match traffic on TCP port $SSHD_PORT, outgoing via the QEMU bridge, from the bridge's own IP:
     # -> Masquerade it as if from the DNS_IP.
     #    This is necessary to allow SSH from within the container to the VM.
-    XTABLES_LIBDIR=/opt/runcvm/lib64/usr/lib/xtables/ /opt/runcvm/sbin/xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p tcp -m tcp --dport 22 -j SNAT --to-source $RUNCVM_DNS_IP
+    XTABLES_LIBDIR=/opt/runcvm/lib64/usr/lib/xtables/ /opt/runcvm/sbin/xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p tcp -m tcp --dport $SSHD_PORT -j SNAT --to-source $RUNCVM_DNS_IP
   fi
 
 done

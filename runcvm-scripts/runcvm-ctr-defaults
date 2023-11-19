@@ -7,6 +7,8 @@ QEMU_VIRTIOFSD_SOCKET=/run/.virtiofs.sock
 QEMU_GUEST_AGENT=/run/.qemu-guest-agent
 QEMU_MONITOR_SOCKET=/run/.qemu-monitor-socket
 
+SSHD_PORT=22222
+
 clean_env() {
   export -n \
   RUNCVM_BREAK RUNCVM_INIT \
