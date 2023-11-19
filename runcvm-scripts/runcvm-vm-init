@@ -5,6 +5,19 @@
 # Alpine initrd doesn't honour command-line rw flag
 mount -o remount,rw /
 
+# Alpine initrd doesn't configure /dev device permissions and ownership
+# to support non-root users.
+if [ "$(findmnt -rnu -o FSTYPE /dev)" = "devtmpfs" ]; then
+  [ -e /dev/stdin ] || ln -snf /proc/self/fd/0 /dev/stdin
+  [ -e /dev/stdout ] || ln -snf /proc/self/fd/1 /dev/stdout
+  [ -e /dev/stderr ] || ln -snf /proc/self/fd/2 /dev/stderr
+  [ -e /proc/kcore ] && ln -snf /proc/kcore /dev/core
+  [ -h /dev/ptmx ] || ln -snf pts/ptmx /dev/ptmx
+  chmod 666 /dev/null /dev/random /dev/urandom /dev/zero /dev/tty /dev/pts/ptmx
+  chmod 620 /dev/tty[0-9]*
+  chgrp tty /dev/tty*
+fi
+
 # Unmount /run if it is a tmpfs (not a virtiofs) mounted by the initramfs
 # /run may be populated in the underlying image, and may also be a volume or be bind-mounted,
 # and its contents should be accessible in these cases.
@@ -117,7 +130,7 @@ if [ "$RUNCVM_INIT" = "1" ]; then
   $RUNCVM/bin/cat >/etc/inittab <<_EOE_
 ttyS0::respawn:-/opt/runcvm/scripts/runcvm-vm-start
 null::respawn:/opt/runcvm/scripts/runcvm-vm-qemu-ga
-null::respawn:/opt/runcvm/usr/sbin/dropbear -REF -A /opt/runcvm/lib64/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
+null::respawn:/opt/runcvm/usr/sbin/dropbear -REF -p $SSHD_PORT -A /opt/runcvm/lib64/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
 null::ctrlaltdel:/opt/runcvm/bin/poweroff
 null::restart:/opt/runcvm/bin/poweroff
 null::shutdown:/opt/runcvm/bin/poweroff
@@ -138,7 +151,7 @@ else
   $RUNCVM/scripts/runcvm-vm-qemu-ga &>/dev/null &
 
   # Run dropbear SSH server, needed to support 'docker exec'
-  $RUNCVM/usr/sbin/dropbear -REF -A /opt/runcvm/lib64/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
+  $RUNCVM/usr/sbin/dropbear -REF -p $SSHD_PORT -A /opt/runcvm/lib64/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
 
   # Run init from the image
   # Pipe input/output from/to serial console

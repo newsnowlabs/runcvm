@@ -99,7 +99,7 @@ ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-
 ENV EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so"
 ENV CODE_PATH="/opt/runcvm"
 RUN /usr/local/bin/elf-patcher.sh && \
-    bash -c 'cd /opt/runcvm/bin; for cmd in awk base64 cat chmod cut grep head hostname init ln ls mkdir mount poweroff ps rm route sh sysctl tr touch; do ln -s busybox $cmd; done' && \
+    bash -c 'cd /opt/runcvm/bin; for cmd in awk base64 cat chgrp chmod cut grep head hostname init ln ls mkdir mount poweroff ps rm route sh sysctl tr touch; do ln -s busybox $cmd; done' && \
     mkdir -p /opt/runcvm/usr/share && cp -a /usr/share/qemu /opt/runcvm/usr/share
 
 # --- BUILD STAGE ---
