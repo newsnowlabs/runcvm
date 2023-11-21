@@ -60,26 +60,28 @@ NODES=3 MTU=9000 ./test
 
 [![Playing around with RunCVM, a docker runtime plugin](https://i.ytimg.com/vi/OENaWDlCWKg/maxresdefault.jpg)](https://www.youtube.com/watch?v=OENaWDlCWKg "Playing around with RunCVM, a docker runtime plugin")
 
-## Why?
+## Motivation
 
 RunCVM was born out of difficulties experienced using the Docker and Podman CLIs to launch [Kata Containers v2](https://katacontainers.io/), and a belief that launching containerised workloads in VMs using Docker needn't be so complicated.
 
-(See the ongoing effort to [re-add OCI CLI commands for docker/podman](https://github.com/kata-containers/kata-containers/issues/722) to Kata v2 to support Docker & Podman; other Kata issues [#3358](https://github.com/kata-containers/kata-containers/issues/3358), [#1123](https://github.com/kata-containers/kata-containers/issues/1123), [#1133](https://github.com/kata-containers/kata-containers/issues/1133), [#3038](https://github.com/kata-containers/runtime/issues/3038); [#5321](https://github.com/kata-containers/runtime/issues/5321); [#6861](https://github.com/kata-containers/runtime/issues/6861); Podman issues [#8579](https://github.com/containers/podman/issues/8579) and [#17070](https://github.com/containers/podman/issues/17070); and Kubernetes issue [#40114](https://github.com/kubernetes/website/issues/40114)).
+> Motivations included: efforts to [re-add OCI CLI commands for docker/podman](https://github.com/kata-containers/kata-containers/issues/722) to Kata v2 to support Docker & Podman; other Kata issues [#3358](https://github.com/kata-containers/kata-containers/issues/3358), [#1123](https://github.com/kata-containers/kata-containers/issues/1123), [#1133](https://github.com/kata-containers/kata-containers/issues/1133), [#3038](https://github.com/kata-containers/runtime/issues/3038); [#5321](https://github.com/kata-containers/runtime/issues/5321); [#6861](https://github.com/kata-containers/runtime/issues/6861); Podman issues [#8579](https://github.com/containers/podman/issues/8579) and [#17070](https://github.com/containers/podman/issues/17070); and Kubernetes issue [#40114](https://github.com/kubernetes/website/issues/40114); though please note, since authoring RunCVM some of these issues may have been resolved.
 
 Like Kata, RunCVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualisation technology.
 
-However, unlike Kata, RunCVM:
+RunCVM features:
 
-- Is compatible with `docker run` *today* (with experimental support for `podman run`).
-- Is written almost entirely in shell script, for simplicity, portability and ease of development.
-- Uses a lightweight 'wrapper-runtime' technology that subverts the behaviour of the standard container runtime `runc`, making its code footprint and external dependencies extremely small, and its internals extremely simple and easy to understand and tailor for specific purposes.
-- Is highly portable among Linux distributions and development platforms providing KVM. It even installs on [GitHub Codespaces](https://github.com/features/codespaces)!
+- Compatible with `docker run` (with experimental support for `podman run`).
+- Uses a lightweight 'wrapper-runtime' technology that subverts the behaviour of the standard container runtime `runc` to cause a VM to be launched within the container (making its code footprint and external dependencies extremely small, and its internals extremely simple and easy to understand and tailor for specific purposes).
+- Highly portable among Linux distributions and development platforms providing KVM. Can even be installed on [GitHub Codespaces](https://github.com/features/codespaces)!
+- Written, using off-the-shelf open-source components, almost entirely in shell script for simplicity, portability and ease of development.
 
 > RunCVM makes some trade-offs in return for this simplicity. See the full list of [features and limitations](#features-and-limitations).
 
 ## Contents
 
 - [Introduction](#introduction)
+- [Quick start](#quick-start)
+- [Motivation](#motivation)
 - [Licence](#licence)
 - [Project aims](#project-aims)
 - [Project ambitions](#project-ambitions)
@@ -115,12 +117,13 @@ RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. 
 - Command-line and image-embedded options for customising the a container's VM specifications, devices, kernel
 - Intelligent kernel selection, according to the distribution used in the image being launched
 - No external dependencies, except for Docker/Podman and relevant Linux kernel modules (`kvm` and `tun`)
+- Support multiple Docker network interfaces attached to a created (but not yet running) container using `docker run --network=<network>` and `docker network connect` (excluding IPv6)
 
 ## Project ambitions
 
-- Support multiple network interfaces, when attached to a created (but not yet running) container using `docker network connect` (COMPLETE - excluding IPv6)
+- Support for booting VM with a file-backed disk root fs generated from the container image, instead of only virtiofs root
 - Support running foreign-architecture VMs by using QEMU dynamic CPU emulation for the entire VM (instead of the approach used by [https://github.com/multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static) which uses dynamic CPU emulation for each individual binary)
-- Support for QEMU [microvm](https://qemu.readthedocs.io/en/latest/system/i386/microvm.html) or Amazon Firecracker
+- Support for QEMU [microvm](https://qemu.readthedocs.io/en/latest/system/i386/microvm.html) or potentially Amazon Firecracker
 - More natural console support with independent stdout and stderr channels for `docker run -it`
 - Improve VM boot time and other behaviours using custom kernel
 - Support for specific hardware e.g. graphics display served via VNC
