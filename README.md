@@ -36,12 +36,24 @@ Gain another interactive console on `ubuntu1`:
 docker exec -it ubuntu1 bash
 ```
 
+Launch a VM with 1G memory and a 1G ext4-formatted backing file mounted at `/var/lib/docker` and stored in the underlying container's filesystem:
+
+```sh
+docker run -it --runtime=runcvm --memory=1G --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,1G <docker-image>
+```
+
+Launch a VM with 2G memory and a 5G ext4-formatted backing file mounted at `/var/lib/docker` and stored in a dedicated Docker volume on the host:
+
+```sh
+docker run -it --runtime=runcvm --memory=2G --mount=type=volume,src=runcvm-disks,dst=/disks --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,5G <docker-image>
+```
+
 Launch a 3-node Docker Swarm on a network with 9000 MTU and, on the swarm, an http global service:
 
 ```console
 git clone https://github.com/newsnowlabs/runcvm.git && \
 cd runcvm/tests/00-http-docker-swarm && \
-./test
+NODES=3 MTU=9000 ./test
 ```
 
 ## RunCVM-in-Portainer walk-through
