@@ -132,7 +132,7 @@ do
     --publish=$((8080+$n-1)):80 \
     --name=$NODE$n \
     --hostname=$NODE$n \
-    --memory=256m \
+    --memory=512m \
     --env=NODE=$n \
     --env=NODES=$NODES \
     --env=MTU=$MTU \
