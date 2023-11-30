@@ -1,0 +1,11 @@
+--- mkinitfs-3.8.1.orig/nlplug-findfs/nlplug-findfs.c
++++ mkinitfs-3.8.1/nlplug-findfs/nlplug-findfs.c
+@@ -41,7 +41,7 @@
+ #include <blkid.h>
+ #include <libcryptsetup.h>
+ 
+-#define MAX_EVENT_TIMEOUT	5000
++#define MAX_EVENT_TIMEOUT	1000
+ #define DEFAULT_EVENT_TIMEOUT	250
+ /* usb mass storage needs 1 sec to settle */
+ #define USB_STORAGE_TIMEOUT	1000

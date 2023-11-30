@@ -71,6 +71,20 @@ make install
 EOF
 
 # --- BUILD STAGE ---
+# Build patched mkinitfs/nlplug-findfs
+# with shorter timeout for speedier boot (saving ~4s)
+FROM alpine-sdk as alpine-mkinitfs
+
+ADD patches/mkinitfs/nlplug-findfs.patch /root/aports/main/mkinitfs/nlplug-findfs.patch
+
+RUN <<EOF
+cd /root/aports/main/mkinitfs
+echo 'sha512sums="${sha512sums}$(sha512sum nlplug-findfs.patch)"' >>APKBUILD
+echo 'source="${source} nlplug-findfs.patch"' >>APKBUILD
+abuild -rFf
+EOF
+
+# --- BUILD STAGE ---
 # Build dist-independent dynamic binaries and libraries
 FROM alpine:$ALPINE_VERSION as binaries
 
@@ -126,9 +140,13 @@ RUN cd /root/qemu-exit && cc -o /root/qemu-exit/qemu-exit -std=gnu99 -static -s 
 # Build alpine kernel and initramfs with virtiofs module
 FROM alpine:3.18 as alpine-kernel
 
+# Install patched mkinitfs
+COPY --from=alpine-mkinitfs /root/packages/main/x86_64 /tmp/mkinitfs/
+RUN apk add --allow-untrusted /tmp/mkinitfs/*.apk
 RUN apk add --no-cache linux-virt
 RUN echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules && \
     sed -ri 's/\b(ata|nvme|raid|scsi|usb|cdrom|kms|mmc)\b//g; s/[ ]+/ /g' /etc/mkinitfs/mkinitfs.conf && \
+    sed -ri 's/(nlplug-findfs)/\1 --timeout=1000/' /usr/share/mkinitfs/initramfs-init && \
     mkinitfs $(basename $(ls -d /lib/modules/*))
 RUN mkdir -p /opt/runcvm/kernels/alpine/$(basename $(ls -d /lib/modules/*)) && \
     cp -a /boot/vmlinuz-virt /opt/runcvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
