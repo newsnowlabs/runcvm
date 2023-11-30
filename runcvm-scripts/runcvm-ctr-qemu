@@ -9,13 +9,7 @@
 QEMU_IFUP="$RUNCVM/scripts/runcvm-ctr-qemu-ifup"
 QEMU_IFDOWN="$RUNCVM/scripts/runcvm-ctr-qemu-ifdown"
 
-# BREAK="break=mountroot"
-PANIC="panic=-1"
-
 INIT="init=/opt/runcvm/scripts/runcvm-vm-init"
-
-SERIAL="mon:stdio"
-# SERIAL="stdio"
 
 error() {
   echo "$1" >&2
@@ -65,7 +59,7 @@ do_disk() {
   local UUID=$(blkid -o value "$src" | head -n 1)
   mkdir -p "$RUNCVM_VM_MOUNTPOINT/$dst" >&2
   echo "UUID=$UUID $dst $fs defaults,noatime 0 0" >>/.runcvm/fstab
-  DISKS+=("-drive file=$src,format=raw,if=virtio,media=disk,cache=directsync,aio=native")
+  DISKS+=(-drive file=$src,format=raw,if=virtio,media=disk,cache=directsync,aio=native)
 }
 
 # Argument e.g. /disk1,/home,ext4,5G;/disk2,/var,ext4,1G
@@ -122,20 +116,17 @@ fi
 
 if [ "$RUNCVM_ARCH" = "arm64" ]; then
   CMD="qemu-system-aarch64"
-  OPTS=(-cpu max -machine virt,gic-version=max,usb=off)
+  MACHINE+=(-cpu max -machine virt,gic-version=max,usb=off)
 else
   CMD="qemu-system-x86_64"
-  OPTS=(-enable-kvm -cpu host -machine q35,accel=kvm,usb=off,sata=off -device isa-debug-exit)
+  MACHINE+=(-enable-kvm -cpu host,pmu=off -machine q35,accel=kvm,usb=off,sata=off -device isa-debug-exit)
 fi
 
 if [ -n "$RUNCVM_QEMU_DISPLAY" ]; then
-  OPTS+=(-display $RUNCVM_QEMU_DISPLAY)
+  DISPLAY+=(-display $RUNCVM_QEMU_DISPLAY)
 else
-  OPTS+=(-nographic)
-fi
-
-if [ "$RUNCVM_KERNEL_DEBUG" = "1" ]; then
-  APPEND=("console=ttyS0")
+  DISPLAY+=(-nographic)
+  DISPLAY+=(-vga none)
 fi
 
 if [ "$RUNCVM_BIOS_DEBUG" != "1" ]; then
@@ -145,48 +136,117 @@ if [ "$RUNCVM_BIOS_DEBUG" != "1" ]; then
   OPTS+=(-fw_cfg opt/org.seabios/etc/sercon-port,string=0)
 fi
 
-# Disable IPv6, which is currently unsupported, at kernel boot time
-APPEND+=(ipv6.disable=1)
+MEM_BACKEND=(-numa node,memdev=mem)
+if [ "$RUNCVM_HUGETLB" != "1" ]; then
+  # Tests suggests prealloc=on slows down mem-path=/dev/shm
+  MEM_PATH="/dev/shm" MEM_PREALLOC="off"
+  MEM_BACKEND+=(-object memory-backend-file,id=mem,size=$RUNCVM_MEM_SIZE,mem-path=$MEM_PATH,share=on,prealloc=$MEM_PREALLOC)
+else
+  # Fastest performance: +15% CPU/net intensive; 3.5x disk intensive.
+  MEM_BACKEND+=(-object memory-backend-memfd,id=mem,size=$RUNCVM_MEM_SIZE,share=on,prealloc=on,hugetlb=on)
+fi
 
 # 16-64 works well and is more performant than 1024 in some scenarios.
 # For now, stick with original figure.
 VIRTIOFS_QUEUE_SIZE=1024
+VIRTIOFS+=(
+  -chardev socket,id=virtiofs,path=$QEMU_VIRTIOFSD_SOCKET
+  -device vhost-user-fs-pci,queue-size=$VIRTIOFS_QUEUE_SIZE,chardev=virtiofs,tag=runcvmfs,ats=off
+)
 
-if [ "$RUNCVM_HUGETLB" != "1" ]; then
-  # Tests suggests prealloc=on slows down mem-path=/dev/shm
-  MEM_PATH=/dev/shm MEM_PREALLOC=off
-  MEM_BACKEND="-object memory-backend-file,id=mem,size=$RUNCVM_MEM_SIZE,mem-path=$MEM_PATH,share=on,prealloc=$MEM_PREALLOC"
+CONSOLE=()
+CONSOLE_MONITOR="0"
+if [ "$CONSOLE_MONITOR" = "1" ]; then
+  # Creates a multiplexed stdio backend connected to the serial port (and the QEMU monitor).
+  # Use with /dev/ttyS0
+  CONSOLE+=(
+    -chardev stdio,id=char0,mux=on,signal=off
+    -serial chardev:char0 -mon chardev=char0
+  )
+
+  # Set monitor escape key to CTRL-T to reduce risk of conflict (as default, CTRL-A, is  commonly used)
+  CONSOLE+=(-echr 20)
+
+  CONSOLE_DEV="ttyS0"
 else
-  # Fastest performance: +15% CPU/net intensive; 3.5x disk intensive.
-  MEM_BACKEND="-object memory-backend-memfd,id=mem,size=$RUNCVM_MEM_SIZE,share=on,prealloc=on,hugetlb=on"
+  # Creates a stdio backend connected to the virtual console.
+  # Use with /dev/hvc0
+  CONSOLE+=(
+    -chardev stdio,id=char0,mux=off,signal=off
+    -device virtconsole,chardev=char0,id=console0
+  )
+
+  CONSOLE_DEV="hvc0"
+fi
+
+# Save choice of console device
+echo "$CONSOLE_DEV" >/.runcvm/console
+
+# Experimental: Enable to specify a dedicated PCI bridge
+# OPTS+=(-device pci-bridge,bus=pcie.0,id=pci-bridge-0,chassis_nr=1,shpc=off,addr=2,io-reserve=4k,mem-reserve=1m,pref64-reserve=1m)
+
+# Experimental: Enable for a SCSI bus
+# OPTS+=(-device virtio-scsi-pci,id=scsi0,disable-modern=true)
+
+# Disable IPv6, which is currently unsupported, at kernel boot time
+APPEND+=(ipv6.disable=1 panic=-1)
+
+# Disable unneeded functionality
+APPEND+=(scsi_mod.scan=none tsc=reliable no_timer_check rcupdate.rcu_expedited=1 i8042.direct=1 i8042.dumbkbd=1 i8042.nopnp=1 i8042.noaux=1 noreplace-smp reboot=k cryptomgr.notests pci=lastbus=0 selinux=0)
+
+if [ "$RUNCVM_KERNEL_DEBUG" = "1" ]; then
+  APPEND+=(console=$CONSOLE_DEV)
+else
+  APPEND+=(quiet)
 fi
 
 ARGS=(
-  "${OPTS[@]}"
   -no-user-config
   -nodefaults
-  -serial $SERIAL
+  -no-reboot
+
+  -action panic=none
+  -action reboot=shutdown
+
+  "${MACHINE[@]}"
+  "${DISPLAY[@]}"
+  "${OPTS[@]}"
+
+  # N.B. There is a counterintuitive relationship between cpus and memory, and performance:
+  # - more cpus needs more memory to maintain the same virtiofs disk I/O performance.
   -m "$RUNCVM_MEM_SIZE"
-  -chardev socket,id=char0,path=$QEMU_VIRTIOFSD_SOCKET
-  -device vhost-user-fs-pci,queue-size=$VIRTIOFS_QUEUE_SIZE,chardev=char0,tag=myfs,ats=on
+  -smp $RUNCVM_CPUS,cores=1,threads=1,sockets=$RUNCVM_CPUS,maxcpus=$RUNCVM_CPUS
+
+  # Creates a virtio-serial bus on the PCI bus; this is used for the guest agent and virtiofs
+  -device virtio-serial-pci,id=serial0 
+
+  # Creates an RNG on the PCI bus
+  -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0
+
+  # Memory backend
+  "${MEM_BACKEND[@]}"
+
+  # virtiofs socket and interface
+  "${VIRTIOFS[@]}"
+
+  # Configure host/container tap device with PXE roms disabled
+  "${IFACES[@]}"
+  "${DISKS[@]}"
+
+  # Configure console
+  "${CONSOLE[@]}"
+
+  # Support for guest agent
+  -chardev socket,id=qemuguest0,path=$QEMU_GUEST_AGENT,server=on,wait=off
+  -device virtserialport,chardev=qemuguest0,name=org.qemu.guest_agent.0
+
+  # Creates a unix socket for the QEMU monitor
+  -monitor unix:$QEMU_MONITOR_SOCKET,server,nowait
+
+  # Kernel and initrd and kernel cmdline
   -kernel $RUNCVM_KERNEL_PATH
   -initrd $RUNCVM_KERNEL_INITRAMFS_PATH
-  -append "$RUNCVM_KERNEL_ROOT $INIT rw ${APPEND[*]} $PANIC $RUNCVM_KERNEL_APPEND $BREAK"
-  $MEM_BACKEND
-  -numa node,memdev=mem
-  -smp $RUNCVM_CPUS
-  # Configure host/container tap device with PXE roms disabled
-  ${IFACES[@]}
-  -no-reboot
-  ${DISKS[@]}
-  -action panic=none -action reboot=shutdown
-  -monitor unix:$QEMU_MONITOR_SOCKET,server,nowait
-  -chardev socket,id=charchannel0,path=$QEMU_GUEST_AGENT,server=on,wait=off
-  -device virtio-serial
-  -device virtserialport,chardev=charchannel0,name=org.qemu.guest_agent.0
-
-  # Set monitor escape key to CTRL-T to reduce risk of conflict (as default, CTRL-A, is  commonly used)
-  -echr 20
+  -append "$RUNCVM_KERNEL_ROOT $INIT rw ${APPEND[*]} $RUNCVM_KERNEL_APPEND"
 )
 
 if [[ "$RUNCVM_BREAK" =~ preqemu ]]; then echo Preparing to run: $CMD "${ARGS[@]@Q}"; bash; fi

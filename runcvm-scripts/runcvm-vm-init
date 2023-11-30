@@ -124,11 +124,14 @@ _EOE_
 # Load original environment
 . /.runcvm/config
 
+# Load choice of console device
+read -r CONSOLE_DEVICE </.runcvm/console
+
 if [ "$RUNCVM_INIT" = "1" ]; then
   # If launched with '--init' (or --env=RUNCVM_INIT=1) then run our own init in place of Docker's/Podman's.
 
   $RUNCVM/bin/cat >/etc/inittab <<_EOE_
-ttyS0::respawn:-/opt/runcvm/scripts/runcvm-vm-start
+$CONSOLE_DEVICE::respawn:-/opt/runcvm/scripts/runcvm-vm-start
 null::respawn:/opt/runcvm/scripts/runcvm-vm-qemu-ga
 null::respawn:/opt/runcvm/usr/sbin/dropbear -REF -p $SSHD_PORT -A /opt/runcvm/lib64/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
 null::ctrlaltdel:/opt/runcvm/bin/poweroff
@@ -154,8 +157,8 @@ else
   $RUNCVM/usr/sbin/dropbear -REF -p $SSHD_PORT -A /opt/runcvm/lib64/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
 
   # Run init from the image
-  # Pipe input/output from/to serial console
-  exec </dev/ttyS0 &>/dev/ttyS0
+  # Pipe input/output from/to console device
+  exec </dev/$CONSOLE_DEVICE &>/dev/$CONSOLE_DEVICE
   
   # Invoke runcvm-init with --no-fork purely to create controlling tty,
   # then exec runcvm-vm-start
