@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.3-labs
 
 # Alpine version to build with
-ARG ALPINE_VERSION=3.16
+ARG ALPINE_VERSION=3.18
 
 # --- BUILD STAGE ---
 # Build base alpine-sdk image for later build stages
@@ -124,7 +124,7 @@ RUN cd /root/qemu-exit && cc -o /root/qemu-exit/qemu-exit -std=gnu99 -static -s 
 
 # --- BUILD STAGE ---
 # Build alpine kernel and initramfs with virtiofs module
-FROM alpine:3.16 as alpine-kernel
+FROM alpine:3.18 as alpine-kernel
 
 RUN apk add --no-cache linux-virt
 RUN echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules && \
