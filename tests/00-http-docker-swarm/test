@@ -81,9 +81,14 @@ quit() {
   log "Exiting with code $code"
 }
 
+term() {
+   exit 254
+}
+
 # Standard setup
 
-trap quit TERM INT EXIT
+trap quit EXIT
+trap term TERM INT QUIT
 
 h=$(hostname)
 
@@ -165,7 +170,7 @@ do
   replicas=$(docker exec ${NODE}1 docker service ls --format='{{ .Replicas }}' --filter='Name=http')
   log "Waiting for remainder of $replicas replicas to launch (#$i) ..."
   [ "$replicas" = "$NODES/$NODES" ] && break
-  [ $i -eq 1 ] && exit 130
+  [ $i -eq 1 ] && exit 253
   sleep 1
 done
 log "All $NODES replicas launched."
