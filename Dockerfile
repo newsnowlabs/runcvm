@@ -155,8 +155,8 @@ RUN mkdir -p /opt/runcvm/kernels/alpine/$(basename $(ls -d /lib/modules/*)) && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/alpine
 
 # --- BUILD STAGE ---
-# Build Debian bullseye kernel and initramfs with virtiofs module
-FROM amd64/debian:bullseye as debian-kernel
+# Build Debian bookworm kernel and initramfs with virtiofs module
+FROM amd64/debian:bookworm as debian-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt update && apt install -y linux-image-amd64:amd64 && \
