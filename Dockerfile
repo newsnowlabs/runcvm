@@ -109,12 +109,19 @@ RUN apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/drop
 
 # Patch the binaries and set up symlinks
 COPY build-utils/elf-patcher.sh /usr/local/bin/elf-patcher.sh
-ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/* tput stdbuf coreutils getent dropbear dbclient dropbearkey"
-ENV EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so"
+ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/virtiofsd tput stdbuf coreutils getent dropbear dbclient dropbearkey"
+ENV EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so"
 ENV CODE_PATH="/opt/runcvm"
 RUN /usr/local/bin/elf-patcher.sh && \
-    bash -c 'cd /opt/runcvm/bin; for cmd in awk base64 cat chgrp chmod cut grep head hostname init ln ls mkdir mount poweroff ps rm route sh sysctl tr touch; do ln -s busybox $cmd; done' && \
-    mkdir -p /opt/runcvm/usr/share && cp -a /usr/share/qemu /opt/runcvm/usr/share
+    cd $CODE_PATH/bin && \
+    for cmd in \
+        awk base64 cat chgrp chmod cut grep head hostname init ln ls \
+        mkdir poweroff ps rm route sh sysctl tr touch; \
+    do \
+        ln -s busybox $cmd; \
+    done && \
+    mkdir -p $CODE_PATH/usr/share && \
+    cp -a /usr/share/qemu $CODE_PATH/usr/share
 
 # --- BUILD STAGE ---
 # Build static runcvm-init
