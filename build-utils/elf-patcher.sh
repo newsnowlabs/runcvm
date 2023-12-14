@@ -1,10 +1,37 @@
 #!/bin/sh
 
-# Patches all required binaries, Theia binaries and Theia dynamic libraries (ELF libs) for full portability.
+# Patches all required binaries and dynamic libraries (ELF libs) for full path-portability.
+# - Copies all required binaries and ELF libs to the install location (CODE_PATH).
+# - Sets the interpreter for all binaries to the exec location (EXEC_PATH).
+# - Sets the RPATH for all binaries and ELF libs to the exec location (EXEC_PATH) (absolute mode)
+#   or to a relative path (relative mode).
+# - Adds a link to the dynamic linker (ld-musl-*.so.1) in the install location (CODE_PATH/lib/ld).
 
 # Environment variable inputs:
-# - BINARIES - list of additional system binaries 
-# - CODE_PATH - path to Theia version to be scanned and patched
+# - BINARIES - list required binaries to be scanned and copied
+# - EXTRA_LIBS - list extra libraries to be scanned and copied
+# - CODE_PATH - path where binaries and libraries will be copied to
+# - EXEC_PATH - path where binaries and libraries will be executed from
+
+# EXEC_PATH defaults to CODE_PATH
+EXEC_PATH="${EXEC_PATH:-$CODE_PATH}"
+
+# Determine LD_MUSL filename, which is architecture-dependent
+# e.g. ld-musl-aarch64.so.1 (linux/arm64), ld-musl-armhf.so.1 (linux/arm/v7), ld-musl-x86_64.so.1 (linux/amd64)
+LD_MUSL_PATH=$(ls -1 /lib/ld-musl-* | head -n 1)
+LD_MUSL_BIN=$(basename $LD_MUSL_PATH)
+
+# LIB_PREFIX="/lib64"
+LIB_PREFIX=""
+
+# Where to copy binaries and libraries to
+CODE_LIBPATH="$CODE_PATH$LIB_PREFIX"
+
+# Where binaries and libraries will be executed from
+EXEC_LIBPATH="$EXEC_PATH$LIB_PREFIX"
+
+# Whether to use absolute or relative paths for RPATH
+LIBPATH_TYPE="${LIBPATH_TYPE:-relative}"
 
 append() {
   while read line; do echo "${line}${1}"; done
@@ -21,8 +48,8 @@ checkelfs() {
   # Now check the ELF files
   for lib in $(cat $CODE_PATH/.binelfs $CODE_PATH/.libelfs)
   do
-    printf "Checking %-60s ... " "$lib" >&2
-    $CODE_PATH/lib64/lib/ld-musl-x86_64.so.1 --list $lib 2>/dev/null | sed -nr '/=>/!d; s/^\s*(\S+)\s*=>\s*(.*?)(\s*\(0x[0-9a-f]+\))?$/\1 \2/;/^.+$/p;' | append " in $lib" | egrep -v "$CODE_PATH/lib64"
+    printf "Checking: %s ...\n" "$lib" >&2
+    $CODE_LIBPATH$LD_MUSL_PATH --list $lib 2>/dev/null | sed -nr '/=>/!d; s/^\s*(\S+)\s*=>\s*(.*?)(\s*\(0x[0-9a-f]+\))?$/- \2 \1/;/^.+$/p;' | egrep -v "^- ($CODE_PATH/|$EXEC_PATH/.*/$LD_MUSL_BIN)" >&2
   
     # If any libraries do not match the expected pattern, grep returns true
     if [ $? -eq 0 ]; then
@@ -31,6 +58,7 @@ checkelfs() {
     else
       echo "GOOD" >&2
     fi
+    echo >&2
 
     sleep 0.02
   done
@@ -72,7 +100,7 @@ find_lib_deps() {
 }
 
 copy_libs() {
-  mkdir -p $CODE_PATH/lib64
+  mkdir -p $CODE_LIBPATH
 
   # For each resolved library filepath:
   # - Copy $dest to the install location.
@@ -87,32 +115,56 @@ copy_libs() {
     # Copy $dest; and if $dest is a symlink, copy its target.
     # This could conceivably result in duplicates if multiple symlinks point to the same target,
     # but is much simpler than trying to copy symlinks and targets separately.
-    cp -a --parents -L $dest $CODE_PATH/lib64
+    cp -a --parents -L $dest $CODE_LIBPATH
 
     # If needed, add a symlink from $lib to $(basename $dest)
-    [ "$(basename $dest)" != "$lib" ] && cd $CODE_PATH/lib64/$(dirname $dest) && ln -s $(basename $dest) $lib && cd -
+    [ "$(basename $dest)" != "$lib" ] && cd $CODE_LIBPATH/$(dirname $dest) && ln -s $(basename $dest) $lib && cd -
 
-    if [ "$dest" != "/lib/ld-musl-x86_64.so.1" ]; then
-        echo "$CODE_PATH/lib64$dest" >>/tmp/cmd-elf-lib
+    if [ "$dest" != "$LD_MUSL_PATH" ]; then
+        echo "$CODE_LIBPATH$dest" >>/tmp/cmd-elf-lib
     fi
   done
+}
+
+patch_binary() {
+  local bin="$1"
+
+  if patchelf --set-interpreter $EXEC_LIBPATH$LD_MUSL_PATH $bin 2>/dev/null; then
+    echo patchelf --set-interpreter $EXEC_LIBPATH$LD_MUSL_PATH $bin >>/tmp/patchelf.log
+    return 0
+  fi
+
+  return 1
 }
 
 patch_binaries() {
   # For all ELF binaries, set the interpreter to our own.
   for bin in $(sort -u "$@")
   do
-    echo patchelf --set-interpreter $CODE_PATH/lib64/lib/ld-musl-x86_64.so.1 $bin >>/tmp/patchelf.log
-    patchelf --set-interpreter $CODE_PATH/lib64/lib/ld-musl-x86_64.so.1 $bin >>/tmp/patchelf.log 2>&1
+    patch_binary "$bin" || exit 1
   done
 }
 
 patch_elf_binaries_and_libs() {
   # For all ELF libs, set the RPATH to our own, and force RPATH use.
+  local p
   for lib in $(sort -u "$@")
   do
-    echo patchelf --force-rpath --set-rpath $CODE_PATH/lib64/lib:$CODE_PATH/lib64/usr/lib:$CODE_PATH/lib64/usr/lib/xtables $lib >>/tmp/patchelf.log
-    patchelf --force-rpath --set-rpath $CODE_PATH/lib64/lib:$CODE_PATH/lib64/usr/lib:$CODE_PATH/lib64/usr/lib/xtables $lib >>/tmp/patchelf.log 2>&1
+
+    if [ "$LIBPATH_TYPE" = "absolute" ]; then
+      echo patchelf --force-rpath --set-rpath $CODE_LIBPATH/lib:$CODE_LIBPATH/usr/lib:$CODE_LIBPATH/usr/lib/xtables $lib >>/tmp/patchelf.log
+      patchelf --force-rpath --set-rpath $CODE_LIBPATH/lib:$CODE_LIBPATH/usr/lib:$CODE_LIBPATH/usr/lib/xtables $lib >>/tmp/patchelf.log 2>&1
+    else
+      p=$(dirname "$lib" | sed -r "s|^$CODE_PATH/||; s|[^/]+|..|g")
+      echo patchelf --force-rpath --set-rpath \$ORIGIN/$p$LIB_PREFIX/lib:\$ORIGIN/$p$LIB_PREFIX/usr/lib:\$ORIGIN/$p$LIB_PREFIX/usr/lib/xtables $lib >>/tmp/patchelf.log
+      patchelf --force-rpath --set-rpath \
+        \$ORIGIN/$p$LIB_PREFIX/lib:\$ORIGIN/$p$LIB_PREFIX/usr/lib:\$ORIGIN/$p$LIB_PREFIX/usr/lib/xtables \
+        $lib >>/tmp/patchelf.log 2>&1 || exit 1
+    fi
+
+    # Fail silently if patchelf fails to set the interpreter: this is a catch-all for add libraries like /usr/lib/libcap.so.2
+    # which strangely have an interpreter set.
+    patch_binary "$lib"
   done
 }
 
@@ -145,3 +197,6 @@ write_digest # Write a summary of binaries and libraries to CODE_PATH
 # Check the full list for any library dependencies being inadvertently resolved outside the install location.
 # Returns true if OK, false on any problems.
 checkelfs
+
+# Symlink ld-musl-*.so.1 to ld
+ln -s $LD_MUSL_BIN $CODE_LIBPATH/lib/ld
