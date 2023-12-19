@@ -1,5 +1,9 @@
 #!/bin/bash -e
 
+# Load framework functions
+. ../framework.sh
+
+# TEST VARIABLES
 NODE=00-http-docker-swarm-node
 
 # Number of nodes
@@ -14,85 +18,13 @@ DIRD=${DIRD:-0}
 # Set to "1" to disable cleanup of Docker image
 NO_CLEAN_IMAGE=${NO_CLEAN_IMAGE:-0}
 
-log() {
-  local opts
-  if [ "$1" = "-n" ]; then opts="-n"; shift; fi
-  echo $opts "$(date +%Y%m%d.%H%M%S) ($h) > $1"
-}
-
-nodes() {
-  seq 1 $NODES | sed "s/^/$NODE/"
-}
-
-volumes() {
-  echo swarm $(nodes)
-}
-
-networks() {
-  echo runcvm-mtu
-}
-
-_cleanup() {
-  log "Cleaning up nodes ..."
-  docker rm -f $(nodes) 2>/dev/null
-  echo
-
-  if [ "$(volumes)" != "" ]; then
-    log "Cleaning up volumes ..."
-    docker volume rm -f $(volumes)
-  fi
-  echo
-
-  if [ -n "$IMAGE" ] && [ "$NO_CLEAN_IMAGE" != "1" ]; then
-    log "Cleaning up temporary image ..."
-    docker rmi $IMAGE
-    echo
-  fi
-  
-  rm -f /tmp/iid
-  
-  if [ "$(networks)" != "" ]; then
-    log "Cleaning up networks ..."
-    docker network rm $(networks)
-  fi
-  echo
-
-  log "Cleaned up"
-}
-
-cleanup() {
-  # Allow this to complete, even if we encounter errors
-  set +e
-
-  _cleanup
-  
-  # Restore setting to fail on error
-  set -e
-}
-
-quit() {
-  local code=$?
-
-  # Don't run a second time
-  trap '' TERM INT EXIT
-  
-  cleanup
-
-  log "Exiting with code $code"
-}
-
-term() {
-   exit 254
-}
-
-# Standard setup
-
-trap quit EXIT
-trap term TERM INT QUIT
+# OVERRIDE FRAMEWORK FUNCTIONS
+nodes() { seq 1 $NODES | sed "s/^/$NODE/"; }
+volumes() { echo swarm $(nodes); }
+networks() { echo runcvm-mtu; }
+images() { echo $IMAGE; }
 
 h=$(hostname)
-
-cleanup
 
 if [ -n "$REGISTRY_MIRROR" ]; then
   log "REGISTRY_MIRROR '$REGISTRY_MIRROR' detected."
@@ -149,7 +81,7 @@ do
 done
 
 log "Monitoring ${NODE}1 logs for swarm setup progress ..."
-docker logs -f ${NODE}1 -n 0 2>&1 | sed "s/^/($h) > (${NODE}1) > /; /Swarm complete/q0; /Swarm failed/q129;"
+docker logs -f ${NODE}1 -n 0 2>&1 | sed "s/^/> (${NODE}1) > /; /Swarm complete/q0; /Swarm failed/q129;"
 log "Finished monitoring ${NODE}1 logs as swarm is set up."
 
 log "Creating http service (please be patient) ..."
