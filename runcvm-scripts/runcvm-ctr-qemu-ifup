@@ -1,6 +1,10 @@
-#!/opt/runcvm/bin/bash
+#!/.runcvm/guest/bin/bash
 
-. /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
+# Load original environment
+. /.runcvm/config
+
+# Load defaults and aliases
+. $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
 tap="$1"
 if="$(busybox sed 's/tap-//' <<<$tap)"

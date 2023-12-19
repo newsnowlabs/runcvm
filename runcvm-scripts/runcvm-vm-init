@@ -1,9 +1,18 @@
-#!/opt/runcvm/bin/bash
+#!/.runcvm/guest/bin/bash
 
-. /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
+# Load original environment
+. /.runcvm/config
+
+# Load defaults and aliases
+. $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
 # Alpine initrd doesn't honour command-line rw flag
 mount -o remount,rw /
+
+# FIXME: Something is making /.runcvm ro, so remount it rw
+# until such time as exit code handling and dropbear key creation
+# obviate the need for this.
+mount -o remount,rw /.runcvm
 
 # Alpine initrd doesn't configure /dev device permissions and ownership
 # to support non-root users.
@@ -26,7 +35,7 @@ if [ "$(findmnt -rnu -o FSTYPE /run)" = "tmpfs" ]; then
 fi
 
 # FIXME: virtiofs mounts aren't always made rw. Remount them all rw (if allowed)
-# /opt/runcvm/bin/mount -t virtiofs | awk '{print $3}' | xargs -n 1 mount -o remount,rw
+# $RUNCVM_GUEST/bin/mount -t virtiofs | awk '{print $3}' | xargs -n 1 mount -o remount,rw
 
 # Some systems do not set up /dev/fd. If needed, add it.
 if ! [ -h /dev/fd ]; then
@@ -106,7 +115,7 @@ fi
 mkdir -p /.runcvm/dropbear
 
 # Create dropbear RSA public/private key pair
-KEY_PUBLIC=$(/opt/runcvm/usr/bin/dropbearkey -t rsa -s 2048 -f /.runcvm/dropbear/key 2>/dev/null | grep ^ssh | cut -d' ' -f2)
+KEY_PUBLIC=$(dropbearkey -t rsa -s 2048 -f /.runcvm/dropbear/key 2>/dev/null | grep ^ssh | cut -d' ' -f2)
 
 # Create json for dropbear EPKA module
 cat <<_EOE_ >/.runcvm/dropbear/epka.json && chmod 400 /.runcvm/dropbear/epka.json
@@ -121,29 +130,26 @@ cat <<_EOE_ >/.runcvm/dropbear/epka.json && chmod 400 /.runcvm/dropbear/epka.jso
 ]
 _EOE_
 
-# Load original environment
-. /.runcvm/config
-
 # Load choice of console device
 read -r CONSOLE_DEVICE </.runcvm/console
 
 if [ "$RUNCVM_INIT" = "1" ]; then
   # If launched with '--init' (or --env=RUNCVM_INIT=1) then run our own init in place of Docker's/Podman's.
 
-  $RUNCVM/bin/cat >/etc/inittab <<_EOE_
-$CONSOLE_DEVICE::respawn:-/opt/runcvm/scripts/runcvm-vm-start
-null::respawn:/opt/runcvm/scripts/runcvm-vm-qemu-ga
-null::respawn:/opt/runcvm/usr/sbin/dropbear -REF -p $SSHD_PORT -A /opt/runcvm/lib64/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
-null::ctrlaltdel:/opt/runcvm/bin/poweroff
-null::restart:/opt/runcvm/bin/poweroff
-null::shutdown:/opt/runcvm/bin/poweroff
+  cat >/etc/inittab <<_EOE_
+$CONSOLE_DEVICE::respawn:-$RUNCVM_GUEST/scripts/runcvm-vm-start-wrapper
+null::respawn:$RUNCVM_GUEST/scripts/runcvm-vm-qemu-ga
+null::respawn:$RUNCVM_GUEST/usr/sbin/dropbear -REF -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
+null::ctrlaltdel:$RUNCVM_GUEST/bin/poweroff
+null::restart:$RUNCVM_GUEST/bin/poweroff
+null::shutdown:$RUNCVM_GUEST/bin/poweroff
 _EOE_
 
-  # Allow runcvm-vm-start to runs once (and only once)
-  $RUNCVM/bin/rm -f /.runcvm/once
+  # Allow runcvm-vm-start to run once (and only once)
+  rm -f /.runcvm/once
 
   # Clear the environment, and run our own init, disconnecting stdout and stderr from terminal
-  exec -c /opt/runcvm/bin/init &>/dev/null
+  exec -c $RUNCVM_GUEST/bin/init &>/dev/null
 else
   # If not, assume the user knows what they're doing: launch qemu-ga and just run their entrypoint.
 
@@ -154,7 +160,7 @@ else
   $RUNCVM/scripts/runcvm-vm-qemu-ga &>/dev/null &
 
   # Run dropbear SSH server, needed to support 'docker exec'
-  $RUNCVM/usr/sbin/dropbear -REF -p $SSHD_PORT -A /opt/runcvm/lib64/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
+  dropbear -REF -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
 
   # Run init from the image
   # Pipe input/output from/to console device
@@ -162,5 +168,5 @@ else
   
   # Invoke runcvm-init with --no-fork purely to create controlling tty,
   # then exec runcvm-vm-start
-  exec -c $RUNCVM/sbin/runcvm-init --no-fork $RUNCVM/scripts/runcvm-vm-start
+  exec -c $RUNCVM_GUEST/sbin/runcvm-init --no-fork $RUNCVM_GUEST/scripts/runcvm-vm-start
 fi

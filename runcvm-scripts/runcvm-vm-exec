@@ -1,4 +1,4 @@
-#!/opt/runcvm/bin/bash
+#!/.runcvm/guest/bin/bash
 
 from_bin() {
   tr '\200\201\202\203\204\205' "\011\012\040\047\042\134"
@@ -24,4 +24,10 @@ cwd=$(echo -n "$cwd_bin" | from_bin)
 
 cd "$cwd" 2>/dev/null && unset OLDPWD || error
 
-exec /opt/runcvm/bin/busybox env -i "${env[@]}" /opt/runcvm/bin/s6-applyuidgid -u $uid -g $gid -G "$additionalGids" "${args[@]}"
+# Load original environment
+. /.runcvm/config
+
+# Load defaults and aliases
+. $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
+
+exec -c $RUNCVM_GUEST/bin/busybox env -i "${env[@]}" $RUNCVM_GUEST/bin/s6-applyuidgid -u $uid -g $gid -G "$additionalGids" "${args[@]}"

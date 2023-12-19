@@ -1,15 +1,18 @@
-#!/opt/runcvm/bin/bash
+#!/.runcvm/guest/bin/bash
 
-# TODO: Clean up ENV vars
+# Exit on errors
+set -o errexit -o pipefail
+
+# Load original environment
 . /.runcvm/config
 
-# Load defaults after exports (so that PATH is overridden)
-. /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
+# Load defaults
+. $RUNCVM_GUEST/scripts/runcvm-ctr-defaults && unset PATH
 
-QEMU_IFUP="$RUNCVM/scripts/runcvm-ctr-qemu-ifup"
-QEMU_IFDOWN="$RUNCVM/scripts/runcvm-ctr-qemu-ifdown"
+QEMU_IFUP="$RUNCVM_GUEST/scripts/runcvm-ctr-qemu-ifup"
+QEMU_IFDOWN="$RUNCVM_GUEST/scripts/runcvm-ctr-qemu-ifdown"
 
-INIT="init=/opt/runcvm/scripts/runcvm-vm-init"
+INIT="init=$RUNCVM_GUEST/scripts/runcvm-vm-init"
 
 error() {
   echo "$1" >&2
@@ -115,10 +118,10 @@ fi
 # - Consider using '-device pvpanic'
 
 if [ "$RUNCVM_ARCH" = "arm64" ]; then
-  CMD="qemu-system-aarch64"
+  CMD="$(which qemu-system-aarch64)"
   MACHINE+=(-cpu max -machine virt,gic-version=max,usb=off)
 else
-  CMD="qemu-system-x86_64"
+  CMD="$(which qemu-system-x86_64)"
   MACHINE+=(-enable-kvm -cpu host,pmu=off -machine q35,accel=kvm,usb=off,sata=off -device isa-debug-exit)
 fi
 
@@ -249,6 +252,6 @@ ARGS=(
   -append "$RUNCVM_KERNEL_ROOT $INIT rw ${APPEND[*]} $RUNCVM_KERNEL_APPEND"
 )
 
-if [[ "$RUNCVM_BREAK" =~ preqemu ]]; then echo Preparing to run: $CMD "${ARGS[@]@Q}"; bash; fi
+if [[ "$RUNCVM_BREAK" =~ preqemu ]]; then echo Preparing to run: '$CMD' "${ARGS[@]@Q}"; bash; fi
 
-exec $CMD "${ARGS[@]}"
+exec "$CMD" "${ARGS[@]}"

@@ -1,10 +1,17 @@
 #!/bin/sh
 
+RUNCVM=/opt/runcvm
+RUNCVM_LD=$RUNCVM/lib/ld
+RUNCVM_JQ=$RUNCVM/usr/bin/jq
 MNT=/runcvm
 REPO=${REPO:-newsnowlabs/runcvm}
 
 log() {
     echo "$@"
+}
+
+jq() {
+  $RUNCVM_LD $RUNCVM_JQ "$@"
 }
 
 jq_set() {
@@ -13,7 +20,7 @@ jq_set() {
   
   local tmp="/tmp/$$.json"
 
-  if /opt/runcvm/usr/bin/jq "$@" $file >$tmp; then
+  if jq "$@" $file >$tmp; then
     mv $tmp $file
   else
     echo "Failed to update $(basename $file); aborting!" 2>&1

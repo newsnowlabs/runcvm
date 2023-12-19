@@ -1,12 +1,12 @@
-#!/opt/runcvm/bin/bash -e
+#!/.runcvm/guest/bin/bash -e
 
 # See https://qemu-project.gitlab.io/qemu/interop/qemu-ga-ref.html
 
-. /opt/runcvm/scripts/runcvm-ctr-defaults
+# Load original environment
+. /.runcvm/config
 
-busybox() {
-  $RUNCVM/bin/busybox "$@"
-}
+# Load defaults and aliases
+. $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
 env() {
   busybox env "$@"
@@ -19,6 +19,7 @@ to_bin() {
 
 # Expects:
 # - To be run as root
+# - To be given env vars
 # - To be given arguments
 #   $1 <uid>:<gid>:<additionalGids>
 #   $2 <cwd>
@@ -26,7 +27,7 @@ to_bin() {
 #   $4 <wantsTerminal-boolean>
 #   $(5...) <command> <args>
 
-command="$RUNCVM/scripts/runcvm-vm-exec"
+command="$RUNCVM_GUEST/scripts/runcvm-vm-exec"
 uidgid="$1"
 cwd="$2"
 hasHome="$3"
@@ -53,7 +54,7 @@ fi
 
 if [ "$hasHome" != "1" ]; then
   # Either this script needs to look up uid's HOME or else runcvm-vm-exec does; for now, we do it here.
-  HOME=$($RUNCVM/usr/bin/getent passwd "$uid" | $RUNCVM/bin/cut -d':' -f6)
+  HOME=$(getent passwd "$uid" | cut -d':' -f6)
 fi
 
 # Clean RUNCVM env vars
@@ -75,4 +76,4 @@ if ! [ -s /.runcvm/dropbear/key ] || ! load_network; then
   exit 1
 fi
 
-exec $RUNCVM/usr/bin/dbclient ${opts[@]} -p $SSHD_PORT -y -y -i /.runcvm/dropbear/key root@$DOCKER_IF_IP "$command '$uidgid' '$(echo -n $cwd | to_bin)' '$args_bin' '$env_bin'"
+exec $RUNCVM_GUEST/usr/bin/dbclient "${opts[@]}" -p $SSHD_PORT -y -y -i /.runcvm/dropbear/key root@$DOCKER_IF_IP "$command '$uidgid' '$(echo -n $cwd | to_bin)' '$args_bin' '$env_bin'"

@@ -1,16 +1,19 @@
-#!/opt/runcvm/bin/bash
+#!/.runcvm/guest/bin/bash
 
 # runcvm-init forks and execs this script when it receives a SIGTERM
 
+# Load original environment
+. /.runcvm/config
+
 poweroff() {
   # Try ACPI poweroff
-  /opt/runcvm/scripts/runcvm-ctr-qemu-poweroff
+  $RUNCVM_GUEST/scripts/runcvm-ctr-qemu-poweroff
   
   # Try running busybox poweroff
-  /opt/runcvm/scripts/runcvm-ctr-exec 0:0 / 0 0 /opt/runcvm/bin/poweroff &>/dev/null
+  $RUNCVM_GUEST/scripts/runcvm-ctr-exec 0:0 / 0 0 $RUNCVM_GUEST/bin/poweroff &>/dev/null
 
   # Try killing the VM's PID 1
-  /opt/runcvm/scripts/runcvm-ctr-exec 0:0 / 0 0 /opt/runcvm/bin/busybox kill 1 &>/dev/null
+  $RUNCVM_GUEST/scripts/runcvm-ctr-exec 0:0 / 0 0 $RUNCVM_GUEST/bin/busybox kill 1 &>/dev/null
 }
 
 poweroff

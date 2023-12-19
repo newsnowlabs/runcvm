@@ -1,6 +1,10 @@
-#!/opt/runcvm/bin/bash
+#!/.runcvm/guest/bin/bash
 
-. /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
+# Load original environment
+. /.runcvm/config
+
+# Load defaults and aliases
+. $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
 if [ -f /.runcvm/once ]; then
   poweroff
@@ -12,7 +16,7 @@ fi
 # Change to saved PWD
 cd $(cat /.runcvm/pwd) && unset OLDPWD
 
-# Load original environment
+# Reload original environment
 . /.runcvm/config
 
 # Load original entrypoint
@@ -22,4 +26,4 @@ mapfile -t ARGS </.runcvm/entrypoint
 clean_env
 
 IFS=':' read -r uid gid additionalGids <<< "$RUNCVM_UIDGID"
-exec $RUNCVM/bin/s6-applyuidgid -u $uid -g $gid -G "$additionalGids" "${ARGS[@]}"
+exec $RUNCVM_GUEST/bin/s6-applyuidgid -u $uid -g $gid -G "$additionalGids" "${ARGS[@]}"
