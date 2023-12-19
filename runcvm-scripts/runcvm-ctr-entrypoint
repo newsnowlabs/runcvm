@@ -1,4 +1,4 @@
-#!/opt/runcvm/bin/bash
+#!/.runcvm/guest/bin/bash
 
 # DEBUG
 if [[ "$RUNCVM_BREAK" =~ (prenet|postnet) ]]; then set -x; fi
@@ -55,7 +55,7 @@ printf "%s\n" "${args[@]}" >/.runcvm/entrypoint
 # If not, then we set HOME to the requested user's default homedir in accordance with https://github.com/moby/moby/issues/2968.
 
 if [ "$RUNCVM_HAS_HOME" == "0" ]; then
-  HOME=$(/opt/runcvm/usr/bin/getent passwd "${RUNCVM_UIDGID%%:*}" | /opt/runcvm/bin/cut -d':' -f6)
+  HOME=$($RUNCVM_GUEST/usr/bin/getent passwd "${RUNCVM_UIDGID%%:*}" | $RUNCVM_GUEST/bin/cut -d':' -f6)
 fi
 
 # SAVE ENVIRONMENT
@@ -64,10 +64,10 @@ export -n SHLVL OLDPWD
 export >/.runcvm/config
 
 # NOW LOAD DEFAULT ENV AND PATH
-. /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
+. $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
 # LOAD IP MANIPULATION FUNCTIONS
-. $RUNCVM/scripts/runcvm-ip-functions
+. $RUNCVM_GUEST/scripts/runcvm-ip-functions
 
 # SAVE PWD
 busybox pwd >/.runcvm/pwd
@@ -138,18 +138,18 @@ do
     ip route add default via $DOCKER_GW_IF_IP dev $QEMU_BRIDGE
 
     # Accept DNS requests for $RUNCVM_DNS_IP; these will be passed to dnsmasq
-    XTABLES_LIBDIR=/opt/runcvm/lib64/usr/lib/xtables/ /opt/runcvm/sbin/xtables-nft-multi iptables -t nat -A PREROUTING -d $RUNCVM_DNS_IP/32 -p udp -m udp --dport 53 -j REDIRECT
+    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -d $RUNCVM_DNS_IP/32 -p udp -m udp --dport 53 -j REDIRECT
 
     # Match UDP port 53 traffic, outgoing via the QEMU bridge, from the bridge's own IP:
     # -> Masquerade as if from the VM's IP.
     #    This allows outgoing DNS requests from the VM to be received by dnsmasq running in the container.
-    XTABLES_LIBDIR=/opt/runcvm/lib64/usr/lib/xtables/ /opt/runcvm/sbin/xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p udp -m udp --sport 53 -j SNAT --to-source $DOCKER_IF_IP
-    XTABLES_LIBDIR=/opt/runcvm/lib64/usr/lib/xtables/ /opt/runcvm/sbin/xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p udp -m udp --dport 53 -j SNAT --to-source $DOCKER_IF_IP
+    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p udp -m udp --sport 53 -j SNAT --to-source $DOCKER_IF_IP
+    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p udp -m udp --dport 53 -j SNAT --to-source $DOCKER_IF_IP
 
     # Match traffic on TCP port $SSHD_PORT, outgoing via the QEMU bridge, from the bridge's own IP:
     # -> Masquerade it as if from the DNS_IP.
     #    This is necessary to allow SSH from within the container to the VM.
-    XTABLES_LIBDIR=/opt/runcvm/lib64/usr/lib/xtables/ /opt/runcvm/sbin/xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p tcp -m tcp --dport $SSHD_PORT -j SNAT --to-source $RUNCVM_DNS_IP
+    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p tcp -m tcp --dport $SSHD_PORT -j SNAT --to-source $RUNCVM_DNS_IP
   fi
 
 done
@@ -165,11 +165,11 @@ echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
 dnsmasq -u root --no-hosts
 
 # LAUNCH VIRTIOFSD
-/opt/runcvm/scripts/runcvm-ctr-virtiofsd &
+$RUNCVM_GUEST/scripts/runcvm-ctr-virtiofsd &
 
 # DEBUG
 if [[ "$RUNCVM_BREAK" =~ postnet ]]; then bash; fi
 
 # LAUNCH INIT SUPERVISING QEMU
 # FIXME: Add -v to debug
-exec /opt/runcvm/sbin/runcvm-init -c /opt/runcvm/scripts/runcvm-ctr-qemu
+exec $RUNCVM_GUEST/sbin/runcvm-init -c $RUNCVM_GUEST/scripts/runcvm-ctr-qemu

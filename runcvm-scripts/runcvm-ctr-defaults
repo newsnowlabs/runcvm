@@ -1,7 +1,7 @@
 #!/bin/bash
 
-RUNCVM=/opt/runcvm
-RUNCVM_PATH=$RUNCVM/usr/sbin:$RUNCVM/usr/bin:$RUNCVM/sbin:$RUNCVM/bin:$RUNCVM/usr/lib/qemu
+RUNCVM_GUEST=${RUNCVM_GUEST:-/.runcvm/guest}
+RUNCVM_PATH=$RUNCVM_GUEST/usr/sbin:$RUNCVM_GUEST/usr/bin:$RUNCVM_GUEST/sbin:$RUNCVM_GUEST/bin:$RUNCVM_GUEST/usr/lib/qemu
 
 QEMU_VIRTIOFSD_SOCKET=/run/.virtiofs.sock
 QEMU_GUEST_AGENT=/run/.qemu-guest-agent
@@ -12,6 +12,7 @@ SSHD_PORT=22222
 clean_env() {
   export -n \
   RUNCVM_BREAK RUNCVM_INIT \
+  RUNCVM_GUEST \
   RUNCVM_RUNTIME_DEBUG RUNCVM_BIOS_DEBUG RUNCVM_KERNEL_DEBUG \
   RUNCVM_KERNEL RUNCVM_KERNEL_ROOT RUNCVM_KERNEL_APPEND RUNCVM_KERNEL_INITRAMFS_PATH RUNCVM_KERNEL_PATH RUNCVM_DISKS \
   RUNCVM_UIDGID RUNCVM_VM_MOUNTPOINT RUNCVM_TMPFS \
@@ -28,3 +29,29 @@ load_network() {
   read -r DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX  DOCKER_IF_IP_GW </.runcvm/network/devices/$if
   return 0
 }
+
+which() {
+  local cmd="$1"
+  local WHICH_PATH="${RUNCVM_PATH//:/ }" # Replace ':' with ' '
+  for p in $WHICH_PATH; do [ -x "$p/$cmd" ] && echo "$p/$cmd" && return 0; done
+  return 1
+}
+
+create_aliases() {
+  for cmd in \
+      bash \
+      busybox awk cat chgrp chmod cut grep head hostname init ln ls mkdir poweroff ps rm sh sysctl touch tr \
+      ip jq \
+      dnsmasq \
+      blkid findmnt getent mke2fs mount nc \
+      xtables-nft-multi xtables-legacy-multi \
+      qemu-system-x86_64 qemu-ga \
+      dbclient dropbear dropbearkey \
+      s6-applyuidgid \
+      tput
+  do
+    eval "$cmd() { $(which $cmd) \"\$@\"; }"
+  done
+}
+
+create_aliases

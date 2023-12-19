@@ -1,6 +1,7 @@
-#!/opt/runcvm/bin/bash
+#!/.runcvm/guest/bin/bash
 
-. /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
+# Load defaults and aliases
+. /.runcvm/guest/scripts/runcvm-ctr-defaults
 
 if [ "$RUNCVM_SYS_ADMIN" = "1" ]; then
   OPTS+=(-o modcaps=+sys_admin)
@@ -13,4 +14,4 @@ OPTS+=(-o cache=always)
 # OPTS+=(--thread-pool-size=1)
 
 # Send logs to /run in container (not in VM)
-exec virtiofsd "${OPTS[@]}" -o announce_submounts -o xattr --socket-path=$QEMU_VIRTIOFSD_SOCKET -o source=$RUNCVM_VM_MOUNTPOINT -o sandbox=chroot >/run/.virtiofsd.log 2>&1
+exec "$(which virtiofsd)" "${OPTS[@]}" -o announce_submounts -o xattr --socket-path=$QEMU_VIRTIOFSD_SOCKET -o source=$RUNCVM_VM_MOUNTPOINT -o sandbox=chroot >/run/.virtiofsd.log 2>&1

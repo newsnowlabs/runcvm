@@ -99,7 +99,7 @@ void forward_signal(int signum) {
 
 pid_t shutdown() {   
    pid_t my_child_pid;
-   char *shutdown_cmd[] = {"/opt/runcvm/scripts/runcvm-ctr-shutdown", NULL};
+   char *shutdown_cmd[] = {"/.runcvm/guest/scripts/runcvm-ctr-shutdown", NULL};
    
     my_child_pid = fork();
     if (my_child_pid < 0) {
@@ -123,7 +123,7 @@ pid_t shutdown() {
 
 void quit(int exit_status) {
     char exit_status_string[4];
-    char *exit_cmd[] = {"/opt/runcvm/scripts/runcvm-ctr-exit", exit_status_string, NULL};
+    char *exit_cmd[] = {"/.runcvm/guest/scripts/runcvm-ctr-exit", exit_status_string, NULL};
 
     sprintf(exit_status_string, "%d", exit_status & 0xFF);
 

@@ -6,5 +6,5 @@
 # Load defaults and aliases
 . $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
-ip link set dev "$1" down || true
-exit 0
+# Clear all environment (set by busybox init)
+exec -c $RUNCVM_GUEST/scripts/runcvm-vm-start

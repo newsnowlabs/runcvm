@@ -1,5 +1,9 @@
-#!/opt/runcvm/bin/bash
+#!/.runcvm/guest/bin/bash
 
-. /opt/runcvm/scripts/runcvm-ctr-defaults && PATH="$RUNCVM_PATH"
+# Load original environment
+. /.runcvm/config
+
+# Load defaults and aliases
+. $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
 echo "system_powerdown" | nc -w 1 -U $QEMU_MONITOR_SOCKET

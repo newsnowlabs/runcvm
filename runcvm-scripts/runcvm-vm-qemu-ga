@@ -1,9 +1,10 @@
-#!/opt/runcvm/bin/bash
+#!/.runcvm/guest/bin/bash
 
-# TODO Rationalise these into defaults
-RUNCVM=/opt/runcvm
-PATH=$RUNCVM/sbin:$RUNCVM/bin:$RUNCVM/usr/bin
-unset RUNCVM
+# Load config
+. /.runcvm/config
+
+# Load defaults and aliases
+. $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
 OPTS=(--retry-path --statedir /.runcvm)
 
@@ -21,4 +22,4 @@ if [ -z "$DEV" ]; then
   exit 0
 fi
 
-exec qemu-ga "${OPTS[@]}"
+exec -c "$(which qemu-ga)" "${OPTS[@]}"

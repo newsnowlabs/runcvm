@@ -1,4 +1,4 @@
-#!/opt/runcvm/bin/bash
+#!/opt/runcvm/lib/ld-musl-x86_64.so.1 /opt/runcvm/bin/bash
 
 # REFERENCES
 
@@ -21,11 +21,14 @@
 # - https://www.redhat.com/sysadmin/mount-namespaces
 
 RUNCVM=/opt/runcvm
+RUNCVM_LD=$RUNCVM/lib/ld
 RUNCVM_JQ=$RUNCVM/usr/bin/jq
 RUNCVM_VM_MOUNTPOINT="/vm"
-RUNCVM_ENTRYPOINT=$RUNCVM/scripts/runcvm-ctr-entrypoint
-RUNCVM_EXEC=$RUNCVM/scripts/runcvm-ctr-exec
+RUNCVM_GUEST=/.runcvm/guest
+RUNCVM_ENTRYPOINT=$RUNCVM_GUEST/scripts/runcvm-ctr-entrypoint
+RUNCVM_EXEC="$RUNCVM_GUEST/scripts/runcvm-ctr-exec"
 RUNCVM_KERNELS=$RUNCVM/kernels
+RUNCVM_GUEST_KERNELS=$RUNCVM_GUEST/kernels
 RUNCVM_KERNEL_DEFAULT=debian
 RUNCVM_MEM_SIZE_DEFAULT="512M"
 RUNCVM_DEBUG=""
@@ -76,7 +79,7 @@ load_env_from_file() {
 }
 
 jq() {
-    $RUNCVM_JQ "$@"
+  $RUNCVM_LD $RUNCVM_JQ "$@"
 }
 
 jq_set() {
@@ -204,6 +207,9 @@ if [ "$COMMAND" = "create" ]; then
     
   fi
   
+  # Pending support for user-specified mountpoint for the guest (VM) binaries and scripts
+  set_config_env "RUNCVM_GUEST" "$RUNCVM_GUEST"
+
   ARG0=$(jq_get "$CFG" '.process.args[0]')
   # Now look in mounts for destination == $ARG0 (this works for Docker and Podman)
   if [ "$ARG0" = "/sbin/docker-init" ] || [ "$ARG0" = "/dev/init" ]; then
@@ -276,13 +282,14 @@ if [ "$COMMAND" = "create" ]; then
   # (these being only the ones defined ahead of this item in the mounts[] array - so order matters!)
   jq_set "$CFG" --arg root "$ROOT" --arg vm "$RUNCVM_VM_MOUNTPOINT" '.mounts |= [{"destination":$vm,"type":"bind","source":$root,"options":["rbind","private","rw"]}] + .'
 
+  # Mount /opt/runcvm from host to container
+  # Define this at top of mounts[] so it is recursively mounted
+  # and before (but after in the mounts[] array) /.runcvm so it can be mounted inside it
+  jq_set "$CFG" --arg runcvm "$RUNCVM" --arg runcvm_guest "$RUNCVM_GUEST" '.mounts |= [{"destination":$runcvm_guest,"type":"bind","source":$runcvm,"options":["bind","private","ro"]}] + .'
+
   # Mount a tmpfs at /.runcvm in container
   # Define this at top of mounts[] so it is recursively mounted
   jq_set "$CFG" '.mounts |= [{"destination":"/.runcvm","type":"tmpfs","source":"runcvm","options":["nosuid","noexec","nodev","size=1M","mode=700"]}] + .'
-
-  # Mount /opt/runcvm from host to container
-  # Define this at top of mounts[] so it is recursively mounted
-  jq_set "$CFG" --arg runcvm "$RUNCVM" '.mounts |= [{"destination":$runcvm,"type":"bind","source":$runcvm,"options":["bind","private","ro"]}] + .'
 
   # Mount a tmpfs at /run in container
   # Define this at bottom of mounts[] so it is not recursively mounted to /vm
@@ -302,14 +309,14 @@ if [ "$COMMAND" = "create" ]; then
   
   # Look for RUNCVM_KERNEL env var
   RUNCVM_KERNEL=$(get_config_env 'RUNCVM_KERNEL')
-  log "RUNCVM_KERNEL=$RUNCVM_KERNEL (1)"
+  log "RUNCVM_KERNEL='$RUNCVM_KERNEL' (1)"
+
+  # Generate:
+  # - RUNCVM_KERNEL_ID: the distro name (e.g. alpine, debian, ubuntu)
+  # - RUNCVM_KERNEL_IDVER: the distro name and kernel version (e.g. alpine/5.15.59-0-virt, debian/5.10.0-16-amd64)
 
   if [ -n "$RUNCVM_KERNEL" ]; then
     # If found, validate
-
-    if [[ "$RUNCVM_KERNEL" =~ ^[a-z]+$ ]]; then
-      RUNCVM_KERNEL+="/latest"
-    fi
   
     if [[ "$RUNCVM_KERNEL" =~ \.\. ]]; then
       error "Kernel '$RUNCVM_KERNEL' invalid (contains '..')"
@@ -323,7 +330,14 @@ if [ "$COMMAND" = "create" ]; then
       error "Kernel '$RUNCVM_KERNEL' not found (check $RUNCVM_KERNELS)"
     fi
 
-    RUNCVM_KERNEL_ID=$(dirname "$RUNCVM_KERNEL") # Returns e.g. alpine, debian, ubuntu
+    # If RUNCVM_KERNEL is a distro name only, append /latest
+    if [[ "$RUNCVM_KERNEL" =~ ^[a-z]+$ ]]; then
+      RUNCVM_KERNEL_IDVER="$RUNCVM_KERNEL/latest"
+    else
+      RUNCVM_KERNEL_IDVER="$RUNCVM_KERNEL"
+    fi  
+
+    RUNCVM_KERNEL_ID=$(dirname "$RUNCVM_KERNEL_IDVER") # Returns e.g. alpine, debian, ubuntu
 
   else
     # If not found, look for value from /etc/os-release in the container image
@@ -338,12 +352,12 @@ if [ "$COMMAND" = "create" ]; then
       RUNCVM_KERNEL_ID="${RUNCVM_KERNEL_DEFAULT:-debian}"
     fi
 
-    RUNCVM_KERNEL="$RUNCVM_KERNEL_ID/latest"
+    RUNCVM_KERNEL_IDVER="$RUNCVM_KERNEL_ID/latest"
   fi
   
-  log "RUNCVM_KERNEL=$RUNCVM_KERNEL (2)"
-  log "RUNCVM_KERNEL_ID=$RUNCVM_KERNEL_ID"
-  log "RUNCVM_KERNEL_VERSION=$RUNCVM_KERNEL_VERSION"
+  log "RUNCVM_KERNEL='$RUNCVM_KERNEL' (2)"
+  log "RUNCVM_KERNEL_ID='$RUNCVM_KERNEL_ID'"
+  log "RUNCVM_KERNEL_IDVER='$RUNCVM_KERNEL_IDVER'"
   
   # Now look up the default kernel and initramfs paths and args for this kernel
   case "$RUNCVM_KERNEL_ID" in
@@ -367,15 +381,15 @@ if [ "$COMMAND" = "create" ]; then
            *) error "Unrecognised image O/S '$RUNCVM_KERNEL'; specify --env=RUNCVM_KERNEL=<dist> or --env=RUNCVM_KERNEL=<dist>/<version>"; ;;
   esac
   
-  # Look for a kernel and initramfs at the expected paths in the container image.
-  if [[ -f "$ROOT/$RUNCVM_KERNEL_OS_KERNEL_PATH" && -f "$ROOT/$RUNCVM_KERNEL_OS_INITRAMFS_PATH" ]]; then
+  # If no RUNCVM_KERNEL specified, look for a kernel and initramfs at the expected paths in the container image.
+  if [[ -z "$RUNCVM_KERNEL" && -f "$ROOT/$RUNCVM_KERNEL_OS_KERNEL_PATH" && -f "$ROOT/$RUNCVM_KERNEL_OS_INITRAMFS_PATH" ]]; then
     RUNCVM_KERNEL_PATH="$RUNCVM_KERNEL_OS_KERNEL_PATH"
     RUNCVM_KERNEL_INITRAMFS_PATH="$RUNCVM_KERNEL_OS_INITRAMFS_PATH"
   else
-    # If we didn't find a kernel and initramfs at the expected paths in the container image,
+    # If RUNCVM_KERNEL was specified, or we didn't find a kernel and initramfs at the expected paths in the container image,
     # select the latest RUNCVM kernel version and arrange to mount it.
 
-    RUNCVM_KERNEL_VERSION=$(basename $(readlink -f "$RUNCVM_KERNELS/$RUNCVM_KERNEL")) # Returns e.g. 5.15.53-0-virt
+    RUNCVM_KERNEL_VERSION=$(basename $(readlink -f "$RUNCVM_KERNELS/$RUNCVM_KERNEL_IDVER")) # Returns e.g. 5.15.53-0-virt
 
     RUNCVM_KERNEL_MOUNT_LIB_MODULES=$(get_config_env 'RUNCVM_KERNEL_MOUNT_LIB_MODULES')
     if [ -n "$RUNCVM_KERNEL_MOUNT_LIB_MODULES" ]; then
@@ -386,22 +400,22 @@ if [ "$COMMAND" = "create" ]; then
       RUNCVM_KERNEL_MODULES_DST="/lib/modules/$RUNCVM_KERNEL_VERSION"
     fi
     
-    RUNCVM_KERNEL_PATH="$RUNCVM_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/vmlinuz"
-    RUNCVM_KERNEL_INITRAMFS_PATH="$RUNCVM_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/initrd"
+    RUNCVM_KERNEL_PATH="$RUNCVM_GUEST_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/vmlinuz"
+    RUNCVM_KERNEL_INITRAMFS_PATH="$RUNCVM_GUEST_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/initrd"
 
     jq_set "$CFG" --arg modules_dst "$RUNCVM_VM_MOUNTPOINT$RUNCVM_KERNEL_MODULES_DST" --arg modules_src "$RUNCVM_KERNEL_MODULES_SRC" '.mounts += [{"destination":$modules_dst,"type":"bind","source":$modules_src,"options":["bind","private","ro"]}]'
   fi
 
-  log "RUNCVM_KERNEL=$RUNCVM_KERNEL"
-  log "RUNCVM_KERNEL_ID=$RUNCVM_KERNEL_ID"
-  log "RUNCVM_KERNEL_VERSION=$RUNCVM_KERNEL_VERSION"
-  log "RUNCVM_KERNEL_OS_KERNEL_PATH=$RUNCVM_KERNEL_OS_KERNEL_PATH"
-  log "RUNCVM_KERNEL_OS_INITRAMFS_PATH=$RUNCVM_KERNEL_OS_INITRAMFS_PATH"
-  log "RUNCVM_KERNEL_PATH=$RUNCVM_KERNEL_PATH"
-  log "RUNCVM_KERNEL_INITRAMFS_PATH=$RUNCVM_KERNEL_INITRAMFS_PATH"
-  log "RUNCVM_KERNEL_ROOT=$RUNCVM_KERNEL_ROOT"
-  log "RUNCVM_KERNEL_MODULES_SRC=$RUNCVM_KERNEL_MODULES_SRC"
-  log "RUNCVM_KERNEL_MODULES_DST=$RUNCVM_KERNEL_MODULES_DST"
+  log "RUNCVM_KERNEL='$RUNCVM_KERNEL'"
+  log "RUNCVM_KERNEL_ID='$RUNCVM_KERNEL_ID'"
+  log "RUNCVM_KERNEL_VERSION='$RUNCVM_KERNEL_VERSION'"
+  log "RUNCVM_KERNEL_OS_KERNEL_PATH='$RUNCVM_KERNEL_OS_KERNEL_PATH'"
+  log "RUNCVM_KERNEL_OS_INITRAMFS_PATH='$RUNCVM_KERNEL_OS_INITRAMFS_PATH'"
+  log "RUNCVM_KERNEL_PATH='$RUNCVM_KERNEL_PATH'"
+  log "RUNCVM_KERNEL_INITRAMFS_PATH='$RUNCVM_KERNEL_INITRAMFS_PATH'"
+  log "RUNCVM_KERNEL_ROOT='$RUNCVM_KERNEL_ROOT'"
+  log "RUNCVM_KERNEL_MODULES_SRC='$RUNCVM_KERNEL_MODULES_SRC'"
+  log "RUNCVM_KERNEL_MODULES_DST='$RUNCVM_KERNEL_MODULES_DST'"
   
   set_config_env "RUNCVM_KERNEL_PATH" "$RUNCVM_KERNEL_PATH"
   set_config_env "RUNCVM_KERNEL_INITRAMFS_PATH" "$RUNCVM_KERNEL_INITRAMFS_PATH"
