@@ -535,8 +535,11 @@ elif [ "$COMMAND" = "exec" ]; then
     wantsTerminal=$(jq_get "$PROCESS" '.terminal')
 
     jq_set "$PROCESS" \
-      --arg exec "$RUNCVM_EXEC" --arg uidgid "$uidgid" --arg cwd "$cwd" \
-      --arg hasHome "$hasHome" --arg wantsTerminal "$wantsTerminal" \
+      --arg exec "$RUNCVM_EXEC" \
+      --arg uidgid "$uidgid" \
+      --arg cwd "$cwd" \
+      --arg hasHome "$hasHome" \
+      --arg wantsTerminal "$wantsTerminal" \
       '.args |= [$exec, $uidgid, $cwd, $hasHome, $wantsTerminal] + .'
 
     # Force root (or whatever user qemu runs as)
