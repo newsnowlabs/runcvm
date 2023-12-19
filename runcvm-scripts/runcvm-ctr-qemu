@@ -14,6 +14,9 @@ QEMU_IFDOWN="$RUNCVM_GUEST/scripts/runcvm-ctr-qemu-ifdown"
 
 INIT="init=$RUNCVM_GUEST/scripts/runcvm-vm-init"
 
+# Must export TERMINFO so curses library can find terminfo database.
+export TERMINFO="$RUNCVM_GUEST/usr/share/terminfo"
+
 error() {
   echo "$1" >&2
   exit 1
