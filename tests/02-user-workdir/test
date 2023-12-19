@@ -1,0 +1,78 @@
+#!/bin/bash -e
+
+# Load framework functions
+. ../framework.sh
+
+# TEST VARIABLES
+NODE=runcvm-01-test
+NETWORK="$NODE-network"
+IMAGE="alpine"
+RUNTIME="${RUNTIME:-runcvm}"
+
+# OVERRIDE FRAMEWORK FUNCTIONS
+nodes() { echo $NODE; }
+networks() { echo $NETWORK; }
+
+# TEST DETAILS
+COMMAND='echo "$(id -u) $(pwd)"'
+USER_ID="1000"
+WORK_DIR="/tmp"
+EXPECTED_OUTPUT="${USER_ID} ${WORK_DIR}"
+
+# TEST FUNCTIONS
+# --------------
+
+# Function to test output against expected values
+test_output() {
+  local test_type="$1"
+  local expected_output="$2"
+  local output_to_test="$3"
+
+  if [ "$output_to_test" = "$expected_output" ]; then
+    log "docker $test_type test: expected and received '$output_to_test' - PASS"
+    return 0
+  fi
+
+  log "docker $test_type test: expected '$expected_output', but got: '$output_to_test' - FAIL"
+  return 1
+}
+
+# TEST PROCEDURE
+# --------------
+
+# Create custom network
+log -n "Creating network '$NETWORK' ..."
+docker network create $NETWORK
+
+# Create and run the container
+log -n "Launching runcvm container with command '$COMMAND' ..."
+docker run \
+  -d \
+  --rm \
+  --runtime=$RUNTIME \
+  --network=$NETWORK \
+  --name=$NODE \
+  --hostname=$NODE \
+  --user=$USER_ID \
+  --workdir=$WORK_DIR \
+  $IMAGE \
+  sh -c "$COMMAND; while true; do echo ===DONE===; sleep 1; done"
+
+shopt -s lastpipe
+log "Container '$NODE' output ..."
+docker logs -f $NODE 2>&1 | sed "s/^/($NODE) > /; /===DONE===/q0; /failed/q129;"
+
+ERRORS=0
+
+# Test docker run command:
+# - Retrieve first line of logs from container
+# - Strip carriage returns for now. as it's unclear why they are present and are not present in the expected output
+test_output "run" "$EXPECTED_OUTPUT" "$(docker logs $NODE | grep -v '===DONE===' | tr -d '\015')" || ERRORS=$((ERRORS+1))
+
+# Test docker exec command:
+# - Retrieve output from exec command for exec test
+test_output "exec" "$EXPECTED_OUTPUT" "$(docker exec $NODE sh -c "$COMMAND")" || ERRORS=$((ERRORS+1))
+
+# Final output
+log "Tests completed with $ERRORS errors"
+exit $ERRORS
