@@ -107,7 +107,9 @@ get_process_env() {
   local file="$1"
   local var="$2"
   local default="$3"
-  local value=$(jq_get "$file" --arg env "$var" '.env[] | select(match("^" + $env + "=")) | match("^" + $env + "=(.*)") | .captures[] | .string')
+  local value
+  
+  value=$(jq_get "$file" --arg env "$var" '.env[] | select(match("^" + $env + "=")) | match("^" + $env + "=(.*)") | .captures[] | .string')
   
   [ -n "$value" ] && echo -n "$value" || echo -n "$default"
 }
@@ -115,7 +117,9 @@ get_process_env() {
 get_process_env_boolean() {
   local file="$1"
   local var="$2"
-  local value=$(jq_get "$file" --arg env "$var" '.env[] | select(match("^" + $env + "=")) | match("^" + $env + "=(.*)") | .captures[] | .string')
+  local value
+  
+  value=$(jq_get "$file" --arg env "$var" '.env[] | select(match("^" + $env + "=")) | match("^" + $env + "=(.*)") | .captures[] | .string')
   
   [ -n "$value" ] && echo "1" || echo "0"
 }
@@ -123,7 +127,9 @@ get_process_env_boolean() {
 get_config_env() {
   local var="$1"
   local default="$2"
-  local value=$(jq_get "$CFG" --arg env "$var" '.process.env[] | select(match("^" + $env + "=")) | match("^" + $env + "=(.*)") | .captures[] | .string')
+  local value
+
+  value=$(jq_get "$CFG" --arg env "$var" '.process.env[] | select(match("^" + $env + "=")) | match("^" + $env + "=(.*)") | .captures[] | .string')
   
   [ -n "$value" ] && echo -n "$value" || echo -n "$default"
 }

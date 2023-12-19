@@ -48,8 +48,9 @@ docker_restart() {
   # - With systemd, run: systemctl restart docker
   # - On GitHub Codespaces, run: sudo killall dockerd && sudo /usr/local/share/docker-init.sh
 
-  local init=$(ps -o comm,pid 1 | grep ' 1$' | awk '{print $1}')
-  local cmd
+  local cmd init
+  
+  init=$(ps -o comm,pid 1 | grep ' 1$' | awk '{print $1}')
 
   log "  - Preparing to restart dockerd ..."
 

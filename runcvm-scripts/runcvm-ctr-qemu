@@ -25,7 +25,7 @@ error() {
 # Argument e.g. /volume/disk1,/var/lib/docker,ext4,5G
 do_disk() {
   local spec="$1"
-  local src dst fs size
+  local src dst fs size dir UUID
 
   local IFS=','
   read src dst fs size <<< $(echo "$spec")
@@ -53,7 +53,7 @@ do_disk() {
     fi
 
     # Create directory for disk backing file, if needed.
-    local dir="$(busybox dirname "$src")"
+    dir="$(busybox dirname "$src")"
     if ! [ -d "$dir" ]; then
       mkdir -p $(busybox dirname "$src")
     fi
@@ -62,7 +62,7 @@ do_disk() {
     mke2fs -F -t "$fs" "$src" >&2 || error "Error: disk spec '$spec' invalid: mke2fs on '$src' with fs '$fs' failed"
   fi
 
-  local UUID=$(blkid -o value "$src" | head -n 1)
+  UUID=$(blkid -o value "$src" | head -n 1)
   mkdir -p "$RUNCVM_VM_MOUNTPOINT/$dst" >&2
   echo "UUID=$UUID $dst $fs defaults,noatime 0 0" >>/.runcvm/fstab
   DISKS+=(-drive file=$src,format=raw,if=virtio,media=disk,cache=directsync,aio=native)
@@ -252,9 +252,10 @@ ARGS=(
   # Kernel and initrd and kernel cmdline
   -kernel $RUNCVM_KERNEL_PATH
   -initrd $RUNCVM_KERNEL_INITRAMFS_PATH
+  -L $RUNCVM_GUEST/usr/share/qemu
   -append "$RUNCVM_KERNEL_ROOT $INIT rw ${APPEND[*]} $RUNCVM_KERNEL_APPEND"
 )
 
-if [[ "$RUNCVM_BREAK" =~ preqemu ]]; then echo Preparing to run: '$CMD' "${ARGS[@]@Q}"; bash; fi
+if [[ "$RUNCVM_BREAK" =~ preqemu ]]; then echo "Preparing to run: '$CMD' ${ARGS[@]@Q}"; bash; fi
 
 exec "$CMD" "${ARGS[@]}"
