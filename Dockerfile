@@ -122,7 +122,9 @@ RUN /usr/local/bin/elf-patcher.sh && \
         ln -s busybox $cmd; \
     done && \
     mkdir -p $CODE_PATH/usr/share && \
-    cp -a /usr/share/qemu $CODE_PATH/usr/share
+    cp -a /usr/share/qemu $CODE_PATH/usr/share && \
+    cp -a /etc/terminfo $CODE_PATH/usr/share
+
 
 # --- BUILD STAGE ---
 # Build static runcvm-init
