@@ -65,7 +65,7 @@ trap quit EXIT
 trap term TERM INT QUIT
 
 # Trap for cleanup on exit
-trap _cleanup EXIT
+trap cleanup EXIT
 
 # Clean up after any unclean exits
 cleanup
