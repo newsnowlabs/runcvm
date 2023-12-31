@@ -79,7 +79,7 @@ if [ -n "$REGISTRY_MIRROR" ]; then
   DOCKER_OPTS+=(--registry-mirror=$(sed "s|/localhost\b|/$DOCKER_IF_GW|" <<< $REGISTRY_MIRROR))
 fi
 
-log "Launching YYY 'dockerd ${DOCKER_OPTS[*]}' ... XXX"
+log "Launching 'dockerd ${DOCKER_OPTS[*]}' ..."
 while true; do dockerd "${DOCKER_OPTS[@]}" >>/var/log/dockerd.log 2>&1; done &
 
 for i in $(seq 1 10 | sort -nr)
