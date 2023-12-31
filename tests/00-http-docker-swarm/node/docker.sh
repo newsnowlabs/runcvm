@@ -175,9 +175,10 @@ if [ "$NodeState" = "inactive" ] || [ "$NodeState" = "pending" ]; then
   log "Log memory consumption ..."
   free
 
-  # Log this trigger line last
-  # BUT before running DIRD.
-  log "Swarm complete!"
+  # Log this trigger line last BUT before (optionally) running DIRD.
+  # This is because the test script waits for this line to appear before proceeding to launch the service.
+  # We log multiple times to work around a minor bug whereby the test script sometimes fails to react to the first log line alone.
+  for i in $(seq 1 5); do log "Swarm complete!"; sleep 0.25; done
   
   # Optionally run DIRD.
   # Do this after logging "Swarm complete" so that test script proceeds to launch the service;
