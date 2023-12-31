@@ -91,6 +91,7 @@ RunCVM features:
 - [Installation](#installation)
 - [Upgrading](#upgrading)
 - [Features and Limitations](#features-and-limitations)
+- [RunCVM vs Kata comparison](#runcvm-vs-kata-comparison)
 - [Kernel selection](#kernel-selection)
 - [Option reference](#option-reference)
 - [Advanced usage](#advanced-usage)
@@ -241,6 +242,76 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
 - Kernels
    - [+] Use any kernel, either one pre-packaged with RunCVM or roll your own
    - [+] RunCVM will try to select an appropriate kernel to use based on examination of `/etc/os-release` within the image being launched.
+
+## RunCVM vs Kata comparison
+
+This table provides a high-level comparison of RunCVM and Kata across various features like kernels, networking/DNS, memory allocation, namespace handling, method of operation, and performance characteristics:
+
+| Feature | RunCVM | Kata |
+|---------|--------|------|
+| **Methodology** | Boots VM from distribution kernels with container's filesystem directly mounted as root filesystem, using virtiofs. VM setup code and kernel modules are bind-mounted into the container. VM's PID1 runs setup code to reproduce the container's networking environment within the VM before executing the container's original entrypoint. | Boots VM from custom kernel with custom root disk image, mounts the virtiofsd-shared host container filesystem to a target folder and executes the container's entrypoint within a restricted namespace having chrooted to that folder. |
+| **Privileges/restrictions** | Container code has full root access to VM and its devices. It may run anything that runs in a VM, mounting filesystems, installing kernel modules, accessing devices. RunCVM helper processes are visible to `ps` etc. | Runs container code inside a VM namespace with restricted privileges. Use of mounts, kernel modules is restricted. Kata helper processes (like kata-agent and chronyd) are invisible to `ps`.|
+| **Kernels** | Launches stock Alpine, Debian, Ubuntu kernels. Kernel `/lib/modules` automatically mounted within VM. Install any needed modules without host reconfiguration. | Launches custom kernels. Kernel modules aren't mounted and need host reconfiguration to be installed. |
+| **Networking/DNS** | Docker container networking + internal/external DNS out-of-the-box. No support for `docker network connect/disconnect` | DNS issues presented: with custom network, external ping works, but DNS lookups fail both for internal docker hosts and external hosts.[^1] |
+| **Memory** | VM assigned and reports total memory as per `--memory <mem>` | VM total memory reported by `free` appears unrelated to `--memory <mem>` specified [^2] |
+| **CPUs** | VM assigned and reports CPUs as per `--cpus <cpus>` | CPUs must be hardcoded in Kata host config |
+| **Performance** | | Custom kernel optimisations may deliver improved startup (~3.2s) or operational performance (~15%) |
+| **virtiofsd** | Runs `virtiofsd` in container namespace | Unknown |
+
+[^1]: `docker network create --scope=local testnet >/dev/null && docker run --name=test --rm --runtime=kata --network=testnet --entrypoint=/bin/ash alpine -c 'for n in test google.com 8.8.8.8; do echo "ping $n ..."; ping -q -c 8 -i 0.5 $n; done'; docker network rm testnet >/dev/null` succeeds on `runc` and `runcvm` but at time of writing (2023-12-31) the DNS lookups needed fail on `kata`.
+
+```
+$ docker network create --scope=local testnet >/dev/null && docker run --name=test --rm -it --runtime=kata --network=testnet --entrypoint=/bin/ash alpine -c 'for n in test google.com 8.8.8.8; do echo "ping $n ..."; ping -q -c 8 -i 0.5 $n; done'; docker network rm testnet >/dev/null
+ping test ...
+ping: bad address 'test'
+ping google.com ...
+ping: bad address 'google.com'
+ping 8.8.8.8 ...
+PING 8.8.8.8 (8.8.8.8): 56 data bytes
+
+--- 8.8.8.8 ping statistics ---
+8 packets transmitted, 8 packets received, 0% packet loss
+round-trip min/avg/max = 0.911/1.716/3.123 ms
+```
+
+```
+$ docker network create --scope=local testnet >/dev/null && docker run --name=test --rm -it --runtime=runcvm --network=testnet --entrypoint=/bin/ash alpine -c 'for n in test google.com 8.8.8.8; do echo "ping $n ..."; ping -q -c 8 -i 0.5 $n; done'; docker network rm testnet >/dev/null
+ping test ...
+PING test (172.25.8.2): 56 data bytes
+
+--- test ping statistics ---
+8 packets transmitted, 8 packets received, 0% packet loss
+round-trip min/avg/max = 0.033/0.085/0.137 ms
+ping google.com ...
+PING google.com (172.217.16.238): 56 data bytes
+
+--- google.com ping statistics ---
+8 packets transmitted, 8 packets received, 0% packet loss
+round-trip min/avg/max = 8.221/8.398/9.017 ms
+ping 8.8.8.8 ...
+PING 8.8.8.8 (8.8.8.8): 56 data bytes
+
+--- 8.8.8.8 ping statistics ---
+8 packets transmitted, 8 packets received, 0% packet loss
+round-trip min/avg/max = 1.074/1.491/1.801 ms
+```
+
+[^2]: `docker run --rm -it --runtime=kata --entrypoint=/bin/ash -m 500m alpine -c 'free -h; df -h /dev/shm'`
+
+```
+$ docker run --rm --runtime=kata --name=test -m 2g --env=RUNCVM_KERNEL_DEBUG=1 -it alpine ash -c 'free -h'
+              total        used        free      shared  buff/cache   available
+Mem:           3.9G       94.4M        3.8G           0        3.7M        3.8G
+Swap:             0           0           0
+$ docker run --rm --runtime=kata --name=test -m 3g --env=RUNCVM_KERNEL_DEBUG=1 -it alpine ash -c 'free -h'
+              total        used        free      shared  buff/cache   available
+Mem:           4.9G      107.0M        4.8G           0        3.9M        4.8G
+Swap:             0           0           0
+$ docker run --rm --runtime=kata --name=test -m 0g --env=RUNCVM_KERNEL_DEBUG=1 -it alpine ash -c 'free -h'
+              total        used        free      shared  buff/cache   available
+Mem:           1.9G       58.8M        1.9G           0        3.4M        1.9G
+Swap:             0           0           0
+```
 
 ## Kernel auto-detection
 
