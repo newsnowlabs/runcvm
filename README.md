@@ -259,59 +259,55 @@ This table provides a high-level comparison of RunCVM and Kata across various fe
 | **virtiofsd** | Runs `virtiofsd` in container namespace | Unknown |
 
 [^1]: `docker network create --scope=local testnet >/dev/null && docker run --name=test --rm --runtime=kata --network=testnet --entrypoint=/bin/ash alpine -c 'for n in test google.com 8.8.8.8; do echo "ping $n ..."; ping -q -c 8 -i 0.5 $n; done'; docker network rm testnet >/dev/null` succeeds on `runc` and `runcvm` but at time of writing (2023-12-31) the DNS lookups needed fail on `kata`.
+    ```
+    $ docker network create --scope=local testnet >/dev/null && docker run --name=test --rm -it --runtime=kata --network=testnet --entrypoint=/bin/ash alpine -c 'for n in test google.com 8.8.8.8; do echo "ping $n ..."; ping -q -c 8 -i 0.5 $n; done'; docker network rm testnet >/dev/null
+    ping test ...
+    ping: bad address 'test'
+    ping google.com ...
+    ping: bad address 'google.com'
+    ping 8.8.8.8 ...
+    PING 8.8.8.8 (8.8.8.8): 56 data bytes
 
-```
-$ docker network create --scope=local testnet >/dev/null && docker run --name=test --rm -it --runtime=kata --network=testnet --entrypoint=/bin/ash alpine -c 'for n in test google.com 8.8.8.8; do echo "ping $n ..."; ping -q -c 8 -i 0.5 $n; done'; docker network rm testnet >/dev/null
-ping test ...
-ping: bad address 'test'
-ping google.com ...
-ping: bad address 'google.com'
-ping 8.8.8.8 ...
-PING 8.8.8.8 (8.8.8.8): 56 data bytes
+    --- 8.8.8.8 ping statistics ---
+    8 packets transmitted, 8 packets received, 0% packet loss
+    round-trip min/avg/max = 0.911/1.716/3.123 ms
+    
+    $ docker network create --scope=local testnet >/dev/null && docker run --name=test --rm -it --runtime=runcvm --network=testnet --entrypoint=/bin/ash alpine -c 'for n in test google.com 8.8.8.8; do echo "ping $n ..."; ping -q -c 8 -i 0.5 $n; done'; docker network rm testnet >/dev/null
+    ping test ...
+    PING test (172.25.8.2): 56 data bytes
 
---- 8.8.8.8 ping statistics ---
-8 packets transmitted, 8 packets received, 0% packet loss
-round-trip min/avg/max = 0.911/1.716/3.123 ms
-```
+    --- test ping statistics ---
+    8 packets transmitted, 8 packets received, 0% packet loss
+    round-trip min/avg/max = 0.033/0.085/0.137 ms
+    ping google.com ...
+    PING google.com (172.217.16.238): 56 data bytes
 
-```
-$ docker network create --scope=local testnet >/dev/null && docker run --name=test --rm -it --runtime=runcvm --network=testnet --entrypoint=/bin/ash alpine -c 'for n in test google.com 8.8.8.8; do echo "ping $n ..."; ping -q -c 8 -i 0.5 $n; done'; docker network rm testnet >/dev/null
-ping test ...
-PING test (172.25.8.2): 56 data bytes
+    --- google.com ping statistics ---
+    8 packets transmitted, 8 packets received, 0% packet loss
+    round-trip min/avg/max = 8.221/8.398/9.017 ms
+    ping 8.8.8.8 ...
+    PING 8.8.8.8 (8.8.8.8): 56 data bytes
 
---- test ping statistics ---
-8 packets transmitted, 8 packets received, 0% packet loss
-round-trip min/avg/max = 0.033/0.085/0.137 ms
-ping google.com ...
-PING google.com (172.217.16.238): 56 data bytes
-
---- google.com ping statistics ---
-8 packets transmitted, 8 packets received, 0% packet loss
-round-trip min/avg/max = 8.221/8.398/9.017 ms
-ping 8.8.8.8 ...
-PING 8.8.8.8 (8.8.8.8): 56 data bytes
-
---- 8.8.8.8 ping statistics ---
-8 packets transmitted, 8 packets received, 0% packet loss
-round-trip min/avg/max = 1.074/1.491/1.801 ms
-```
+    --- 8.8.8.8 ping statistics ---
+    8 packets transmitted, 8 packets received, 0% packet loss
+    round-trip min/avg/max = 1.074/1.491/1.801 ms
+    ```
 
 [^2]: `docker run --rm -it --runtime=kata --entrypoint=/bin/ash -m 500m alpine -c 'free -h; df -h /dev/shm'`
-
-```
-$ docker run --rm --runtime=kata --name=test -m 2g --env=RUNCVM_KERNEL_DEBUG=1 -it alpine ash -c 'free -h'
-              total        used        free      shared  buff/cache   available
-Mem:           3.9G       94.4M        3.8G           0        3.7M        3.8G
-Swap:             0           0           0
-$ docker run --rm --runtime=kata --name=test -m 3g --env=RUNCVM_KERNEL_DEBUG=1 -it alpine ash -c 'free -h'
-              total        used        free      shared  buff/cache   available
-Mem:           4.9G      107.0M        4.8G           0        3.9M        4.8G
-Swap:             0           0           0
-$ docker run --rm --runtime=kata --name=test -m 0g --env=RUNCVM_KERNEL_DEBUG=1 -it alpine ash -c 'free -h'
-              total        used        free      shared  buff/cache   available
-Mem:           1.9G       58.8M        1.9G           0        3.4M        1.9G
-Swap:             0           0           0
-```
+    ```
+    $ docker run --rm --runtime=kata --name=test -m 2g --env=RUNCVM_KERNEL_DEBUG=1 -it alpine ash -c 'free -h'
+                total        used        free      shared  buff/cache   available
+    Mem:           3.9G       94.4M        3.8G           0        3.7M        3.8G
+    Swap:             0           0           0
+    $ docker run --rm --runtime=kata --name=test -m 3g --env=RUNCVM_KERNEL_DEBUG=1 -it alpine ash -c 'free -h'
+                total        used        free      shared  buff/cache   available
+    Mem:           4.9G      107.0M        4.8G           0        3.9M        4.8G
+    Swap:             0           0           0
+    $ docker run --rm --runtime=kata --name=test -m 0g --env=RUNCVM_KERNEL_DEBUG=1 -it alpine ash -c 'free -h'
+                total        used        free      shared  buff/cache   available
+    Mem:           1.9G       58.8M        1.9G           0        3.4M        1.9G
+    Swap:             0           0           0
+    ```
 
 ## Kernel auto-detection
 
