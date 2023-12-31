@@ -38,6 +38,9 @@ test_output() {
 # TEST PROCEDURE
 # --------------
 
+# Run routine cleanup of any preexisting containers, volumes, networks, and images
+cleanup
+
 # Create custom network
 log -n "Creating network '$NETWORK' ..."
 docker network create $NETWORK

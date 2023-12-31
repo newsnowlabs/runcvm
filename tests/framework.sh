@@ -66,6 +66,3 @@ trap term TERM INT QUIT
 
 # Trap for cleanup on exit
 trap cleanup EXIT
-
-# Clean up after any unclean exits
-cleanup

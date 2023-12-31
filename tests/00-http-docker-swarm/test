@@ -24,6 +24,9 @@ volumes() { echo swarm $(nodes); }
 networks() { echo runcvm-mtu; }
 images() { echo $IMAGE; }
 
+# Run routine cleanup of any preexisting containers, volumes, networks, and images
+cleanup
+
 h=$(hostname)
 
 if [ -n "$REGISTRY_MIRROR" ]; then
