@@ -68,6 +68,12 @@ RunCVM was born out of difficulties experienced using the Docker and Podman CLIs
 
 Like Kata, RunCVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualisation technology.
 
+However, while Kata aims to launch standard container images inside a restricted-privileges namespace inside a VM running a single fixed and heavily customised kernel and Linux distribution optimised for this purpose, RunCVM intentionally aims to launch container _or VM_ images as the _VM's root filesystem_ using stock or bespoke Linux kernels, the upshot being RunCVM's can run VM workloads that Kata's security and kernel model would explicitly prevent.
+
+For example:
+- RunCVM can launch system images expecting to interface directly with hardware, like [OpenWRT](https://openwrt.org/)
+- RunCVM can launch VMs nested inside a RunCVM VM - i.e. an 'inner' RunCVM container/VM guest can be launched by Docker running within an 'outer' RunCVM container/VM guest (assuming the host supports nested VMs) - in this sense, RunCVM is 'reentrant'.
+
 RunCVM features:
 
 - Compatible with `docker run` (with experimental support for `podman run`).
