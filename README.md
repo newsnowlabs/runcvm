@@ -56,6 +56,14 @@ cd runcvm/tests/00-http-docker-swarm && \
 NODES=3 MTU=9000 ./test
 ```
 
+Launch OpenWRT with port forward to LuCI web UI on port 10080:
+```console
+docker import --change='ENTRYPOINT ["/sbin/init"]' https://archive.openwrt.org/releases/23.05.2/targets/x86/generic/openwrt-23.05.2-x86-generic-rootfs.tar.gz openwrt-23.05.2 && \
+docker network create --subnet 172.128.0.0/24 runcvm-openwrt && \
+echo -e "config interface 'loopback'\n\toption device 'lo'\n\toption proto 'static'\n\toption ipaddr '127.0.0.1'\n\toption netmask '255.0.0.0'\n\nconfig device\n\toption name 'br-lan'\n\toption type 'bridge'\n\tlist ports 'eth0'\n\nconfig interface 'lan'\n\toption device 'br-lan'\n\toption proto 'static'\n\toption ipaddr '172.128.0.5'\n\toption netmask '255.255.255.0'\n\toption gateway '172.128.0.1'\n" >/tmp/runcvm-openwrt-network && \
+docker run -it --rm --runtime=runcvm --name=openwrt --network=runcvm-openwrt --ip=172.128.0.5 -v /tmp/runcvm-openwrt-network:/etc/config/network -p 10080:80 openwrt-23.05.2
+```
+
 ## RunCVM-in-Portainer walk-through
 
 [![Playing around with RunCVM, a docker runtime plugin](https://i.ytimg.com/vi/OENaWDlCWKg/maxresdefault.jpg)](https://www.youtube.com/watch?v=OENaWDlCWKg "Playing around with RunCVM, a docker runtime plugin")

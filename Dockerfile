@@ -164,6 +164,15 @@ RUN mkdir -p /opt/runcvm/kernels/alpine/$(basename $(ls -d /lib/modules/*)) && \
     cp -a /lib/modules/ /opt/runcvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/ && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/alpine
 
+FROM alpine-kernel as openwrt-kernel
+RUN mkdir -p /opt/runcvm/kernels/openwrt/$(basename $(ls -d /lib/modules/*))/modules/$(basename $(ls -d /lib/modules/*)) && \
+    cd /opt/runcvm/kernels/openwrt/$(basename $(ls -d /lib/modules/*)) && \
+    cp -a /boot/vmlinuz-virt vmlinuz && \
+    cp -a /boot/initramfs-virt initrd && \
+    find /lib/modules/ -type f -name '*.ko*' -exec cp -a {} modules/$(basename $(ls -d /lib/modules/*)) \; && \
+    gunzip modules/$(basename $(ls -d /lib/modules/*))/*.gz && \
+    chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/openwrt
+
 # --- BUILD STAGE ---
 # Build Debian bookworm kernel and initramfs with virtiofs module
 FROM amd64/debian:bookworm as debian-kernel
@@ -229,6 +238,7 @@ ENTRYPOINT ["/entrypoint-install.sh"]
 # Comment out any kernels that are unneeded.
 COPY --from=alpine-kernel /opt/runcvm/kernels/alpine /opt/runcvm/kernels/alpine
 COPY --from=debian-kernel /opt/runcvm/kernels/debian /opt/runcvm/kernels/debian
+COPY --from=openwrt-kernel /opt/runcvm/kernels/openwrt /opt/runcvm/kernels/openwrt
 COPY --from=ubuntu-kernel /opt/runcvm/kernels/ubuntu /opt/runcvm/kernels/ubuntu
 COPY --from=oracle-kernel /opt/runcvm/kernels/ol     /opt/runcvm/kernels/ol
 

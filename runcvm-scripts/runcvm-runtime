@@ -367,22 +367,22 @@ if [ "$COMMAND" = "create" ]; then
   
   # Now look up the default kernel and initramfs paths and args for this kernel
   case "$RUNCVM_KERNEL_ID" in
-      debian) RUNCVM_KERNEL_OS_KERNEL_PATH="/vmlinuz"
-              RUNCVM_KERNEL_OS_INITRAMFS_PATH="/initrd.img"
-              RUNCVM_KERNEL_ROOT="rootfstype=virtiofs root=runcvmfs noresume nomodeset net.ifnames=1"
-              ;;
-      ubuntu) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
-              RUNCVM_KERNEL_OS_INITRAMFS_PATH="/boot/initrd.img"
-              RUNCVM_KERNEL_ROOT="rootfstype=virtiofs root=runcvmfs noresume nomodeset net.ifnames=1"
-              ;;
-          ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
-              RUNCVM_KERNEL_OS_INITRAMFS_PATH="/boot/initramfs"
-              RUNCVM_KERNEL_ROOT="root=virtiofs:runcvmfs noresume nomodeset net.ifnames=1"
-              ;;
-      alpine) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz-virt"
-              RUNCVM_KERNEL_OS_INITRAMFS_PATH="/boot/initramfs-virt"
-              RUNCVM_KERNEL_ROOT="rootfstype=virtiofs root=runcvmfs resume= nomodeset"
-              ;;
+          debian) RUNCVM_KERNEL_OS_KERNEL_PATH="/vmlinuz"
+                  RUNCVM_KERNEL_OS_INITRAMFS_PATH="/initrd.img"
+                  RUNCVM_KERNEL_ROOT="rootfstype=virtiofs root=runcvmfs noresume nomodeset net.ifnames=1"
+                  ;;
+          ubuntu) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
+                  RUNCVM_KERNEL_OS_INITRAMFS_PATH="/boot/initrd.img"
+                  RUNCVM_KERNEL_ROOT="rootfstype=virtiofs root=runcvmfs noresume nomodeset net.ifnames=1"
+                  ;;
+              ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
+                  RUNCVM_KERNEL_OS_INITRAMFS_PATH="/boot/initramfs"
+                  RUNCVM_KERNEL_ROOT="root=virtiofs:runcvmfs noresume nomodeset net.ifnames=1"
+                  ;;
+  alpine|openwrt) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz-virt"
+                  RUNCVM_KERNEL_OS_INITRAMFS_PATH="/boot/initramfs-virt"
+                  RUNCVM_KERNEL_ROOT="rootfstype=virtiofs root=runcvmfs resume= nomodeset"
+                  ;;
 
            *) error "Unrecognised image O/S '$RUNCVM_KERNEL'; specify --env=RUNCVM_KERNEL=<dist> or --env=RUNCVM_KERNEL=<dist>/<version>"; ;;
   esac
