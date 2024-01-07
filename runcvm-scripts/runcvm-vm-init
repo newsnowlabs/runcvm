@@ -156,6 +156,11 @@ _EOE_
 # Load choice of console device
 read -r CONSOLE_DEVICE </.runcvm/console
 
+# Rename /.dockerenv, because presence of this file leads to systemd-detect-virt detecting presence of a container,
+# which in-turn prevents loading certain units (like systemd-modules-load.service), that
+# specify 'ConditionVirtualization=!container'
+mv /.dockerenv /.dockerenv.runcvm
+
 if [ "$RUNCVM_INIT" = "1" ]; then
   # If launched with '--init' (or --env=RUNCVM_INIT=1) then run our own init in place of Docker's/Podman's.
 
