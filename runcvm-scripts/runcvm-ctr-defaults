@@ -17,7 +17,8 @@ clean_env() {
   RUNCVM_KERNEL RUNCVM_KERNEL_ROOT RUNCVM_KERNEL_APPEND RUNCVM_KERNEL_INITRAMFS_PATH RUNCVM_KERNEL_PATH RUNCVM_DISKS \
   RUNCVM_UIDGID RUNCVM_VM_MOUNTPOINT RUNCVM_TMPFS \
   RUNCVM_CPUS RUNCVM_MEM_SIZE RUNCVM_HUGETLB \
-  RUNCVM_HAS_HOME
+  RUNCVM_HAS_HOME \
+  RUNCVM_CGROUPFS
 
   # May be set in VM by busybox init process
   export -n USER
@@ -40,7 +41,7 @@ which() {
 create_aliases() {
   for cmd in \
       bash \
-      busybox awk cat chgrp chmod cut grep head hostname init ln ls mkdir poweroff ps rm sh sysctl touch tr \
+      busybox awk cat chgrp chmod cut grep head hostname init ln ls mkdir mountpoint poweroff ps rm rmdir sh sysctl touch tr \
       ip jq \
       dnsmasq \
       blkid findmnt getent mke2fs mount nc \

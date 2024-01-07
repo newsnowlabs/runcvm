@@ -1,0 +1,51 @@
+cgroupfs_mount() {
+  local cgroupfs="$1"
+
+  # We want no cgroupfs at all, or we will leave it to the distribution.
+  if [[ "$cgroupfs" = "none" || "$cgroupfs" = "systemd" ]]; then
+    return
+  fi
+
+  # If defined in fstab, or there's no kernel support, skip.
+  # see also https://github.com/tianon/cgroupfs-mount/blob/master/cgroupfs-mount
+  if grep -v '^#' /etc/fstab | grep -q cgroup \
+    || [ ! -e /proc/cgroups ] \
+    || [ ! -d /sys/fs/cgroup ]; then
+      return
+  fi
+
+  # If hybrid, mixed, or cgroup1 cgroup support is requested...
+  if [[ "$cgroupfs" = "hybrid" || "$cgroupfs" = "mixed" || "$cgroupfs" = "1" || "$cgroupfs" = "cgroup1" ]]; then
+
+    if ! findmnt -rnu -M /sys/fs/cgroup; then
+      mount -t tmpfs -o uid=0,gid=0,mode=0755 cgroup /sys/fs/cgroup
+    fi
+    
+    for subtype in $(awk '!/^#/ { if ($4 == 1) print $1 }' /proc/cgroups); do
+      local sys="/sys/fs/cgroup/$subtype"
+      mkdir -p $sys
+      if ! findmnt -rnu -M $sys; then
+        if ! mount -n -t cgroup -o $subtype cgroup $sys; then
+          rmdir $sys || true
+        fi
+      fi
+    done
+
+  fi
+
+  # If hybrid or mixed cgroup support is requested...
+  if [[ "$cgroupfs" = "hybrid" || "$cgroupfs" = "mixed" ]]; then
+    if ! findmnt -rnu -M /sys/fs/cgroup/unified; then
+      mkdir -p /sys/fs/cgroup/unified
+      mount -t cgroup2 -o rw,nosuid,nodev,noexec,relatime cgroup2 /sys/fs/cgroup/unified
+    fi
+  fi
+
+  # If purely cgroup2 cgroup support is requested...
+  if [[ "$cgroupfs" = "2" || "$cgroupfs" = "cgroup2" ]]; then
+    if ! findmnt -rnu -M /sys/fs/cgroup; then
+      mkdir -p /sys/fs/cgroup
+      mount -t cgroup2 -o rw,nosuid,nodev,noexec,relatime cgroup2 /sys/fs/cgroup
+    fi
+  fi
+}

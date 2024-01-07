@@ -117,7 +117,7 @@ RUN /usr/local/bin/elf-patcher.sh && \
     cd $CODE_PATH/bin && \
     for cmd in \
         awk base64 cat chgrp chmod cut grep head hostname init ln ls \
-        mkdir poweroff ps rm route sh sysctl tr touch; \
+        mkdir poweroff ps rm rmdir route sh sysctl tr touch; \
     do \
         ln -s busybox $cmd; \
     done && \

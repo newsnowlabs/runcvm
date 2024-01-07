@@ -439,6 +439,25 @@ Enable breakpoints (falling to bash shell) during the RunCVM container/VM boot p
 
 **[EXPERIMENTAL]** Enable use of preallocated hugetlb memory backend, which can improve performance in some scenarios.
 
+### `--env=RUNCVM_CGROUPFS=<value>`
+
+Configures cgroupfs mountpoints in the VM, which may be needed to run applications like Docker if systemd is not running. Acceptable values are:
+
+- `none`/`systemd` - do nothing; leave to the application or to systemd (if running)
+- `1`/`cgroup1` - mount only cgroup v1 filesystems supported by the running kernel to subdirectories of `/sys/fs/cgroup`
+- `2`/`cgroup2` - mount only cgroup v2 filesystem to `/sys/fs/cgroup`
+- `hybrid`/`mixed` - mount cgroup v1 filesystems and mount cgroup v2 filesystem to `/sys/fs/cgroup/unified`
+
+Please note that if `RUNCVM_CGROUPFS` is left undefined or set to an empty string, then RunCVM selects an appropriate
+default behaviour according to these rules:
+
+- If specified entrypoint (or, if a symlink, its target) matches the regex `/systemd$` then assume a default value of `none`;
+- Else, assume a default value of `hybrid`.
+
+These rules work well in the cases of running Docker in (a) stock Alpine/Debian/Ubuntu distributions in which Docker has been installed but Systemd is not running; and (b) distributions in which Systemd is running. Of course you should set `RUNCVM_CGROUPFS` if you need to override the default behaviour.
+
+Please also note that in the case your distribution is running Systemd you may instead set `--env=RUNCVM_KERNEL_APPEND='systemd.unified_cgroup_hierarchy=<boolean>'` (where `<boolean>` is `0` or `1`) to request Systemd to create either hybrid or cgroup2-only cgroup filesystem(s) itself.
+
 ## Advanced usage
 
 ### Running Docker in a RunCVM container/VM
