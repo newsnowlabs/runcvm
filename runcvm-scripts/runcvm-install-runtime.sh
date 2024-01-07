@@ -100,24 +100,42 @@ log "========================"
 log
 
 if [ $(id -u) -ne 0 ]; then
-  log "Error: $0 must be run as root. Please relaunch using sudo."
+  log "- Error: $0 must be run as root. Please relaunch using sudo."
   usage
 fi
 
 for app in docker dockerd
 do
   if [ -z $(which docker) ]; then
-    log "Error: $0 currently requires the '$app' binary; please install it and try again"
+    log "- Error: $0 currently requires the '$app' binary; please install it and try again"
     usage
   fi
 done
 
-# Install RunCVM package to $MNT
-if docker run --rm -v /opt/runcvm:$MNT $REPO --quiet; then
-  log "- Installed RunCVM package to /opt/runcvm"
+
+if [ "$1" = "--no-dockerd" ]; then
+  NO_DOCKERD="1"
+  log "- Skipping dockerd check and docker-based package install due to '--no-dockerd'"
+  shift
 else
-  log "- Failed to install RunCVM package to /opt/runcvm; aborting!"
-  exit 1
+  log "- Checking dockerd ..."
+  if docker info >/dev/null 2>&1; then
+    log "  - Detected running dockerd"
+  else
+    log "  - Error: dockerd not running; please start dockerd; aborting!"
+    exit 1
+  fi
+fi
+
+# Install RunCVM package to $MNT
+if [ -z "$NO_DOCKERD" ]; then
+  log "- Installing RunCVM package to $MNT ..."
+  if docker run --rm -v /opt/runcvm:$MNT $REPO --quiet; then
+    log "- Installed RunCVM package to /opt/runcvm"
+  else
+    log "- Failed to install RunCVM package to /opt/runcvm; aborting!"
+    exit 1
+  fi
 fi
 
 if [ -d "/etc/docker" ]; then
@@ -140,6 +158,7 @@ if [ -d "/etc/docker" ]; then
     fi
 
     # Attempt restart of dockerd
+    # (if dockerd not found, we'll just continue)
     docker_restart
 
   else
