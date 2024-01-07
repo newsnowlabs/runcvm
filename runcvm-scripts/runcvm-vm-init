@@ -105,7 +105,7 @@ hostname -F /etc/hostname
 # Mount filesystems defined in /etc/fstab OR as defined in RUNCVM_DISKS
 if [ -f /.runcvm/fstab ]; then
   busybox modprobe ext4
-  mount -av --fstab /.runcvm/fstab -o X-mount.mkdir
+  mount -a --fstab /.runcvm/fstab -o X-mount.mkdir
 
   # Now mount our fstab over /etc/fstab
   mount --bind /.runcvm/fstab /etc/fstab
