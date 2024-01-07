@@ -200,6 +200,11 @@ APPEND+=(ipv6.disable=1 panic=-1)
 # Disable unneeded functionality
 APPEND+=(scsi_mod.scan=none tsc=reliable no_timer_check rcupdate.rcu_expedited=1 i8042.direct=1 i8042.dumbkbd=1 i8042.nopnp=1 i8042.noaux=1 noreplace-smp reboot=k cryptomgr.notests pci=lastbus=0 selinux=0)
 
+# Enable systemd startup logging by default:
+# - Only effective when --env=RUNCVM_KERNEL_DEBUG=1
+# - Override this by launching with --env='RUNCVM_KERNEL_APPEND=systemd.show_status=0'
+APPEND+=(systemd.show_status=1)
+
 if [ "$RUNCVM_KERNEL_DEBUG" = "1" ]; then
   APPEND+=(console=$CONSOLE_DEV)
 else
