@@ -59,7 +59,7 @@ do_disk() {
     fi
 
     busybox truncate -s "$size" "$src" >&2 || error "Error: disk spec '$spec' invalid: truncate on '$src' with size '$size' failed"
-    mke2fs -F -t "$fs" "$src" >&2 || error "Error: disk spec '$spec' invalid: mke2fs on '$src' with fs '$fs' failed"
+    mke2fs -q -F -t "$fs" "$src" >&2 || error "Error: disk spec '$spec' invalid: mke2fs on '$src' with fs '$fs' failed"
   fi
 
   UUID=$(blkid -o value "$src" | head -n 1)
