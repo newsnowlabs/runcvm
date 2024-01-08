@@ -88,7 +88,7 @@ do
 done
 
 # If startup was detected, wait a few extra seconds for dropbear sshd to be ready
-if [ -n "$delay" ]; then
+if [ "$delay" -ne 0 ]; then
   sleep 2
 fi
 
