@@ -71,9 +71,25 @@ if [ "$wantsTerminal" = "true" ]; then
   opts=(-t)
 fi
 
-if ! [ -s /.runcvm/dropbear/key ] || ! load_network; then
-  echo "Error: RunCVM container not fully started" >&2
+retries=30 # 15 seconds
+delay=0 # Signal that extra time should be allowed for RunCVM VM, its init and its dropbear sshd to start after the above conditions are satisfied
+
+while ! [ -s /.runcvm/dropbear/key ] || ! load_network
+do
+  if [ $retries -gt 0 ]; then
+    retries=$((retries-1))
+    delay=1
+    sleep 0.5
+    continue
+  fi
+
+  echo "Error: RunCVM container not yet started" >&2
   exit 1
+done
+
+# If startup was detected, wait a few extra seconds for dropbear sshd to be ready
+if [ -n "$delay" ]; then
+  sleep 2
 fi
 
 exec $RUNCVM_GUEST/usr/bin/dbclient "${opts[@]}" -p $SSHD_PORT -y -y -i /.runcvm/dropbear/key root@$DOCKER_IF_IP "$command '$uidgid' '$(echo -n $cwd | to_bin)' '$args_bin' '$env_bin'"
