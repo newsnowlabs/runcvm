@@ -62,16 +62,7 @@ NODES=3 MTU=9000 ./test
 
 ### System workloads
 
-Launch [OpenWrt](https://openwrt.org/) with port forward to LuCI web UI on port 10080:
-
-```console
-docker import --change='ENTRYPOINT ["/sbin/init"]' https://archive.openwrt.org/releases/23.05.2/targets/x86/generic/openwrt-23.05.2-x86-generic-rootfs.tar.gz openwrt-23.05.2 && \
-docker network create --subnet 172.128.0.0/24 runcvm-openwrt && \
-echo -e "config interface 'loopback'\n\toption device 'lo'\n\toption proto 'static'\n\toption ipaddr '127.0.0.1'\n\toption netmask '255.0.0.0'\n\nconfig device\n\toption name 'br-lan'\n\toption type 'bridge'\n\tlist ports 'eth0'\n\nconfig interface 'lan'\n\toption device 'br-lan'\n\toption proto 'static'\n\toption ipaddr '172.128.0.5'\n\toption netmask '255.255.255.0'\n\toption gateway '172.128.0.1'\n" >/tmp/runcvm-openwrt-network && \
-docker run -it --rm --runtime=runcvm --name=openwrt --network=runcvm-openwrt --ip=172.128.0.5 -v /tmp/runcvm-openwrt-network:/etc/config/network -p 10080:80 openwrt-23.05.2
-```
-
-Launch Ubuntu running Systemd and Docker with [Sysbox](https://github.com/nestybox/sysbox) runtime; then within it run an Alpine _Sysbox_ container; and, _within that_ install dockerd and run a container from the 'hello-world' image:
+**Docker+Sysbox runtime demo** - Launch Ubuntu running Systemd and Docker with [Sysbox](https://github.com/nestybox/sysbox) runtime; then within it run an Alpine _Sysbox_ container; and, _within that_ install dockerd and run a container from the 'hello-world' image:
 
 ```console
 cat <<EOF | docker build --tag=ubuntu-docker-sysbox -
@@ -83,13 +74,17 @@ RUN wget -O /tmp/sysbox.deb \
     https://downloads.nestybox.com/sysbox/releases/v0.6.2/sysbox-ce_0.6.2-0.linux_amd64.deb && \
     apt -y install /tmp/sysbox.deb
 ENTRYPOINT ["/lib/systemd/systemd"]
+ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,1G;/disks/sysbox,/var/lib/sysbox,ext4,1G'
+VOLUME /disks
 EOF
-docker run -d --runtime=runcvm -m 2g --name=ubuntu-docker-sysbox --env=RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,1G;/disks/sysbox,/var/lib/sysbox,ext4,1G' ubuntu-docker-sysbox
+docker run -d --runtime=runcvm -m 2g --name=ubuntu-docker-sysbox ubuntu-docker-sysbox
 docker exec ubuntu-docker-sysbox bash -c "docker run --rm --runtime=sysbox-runc alpine ash -x -c 'apk add docker; dockerd &>/dev/null & sleep 5; docker run --rm hello-world'"
-docker rm -f ubuntu-docker-sysbox
+docker rm -fv ubuntu-docker-sysbox
 ```
 
-**Nested RunCVM demo** -- Launch Ubuntu running Systemd and Docker with RunCVM runtime installed; then within it run an Alpine _RunCVM_ container-VM; and, within that install dockerd and, _within that_, run a container from the 'hello-world' image:
+- [Watch on Asciinema](https://asciinema.org/a/630032)
+
+**Nested RunCVM demo** - Launch Ubuntu running Systemd and Docker with RunCVM runtime installed; then within it run an Alpine _RunCVM_ container-VM; and, within that install dockerd and, _within that_, run a container from the 'hello-world' image:
 
 ```console
 cat <<EOF | docker build --tag=ubuntu-docker-runcvm -
@@ -102,11 +97,24 @@ RUN rm -f /etc/init.d/docker && \
     bash /opt/runcvm/scripts/runcvm-install-runtime.sh --no-dockerd && \
     echo kvm_intel >>/etc/modules
 ENTRYPOINT ["/lib/systemd/systemd"]
+ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,1G'
+VOLUME /disks
 EOF
-docker run -d --runtime=runcvm -m 2g --name=ubuntu-docker-runcvm --env=RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,1G' ubuntu-docker-runcvm
+docker run -d --runtime=runcvm -m 2g --name=ubuntu-docker-runcvm ubuntu-docker-runcvm
 docker exec ubuntu-docker-runcvm bash -c "docker run --rm --runtime=runcvm alpine ash -x -c 'apk add docker; dockerd &>/dev/null & sleep 5; docker run --rm hello-world'"
-docker rm -f ubuntu-docker-runcvm
+docker rm -fv ubuntu-docker-runcvm
 ```
+
+Launch [OpenWrt](https://openwrt.org/) with port forward to LuCI web UI on port 10080:
+
+```console
+docker import --change='ENTRYPOINT ["/sbin/init"]' https://archive.openwrt.org/releases/23.05.2/targets/x86/generic/openwrt-23.05.2-x86-generic-rootfs.tar.gz openwrt-23.05.2 && \
+docker network create --subnet 172.128.0.0/24 runcvm-openwrt && \
+echo -e "config interface 'loopback'\n\toption device 'lo'\n\toption proto 'static'\n\toption ipaddr '127.0.0.1'\n\toption netmask '255.0.0.0'\n\nconfig device\n\toption name 'br-lan'\n\toption type 'bridge'\n\tlist ports 'eth0'\n\nconfig interface 'lan'\n\toption device 'br-lan'\n\toption proto 'static'\n\toption ipaddr '172.128.0.5'\n\toption netmask '255.255.255.0'\n\toption gateway '172.128.0.1'\n" >/tmp/runcvm-openwrt-network && \
+docker run -it --rm --runtime=runcvm --name=openwrt --network=runcvm-openwrt --ip=172.128.0.5 -v /tmp/runcvm-openwrt-network:/etc/config/network -p 10080:80 openwrt-23.05.2
+```
+
+- [Watch on Asciinema](https://asciinema.org/a/631857)
 
 ## RunCVM-in-Portainer walk-through
 
