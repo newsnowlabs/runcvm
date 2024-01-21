@@ -163,6 +163,7 @@ RunCVM features:
 - [Advanced usage](#advanced-usage)
 - [Developing](#developing)
 - [Building](#building)
+- [Testing](#testing)
 - [Contributing](#contributing)
 - [Support](#support)
 - [Uninstallation](#uninstallation)
@@ -635,6 +636,59 @@ cd runcvm
 The build script creates a Docker image named `newsnowlabs/runcvm:latest`.
 
 Now follow the main [installation instructions](#installation) to install your built RunCVM from the Docker image.
+
+## Testing
+
+Test RunCVM using nested RunCVM. You can do this using a Docker image capable of installing RunCVM, or an image built with a version of RunCVM preinstalled.
+
+Build a suitable image as follows:
+
+```sh
+cat <<EOF | docker build --tag=ubuntu-docker-runcvm -
+FROM ubuntu:jammy
+
+# Install needed packages and create and configure 'runcvm' user account
+RUN apt update && \
+    apt -y install \
+        apt-utils kmod wget iproute2 systemd \
+        ca-certificates curl gnupg udev dbus sudo psmisc && \
+    curl -fsSL https://get.docker.com | bash && \
+    echo kvm_intel >>/etc/modules && \
+    useradd --create-home --shell /bin/bash --groups sudo,docker runcvm && \
+    echo runcvm:runcvm | chpasswd && \
+    echo 'runcvm ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/runcvm
+
+WORKDIR /home/runcvm
+ENTRYPOINT ["/lib/systemd/systemd"]
+VOLUME /disks
+
+# Mount formatted backing file at /var/lib/docker for speed and overlay2 support
+ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,2G'
+
+# # Uncomment this block to preinstall RunCVM from the specified image
+#
+# COPY --from=newsnowlabs/runcvm:latest /opt /opt/
+# RUN rm -f /etc/init.d/docker && \
+#     bash /opt/runcvm/scripts/runcvm-install-runtime.sh --no-dockerd
+EOF
+```
+
+(Uncomment the final block to build an image with RunCVM preinstalled, or leave the block commented to test RunCVM installation).
+
+To launch, run:
+
+```sh
+docker run -d --runtime=runcvm -m 2g --name=ubuntu-docker-runcvm ubuntu-docker-runcvm
+```
+
+> Optionally modify this `docker run` command by:
+> - adding `--rm` - to automatically remove the container after systemd shutdown
+> - removing `-d` and adding `--env=RUNCVM_KERNEL_DEBUG=1` - to see kernel and systemd boot logs
+> - removing `-d` and adding `-it` - to provide a console
+
+Then `docker exec -it -u runcvm ubuntu-docker-runcvm bash` to obtain a command prompt and perform testing.
+
+Run `docker rm -fv ubuntu-docker-runcvm` to clean up after testing.
 
 ## Support
 
