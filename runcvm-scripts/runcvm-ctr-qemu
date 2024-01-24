@@ -58,13 +58,22 @@ do_disk() {
       mkdir -p $(busybox dirname "$src")
     fi
 
+    # Create disk backing file.
     busybox truncate -s "$size" "$src" >&2 || error "Error: disk spec '$spec' invalid: truncate on '$src' with size '$size' failed"
-    mke2fs -q -F -t "$fs" "$src" >&2 || error "Error: disk spec '$spec' invalid: mke2fs on '$src' with fs '$fs' failed"
+
+    # Create filesystem on disk backing file, populated with any pre-existing files from dst.
+    [ -d "$RUNCVM_VM_MOUNTPOINT/$dst" ]|| mkdir -p "$RUNCVM_VM_MOUNTPOINT/$dst" >&2
+    mke2fs -q -F -t "$fs" -d "$RUNCVM_VM_MOUNTPOINT/$dst" "$src" >&2 || error "Error: disk spec '$spec' invalid: mke2fs on '$src' with fs '$fs' failed"
   fi
 
+  # Create the mountpoint, if we haven't already/it didn't already exist.
+  [ -d "$RUNCVM_VM_MOUNTPOINT/$dst" ]|| mkdir -p "$RUNCVM_VM_MOUNTPOINT/$dst" >&2
+
+  # Obtain a UUID for the filesystem and add to fstab.
   UUID=$(blkid -o value "$src" | head -n 1)
-  mkdir -p "$RUNCVM_VM_MOUNTPOINT/$dst" >&2
   echo "UUID=$UUID $dst $fs defaults,noatime 0 0" >>/.runcvm/fstab
+
+  # Add disk to QEMU command line.
   DISKS+=(-drive file=$src,format=raw,if=virtio,media=disk,cache=directsync,aio=native)
 }
 

@@ -431,11 +431,13 @@ Automatically create, format and mount backing files as virtual disks on the VM.
 Each `<diskN>` should be a comma-separated list of values of the form: `<src>,<dst>,<filesystem>[,<size>]`.
 
 - `<src>` is the path _within the container_ where the virtual disk backing file should be located. This may be in the container's overlayfs or within a volume (mounted using `--mount=type=volume`).
-- `<dst>` is the path within the VM where the virtual disk should be mounted.
-- `<filesystem>` is the filesystem with which the backing disk should be formatted (using `mke2fs`) when first created.
+- `<dst>` is both (a) the path within the VM where the virtual disk should be mounted; and (b) the location of the directory with which contents the disk should be prepopulated.
+- `<filesystem>` is the filesystem with which the backing disk should be formatted when first created.
 - `<size>` is the size of the backing file (in `truncate` format), and must be specified if `<src>` does not exist.
 
-When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs`. When RunCVM creates a container/VM, fstab entries will be drafted. After the VM boots, the fstab entries will be mounted. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on.
+When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs` and populated with any files preexisting at `<dst>`.
+
+When RunCVM creates a container/VM, fstab entries will be drafted. After the VM boots, the fstab entries will be mounted. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on.
 
 #### Example #1
 
@@ -443,7 +445,7 @@ When first created, the backing file will be created as a sparse file to the spe
 docker run -it --runtime=runcvm --env=RUNCVM_DISKS=/disk1,/home,ext4,5G <docker-image>
 ```
 
-In this example, RunCVM will check for existence of a file at `/disk1` within `<docker-image>`, and if not found create a 5G backing file (in the container's filesystem, typically overlay2) with an ext4 filesystem, then add the disk to `/etc/fstab` and mount it within the VM at `/home`.
+In this example, RunCVM will check for existence of a file at `/disk1` within `<docker-image>`, and if not found create a 5G backing file (in the container's filesystem, typically overlay2) with an ext4 filesystem populated with any preexisting contents of `/home`, then add the disk to `/etc/fstab` and mount it within the VM at `/home`.
 
 #### Example #2
 
@@ -453,9 +455,7 @@ docker run -it --runtime=runcvm --mount=type=volume,src=runcvm-disks,dst=/disks 
 
 This example behaves similarly, except that the `runcvm-disks` persistent Docker volume is first mounted at `/disks` within the container's filesystem, and therefore the backing files at `/disks/disk1` and `/disks/disk2` (mounted in the VM at `/home` and `/opt` respectively) are stored in the _persistent volume_ (typically stored in `/var/lib/docker` on the host, bypassing overlay2).
 
-> N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints,
-these are *NOT* mounted into the VM but only into the container,
-and are therefore suitable for use for mounting backing files for use as VM disks.
+> N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints, these are *NOT* mounted into the VM but only into the container, and are therefore suitable for use for mounting VM disks from bscking files that cannot be accessed within the VM's filesystem.
 
 ### `--env=RUNCVM_QEMU_DISPLAY=<value>`
 
@@ -662,8 +662,10 @@ WORKDIR /home/runcvm
 ENTRYPOINT ["/lib/systemd/systemd"]
 VOLUME /disks
 
-# Mount formatted backing file at /var/lib/docker for speed and overlay2 support
-ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,2G'
+# Mount formatted backing files at:
+# - /var/lib/docker for speed and overlay2 support
+# - /opt/runcvm to avoid nested virtiofs, which works, but can't be great for speed
+ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,2G;/disks/runcvm,/opt/runcvm,ext4,2G'
 
 # # Uncomment this block to preinstall RunCVM from the specified image
 #
