@@ -84,7 +84,7 @@ docker rm -fv ubuntu-docker-sysbox
 
 - [Watch on Asciinema](https://asciinema.org/a/630032)
 
-**Nested RunCVM demo** - Launch Ubuntu running Systemd and Docker with RunCVM runtime installed; then within it run an Alpine _RunCVM_ container-VM; and, within that install dockerd and, _within that_, run a container from the 'hello-world' image:
+**Nested RunCVM demo** - Launch Ubuntu running Systemd and Docker with RunCVM runtime installed; then within it run an Alpine _RunCVM_ Container/VM; and, within that install dockerd and, _within that_, run a container from the 'hello-world' image:
 
 ```console
 cat <<EOF | docker build --tag=ubuntu-docker-runcvm -
@@ -132,7 +132,7 @@ However, while Kata aims to launch standard container images inside a restricted
 
 For example:
 - RunCVM can launch system images expecting to interface directly with hardware, like [OpenWRT](https://openwrt.org/)
-- RunCVM can launch VMs nested inside a RunCVM VM - i.e. an 'inner' RunCVM container/VM guest can be launched by Docker running within an 'outer' RunCVM container/VM guest (assuming the host supports nested VMs) - in this sense, RunCVM is 'reentrant'.
+- RunCVM can launch VMs nested inside a RunCVM VM - i.e. an 'inner' RunCVM Container/VM guest can be launched by Docker running within an 'outer' RunCVM Container/VM guest (assuming the host supports nested VMs) - in this sense, RunCVM is 'reentrant'.
 
 RunCVM features:
 
@@ -437,7 +437,7 @@ Each `<diskN>` should be a comma-separated list of values of the form: `<src>,<d
 
 When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs` and prepopulated with any files preexisting at `<dst>`.
 
-When RunCVM creates a container/VM, fstab entries will be drafted. After the VM boots, the fstab entries will be mounted. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on.
+When RunCVM creates a Container/VM, fstab entries will be drafted. After the VM boots, the fstab entries will be mounted. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on.
 
 #### Example #1
 
@@ -484,7 +484,7 @@ Debug logs are written to files in `/tmp`.
 
 ### `--env=RUNCVM_BREAK=<values>`
 
-Enable breakpoints (falling to bash shell) during the RunCVM container/VM boot process.
+Enable breakpoints (falling to bash shell) during the RunCVM Container/VM boot process.
 
 `<values>` must be a comma-separated list of: `prenet`, `postnet`, `preqemu`.
 
@@ -513,7 +513,7 @@ Please also note that in the case your distribution is running Systemd you may i
 
 ## Advanced usage
 
-### Running Docker in a RunCVM container/VM
+### Running Docker in a RunCVM Container/VM
 
 #### ext4 disk backing file mounted at `/var/lib/docker`
 
