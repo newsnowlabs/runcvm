@@ -426,7 +426,7 @@ Any custom kernel command line options e.g. `apparmor=0` or `systemd.unified_cgr
 
 ### `--env='RUNCVM_DISKS=<disk1>[;<disk2>;...]'`
 
-Automatically create, format and mount backing files as virtual disks on the VM.
+Automatically create, format, prepopulate and mount backing files as virtual disks on the VM.
 
 Each `<diskN>` should be a comma-separated list of values of the form: `<src>,<dst>,<filesystem>[,<size>]`.
 
@@ -435,7 +435,7 @@ Each `<diskN>` should be a comma-separated list of values of the form: `<src>,<d
 - `<filesystem>` is the filesystem with which the backing disk should be formatted when first created.
 - `<size>` is the size of the backing file (in `truncate` format), and must be specified if `<src>` does not exist.
 
-When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs` and populated with any files preexisting at `<dst>`.
+When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs` and prepopulated with any files preexisting at `<dst>`.
 
 When RunCVM creates a container/VM, fstab entries will be drafted. After the VM boots, the fstab entries will be mounted. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on.
 
@@ -445,7 +445,7 @@ When RunCVM creates a container/VM, fstab entries will be drafted. After the VM 
 docker run -it --runtime=runcvm --env=RUNCVM_DISKS=/disk1,/home,ext4,5G <docker-image>
 ```
 
-In this example, RunCVM will check for existence of a file at `/disk1` within `<docker-image>`, and if not found create a 5G backing file (in the container's filesystem, typically overlay2) with an ext4 filesystem populated with any preexisting contents of `/home`, then add the disk to `/etc/fstab` and mount it within the VM at `/home`.
+In this example, RunCVM will check for existence of a file at `/disk1` within `<docker-image>`, and if not found create a 5G backing file (in the container's filesystem, typically overlay2) with an ext4 filesystem prepopulated with any preexisting contents of `/home`, then add the disk to `/etc/fstab` and mount it within the VM at `/home`.
 
 #### Example #2
 
