@@ -43,6 +43,55 @@ _EOE_
   exit 1
 }
 
+check_rp_filter() {
+  # For RunCVM to work, the following condition on /proc/sys/net/ipv4/conf/ must be met:
+  # - the max of all/rp_filter and <bridge>/rp_filter should be 0 or 2
+  #   (where <bridge> is the bridge underpinning the Docker network to which RunCVM instances will be attached)
+  #
+  # This means that:
+  # - if all/rp_filter is set to 0, then <bridge>/rp_filter must be set to 0 or 2
+  #   (or, if <bridge> is not yet or might not yet have been created, then default/rp_filter must be set to 0 or 2)
+  # - if all/rp_filter is set to 1, then <bridge>/rp_filter must be set to 2
+  #   (or, if <bridge> is not yet or might not yet have been created, then default/rp_filter must be set to 2)
+  # - if all/rp_filter is set to 2, then no further action is needed
+
+  local rp_filter_all rp_filter_default
+
+  log "- Checking rp_filter ..."
+
+  if [ -f "/proc/sys/net/ipv4/conf/all/rp_filter" ]; then
+    rp_filter_all=$(cat /proc/sys/net/ipv4/conf/all/rp_filter)
+  else
+    log "  - Warning: could not find /proc/sys/net/ipv4/conf/all/rp_filter"
+  fi
+
+  if [ -f "/proc/sys/net/ipv4/conf/default/rp_filter" ]; then
+    rp_filter_default=$(cat /proc/sys/net/ipv4/conf/default/rp_filter)
+  else
+    log "  - Warning: could not find /proc/sys/net/ipv4/conf/default/rp_filter"
+  fi
+
+  if [ -z "$rp_filter_all" ] || [ -z "$rp_filter_default" ]; then
+    return
+  fi
+  
+  if [ "$rp_filter_all" = "2" ]; then
+    log "  - sys.net.ipv4.conf.all.rp_filter is set to 2; assuming no further action needed"
+    return
+  elif [ "$rp_filter_all" = "0" ] && [ "$rp_filter_default" = "0" ]; then
+    log "  - sys.net.ipv4.conf.all.rp_filter AND sys.net.ipv4.conf.default.rp_filter are set to 0; assuming no further action needed"
+    return
+  fi
+  
+  log "  - sys.net.ipv4.conf.all.rp_filter is set to $rp_filter_all; fixing ..."
+  log "  - Setting sys.net.ipv4.conf.all.rp_filter and Setting sys.net.ipv4.conf.default.rp_filter to 2 ..."
+  echo 2 >/proc/sys/net/ipv4/conf/all/rp_filter
+  echo 2 >/proc/sys/net/ipv4/conf/default/rp_filter
+
+  log "  - Patching /etc/sysctl.conf, /etc/sysctl.d/* to make these settings persist after reboot ..."
+  find /etc/sysctl.conf /etc/sysctl.d -type f -exec sed -r -i 's/^([ ]*net.ipv4.conf.(all|default).rp_filter)=(1)$/# DISABLED BY RUNCVM\n# \1=\3\n# ADDED BY RUNCVM\n\1=2/' {} \;
+}
+
 docker_restart() {
   # docker_restart
   # - With systemd, run: systemctl restart docker
@@ -185,6 +234,8 @@ if [ -n "$(which podman)" ]; then
     runcvm = [ "/opt/runcvm/scripts/runcvm-runtime" ]
 _EOE_
 fi
+
+check_rp_filter
 
 log "- RunCVM installation/upgrade complete."
 log
