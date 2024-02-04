@@ -5,7 +5,9 @@
 RunCVM (Run Container Virtual Machine) is an experimental open-source Docker container runtime for Linux, created by Struan Bartlett at NewsNow Labs, that makes launching standard containerised workloads and system workloads (e.g. Systemd, Docker, even OpenWrt) in VMs as easy as launching a container.
 
 <p align="center">
-<a title="Click to view on Asciinema" href="https://asciinema.org/a/TJyiRZxjm7o673Ix6nZf3zh35" target="_blank"><img src="https://github.com/newsnowlabs/runcvm/assets/354555/7b1a7c87-5444-4a7e-bac6-75607382571e" alt="Install RunCVM and then launch an Alpine Container/VM" width="900"></a>
+<a title="Click to view on Asciinema" href="https://asciinema.org/a/630469" target="_blank"><img src="https://github.com/newsnowlabs/runcvm/assets/354555/7b1a7c87-5444-4a7e-bac6-75607382571e" alt="Install RunCVM and then launch an Alpine Container/VM" width="900"></a>
+<br clear="all" />
+<a title="Click to view on Asciinema" href="https://asciinema.org/a/630469" target="_blank">View on Asciinema</a>
 </p>
 
 ## Quick start
@@ -258,7 +260,7 @@ This will:
   - Verify that RunCVM is recognised via `docker info`
 - For Podman support (experimental)
   - Display instructions on patching `/etc/containers/containers.conf`
-- Check your system and default network device `rp_filter` settings
+- Check your system network device `rp_filter` settings, and amend them if necessary
 
 Following installation, launch a basic test RunCVM Container/VM:
 
