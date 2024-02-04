@@ -218,11 +218,29 @@ For a deep dive into RunCVM's internals, see the section on [Developing RunCVM](
 
 RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM.
 
-RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and the `kvm` and `tun` kernel modules.
-
-Apart from the above, RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
+RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and the `kvm` and `tun` kernel modules. RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
 RunCVM is tested on Debian Bullseye and [GitHub Codespaces](https://github.com/codespaces/new?hide_repo_select=true&ref=main&repo=514606231).
+
+### rp_filter sysctl settings
+
+For RunCVM to support Docker DNS within Container/VMs, the following condition on `/proc/sys/net/ipv4/conf/` must be met:
+- the max of `all/rp_filter` and `<bridge>/rp_filter` should be 0 ('No Source Validation') or 2 (Loose mode as defined in RFC3704 Loose Reverse Path)
+  (where `<bridge>` is any bridge underpinning a Docker network to which RunCVM Container/VMs will be attached)
+
+This means that:
+- if `all/rp_filter` will be set to 0, then `<bridge>/rp_filter` must be set to 0 or 2
+  (or, if `<bridge>` is not yet or might not yet have been created, then `default/rp_filter` must be set to 0 or 2)
+- if `all/rp_filter` will be set to 1, then `<bridge>/rp_filter` must be set to 2
+  (or, if `<bridge>` is not yet or might not yet have been created, then `default/rp_filter` must be set to 2)
+- if `all/rp_filter` will be set to 2, then no further action is needed
+
+At time of writing:
+- the Debian default is `0`;
+- the Ubuntu default is `2`;
+- the Google Cloud Debian image has default `1` and `rp_filter` settings in `/etc/sysctl.d/60-gce-network-security.conf` must be modified or overridden to support RunCVM.
+
+We recommend `all/rp_filter` be set to 2, as this is the simplest change and provides a good balance of security.
 
 ## Installation
 
@@ -240,6 +258,7 @@ This will:
   - Verify that RunCVM is recognised via `docker info`
 - For Podman support (experimental)
   - Display instructions on patching `/etc/containers/containers.conf`
+- Check your system and default network device `rp_filter` settings
 
 Following installation, launch a basic test RunCVM container/VM:
 
