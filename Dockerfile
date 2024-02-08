@@ -158,10 +158,12 @@ RUN echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules &&
     sed -ri 's/\b(ata|nvme|raid|scsi|usb|cdrom|kms|mmc)\b//g; s/[ ]+/ /g' /etc/mkinitfs/mkinitfs.conf && \
     sed -ri 's/(nlplug-findfs)/\1 --timeout=1000/' /usr/share/mkinitfs/initramfs-init && \
     mkinitfs $(basename $(ls -d /lib/modules/*))
-RUN mkdir -p /opt/runcvm/kernels/alpine/$(basename $(ls -d /lib/modules/*)) && \
-    cp -a /boot/vmlinuz-virt /opt/runcvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
-    cp -a /boot/initramfs-virt /opt/runcvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/initrd && \
-    cp -a /lib/modules/ /opt/runcvm/kernels/alpine/$(basename $(ls -d /lib/modules/*))/ && \
+RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
+    mkdir -p /opt/runcvm/kernels/alpine/$BASENAME && \
+    cp -a /boot/vmlinuz-virt /opt/runcvm/kernels/alpine/$BASENAME/vmlinuz && \
+    cp -a /boot/initramfs-virt /opt/runcvm/kernels/alpine/$BASENAME/initrd && \
+    cp -a /lib/modules/ /opt/runcvm/kernels/alpine/$BASENAME/ && \
+    cp -a /boot/config-virt /opt/runcvm/kernels/alpine/$BASENAME/modules/$BASENAME/config && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/alpine
 
 FROM alpine-kernel as openwrt-kernel
@@ -183,10 +185,12 @@ RUN apt update && apt install -y linux-image-amd64:amd64 && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
-RUN mkdir -p /opt/runcvm/kernels/debian/$(basename $(ls -d /lib/modules/*)) && \
-    cp -aL /vmlinuz /opt/runcvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
-    cp -aL /initrd.img /opt/runcvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/initrd && \
-    cp -a /lib/modules/ /opt/runcvm/kernels/debian/$(basename $(ls -d /lib/modules/*))/ && \
+RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
+    mkdir -p /opt/runcvm/kernels/debian/$BASENAME && \
+    cp -aL /vmlinuz /opt/runcvm/kernels/debian/$BASENAME/vmlinuz && \
+    cp -aL /initrd.img /opt/runcvm/kernels/debian/$BASENAME/initrd && \
+    cp -a /lib/modules/ /opt/runcvm/kernels/debian/$BASENAME/ && \
+    cp -a /boot/config-$BASENAME /opt/runcvm/kernels/debian/$BASENAME/modules/$BASENAME/config && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/debian
 
 # --- BUILD STAGE ---
@@ -199,10 +203,12 @@ RUN apt update && apt install -y linux-generic:amd64 && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
-RUN mkdir -p /opt/runcvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*)) && \
-    cp -aL /boot/vmlinuz /opt/runcvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
-    cp -aL /boot/initrd.img /opt/runcvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/initrd && \
-    cp -a /lib/modules/ /opt/runcvm/kernels/ubuntu/$(basename $(ls -d /lib/modules/*))/ && \
+RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
+    mkdir -p /opt/runcvm/kernels/ubuntu/$BASENAME && \
+    cp -aL /boot/vmlinuz /opt/runcvm/kernels/ubuntu/$BASENAME/vmlinuz && \
+    cp -aL /boot/initrd.img /opt/runcvm/kernels/ubuntu/$BASENAME/initrd && \
+    cp -a /lib/modules/ /opt/runcvm/kernels/ubuntu/$BASENAME/ && \
+    cp -a /boot/config-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/modules/$BASENAME/config && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/ubuntu
 
 # --- BUILD STAGE ---
