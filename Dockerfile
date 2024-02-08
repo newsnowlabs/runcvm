@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.3-labs
 
 # Alpine version to build with
-ARG ALPINE_VERSION=3.18
+ARG ALPINE_VERSION=3.19
 
 # --- BUILD STAGE ---
 # Build base alpine-sdk image for later build stages
@@ -148,7 +148,7 @@ RUN cd /root/qemu-exit && cc -o /root/qemu-exit/qemu-exit -std=gnu99 -static -s 
 
 # --- BUILD STAGE ---
 # Build alpine kernel and initramfs with virtiofs module
-FROM alpine:3.18 as alpine-kernel
+FROM alpine:$ALPINE_VERSION as alpine-kernel
 
 # Install patched mkinitfs
 COPY --from=alpine-mkinitfs /root/packages/main/x86_64 /tmp/mkinitfs/
