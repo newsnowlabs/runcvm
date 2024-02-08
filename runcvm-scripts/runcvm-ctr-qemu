@@ -70,7 +70,7 @@ do_disk() {
   [ -d "$RUNCVM_VM_MOUNTPOINT/$dst" ]|| mkdir -p "$RUNCVM_VM_MOUNTPOINT/$dst" >&2
 
   # Obtain a UUID for the filesystem and add to fstab.
-  UUID=$(blkid -o value "$src" | head -n 1)
+  read -r UUID <<< $(blkid -o value "$src")
   echo "UUID=$UUID $dst $fs defaults,noatime 0 0" >>/.runcvm/fstab
 
   # Add disk to QEMU command line.
