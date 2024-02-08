@@ -235,6 +235,7 @@ if [ -n "$(which podman)" ]; then
 _EOE_
 fi
 
+# Check, correct and make persistent required rp_filter settings
 check_rp_filter
 
 log "- RunCVM installation/upgrade complete."
