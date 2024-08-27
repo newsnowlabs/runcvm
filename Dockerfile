@@ -9,6 +9,8 @@ FROM alpine:$ALPINE_VERSION as alpine-sdk
 
 RUN apk update && apk add --no-cache alpine-sdk coreutils && \
     abuild-keygen -an && \
+    # Copy the public keys to the system keys
+    cp -a /root/.abuild/*.pub /etc/apk/keys && \
     git clone --depth 1 --single-branch --filter=blob:none --sparse https://gitlab.alpinelinux.org/alpine/aports.git ~/aports && \
     cd ~/aports/ && \
     git sparse-checkout set main/seabios main/
