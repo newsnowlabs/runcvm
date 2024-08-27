@@ -143,6 +143,9 @@ if [ "$NodeState" = "inactive" ] || [ "$NodeState" = "pending" ]; then
     
       log "Removing default ingress ..."
       echo y | docker network rm ingress
+
+      log "Waiting 3s for ingress removal ..."
+      sleep 3
     
       log "Creating new ingress with MTU $DOCKER_IF_MTU"
       docker network create \
