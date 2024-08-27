@@ -1,4 +1,4 @@
-#!/.runcvm/guest/bin/bash
+#!/.runcvm/guest/bin/bash -e
 
 # Load original environment
 . /.runcvm/config
@@ -49,7 +49,7 @@ IF=$(ls /sys/class/net/ | grep -vE '^(lo|docker)' | head -n 1)
 for i in all $IF
 do
   # /sbin/sysctl -q -w -e net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0 net.ipv6.conf.$i.accept_ra=0
-  sysctl -q -w -e net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0
+  sysctl -q -w -e net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0 || true
 done
 
 # Bring up local interface
@@ -93,7 +93,7 @@ done
 while read -r DOCKER_RT_NET DOCKER_RT_GW DOCKER_RT_DEV DOCKER_RT_PREFSRC
 do
   [ -n "$DOCKER_RT_NET" ] && [ -n "$DOCKER_RT_GW" ] && [ -n "$DOCKER_RT_DEV" ] && \
-    ip route add "$DOCKER_RT_NET" via "$DOCKER_RT_GW" dev "$DOCKER_RT_DEV"
+    ip route add "$DOCKER_RT_NET" via "$DOCKER_RT_GW" dev "$DOCKER_RT_DEV" || true
 done </.runcvm/network/routes
 
 # TODO
