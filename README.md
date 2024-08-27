@@ -289,6 +289,30 @@ Following installation, launch a basic test RunCVM Container/VM:
 docker run --runtime=runcvm --rm -it hello-world
 ```
 
+### Install on Google Cloud
+
+Create an image that will allow instances to have VMX capability:
+
+```console
+gcloud compute images create debian-12-vmx --source-image-project=debian-cloud --source-image-family=debian-12   --licenses="https://compute.googleapis.com/compute/v1/projects/vm-options/global/licenses/enable-vmx"
+```
+
+Now launch a VM, install Docker and RunCVM:
+
+```console
+cat >/tmp/startup-script.sh <<EOF
+#!/bin/bash
+
+apt update && apt -y install apt-utils kmod wget iproute2 systemd \
+    ca-certificates curl gnupg udev dbus jq && \
+    mkdir -p /etc/docker && echo '{"userland-proxy": false}' >/etc/docker/daemon.json && \
+    curl -fsSL https://get.docker.com | bash && \
+    curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=newsnowlabs/runcvm:latest sh
+EOF
+
+gcloud compute instances create runcvm-vmx-test --zone=us-central1-a --machine-type=n2-highmem-2 --network-interface=network-tier=PREMIUM,stack-type=IPV4_ONLY,subnet=default --metadata-from-file=startup-script=/tmp/startup-script.sh --no-restart-on-failure --maintenance-policy=TERMINATE --provisioning-model=SPOT --instance-termination-action=STOP  --no-service-account --no-scopes --create-disk=auto-delete=yes,boot=yes,image=debian-12-vmx,mode=rw,size=50,type=pd-ssd --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --labels=goog-ec-src=vm_add-gcloud --reservation-affinity=any
+```
+
 ## Upgrading
 
 To upgrade, follow this procedure:
