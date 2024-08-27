@@ -209,7 +209,7 @@ if [ "$NodeState" = "inactive" ] || [ "$NodeState" = "pending" ]; then
     IPs=$(echo $IPs | sed 's/,$//')
 
     log "Running docker-ingress-routing-daemon --preexisting --ingress-gateway-ips $IPs --install ..."
-    while true; do /usr/local/bin/docker-ingress-routing-daemon --preexisting --ingress-gateway-ips "$IPs" --install; sleep 1; done &
+    while true; do /usr/local/bin/docker-ingress-routing-daemon --preexisting --iptables-wait-seconds 3 --ingress-gateway-ips "$IPs" --install; sleep 1; done &
   
   fi
     
