@@ -73,6 +73,7 @@ log "- DOCKER_IF=$DOCKER_IF DOCKER_IF_IP=$DOCKER_IF_IP DOCKER_IF_GW=$DOCKER_IF_G
 
 # Start dockerd and keep it running
 DOCKER_OPTS=(--mtu=$DOCKER_IF_MTU)
+DOCKER_OPTS+=(--add-runtime runcvm=/opt/runcvm/scripts/runcvm-runtime)
 
 if [ -n "$REGISTRY_MIRROR" ]; then
   # Replace localhost with custom network gateway, if desired to reach registry running on host network
