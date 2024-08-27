@@ -1,5 +1,5 @@
---- a/cli-kex.c
-+++ b/cli-kex.c
+--- a/src/cli-kex.c
++++ b/src/cli-kex.c
 @@ -312,7 +312,7 @@
  	int ret;
  
@@ -9,8 +9,8 @@
  		return;
  	}
  
---- a/dbutil.c
-+++ b/dbutil.c
+--- a/src/dbutil.c
++++ b/src/dbutil.c
 @@ -140,7 +140,9 @@
  
  	vsnprintf(printbuf, sizeof(printbuf), format, param);
@@ -21,8 +21,8 @@
  
  }
  
---- a/default_options.h
-+++ b/default_options.h
+--- a/src/default_options.h
++++ b/src/default_options.h
 @@ -21,10 +21,10 @@
  /* Default hostkey paths - these can be specified on the command line.
   * Homedir is prepended if path begins with ~/
