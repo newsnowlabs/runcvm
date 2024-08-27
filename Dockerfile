@@ -24,6 +24,7 @@ FROM alpine-sdk as alpine-seabios
 ADD patches/seabios/qemu-fw-cfg-fix.patch /root/aports/main/seabios/0003-qemu-fw-cfg-fix.patch
 
 RUN <<EOF
+set -e
 cd /root/aports/main/seabios
 echo 'sha512sums="${sha512sums}$(sha512sum 0003-qemu-fw-cfg-fix.patch)"' >>APKBUILD
 echo 'source="${source}0003-qemu-fw-cfg-fix.patch"' >>APKBUILD
@@ -39,6 +40,7 @@ FROM alpine-sdk as alpine-dnsmasq
 ADD patches/dnsmasq/remove-passwd-requirement.patch /root/aports/main/dnsmasq/remove-passwd-requirement.patch
 
 RUN <<EOF
+set -e
 cd /root/aports/main/dnsmasq
 echo 'sha512sums="${sha512sums}$(sha512sum remove-passwd-requirement.patch)"' >>APKBUILD
 echo 'source="${source}remove-passwd-requirement.patch"' >>APKBUILD
@@ -53,6 +55,7 @@ FROM alpine-sdk as alpine-dropbear
 ADD patches/dropbear/runcvm.patch /root/aports/main/dropbear/runcvm.patch
 
 RUN <<EOF
+set -e
 cd /root/aports/main/dropbear
 sed -ri '/--disable-pututline/a --enable-plugin \\' APKBUILD
 echo 'sha512sums="${sha512sums}$(sha512sum runcvm.patch)"' >>APKBUILD
@@ -65,7 +68,7 @@ cd dropbear-epka
 apk add --no-cache automake autoconf libtool
 libtoolize --force
 aclocal
-autoheader
+autoheader || true
 automake --force-missing --add-missing
 autoconf
 ./configure
@@ -80,6 +83,7 @@ FROM alpine-sdk as alpine-mkinitfs
 ADD patches/mkinitfs/nlplug-findfs.patch /root/aports/main/mkinitfs/nlplug-findfs.patch
 
 RUN <<EOF
+set -e
 cd /root/aports/main/mkinitfs
 echo 'sha512sums="${sha512sums}$(sha512sum nlplug-findfs.patch)"' >>APKBUILD
 echo 'source="${source} nlplug-findfs.patch"' >>APKBUILD
