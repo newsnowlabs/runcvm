@@ -107,25 +107,26 @@ docker exec ubuntu-docker-runcvm bash -c "docker run --rm --runtime=runcvm alpin
 docker rm -fv ubuntu-docker-runcvm
 ```
 
-**Docker+GVisor runtime demo** - Launch Ubuntu running Systemd and Docker with [Sysbox](https://github.com/nestybox/sysbox) runtime; then within it run an Alpine _Sysbox_ container; and, _within that_ install dockerd and run a container from the 'hello-world' image:
+**Docker+GVisor runtime demo** - Launch Ubuntu running Systemd and Docker with GVisor runtime; then within it run the 'hello-world' image in a _GVisor_ container:
 
 ```console
 cat <<EOF | docker build --tag=ubuntu-docker-gvisor -
 FROM ubuntu:jammy
 RUN apt update && apt -y install apt-utils kmod wget iproute2 systemd \
-    ca-certificates curl gnupg udev dbus && \
+    ca-certificates curl gnupg udev dbus jq && \
     curl -fsSL https://get.docker.com | bash
 RUN curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
-RUN echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" >/etc/apt/sources.list.d/gvisor.list && \
+RUN echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" >/etc/apt/sources.list.d/gvisor.list && \
     apt update && \
     apt-get install -y runsc
+RUN [ ! -f /etc/docker/daemon.json ] && echo '{}' > /etc/docker/daemon.json; cat /etc/docker/daemon.json | jq '.runtimes.runsc.path="/usr/bin/runsc"' | tee /etc/docker/daemon.json
 ENTRYPOINT ["/lib/systemd/systemd"]
-ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,1G;/disks/sysbox,/var/lib/sysbox,ext4,1G'
+ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,1G'
 VOLUME /disks
 EOF
-docker run -d --runtime=runcvm -m 2g --name=ubuntu-docker-sysbox ubuntu-docker-sysbox
-docker exec ubuntu-docker-sysbox bash -c "docker run --rm --runtime=sysbox-runc alpine ash -x -c 'apk add docker; dockerd &>/dev/null & sleep 5; docker run --rm hello-world'"
-docker rm -fv ubuntu-docker-sysbox
+docker run -d --runtime=runsc -m 2g --name=ubuntu-docker-gvisor ubuntu-docker-gvisor
+docker exec ubuntu-docker-gvisor bash -c "docker run --rm --runtime=runsc hello-world"
+docker rm -fv ubuntu-docker-gvisor
 ```
 
 **Launch [OpenWrt](https://openwrt.org/)** - with port forward to LuCI web UI on port 10080:
