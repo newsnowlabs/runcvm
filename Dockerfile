@@ -114,24 +114,27 @@ COPY --from=alpine-dropbear /root/packages/main/x86_64 /usr/local/lib/libepka_fi
 RUN apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/dropbear-dbclient*.apk /tmp/dropbear/dropbear-2*.apk
 
 # Patch the binaries and set up symlinks
-COPY build-utils/elf-patcher.sh /usr/local/bin/elf-patcher.sh
-ENV BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey"
-ENV EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so"
-ENV CODE_PATH="/opt/runcvm"
-ENV EXEC_PATH="/.runcvm/guest"
-RUN /usr/local/bin/elf-patcher.sh && \
-    cd $CODE_PATH/bin && \
+COPY build-utils/make-bundelf-bundle.sh /usr/local/bin/make-bundelf-bundle.sh
+ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey"
+ENV BUNDELF_EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so"
+ENV BUNDELF_EXTRA_SYSTEM_LIB_PATHS="/usr/lib/xtables"
+ENV BUNDELF_CODE_PATH="/opt/runcvm"
+ENV BUNDELF_EXEC_PATH="/.runcvm/guest"
+
+RUN /usr/local/bin/make-bundelf-bundle.sh --bundle && \
+    mkdir -p $BUNDELF_CODE_PATH/bin && \
+    cd $BUNDELF_CODE_PATH/bin && \
     for cmd in \
         awk base64 cat chgrp chmod cut grep head hostname init ln ls \
         mkdir poweroff ps rm rmdir route sh sysctl tr touch; \
     do \
         ln -s busybox $cmd; \
     done && \
-    mkdir -p $CODE_PATH/usr/share && \
-    cp -a /usr/share/qemu $CODE_PATH/usr/share && \
-    cp -a /etc/terminfo $CODE_PATH/usr/share && \
+    mkdir -p $BUNDELF_CODE_PATH/usr/share && \
+    cp -a /usr/share/qemu $BUNDELF_CODE_PATH/usr/share && \
+    cp -a /etc/terminfo $BUNDELF_CODE_PATH/usr/share && \
     # Remove setuid/setgid bits from any/all binaries
-    chmod -R -s $CODE_PATH/
+    chmod -R -s $BUNDELF_CODE_PATH/
 
 # --- BUILD STAGE ---
 # Build static runcvm-init
