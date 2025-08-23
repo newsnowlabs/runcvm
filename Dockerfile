@@ -259,4 +259,8 @@ COPY --from=ubuntu-kernel /opt/runcvm/kernels/ubuntu /opt/runcvm/kernels/ubuntu
 COPY --from=oracle-kernel /opt/runcvm/kernels/ol     /opt/runcvm/kernels/ol
 
 # Add 'latest' symlinks for available kernels
-RUN for d in /opt/runcvm/kernels/*; do cd $d && ln -s $(ls -d * | sort | head -n 1) latest; done
+RUN for d in /opt/runcvm/kernels/*; do \
+      cd "$d" && \
+      tgt="$(ls -d */ 2>/dev/null | sed 's:/$::' | grep -v '^latest$' | sort -Vr | head -n 1)"; \
+      [ -n "$tgt" ] && ln -sfn "$tgt" latest; \
+    done
