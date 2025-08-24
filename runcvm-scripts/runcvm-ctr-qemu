@@ -159,6 +159,11 @@ else
   # Enable the QEMU debug exit device for debugging purposes.
   # This device allows the guest to trigger a debug exit, which can be useful for debugging
   MACHINE+=(-device isa-debug-exit)
+
+  # Set the virtual hardware clock to UTC time and enable drift correction using slewing.
+  # This ensures the VM clock starts in UTC and gradually adjusts for time drift,
+  # providing smooth and accurate timekeeping without sudden changes.
+  MACHINE+=(-rtc base=utc,driftfix=slew)
 fi
 
 # RUNCVM_QEMU_DISPLAY -- the display frontend: none, curses
