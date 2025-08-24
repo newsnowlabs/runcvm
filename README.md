@@ -42,6 +42,12 @@ Gain another interactive console on `ubuntu1`:
 docker exec -it ubuntu1 bash
 ```
 
+Launch with VNC:
+
+```console
+docker run --runtime=runcvm --name ubuntu2 --env=RUNCVM_DISPLAY_MODE=vnc -p 5900:5900 ubuntu
+```
+
 Launch a VM with 1G memory and a 1G ext4-formatted backing file mounted at `/var/lib/docker` and stored in the underlying container's filesystem:
 
 ```console
@@ -62,6 +68,22 @@ cd runcvm/tests/00-http-docker-swarm && \
 NODES=3 MTU=9000 ./test
 ```
 
+### Graphical workloads with VNC
+
+Launch Ubuntu:
+
+```console
+cat <<EOF | docker build --tag=ubuntu-x -
+FROM ubuntu:jammy
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt update && apt -y install --install-recommends apt-utils kmod wget iproute2 systemd ca-certificates curl gnupg udev dbus lightdm
+ENTRYPOINT ["/lib/systemd/systemd"]
+ENV RUNCVM_DISPLAY_MODE=vnc
+EOF
+
+docker run -d --runtime=runcvm -m 2g --name=vnc -p 5900:5900 ubuntu-x
+```
+
 ### System workloads
 
 **Docker+Sysbox runtime demo** - Launch Ubuntu running Systemd and Docker with [Sysbox](https://github.com/nestybox/sysbox) runtime; then within it run an Alpine _Sysbox_ container; and, _within that_ install dockerd and run a container from the 'hello-world' image:
@@ -79,8 +101,11 @@ ENTRYPOINT ["/lib/systemd/systemd"]
 ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,1G;/disks/sysbox,/var/lib/sysbox,ext4,1G'
 VOLUME /disks
 EOF
+
 docker run -d --runtime=runcvm -m 2g --name=ubuntu-docker-sysbox ubuntu-docker-sysbox
+
 docker exec ubuntu-docker-sysbox bash -c "docker run --rm --runtime=sysbox-runc alpine ash -x -c 'apk add docker; dockerd &>/dev/null & sleep 5; docker run --rm hello-world'"
+
 docker rm -fv ubuntu-docker-sysbox
 ```
 
@@ -102,8 +127,11 @@ ENTRYPOINT ["/lib/systemd/systemd"]
 ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,1G'
 VOLUME /disks
 EOF
+
 docker run -d --runtime=runcvm -m 2g --name=ubuntu-docker-runcvm ubuntu-docker-runcvm
+
 docker exec ubuntu-docker-runcvm bash -c "docker run --rm --runtime=runcvm alpine ash -x -c 'apk add docker; dockerd &>/dev/null & sleep 5; docker run --rm hello-world'"
+
 docker rm -fv ubuntu-docker-runcvm
 ```
 
@@ -124,8 +152,11 @@ ENTRYPOINT ["/lib/systemd/systemd"]
 ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,1G'
 VOLUME /disks
 EOF
+
 docker run -d --runtime=runsc -m 2g --name=ubuntu-docker-gvisor ubuntu-docker-gvisor
+
 docker exec ubuntu-docker-gvisor bash -c "docker run --rm --runtime=runsc hello-world"
+
 docker rm -fv ubuntu-docker-gvisor
 ```
 
@@ -524,9 +555,34 @@ This example behaves similarly, except that the `runcvm-disks` persistent Docker
 
 > N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints, these are *NOT* mounted into the VM but only into the container, and are therefore suitable for use for mounting VM disks from bscking files that cannot be accessed within the VM's filesystem.
 
-### `--env=RUNCVM_QEMU_DISPLAY=<value>`
+### `--env=RUNCVM_DISPLAY_MODE=<value>`
 
-Select a specific QEMU display. Currently only `curses` is supported, but others may trivially be added by customising the build.
+Shortcut to select a display mode:
+- `headless` is traditional headless runc-like behaviour over hvc0;
+- `serial` is similar over `ttyS0`;
+- `vnc`, enables launches a VNC server over a VGA device (`virtio`, the default; or `std`) on VNC display `RUNCVM_QEMU_VNC_DISPLAY` (default display is `0` aka `:0`) with virtual tablet and audio device.
+
+> N.B. Use `--env=RUNCVM_DISPLAY_MODE=vnc` always with `-p <hostport>:<guestport>` where `<guestport> = <display> + 5900` and `<display>` is 0 (unless, optionally, `--env=RUNCVM_QEMU_VNC_DISPLAY=<display>` is used to specify a different `<display>` >= 0) to initiate a VNC server to which a VNC client can connect on host port `<hostport>`.
+>
+> e.g. `docker run --runtime=runcvm --env=RUNCVM_DISPLAY_MODE=vnc -p 5900:5900 ubuntu`
+
+### `--env=RUNCVM_QEMU_VGA=<value>`
+
+Selects a QEMU guest VGA adaptor: `none`, `virtio`, `std`, `cirrus`. Can be used with `--env=RUNCVM_DISPLAY_MODE=vnc` to override default `virtio` VGA device.
+
+### `--env=RUNCVM_QEMU_VNC_DISPLAY=<display>`
+
+With `--env=RUNCVM_DISPLAY_MODE=vnc`, overrides the VNC display number (and hence `<guestport>`).
+
+With `--env=RUNCVM_DISPLAY_MODE=headless`, specifies also that a VNC server should also be launched with the given display number.
+
+### `--env=RUNCVM_QEMU_DISPLAY=<value>` [experimental]
+
+Specify a QEMU frontend display. Normally RunCVM runs headless, without any frontend display, so the default is `none`. Currently only `curses` is supported.
+
+### `--env=RUNCVM_QEMU_USB=<value>`
+
+Enable USB interface.
 
 ### `--env=RUNCVM_SYS_ADMIN=1`
 
