@@ -38,3 +38,10 @@ ip_prefix_to_bcast() {
 
   printf "%d.%d.%d.%d\n" "$((i1 | m1))" "$((i2 | m2))" "$((i3 | m3))" "$((i4 | m4))"
 }
+
+is_natural_int() {
+    case $1 in
+        ''|*[!0-9]*) return 1 ;;  # not numeric
+        *) return 0 ;;            # numeric and > 0
+    esac
+}

@@ -129,19 +129,118 @@ fi
 # TODO:
 # - Consider using '-device pvpanic'
 
-if [ "$RUNCVM_ARCH" = "arm64" ]; then
+if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
   CMD="$(which qemu-system-aarch64)"
   MACHINE+=(-cpu max -machine virt,gic-version=max,usb=off)
 else
   CMD="$(which qemu-system-x86_64)"
-  MACHINE+=(-enable-kvm -cpu host,pmu=off -machine q35,accel=kvm,usb=off,sata=off -device isa-debug-exit)
+  MACHINE+=(-enable-kvm)
+  MACHINE+=(-cpu host,pmu=off)
+
+  # QEMU machine configuration:
+  # - q35: modern Intel chipset with PCIe and UEFI support
+  # - accel=kvm: enable KVM for near-native performance (requires hardware virtualization)
+  # - usb=on: enable USB support (e.g., for peripherals or boot devices)
+  # - sata=off: disable SATA controller if using virtio/NVMe instead
+  # - vmport=off: disable VMware backdoor port for improved security/stealth
+  # - smm=on: enable System Management Mode (required for UEFI Secure Boot)
+  # - dump-guest-core=off: disable saving core dumps on guest crash (saves disk space)
+  # - hpet=off: disable High Precision Event Timer to avoid timing issues in some guests
+
+  # - usb=on: enable USB support when requested
+  if [ "$RUNCVM_QEMU_USB" = "on" ]; then
+    USB="on"
+  else
+    USB="off"
+  fi
+
+  MACHINE+=(-machine q35,accel=kvm,sata=off,vmport=off,smm=on,dump-guest-core=off,hpet=off,usb=$USB)
+
+  # Enable the QEMU debug exit device for debugging purposes.
+  # This device allows the guest to trigger a debug exit, which can be useful for debugging
+  MACHINE+=(-device isa-debug-exit)
 fi
 
+# RUNCVM_QEMU_DISPLAY -- the display frontend: none, curses
+# RUNCVM_QEMU_VGA -- the backend VGA video device: none, std, virtio, cirrus
+# RUNCVM_QEMU_VNC_DISPLAY -- the VNC display number (where enabled): 0, 1, ...
+
+CONSOLE=()
+DISPLAY=()
+
+case "${RUNCVM_DISPLAY_MODE:-headless}" in
+  headless) # virtconsole / hvc0
+    RUNCVM_QEMU_DISPLAY="${RUNCVM_QEMU_DISPLAY:-none}"
+    RUNCVM_QEMU_VGA="${RUNCVM_QEMU_VGA:-none}"
+
+    # Creates a stdio backend connected to the virtual console.
+    # Use with /dev/hvc0
+    CONSOLE+=(
+      -chardev stdio,id=char0,mux=off,signal=off
+      -device virtconsole,chardev=char0,id=console0
+    )
+
+    CONSOLE_DEV="hvc0"
+    NOMODESET="1"
+    ;;
+  serial) # stdio + monitor / ttyS0
+    RUNCVM_QEMU_DISPLAY="${RUNCVM_QEMU_DISPLAY:-none}"
+    RUNCVM_QEMU_VGA="${RUNCVM_QEMU_VGA:-none}"
+
+    # Creates a multiplexed stdio backend connected to the serial port (and the QEMU monitor).
+    # Use with /dev/ttyS0
+    CONSOLE+=(
+      -chardev stdio,id=char0,mux=on,signal=off
+      -serial chardev:char0 -mon chardev=char0
+    )
+
+    # Set monitor escape key to CTRL-T to reduce risk of conflict (as default, CTRL-A, is  commonly used)
+    CONSOLE+=(-echr 20)
+    CONSOLE_DEV="ttyS0"
+    NOMODESET="1"
+    ;;
+  vnc) # VNC + tty0
+    RUNCVM_QEMU_DISPLAY="${RUNCVM_QEMU_DISPLAY:-none}"
+    RUNCVM_QEMU_VGA="${RUNCVM_QEMU_VGA:-virtio}"
+    RUNCVM_QEMU_VNC_DISPLAY="${RUNCVM_QEMU_VNC_DISPLAY:-0}"
+
+    CONSOLE_DEV="tty0"
+    NOMODESET="0"
+    ;;
+  *)
+    error "Error: RUNCVM_DISPLAY_MODE '$RUNCVM_DISPLAY_MODE' invalid, must be one of: default|headless, serial, vnc" ;;
+esac
+
+# Save choice of console device
+echo "$CONSOLE_DEV" >/.runcvm/console
+
+# Generate QEMU display options
 if [ -n "$RUNCVM_QEMU_DISPLAY" ]; then
   DISPLAY+=(-display $RUNCVM_QEMU_DISPLAY)
-else
-  DISPLAY+=(-nographic)
-  DISPLAY+=(-vga none)
+fi
+
+if [ -n "$RUNCVM_QEMU_VGA" ]; then
+
+  # i.e. virtio, std, none
+  DISPLAY+=(-vga $RUNCVM_QEMU_VGA)
+
+  if [ "$RUNCVM_QEMU_VGA" != "none" ]; then
+    NOMODESET="0" # Disable nomodeset if using a graphical console
+    DISPLAY+=(-device virtio-tablet-pci)
+    DISPLAY+=(-audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0)
+
+    # For now, unless/until `-device virtio-gpu-pci` support is provided,
+    # the VNC display is only relevant if VGA is not 'none'
+    if [ -n "$RUNCVM_QEMU_VNC_DISPLAY" ]; then
+      DISPLAY+=(-vnc :$RUNCVM_QEMU_VNC_DISPLAY,password=off)
+    fi
+  fi
+fi
+
+# Append nomodeset unless using a graphical console (i.e. not serial or virtconsole)
+# PROBABLY ONLY NEEDED FOR `-display curses` (RUNCVM_QEMU_DISPLAY=curses) CASE
+if [ "$NOMODESET" = "1" ]; then
+  APPEND+=(nomodeset)
 fi
 
 if [ "$RUNCVM_BIOS_DEBUG" != "1" ]; then
@@ -168,34 +267,6 @@ VIRTIOFS+=(
   -chardev socket,id=virtiofs,path=$QEMU_VIRTIOFSD_SOCKET
   -device vhost-user-fs-pci,queue-size=$VIRTIOFS_QUEUE_SIZE,chardev=virtiofs,tag=runcvmfs,ats=off
 )
-
-CONSOLE=()
-CONSOLE_MONITOR="0"
-if [ "$CONSOLE_MONITOR" = "1" ]; then
-  # Creates a multiplexed stdio backend connected to the serial port (and the QEMU monitor).
-  # Use with /dev/ttyS0
-  CONSOLE+=(
-    -chardev stdio,id=char0,mux=on,signal=off
-    -serial chardev:char0 -mon chardev=char0
-  )
-
-  # Set monitor escape key to CTRL-T to reduce risk of conflict (as default, CTRL-A, is  commonly used)
-  CONSOLE+=(-echr 20)
-
-  CONSOLE_DEV="ttyS0"
-else
-  # Creates a stdio backend connected to the virtual console.
-  # Use with /dev/hvc0
-  CONSOLE+=(
-    -chardev stdio,id=char0,mux=off,signal=off
-    -device virtconsole,chardev=char0,id=console0
-  )
-
-  CONSOLE_DEV="hvc0"
-fi
-
-# Save choice of console device
-echo "$CONSOLE_DEV" >/.runcvm/console
 
 # Experimental: Enable to specify a dedicated PCI bridge
 # OPTS+=(-device pci-bridge,bus=pcie.0,id=pci-bridge-0,chassis_nr=1,shpc=off,addr=2,io-reserve=4k,mem-reserve=1m,pref64-reserve=1m)

@@ -140,6 +140,11 @@ do
     # Accept DNS requests for $RUNCVM_DNS_IP; these will be passed to dnsmasq
     XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -d $RUNCVM_DNS_IP/32 -p udp -m udp --dport 53 -j REDIRECT
 
+    # Accept VNC requests on published port (5900 + display number)
+    if [[ "$RUNCVM_DISPLAY_MODE" = "vnc" ]] || is_natural_int "$RUNCVM_QEMU_VNC_DISPLAY"; then
+      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -p tcp -m tcp --dport $((RUNCVM_QEMU_VNC_DISPLAY+5900)) -j REDIRECT
+    fi
+
     # Match UDP port 53 traffic, outgoing via the QEMU bridge, from the bridge's own IP:
     # -> Masquerade as if from the VM's IP.
     #    This allows outgoing DNS requests from the VM to be received by dnsmasq running in the container.

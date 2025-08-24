@@ -96,6 +96,7 @@ FROM alpine:$ALPINE_VERSION as binaries
 
 RUN apk update && \
     apk add --no-cache file bash qemu-system-x86_64 qemu-virtiofsd qemu-ui-curses qemu-guest-agent \
+        qemu-hw-display-virtio-vga \
         jq iproute2 netcat-openbsd e2fsprogs blkid util-linux \
         s6 dnsmasq iptables nftables \
         ncurses coreutils \
