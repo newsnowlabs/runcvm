@@ -348,4 +348,10 @@ ARGS=(
 
 if [[ "$RUNCVM_BREAK" =~ preqemu ]]; then echo "Preparing to run: '$CMD' ${ARGS[@]@Q}"; bash; fi
 
+if [ "$RUNCVM_QEMU_DEBUG" = "1" ]; then
+  "$CMD" "${ARGS[@]}" || echo "QEMU exited with code: $?" >&2
+  echo "QEMU memory cgroup events:" >&2
+  cat /sys/fs/cgroup/memory.events >&2
+else
 exec "$CMD" "${ARGS[@]}"
+fi

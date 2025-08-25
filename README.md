@@ -605,6 +605,10 @@ By default BIOS console output is hidden. Enable it with this option.
 Enable debug logging for the runtime (the portion of RunCVM directly invoked by `docker run`, `docker exec` etc).
 Debug logs are written to files in `/tmp`.
 
+### `--env=RUNCVM_QEMU_DEBUG=1`
+
+Enable logging the exit code from QEMU and OOM statistics.
+
 ### `--env=RUNCVM_BREAK=<values>`
 
 Enable breakpoints (falling to bash shell) during the RunCVM Container/VM boot process.
