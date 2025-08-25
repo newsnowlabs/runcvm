@@ -391,7 +391,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [-] Stdout and Stderr sent immediately before VM shutdown might not always be fully flushed
    - Resource allocation and limits
       - [+] `--cpus` is supported to specify number of VM CPUs
-      - [+] `--memory` (or `-m`) is supported to specify VM memory
+      - [+] `--memory` (or `-m`) is supported to specify VM memory (and limit container memory to this value plus a 256Mb contingency)
       - [-] Other container resource limit options such as (`--cpu-*`), block IO (`--blkio-*`), kernel memory (`--kernel-memory`) are unsupported or untested
    - Exit code
       - [+] Returning the entrypoint's exit code is supported, but it currently requires application support
@@ -700,7 +700,7 @@ In more detail, the RunCVM runtime `create` process:
       - Set container env vars `RUNCVM_KERNEL_PATH`, `RUNCVM_KERNEL_INITRAMFS_PATH` and `RUNCVM_KERNEL_ROOT`
    - Add device mounts for `/dev/kvm` and `/dev/net/tun`.
    - Set the seccomp profile to 'unconfined'.
-   - Set `/dev/shm` to the size desired for the VM's memory and set container env var accordingly.
+   - Set `/dev/shm` to the size desired for the VM's memory, set `RUNCVM_MEM_SIZE` env var accordingly, and set the container memory limit to the size plus 256Mb (a contingency for QEMU itself, along with virtiofsd, dnsmasq and other container contents)
    - Add necessary capabilities, if not already present (`NET_ADMIN`, `NET_RAW`, `MKNOD`, `AUDIT_WRITE`).
    - Only if requested by `--env=SYS_ADMIN=1`, add the `SYS_ADMIN` capability.
 - Executes the standard container runtime `runc` with the modified `config.json`.

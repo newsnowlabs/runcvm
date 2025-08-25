@@ -30,7 +30,8 @@ RUNCVM_EXEC="$RUNCVM_GUEST/scripts/runcvm-ctr-exec"
 RUNCVM_KERNELS=$RUNCVM/kernels
 RUNCVM_GUEST_KERNELS=$RUNCVM_GUEST/kernels
 RUNCVM_KERNEL_DEFAULT=debian
-RUNCVM_MEM_SIZE_DEFAULT="512M"
+RUNCVM_MEM_SIZE_DEFAULT="512" # Default VM memory size (Mb) if not specified in container config
+RUNCVM_CONTAINER_MEM_OVERHEAD="256" # Memory (Mb) overhead to allow for QEMU, virtiofsd, dnsmasq and other container memory footprint: 128Mb minimum, 256Mb recommended
 RUNCVM_DEBUG=""
 
 debug() {
@@ -441,25 +442,23 @@ if [ "$COMMAND" = "create" ]; then
   RUNCVM_MEM_LIMIT=$(jq_get "$CFG" '.linux.resources.memory.limit')
   log "RUNCVM_MEM_LIMIT=$RUNCVM_MEM_LIMIT"
   if [ "$RUNCVM_MEM_LIMIT" != "null" ]; then
-    RUNCVM_MEM_SIZE="$(( $RUNCVM_MEM_LIMIT/1024/1024 ))M"
+    RUNCVM_MEM_SIZE="$(( $RUNCVM_MEM_LIMIT/1024/1024 ))"
   else
     RUNCVM_MEM_SIZE="$RUNCVM_MEM_SIZE_DEFAULT"
   fi
-  log "RUNCVM_MEM_SIZE=$RUNCVM_MEM_SIZE"
-  set_config_env "RUNCVM_MEM_SIZE" "$RUNCVM_MEM_SIZE"
+  log "RUNCVM_MEM_SIZE=${RUNCVM_MEM_SIZE}M"
+  set_config_env "RUNCVM_MEM_SIZE" "${RUNCVM_MEM_SIZE}M"
 
   RUNCVM_HUGETLB=$(get_config_env "RUNCVM_HUGETLB")
   if [ "$RUNCVM_HUGETLB" != "1" ]; then
-    jq_set "$CFG" --arg size "$RUNCVM_MEM_SIZE" '( .mounts[] | select(.destination == "/dev/shm") ) = {"destination": "/dev/shm","type": "tmpfs","source": "shm","options": ["nosuid","noexec","nodev","mode=1777","size=" + $size]}'
+    jq_set "$CFG" --arg size "${RUNCVM_MEM_SIZE}M" '( .mounts[] | select(.destination == "/dev/shm") ) = {"destination": "/dev/shm","type": "tmpfs","source": "shm","options": ["nosuid","noexec","nodev","mode=1777","size=" + $size]}'
   # else
     # --shm-size applies; default 64m.
   fi
 
-  # In future, set the container memory limit to something reasonable to support
-  # QEMU + virtiofsd + dnsmasq. Perhaps $RUNCVM_MEM_LIMIT+K (or vice-versa, reduce
-  # RUNCVM_MEM_SIZE by K), where K is the memory requirement for the container's processes
-  # over and above QEMU.
-  # jq_set "$CFG" --arg size $(($RUNCVM_MEM_LIMIT + )) '.linux.resources.memory.limit |= ($size | tonumber)'
+  # Set the container memory limit with a reasonable additionak reserve to allow for
+  # QEMU, virtiofsd, dnsmasq and other container memory footprint.
+  jq_set "$CFG" --arg size "$((($RUNCVM_MEM_SIZE + $RUNCVM_CONTAINER_MEM_OVERHEAD)*1024*1024))" '.linux.resources.memory.limit = ($size | tonumber)'
 
   # Add non-default capabilities needed by:
   # - Docker: CAP_NET_ADMIN
