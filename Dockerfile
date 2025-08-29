@@ -97,6 +97,11 @@ FROM alpine:$ALPINE_VERSION as binaries
 RUN apk update && \
     apk add --no-cache file bash qemu-system-x86_64 qemu-virtiofsd qemu-ui-curses qemu-guest-agent \
         qemu-hw-display-virtio-vga \
+        qemu-ui-spice-core \
+        qemu-audio-pa \
+        qemu-audio-spice \
+        qemu-chardev-spice \
+        qemu-hw-display-virtio-gpu-pci \
         jq iproute2 netcat-openbsd e2fsprogs blkid util-linux \
         s6 dnsmasq iptables nftables \
         ncurses coreutils \
@@ -194,6 +199,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt update && apt install -y linux-image-amd64:amd64 && \
     echo 'virtiofs' >>/etc/initramfs-tools/modules && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
+    echo 'virtio_gpu' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
 RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
@@ -212,6 +218,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt update && apt install -y linux-generic:amd64 && \
     echo 'virtiofs' >>/etc/initramfs-tools/modules && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
+    echo 'virtio_gpu' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
 RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \

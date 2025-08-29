@@ -167,7 +167,8 @@ else
 fi
 
 # RUNCVM_QEMU_DISPLAY -- the display frontend: none, curses
-# RUNCVM_QEMU_VGA -- the backend VGA video device: none, std, virtio, cirrus
+# RUNCVM_QEMU_VGA -- the backend VGA video device: none, std, virtio, cirrus [DEPRECATED]
+# RUNCVM_QEMU_VIDEO -- the backend video device: none, std, virtio, virtio-gpu
 # RUNCVM_QEMU_VNC_DISPLAY -- the VNC display number (where enabled): 0, 1, ...
 
 CONSOLE=()
@@ -176,7 +177,7 @@ DISPLAY=()
 case "${RUNCVM_DISPLAY_MODE:-headless}" in
   headless) # virtconsole / hvc0
     RUNCVM_QEMU_DISPLAY="${RUNCVM_QEMU_DISPLAY:-none}"
-    RUNCVM_QEMU_VGA="${RUNCVM_QEMU_VGA:-none}"
+    RUNCVM_QEMU_VIDEO="${RUNCVM_QEMU_VIDEO:-none}"
 
     # Creates a stdio backend connected to the virtual console.
     # Use with /dev/hvc0
@@ -190,7 +191,7 @@ case "${RUNCVM_DISPLAY_MODE:-headless}" in
     ;;
   serial) # stdio + monitor / ttyS0
     RUNCVM_QEMU_DISPLAY="${RUNCVM_QEMU_DISPLAY:-none}"
-    RUNCVM_QEMU_VGA="${RUNCVM_QEMU_VGA:-none}"
+    RUNCVM_QEMU_VIDEO="${RUNCVM_QEMU_VIDEO:-none}"
 
     # Creates a multiplexed stdio backend connected to the serial port (and the QEMU monitor).
     # Use with /dev/ttyS0
@@ -206,7 +207,25 @@ case "${RUNCVM_DISPLAY_MODE:-headless}" in
     ;;
   vnc) # VNC + tty0
     RUNCVM_QEMU_DISPLAY="${RUNCVM_QEMU_DISPLAY:-none}"
-    RUNCVM_QEMU_VGA="${RUNCVM_QEMU_VGA:-virtio}"
+    RUNCVM_QEMU_VIDEO="${RUNCVM_QEMU_VIDEO:-virtio}"
+    RUNCVM_QEMU_VNC_DISPLAY="${RUNCVM_QEMU_VNC_DISPLAY:-0}"
+
+    CONSOLE_DEV="tty0"
+    NOMODESET="0"
+    ;;
+  spice) # spice + tty0
+    RUNCVM_QEMU_DISPLAY="${RUNCVM_QEMU_DISPLAY:-none}"
+    RUNCVM_QEMU_VIDEO="${RUNCVM_QEMU_VIDEO:-virtio}"
+    RUNCVM_QEMU_SPICE_PORT="${RUNCVM_QEMU_SPICE_PORT:-5900}"
+
+    CONSOLE_DEV="tty0"
+    NOMODESET="0"
+    ;;
+
+# Requires a virtio GPU-aware guest kernel and OVFM/EFI firmware if Linux kernel messages need displaying)
+  vnc-virtio-gpu) # VNC + tty0 + virtio-gpu-pci
+    RUNCVM_QEMU_DISPLAY="${RUNCVM_QEMU_DISPLAY:-none}"
+    RUNCVM_QEMU_VIDEO="${RUNCVM_QEMU_VIDEO:-virtio-gpu}"
     RUNCVM_QEMU_VNC_DISPLAY="${RUNCVM_QEMU_VNC_DISPLAY:-0}"
 
     CONSOLE_DEV="tty0"
@@ -224,6 +243,7 @@ if [ -n "$RUNCVM_QEMU_DISPLAY" ]; then
   DISPLAY+=(-display $RUNCVM_QEMU_DISPLAY)
 fi
 
+# DEPRECATED: use RUNCVM_QEMU_VIDEO instead
 if [ -n "$RUNCVM_QEMU_VGA" ]; then
 
   # i.e. virtio, std, none
@@ -240,6 +260,41 @@ if [ -n "$RUNCVM_QEMU_VGA" ]; then
       DISPLAY+=(-vnc :$RUNCVM_QEMU_VNC_DISPLAY,password=off)
     fi
   fi
+else
+
+  case "${RUNCVM_QEMU_VIDEO:-none}" in
+    none)
+      DISPLAY+=(-vga none)
+      ;;
+    std)
+      DISPLAY+=(-device VGA)
+      ;;
+    virtio)
+      DISPLAY+=(-device virtio-vga)
+      ;;
+    virtio-gpu)
+      DISPLAY+=(-device virtio-gpu-pci)
+      ;;
+    *)
+      error "Error: RUNCVM_QEMU_VIDEO '$RUNCVM_QEMU_VIDEO' invalid, must be one of: none, std, virtio, virtio-gpu"
+      ;;
+  esac
+
+  if [ "$RUNCVM_QEMU_VIDEO" != "none" ]; then
+    NOMODESET="0" # Disable nomodeset if using a graphical console
+    DISPLAY+=(-device virtio-tablet-pci)
+
+    if [ -n "$RUNCVM_QEMU_VNC_DISPLAY" ]; then
+      DISPLAY+=(-vnc :$RUNCVM_QEMU_VNC_DISPLAY,password=off)
+      DISPLAY+=(-audiodev none,id=snd0 -device ich9-intel-hda -device hda-output,audiodev=snd0)
+    fi
+
+    if [ -n "$RUNCVM_QEMU_SPICE_PORT" ]; then
+      DISPLAY+=(-spice port=$RUNCVM_QEMU_SPICE_PORT,disable-ticketing=on,image-compression=off,playback-compression=off)
+      DISPLAY+=(-audiodev spice,id=snd0 -device ich9-intel-hda -device hda-output,audiodev=snd0)
+    fi
+  fi
+
 fi
 
 # Append nomodeset unless using a graphical console (i.e. not serial or virtconsole)

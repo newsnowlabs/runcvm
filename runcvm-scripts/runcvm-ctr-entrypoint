@@ -145,6 +145,11 @@ do
       XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -p tcp -m tcp --dport $((RUNCVM_QEMU_VNC_DISPLAY+5900)) -j REDIRECT
     fi
 
+    # Accept Spice requests on published port
+    if [[ "$RUNCVM_DISPLAY_MODE" = "spice" ]] || is_natural_int "$RUNCVM_QEMU_SPICE_PORT"; then
+      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -p tcp -m tcp --dport ${RUNCVM_QEMU_SPICE_PORT:-5900} -j REDIRECT
+    fi
+
     # Match UDP port 53 traffic, outgoing via the QEMU bridge, from the bridge's own IP:
     # -> Masquerade as if from the VM's IP.
     #    This allows outgoing DNS requests from the VM to be received by dnsmasq running in the container.
