@@ -88,7 +88,7 @@ do_disks() {
 }
 
 do_networks() {
-  local id=0 ifpath if mac
+  local id=0 ifpath if mac vhost
   local DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW
 
   for ifpath in /.runcvm/network/devices/*
@@ -101,8 +101,14 @@ do_networks() {
 
     mac=$(busybox sed -r 's/^..:..:../52:54:00/' <<<$DOCKER_IF_MAC)
 
+    if [ "$RUNCVM_QEMU_NET_VHOST" = "1" ]; then
+      vhost="on"
+    else
+      vhost="off"
+    fi
+
     IFACES+=(
-        -netdev tap,id=qemu$id,ifname=tap-$DOCKER_IF,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN
+        -netdev tap,id=qemu$id,ifname=tap-$DOCKER_IF,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN,vhost=$vhost
         -device virtio-net-pci,netdev=qemu$id,mac=$mac,rombar=$id
     )
 

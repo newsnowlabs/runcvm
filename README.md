@@ -591,6 +591,10 @@ Enable USB interface.
 
 By default SeaBIOS is used to boot the VM. Enable OVMF EFI boot with this option.
 
+### `--env=RUNCVM_QEMU_NET_VHOST=1`
+
+Enable use of [virtio vhost-net](https://www.redhat.com/en/blog/introduction-virtio-networking-and-vhost-net) (reliant on host `vhost_net` module and `/dev/vhost-net` device) to accelerate networking.
+
 ### `--env=RUNCVM_SYS_ADMIN=1`
 
 By default, `virtiofsd` is not launched with `-o modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.
