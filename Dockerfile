@@ -97,6 +97,7 @@ FROM alpine:$ALPINE_VERSION as binaries
 RUN apk update && \
     apk add --no-cache file bash qemu-system-x86_64 qemu-virtiofsd qemu-ui-curses qemu-guest-agent \
         qemu-hw-display-virtio-vga \
+        ovmf \
         jq iproute2 netcat-openbsd e2fsprogs blkid util-linux \
         s6 dnsmasq iptables nftables \
         ncurses coreutils \
@@ -134,6 +135,7 @@ RUN /usr/local/bin/make-bundelf-bundle.sh --bundle && \
     mkdir -p $BUNDELF_CODE_PATH/usr/share && \
     cp -a /usr/share/qemu $BUNDELF_CODE_PATH/usr/share && \
     cp -a /etc/terminfo $BUNDELF_CODE_PATH/usr/share && \
+    cp -a /usr/share/OVMF $BUNDELF_CODE_PATH/usr/share && \
     # Remove setuid/setgid bits from any/all binaries
     chmod -R -s $BUNDELF_CODE_PATH/
 

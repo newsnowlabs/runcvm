@@ -407,6 +407,9 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
 - Kernels
    - [+] Use any kernel, either one pre-packaged with RunCVM or roll your own
    - [+] RunCVM will try to select an appropriate kernel to use based on examination of `/etc/os-release` within the image being launched.
+- Firmware
+  - [+] [SeaBIOS](https://github.com/qemu/seabios)
+  - [+] [OVMF EFI](https://github.com/tianocore/tianocore.github.io/wiki/OVMF)
 
 ## RunCVM vs Kata comparison
 
@@ -584,6 +587,10 @@ Specify a QEMU frontend display. Normally RunCVM runs headless, without any fron
 
 Enable USB interface.
 
+### `--env=RUNCVM_BIOS=EFI`
+
+By default SeaBIOS is used to boot the VM. Enable OVMF EFI boot with this option.
+
 ### `--env=RUNCVM_SYS_ADMIN=1`
 
 By default, `virtiofsd` is not launched with `-o modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.
@@ -598,7 +605,7 @@ Enable kernel logging (sets kernel `console=ttyS0`).
 
 ### `--env=RUNCVM_BIOS_DEBUG=1`
 
-By default BIOS console output is hidden. Enable it with this option.
+By default BIOS console output is hidden. Enable it with this option. With `--env=RUNCVM_BIOS=EFI`, this option has no effect.
 
 ### `--env=RUNCVM_RUNTIME_DEBUG=1`
 

@@ -255,6 +255,15 @@ if [ "$RUNCVM_BIOS_DEBUG" != "1" ]; then
   OPTS+=(-fw_cfg opt/org.seabios/etc/sercon-port,string=0)
 fi
 
+if [ "$RUNCVM_BIOS" = "EFI" ]; then
+  # UEFI firmware
+  OPTS+=(
+    # -drive if=pflash,format=raw,unit=0,readonly=on,file=$RUNCVM_GUEST/usr/share/OVMF/OVMF_CODE.fd
+    # -drive if=pflash,format=raw,unit=1,readonly=on,file=$RUNCVM_GUEST/usr/share/OVMF/OVMF_VARS.fd
+    -bios $RUNCVM_GUEST/usr/share/OVMF/OVMF.fd
+  )
+fi
+
 MEM_BACKEND=(-numa node,memdev=mem)
 if [ "$RUNCVM_HUGETLB" != "1" ]; then
   # Tests suggests prealloc=on slows down mem-path=/dev/shm
