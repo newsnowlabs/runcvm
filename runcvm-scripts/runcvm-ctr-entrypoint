@@ -58,6 +58,10 @@ if [ "$RUNCVM_HAS_HOME" == "0" ]; then
   HOME=$($RUNCVM_GUEST/usr/bin/getent passwd "${RUNCVM_UIDGID%%:*}" | $RUNCVM_GUEST/bin/cut -d':' -f6)
 fi
 
+if [ -z "$RUNCVM_CPUS" ] || [ "$RUNCVM_CPUS" -le 0 ]; then
+  RUNCVM_CPUS=$($RUNCVM_GUEST/bin/busybox nproc)
+fi
+
 # SAVE ENVIRONMENT
 export -n SHLVL OLDPWD
 

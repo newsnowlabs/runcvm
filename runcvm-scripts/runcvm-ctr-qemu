@@ -25,7 +25,8 @@ error() {
 # Argument e.g. /volume/disk1,/var/lib/docker,ext4,5G
 do_disk() {
   local spec="$1"
-  local src dst fs size dir UUID
+  local id="$2"
+  local src dst fs size dir UUID queues
 
   local IFS=','
   read src dst fs size <<< $(echo "$spec")
@@ -74,16 +75,49 @@ do_disk() {
   echo "UUID=$UUID $dst $fs defaults,noatime 0 0" >>/.runcvm/fstab
 
   # Add disk to QEMU command line.
-  DISKS+=(-drive file=$src,format=raw,if=virtio,media=disk,cache=directsync,aio=native)
+
+  if [ "${RUNCVM_CPUS:-1}" -gt 8 ]; then
+    queues=8
+  else
+    queues="${RUNCVM_CPUS:-1}"
+  fi
+
+  DISKS+=(
+    # Create a block backend (no implicit frontend device attached)
+    # -drive id=drv$id       : give this backend a unique identifier
+    # file=$src              : source image file
+    # if=none                : do not attach directly, will be bound later with -device
+    # format=raw             : treat the file as raw block device
+    # media=disk             : marks this as a disk, not a CD-ROM
+    # cache=none             : use O_DIRECT, bypass host page cache, rely on guest flushes for durability
+    # aio=io_uring           : use Linux io_uring for asynchronous I/O (lower overhead than libaio)
+    # discard=unmap          : propagate guest TRIM/UNMAP to host (space reclamation)
+    # detect-zeroes=unmap    : convert guest zero writes into UNMAPs for efficiency
+    -drive id=drv$id,file=$src,if=none,format=raw,media=disk,cache=none,aio=io_uring,discard=unmap,detect-zeroes=unmap
+
+    # Create a dedicated I/O thread (dataplane) to offload block I/O
+    # -object iothread,id=ioth$id : defines an iothread with a unique identifier
+    -object iothread,id=ioth$id
+
+    # Attach a virtio-blk PCI frontend to the backend and iothread
+    # -device virtio-blk-pci     : create a virtio block device on PCI bus
+    # drive=drv$id               : connect to backend created above
+    # iothread=ioth$id           : process requests in dedicated I/O thread
+    # queue-size=1024            : set depth of each virtqueue
+    # num-queues=4               : create 4 queues, allowing parallel I/O across vCPUs
+    -device virtio-blk-pci,drive=drv$id,iothread=ioth$id,queue-size=1024,num-queues=$queues
+  )
 }
 
 # Argument e.g. /disk1,/home,ext4,5G;/disk2,/var,ext4,1G
 do_disks() {
   local IFS=';'
   local disk
+  local id=0
   for disk in $1
   do
-    do_disk "$disk"
+    do_disk "$disk" "$id"
+    id=$((id+1))
   done
 }
 
