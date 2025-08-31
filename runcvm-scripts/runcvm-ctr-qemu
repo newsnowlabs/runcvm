@@ -308,11 +308,11 @@ fi
 MEM_BACKEND=(-numa node,memdev=mem)
 if [ "$RUNCVM_HUGETLB" != "1" ]; then
   # Tests suggests prealloc=on slows down mem-path=/dev/shm
-  MEM_PATH="/dev/shm" MEM_PREALLOC="off"
-  MEM_BACKEND+=(-object memory-backend-file,id=mem,size=$RUNCVM_MEM_SIZE,mem-path=$MEM_PATH,share=on,prealloc=$MEM_PREALLOC)
+  MEM_PATH="/dev/shm" 
+  MEM_BACKEND+=(-object memory-backend-file,id=mem,size=$RUNCVM_MEM_SIZE,mem-path=$MEM_PATH,share=on,prealloc=${RUNCVM_QEMU_MEM_PREALLOC:-off})
 else
   # Fastest performance: +15% CPU/net intensive; 3.5x disk intensive.
-  MEM_BACKEND+=(-object memory-backend-memfd,id=mem,size=$RUNCVM_MEM_SIZE,share=on,prealloc=on,hugetlb=on)
+  MEM_BACKEND+=(-object memory-backend-memfd,id=mem,size=$RUNCVM_MEM_SIZE,share=on,prealloc=${RUNCVM_QEMU_MEM_PREALLOC:-off},hugetlb=on)
 fi
 
 # 16-64 works well and is more performant than 1024 in some scenarios.

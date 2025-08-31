@@ -630,6 +630,12 @@ Enable breakpoints (falling to bash shell) during the RunCVM Container/VM boot p
 
 **[EXPERIMENTAL]** Enable use of preallocated hugetlb memory backend, which can improve performance in some scenarios.
 
+### `--env=RUNCVM_QEMU_MEM_PREALLOC=<on|off>`
+
+Specify whether QEMU VM memory should be preallocated, or allocated on the host only as required by the guest.
+
+Default is `off`, but `on` may deliver improved performance in some scenarios at expense of ability to overcommit.
+
 ### `--env=RUNCVM_CGROUPFS=<value>`
 
 Configures cgroupfs mountpoints in the VM, which may be needed to run applications like Docker if systemd is not running. Acceptable values are:
