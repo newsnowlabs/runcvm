@@ -186,6 +186,7 @@ else
   # - smm=on: enable System Management Mode (required for UEFI Secure Boot)
   # - dump-guest-core=off: disable saving core dumps on guest crash (saves disk space)
   # - hpet=off: disable High Precision Event Timer to avoid timing issues in some guests
+  # - kernel_irqchip=on: enable kernel-based interrupt controller for better performance
 
   # - usb=on: enable USB support when requested
   if [ "$RUNCVM_QEMU_USB" = "on" ]; then
@@ -194,7 +195,7 @@ else
     USB="off"
   fi
 
-  MACHINE+=(-machine q35,accel=kvm,sata=off,vmport=off,smm=on,dump-guest-core=off,hpet=off,usb=$USB)
+  MACHINE+=(-machine q35,accel=kvm,sata=off,vmport=off,smm=on,dump-guest-core=off,hpet=off,usb=$USB,kernel_irqchip=on)
 
   # Enable the QEMU debug exit device for debugging purposes.
   # This device allows the guest to trigger a debug exit, which can be useful for debugging
