@@ -31,7 +31,10 @@ clean_env() {
 load_network() {
   local if="${1:-default}"
   [ -d /.runcvm/network/devices ] && [ -s /.runcvm/network/devices/$if ] || return 1
-  read -r DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX  DOCKER_IF_IP_GW </.runcvm/network/devices/$if
+  read -r DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW DOCKER_IF_MACVTAP_DEV </.runcvm/network/devices/$if
+
+  [ "$DOCKER_IF_IP_GW" = "-" ] && DOCKER_IF_IP_GW=""
+  [ "$DOCKER_IF_MACVTAP_DEV" = "-" ] && DOCKER_IF_MACVTAP_DEV=""
   return 0
 }
 

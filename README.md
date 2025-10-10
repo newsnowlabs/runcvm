@@ -595,6 +595,10 @@ By default SeaBIOS is used to boot the VM. Enable OVMF EFI boot with this option
 
 Enable use of [virtio vhost-net](https://www.redhat.com/en/blog/introduction-virtio-networking-and-vhost-net) (reliant on host `vhost_net` module and `/dev/vhost-net` device) to accelerate networking.
 
+### `--env=RUNCVM_NETWORK=macvtap`
+
+Replace RunCVM's default bridge-and-dnsmasq network stack with macvtap devices that are connected directly to the container's network interfaces. When this mode is enabled, the runtime creates a macvtap device for each non-loopback interface and hands the corresponding `/dev/tap<N>` character devices to QEMU. The guest can then run a DHCP client on `eth0` (and any additional interfaces) to obtain addresses directly from the upstream network. DNS forwarding via dnsmasq is disabled in this mode, so the guest should consume the DNS configuration supplied by the external DHCP server.
+
 ### `--env=RUNCVM_SYS_ADMIN=1`
 
 By default, `virtiofsd` is not launched with `-o modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.

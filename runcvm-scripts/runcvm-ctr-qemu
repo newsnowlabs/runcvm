@@ -141,10 +141,25 @@ do_networks() {
       vhost="off"
     fi
 
-    IFACES+=(
+    if [ "$RUNCVM_NETWORK" = "macvtap" ]; then
+      if [ -z "$DOCKER_IF_MACVTAP_DEV" ]; then
+        error "Error: macvtap device path missing for interface '$DOCKER_IF'"
+      fi
+
+      local tap_fd
+      exec {tap_fd}<>"$DOCKER_IF_MACVTAP_DEV" || \
+        error "Error: failed to open macvtap device '$DOCKER_IF_MACVTAP_DEV'"
+
+      IFACES+=(
+        -netdev tap,id=qemu$id,fd=$tap_fd,vhost=$vhost
+        -device virtio-net-pci,netdev=qemu$id,mac=$mac,rombar=$id
+      )
+    else
+      IFACES+=(
         -netdev tap,id=qemu$id,ifname=tap-$DOCKER_IF,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN,vhost=$vhost
         -device virtio-net-pci,netdev=qemu$id,mac=$mac,rombar=$id
-    )
+      )
+    fi
 
     id=$((id+1))
   done

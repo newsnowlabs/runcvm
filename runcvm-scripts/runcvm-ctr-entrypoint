@@ -79,99 +79,131 @@ busybox pwd >/.runcvm/pwd
 # DEBUG
 if [[ "$RUNCVM_BREAK" =~ prenet ]]; then bash; fi
 
-# SAVE NETWORKING CONFIG AND CONFIGURE BRIDGES
+setup_bridge_networking() {
+  IFS=$'\n' read -d '' -r DOCKER_GW_IF DOCKER_GW_IF_IP <<< \
+    $(ip -json route show | jq -r '.[] | (select(.dst == "default") | .dev, .gateway)')
 
-# Identify default gateway device and IP address
-IFS=$'\n' read -d '' -r DOCKER_GW_IF DOCKER_GW_IF_IP <<< \
-  $(ip -json route show | jq -r '.[] | (select(.dst == "default") | .dev, .gateway)')
-# e.g. eth0 172.25.10.1
+  QEMU_BRIDGE_IP=169.254.1.1
+  RUNCVM_DNS_IP=169.254.169.254
 
-QEMU_BRIDGE_IP=169.254.1.1
-RUNCVM_DNS_IP=169.254.169.254
+  mkdir -p /.runcvm/network
+  rm -rf /.runcvm/network/devices
+  mkdir -p /.runcvm/network/devices
 
-mkdir -p /.runcvm/network/devices
+  ip -json route show | jq -r '.[] | select(.scope != "link" and .dst != "default") | "\(.dst) \(.gateway) \(.dev) \(.prefsrc)"' >/.runcvm/network/routes
 
-# Save non-link-scope non-default routes for later restoration in the running VM.
-ip -json route show | jq -r '.[] | select(.scope != "link" and .dst != "default") | "\(.dst) \(.gateway) \(.dev) \(.prefsrc)"' >/.runcvm/network/routes
+  for if in $(ip -json link show | jq -r '.[] | .ifname')
+  do
+    [ "$if" = "lo" ] && continue
 
-for if in $(ip -json link show | jq -r '.[] | .ifname')
-do
+    local DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_MAC DOCKER_IF_MTU
+    IFS=$'\n' read -d '' -r DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_MAC DOCKER_IF_MTU <<< \
+      $(ip -json addr show "$if" | jq -r '.[0] | .addr_info[0].local, .addr_info[0].prefixlen, .address, .mtu')
 
-  [ "$if" = "lo" ] && continue
-
-  IFS=$'\n' read -d '' -r DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_MAC DOCKER_IF_MTU <<< \
-    $(ip -json addr show "$if" | jq -r '.[0] | .addr_info[0].local, .addr_info[0].prefixlen, .address, .mtu')
-  # e.g. 172.25.10.2 24 52:54:00:b7:0b:b6 1500
-
-  # Save container network parameters
-  if [ "$if" = "$DOCKER_GW_IF" ]; then
-    echo "$if $DOCKER_IF_MAC $DOCKER_IF_MTU $DOCKER_IF_IP $DOCKER_IF_IP_NETPREFIX $DOCKER_GW_IF_IP" >/.runcvm/network/devices/$if
-    ln -s "$if" /.runcvm/network/devices/default
-  else
-    echo "$if $DOCKER_IF_MAC $DOCKER_IF_MTU $DOCKER_IF_IP $DOCKER_IF_IP_NETPREFIX" >/.runcvm/network/devices/$if
-  fi
-
-  # RECONFIGURE CONTAINER NETWORK
-  ip addr flush dev $if
-
-  QEMU_BRIDGE="br-$if"
-
-  # Create the container bridge
-  # See https://bugs.launchpad.net/neutron/+bug/1738659
-  ip link add $QEMU_BRIDGE type bridge forward_delay 0 ageing 0
-
-  # Add the original container interface to the bridge and bring it up.
-  ip link set dev "$if" master $QEMU_BRIDGE
-  ip link set dev "$if" up
-
-  # Bring the bridge up.
-  ip link set dev $QEMU_BRIDGE up
-
-  # Restore network route via this bridge
-  DOCKER_NET=$(ip_prefix_to_network $DOCKER_IF_IP $DOCKER_IF_IP_NETPREFIX)/$DOCKER_IF_IP_NETPREFIX
-  ip route add $DOCKER_NET dev $QEMU_BRIDGE
-
-  # If this interface is the default gateway interface, perform additional special steps.
-  if [ "$if" = "$DOCKER_GW_IF" ]; then
-
-    # Add a private IP to this bridge.
-    # We need it so the bridge can receive traffic, but the IP won't ever see the light of day.
-    ip addr add $QEMU_BRIDGE_IP dev $QEMU_BRIDGE
-
-    # Restore default gateway route via this bridge.
-    ip route add default via $DOCKER_GW_IF_IP dev $QEMU_BRIDGE
-
-    # Accept DNS requests for $RUNCVM_DNS_IP; these will be passed to dnsmasq
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -d $RUNCVM_DNS_IP/32 -p udp -m udp --dport 53 -j REDIRECT
-
-    # Accept VNC requests on published port (5900 + display number)
-    if [[ "$RUNCVM_DISPLAY_MODE" = "vnc" ]] || is_natural_int "$RUNCVM_QEMU_VNC_DISPLAY"; then
-      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -p tcp -m tcp --dport $((RUNCVM_QEMU_VNC_DISPLAY+5900)) -j REDIRECT
+    if [ "$if" = "$DOCKER_GW_IF" ]; then
+      printf "%s %s %s %s %s %s %s\n" \
+        "$if" "$DOCKER_IF_MAC" "${DOCKER_IF_MTU:-1500}" "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX" "$DOCKER_GW_IF_IP" "-" \
+        >/.runcvm/network/devices/$if
+      ln -sf "$if" /.runcvm/network/devices/default
+    else
+      printf "%s %s %s %s %s %s %s\n" \
+        "$if" "$DOCKER_IF_MAC" "${DOCKER_IF_MTU:-1500}" "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX" "-" "-" \
+        >/.runcvm/network/devices/$if
     fi
 
-    # Match UDP port 53 traffic, outgoing via the QEMU bridge, from the bridge's own IP:
-    # -> Masquerade as if from the VM's IP.
-    #    This allows outgoing DNS requests from the VM to be received by dnsmasq running in the container.
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p udp -m udp --sport 53 -j SNAT --to-source $DOCKER_IF_IP
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p udp -m udp --dport 53 -j SNAT --to-source $DOCKER_IF_IP
+    ip addr flush dev "$if"
 
-    # Match traffic on TCP port $SSHD_PORT, outgoing via the QEMU bridge, from the bridge's own IP:
-    # -> Masquerade it as if from the DNS_IP.
-    #    This is necessary to allow SSH from within the container to the VM.
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p tcp -m tcp --dport $SSHD_PORT -j SNAT --to-source $RUNCVM_DNS_IP
-  fi
+    local QEMU_BRIDGE="br-$if"
+    ip link add "$QEMU_BRIDGE" type bridge forward_delay 0 ageing 0
+    ip link set dev "$if" master "$QEMU_BRIDGE"
+    ip link set dev "$if" up
+    ip link set dev "$QEMU_BRIDGE" up
 
-done
+    local DOCKER_NET
+    DOCKER_NET=$(ip_prefix_to_network "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX")/"$DOCKER_IF_IP_NETPREFIX"
+    ip route add "$DOCKER_NET" dev "$QEMU_BRIDGE"
 
-# FIXME: Bind-mount /etc/resolv.conf as well as /vm/etc/resolv.conf to prevent them showing in 'docker diff'
-cat /vm/etc/resolv.conf >/etc/resolv.conf
-RESOLV_CONF_NEW=$(busybox sed -r "s/127.0.0.11/$RUNCVM_DNS_IP/" /vm/etc/resolv.conf)
-echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
+    if [ "$if" = "$DOCKER_GW_IF" ]; then
+      ip addr add "$QEMU_BRIDGE_IP" dev "$QEMU_BRIDGE"
+      ip route add default via "$DOCKER_GW_IF_IP" dev "$QEMU_BRIDGE"
 
-# LAUNCH DNSMASQ
-# It will receive local DNS requests (within the container, on 127.0.0.1)
-# and requests redirected locally (via the iptables PREROUTING REDIRECT rule) for $RUNCVM_DNS_IP.
-dnsmasq -u root --no-hosts
+      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -d $RUNCVM_DNS_IP/32 -p udp -m udp --dport 53 -j REDIRECT
+
+      if [[ "$RUNCVM_DISPLAY_MODE" = "vnc" ]] || is_natural_int "$RUNCVM_QEMU_VNC_DISPLAY"; then
+        XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -p tcp -m tcp --dport $((RUNCVM_QEMU_VNC_DISPLAY+5900)) -j REDIRECT
+      fi
+
+      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s $QEMU_BRIDGE_IP/32 -p udp -m udp --sport 53 -j SNAT --to-source "$DOCKER_IF_IP"
+      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s $QEMU_BRIDGE_IP/32 -p udp -m udp --dport 53 -j SNAT --to-source "$DOCKER_IF_IP"
+      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s $QEMU_BRIDGE_IP/32 -p tcp -m tcp --dport $SSHD_PORT -j SNAT --to-source $RUNCVM_DNS_IP
+    fi
+  done
+
+  cat /vm/etc/resolv.conf >/etc/resolv.conf
+  RESOLV_CONF_NEW=$(busybox sed -r "s/127.0.0.11/$RUNCVM_DNS_IP/" /vm/etc/resolv.conf)
+  echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
+
+  dnsmasq -u root --no-hosts
+}
+
+setup_macvtap_networking() {
+  IFS=$'\n' read -d '' -r DOCKER_GW_IF DOCKER_GW_IF_IP <<< \
+    $(ip -json route show | jq -r '.[] | (select(.dst == "default") | .dev, .gateway)')
+
+  mkdir -p /.runcvm/network
+  rm -rf /.runcvm/network/devices
+  mkdir -p /.runcvm/network/devices
+
+  ip -json route show | jq -r '.[] | select(.scope != "link" and .dst != "default") | "\(.dst) \(.gateway) \(.dev) \(.prefsrc)"' >/.runcvm/network/routes
+
+  for if in $(ip -json link show | jq -r '.[] | .ifname')
+  do
+    [ "$if" = "lo" ] && continue
+
+    local DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_MAC DOCKER_IF_MTU
+    IFS=$'\n' read -d '' -r DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_MAC DOCKER_IF_MTU <<< \
+      $(ip -json addr show "$if" | jq -r '.[0] | .addr_info[0].local, .addr_info[0].prefixlen, .address, .mtu')
+
+    local vm_mac macvtap_if macvtap_index macvtap_dev macvtap_minor gateway
+    vm_mac=$(busybox sed -r 's/^..:..:../52:54:00/' <<<$DOCKER_IF_MAC)
+    macvtap_if="macvtap-$if"
+
+    if ! ip link show "$macvtap_if" >/dev/null 2>&1; then
+      ip link add link "$if" name "$macvtap_if" type macvtap mode bridge
+    fi
+
+    ip link set dev "$if" up || true
+    ip link set dev "$macvtap_if" address "$vm_mac" 2>/dev/null || true
+    ip link set dev "$macvtap_if" up
+    ip link set dev "$macvtap_if" mtu "${DOCKER_IF_MTU:-1500}"
+
+    macvtap_index=$(cat /sys/class/net/$macvtap_if/ifindex)
+    macvtap_dev=/dev/tap$macvtap_index
+
+    if ! [ -c "$macvtap_dev" ]; then
+      macvtap_minor=$((200 + macvtap_index))
+      busybox mknod "$macvtap_dev" c 10 "$macvtap_minor"
+    fi
+
+    chmod 600 "$macvtap_dev"
+
+    gateway="-"
+    if [ "$if" = "$DOCKER_GW_IF" ] && [ -n "$DOCKER_GW_IF_IP" ]; then
+      gateway="$DOCKER_GW_IF_IP"
+      ln -sf "$if" /.runcvm/network/devices/default
+    fi
+
+    printf "%s %s %s %s %s %s %s\n" \
+      "$if" "$DOCKER_IF_MAC" "${DOCKER_IF_MTU:-1500}" "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX" "$gateway" "$macvtap_dev" \
+      >/.runcvm/network/devices/$if
+  done
+}
+
+if [ "$RUNCVM_NETWORK" = "macvtap" ]; then
+  setup_macvtap_networking
+else
+  setup_bridge_networking
+fi
 
 # LAUNCH VIRTIOFSD
 $RUNCVM_GUEST/scripts/runcvm-ctr-virtiofsd &
