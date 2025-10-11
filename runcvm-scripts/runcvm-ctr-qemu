@@ -17,6 +17,13 @@ INIT="init=$RUNCVM_GUEST/scripts/runcvm-vm-init"
 # Must export TERMINFO so curses library can find terminfo database.
 export TERMINFO="$RUNCVM_GUEST/usr/share/terminfo"
 
+if [ "${RUNCVM_QEMU_MACHINE}" = "microvm" ]; then
+  RUNCVM_QEMU_DEVTAG="device"
+else
+  # Default to q35 machine type
+  RUNCVM_QEMU_DEVTAG="pci"
+fi
+
 error() {
   echo "$1" >&2
   exit 1
@@ -99,13 +106,13 @@ do_disk() {
     # -object iothread,id=ioth$id : defines an iothread with a unique identifier
     -object iothread,id=ioth$id
 
-    # Attach a virtio-blk PCI frontend to the backend and iothread
-    # -device virtio-blk-pci     : create a virtio block device on PCI bus
-    # drive=drv$id               : connect to backend created above
-    # iothread=ioth$id           : process requests in dedicated I/O thread
-    # queue-size=1024            : set depth of each virtqueue
-    # num-queues=4               : create 4 queues, allowing parallel I/O across vCPUs
-    -device virtio-blk-pci,drive=drv$id,iothread=ioth$id,queue-size=1024,num-queues=$queues
+    # Attach a virtio-blk frontend to the backend and iothread
+    # -device virtio-blk-[pci|device]: create a virtio block device
+    # drive=drv$id                   : connect to backend created above
+    # iothread=ioth$id               : process requests in dedicated I/O thread
+    # queue-size=1024                : set depth of each virtqueue
+    # num-queues=4                   : create 4 queues, allowing parallel I/O across vCPUs
+    -device virtio-blk-$RUNCVM_QEMU_DEVTAG,drive=drv$id,iothread=ioth$id,queue-size=1024,num-queues=$queues
   )
 }
 
@@ -143,8 +150,22 @@ do_networks() {
 
     IFACES+=(
         -netdev tap,id=qemu$id,ifname=tap-$DOCKER_IF,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN,vhost=$vhost
-        -device virtio-net-pci,netdev=qemu$id,mac=$mac,rombar=$id
     )
+
+    if [ "${RUNCVM_QEMU_MACHINE}" = "microvm" ]; then
+      IFACES+=(
+        -device virtio-net-device,netdev=qemu$id,mac=$mac
+      )
+    else
+      IFACES+=(
+        -device virtio-net-pci,netdev=qemu$id,mac=$mac,rombar=$id
+      )
+    fi
+    # vectors=8 for mq=on with 4 queues (1 control + 4 tx + 4 rx)
+    # vectors ~= 2 + (2 × queues)
+    # Note: Multi-queue support may vary between machine types
+    # -netdev tap,id=qemu$id,ifname=tap-$DOCKER_IF,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN,vhost=$vhost,queues=$RUNCVM_CPUS
+    # -device virtio-net-[pci|device],netdev=qemu$id,mac=$mac,rombar=$id,mq=on,vectors=$((2 + 2 * RUNCVM_CPUS)),queue-size=1024,num-queues=$RUNCVM_CPUS
 
     id=$((id+1))
   done
@@ -177,25 +198,35 @@ else
   MACHINE+=(-enable-kvm)
   MACHINE+=(-cpu host,pmu=off)
 
-  # QEMU machine configuration:
-  # - q35: modern Intel chipset with PCIe and UEFI support
-  # - accel=kvm: enable KVM for near-native performance (requires hardware virtualization)
-  # - usb=on: enable USB support (e.g., for peripherals or boot devices)
-  # - sata=off: disable SATA controller if using virtio/NVMe instead
-  # - vmport=off: disable VMware backdoor port for improved security/stealth
-  # - smm=on: enable System Management Mode (required for UEFI Secure Boot)
-  # - dump-guest-core=off: disable saving core dumps on guest crash (saves disk space)
-  # - hpet=off: disable High Precision Event Timer to avoid timing issues in some guests
-  # - kernel_irqchip=on: enable kernel-based interrupt controller for better performance
-
-  # - usb=on: enable USB support when requested
-  if [ "$RUNCVM_QEMU_USB" = "on" ]; then
-    USB="on"
+  # QEMU machine configuration based on RUNCVM_QEMU_MACHINE setting
+  if [ "${RUNCVM_QEMU_MACHINE}" = "microvm" ]; then
+    # microvm: minimalistic machine type for fast boot and reduced attack surface
+    # - accel=kvm: enable KVM for near-native performance
+    # - pit=off: disable legacy i8254 PIT
+    # - pic=off: disable legacy i8259 PIC
+    # - rtc=off: disable legacy MC146818 RTC
+    # - kernel_irqchip=on: enable kernel-based interrupt controller
+    USB="off" # microvm doesn't support USB
+    MACHINE+=(-machine microvm,accel=kvm,pit=off,pic=off,rtc=off,usb=$USB,kernel_irqchip=on,acpi=off)
   else
-    USB="off"
-  fi
+    # q35: modern Intel chipset with PCIe and UEFI support
+    # - accel=kvm: enable KVM for near-native performance
+    # - sata=off: disable SATA controller if using virtio/NVMe instead
+    # - vmport=off: disable VMware backdoor port for improved security/stealth
+    # - smm=on: enable System Management Mode (required for UEFI Secure Boot)
+    # - dump-guest-core=off: disable saving core dumps on guest crash
+    # - hpet=off: disable High Precision Event Timer to avoid timing issues
+    # - kernel_irqchip=on: enable kernel-based interrupt controller
 
-  MACHINE+=(-machine q35,accel=kvm,sata=off,vmport=off,smm=on,dump-guest-core=off,hpet=off,usb=$USB,kernel_irqchip=on)
+    # Enable USB support when requested (q35 only)
+    if [ "$RUNCVM_QEMU_USB" = "on" ]; then
+      USB="on"
+    else
+      USB="off"
+    fi
+
+    MACHINE+=(-machine q35,accel=kvm,sata=off,vmport=off,smm=on,dump-guest-core=off,hpet=off,usb=$USB,kernel_irqchip=on)
+  fi
 
   # Enable the QEMU debug exit device for debugging purposes.
   # This device allows the guest to trigger a debug exit, which can be useful for debugging
@@ -204,7 +235,10 @@ else
   # Set the virtual hardware clock to UTC time and enable drift correction using slewing.
   # This ensures the VM clock starts in UTC and gradually adjusts for time drift,
   # providing smooth and accurate timekeeping without sudden changes.
-  MACHINE+=(-rtc base=utc,driftfix=slew)
+  # Note: microvm machine type does not support RTC
+  if [ "${RUNCVM_QEMU_MACHINE}" != "microvm" ]; then
+    MACHINE+=(-rtc base=utc,driftfix=slew)
+  fi
 fi
 
 # RUNCVM_QEMU_DISPLAY -- the display frontend: none, curses
@@ -272,7 +306,7 @@ if [ -n "$RUNCVM_QEMU_VGA" ]; then
 
   if [ "$RUNCVM_QEMU_VGA" != "none" ]; then
     NOMODESET="0" # Disable nomodeset if using a graphical console
-    DISPLAY+=(-device virtio-tablet-pci)
+    DISPLAY+=(-device virtio-tablet-$RUNCVM_QEMU_DEVTAG)
     DISPLAY+=(-audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0)
 
     # For now, unless/until `-device virtio-gpu-pci` support is provided,
@@ -320,14 +354,28 @@ fi
 VIRTIOFS_QUEUE_SIZE=1024
 VIRTIOFS+=(
   -chardev socket,id=virtiofs,path=$QEMU_VIRTIOFSD_SOCKET
-  -device vhost-user-fs-pci,queue-size=$VIRTIOFS_QUEUE_SIZE,chardev=virtiofs,tag=runcvmfs,ats=off
 )
+
+if [ "${RUNCVM_QEMU_MACHINE}" = "microvm" ]; then
+  VIRTIOFS+=(
+    -device vhost-user-fs-device,queue-size=$VIRTIOFS_QUEUE_SIZE,chardev=virtiofs,tag=runcvmfs
+  )
+else
+  VIRTIOFS+=(
+    -device vhost-user-fs-pci,queue-size=$VIRTIOFS_QUEUE_SIZE,chardev=virtiofs,tag=runcvmfs,ats=off
+  )
+fi
 
 # Experimental: Enable to specify a dedicated PCI bridge
 # OPTS+=(-device pci-bridge,bus=pcie.0,id=pci-bridge-0,chassis_nr=1,shpc=off,addr=2,io-reserve=4k,mem-reserve=1m,pref64-reserve=1m)
 
 # Experimental: Enable for a SCSI bus
 # OPTS+=(-device virtio-scsi-pci,id=scsi0,disable-modern=true)
+
+# Kernel command line options: turn off mitigations
+if [ "$RUNCVM_KERNEL_NOMITIGATIONS" = "1" ]; then
+  APPEND+=(mitigations=off)
+fi
 
 # Disable IPv6, which is currently unsupported, at kernel boot time
 APPEND+=(ipv6.disable=1 panic=-1)
@@ -363,11 +411,11 @@ ARGS=(
   -m "$RUNCVM_MEM_SIZE"
   -smp $RUNCVM_CPUS,cores=1,threads=1,sockets=$RUNCVM_CPUS,maxcpus=$RUNCVM_CPUS
 
-  # Creates a virtio-serial bus on the PCI bus; this is used for the guest agent and virtiofs
-  -device virtio-serial-pci,id=serial0 
+  # Creates a virtio-serial bus device; this is used for the guest agent
+  -device virtio-serial-$RUNCVM_QEMU_DEVTAG,id=serial0
 
-  # Creates an RNG on the PCI bus
-  -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0
+  # Creates an RNG device
+  -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-$RUNCVM_QEMU_DEVTAG,rng=rng0
 
   # Memory backend
   "${MEM_BACKEND[@]}"
@@ -403,5 +451,5 @@ if [ "$RUNCVM_QEMU_DEBUG" = "1" ]; then
   echo "QEMU memory cgroup events:" >&2
   cat /sys/fs/cgroup/memory.events >&2
 else
-exec "$CMD" "${ARGS[@]}"
+  exec "$CMD" "${ARGS[@]}"
 fi
