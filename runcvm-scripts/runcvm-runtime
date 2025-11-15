@@ -39,7 +39,7 @@ debug() {
 }
 
 log() {
-  debug && echo "$(date '+%Y-%m-%d %H:%M:%S.%6N'): $@" >>/tmp/runcvm-$$.log
+  debug && echo "$(date '+%Y-%m-%d %H:%M:%S.%6N'): $$: $@" >>/tmp/runcvm-$$.log
 }
 
 error() {
