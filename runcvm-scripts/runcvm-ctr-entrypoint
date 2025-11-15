@@ -1,4 +1,4 @@
-#!/.runcvm/guest/bin/bash
+#!/.runcvm/guest/bin/bash -e
 
 # DEBUG
 if [[ "$RUNCVM_BREAK" =~ (prenet|postnet) ]]; then set -x; fi
@@ -82,8 +82,8 @@ if [[ "$RUNCVM_BREAK" =~ prenet ]]; then bash; fi
 # SAVE NETWORKING CONFIG AND CONFIGURE BRIDGES
 
 # Identify default gateway device and IP address
-IFS=$'\n' read -d '' -r DOCKER_GW_IF DOCKER_GW_IF_IP <<< \
-  $(ip -json route show | jq -r '.[] | (select(.dst == "default") | .dev, .gateway)')
+read -r DOCKER_GW_IF DOCKER_GW_IF_IP < \
+  <(ip -json route show | jq -r '.[] | (select(.dst == "default") | [.dev, .gateway]) | @tsv')
 # e.g. eth0 172.25.10.1
 
 QEMU_BRIDGE_IP=169.254.1.1
@@ -99,50 +99,54 @@ do
 
   [ "$if" = "lo" ] && continue
 
-  IFS=$'\n' read -d '' -r DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_MAC DOCKER_IF_MTU <<< \
-    $(ip -json addr show "$if" | jq -r '.[0] | .addr_info[0].local, .addr_info[0].prefixlen, .address, .mtu')
+  read -r DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_MAC DOCKER_IF_MTU < \
+    <(ip -json addr show "$if" | jq -r '.[0] | [.addr_info[0].local, .addr_info[0].prefixlen, .address, .mtu] | @tsv')
   # e.g. 172.25.10.2 24 52:54:00:b7:0b:b6 1500
 
   # Save container network parameters
   if [ "$if" = "$DOCKER_GW_IF" ]; then
-    echo "$if $DOCKER_IF_MAC $DOCKER_IF_MTU $DOCKER_IF_IP $DOCKER_IF_IP_NETPREFIX $DOCKER_GW_IF_IP" >/.runcvm/network/devices/$if
+    printf "%s %s %s %s %s %s\n" \
+      "$if" "$DOCKER_IF_MAC" "$DOCKER_IF_MTU" "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX" "$DOCKER_GW_IF_IP" \
+      >/.runcvm/network/devices/$if
     ln -s "$if" /.runcvm/network/devices/default
   else
-    echo "$if $DOCKER_IF_MAC $DOCKER_IF_MTU $DOCKER_IF_IP $DOCKER_IF_IP_NETPREFIX" >/.runcvm/network/devices/$if
+    printf "%s %s %s %s %s %s\n" \
+      "$if" "$DOCKER_IF_MAC" "$DOCKER_IF_MTU" "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX" "-" \
+      >/.runcvm/network/devices/$if
   fi
 
   # RECONFIGURE CONTAINER NETWORK
-  ip addr flush dev $if
+  ip addr flush dev "$if"
 
   QEMU_BRIDGE="br-$if"
 
   # Create the container bridge
   # See https://bugs.launchpad.net/neutron/+bug/1738659
-  ip link add $QEMU_BRIDGE type bridge forward_delay 0 ageing 0
+  ip link add "$QEMU_BRIDGE" type bridge forward_delay 0 ageing 0
 
   # Add the original container interface to the bridge and bring it up.
-  ip link set dev "$if" master $QEMU_BRIDGE
+  ip link set dev "$if" master "$QEMU_BRIDGE"
   ip link set dev "$if" up
 
   # Bring the bridge up.
-  ip link set dev $QEMU_BRIDGE up
+  ip link set dev "$QEMU_BRIDGE" up
 
   # Restore network route via this bridge
-  DOCKER_NET=$(ip_prefix_to_network $DOCKER_IF_IP $DOCKER_IF_IP_NETPREFIX)/$DOCKER_IF_IP_NETPREFIX
-  ip route add $DOCKER_NET dev $QEMU_BRIDGE
+  DOCKER_NET=$(ip_prefix_to_network "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX")/"$DOCKER_IF_IP_NETPREFIX"
+  ip route add "$DOCKER_NET" dev "$QEMU_BRIDGE"
 
   # If this interface is the default gateway interface, perform additional special steps.
   if [ "$if" = "$DOCKER_GW_IF" ]; then
 
     # Add a private IP to this bridge.
     # We need it so the bridge can receive traffic, but the IP won't ever see the light of day.
-    ip addr add $QEMU_BRIDGE_IP dev $QEMU_BRIDGE
+    ip addr add "$QEMU_BRIDGE_IP" dev "$QEMU_BRIDGE"
 
     # Restore default gateway route via this bridge.
-    ip route add default via $DOCKER_GW_IF_IP dev $QEMU_BRIDGE
+    ip route add default via "$DOCKER_GW_IF_IP" dev "$QEMU_BRIDGE"
 
     # Accept DNS requests for $RUNCVM_DNS_IP; these will be passed to dnsmasq
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -d $RUNCVM_DNS_IP/32 -p udp -m udp --dport 53 -j REDIRECT
+    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -d "$RUNCVM_DNS_IP/32" -p udp -m udp --dport 53 -j REDIRECT
 
     # Accept VNC requests on published port (5900 + display number)
     if [[ "$RUNCVM_DISPLAY_MODE" = "vnc" ]] || is_natural_int "$RUNCVM_QEMU_VNC_DISPLAY"; then
@@ -152,13 +156,13 @@ do
     # Match UDP port 53 traffic, outgoing via the QEMU bridge, from the bridge's own IP:
     # -> Masquerade as if from the VM's IP.
     #    This allows outgoing DNS requests from the VM to be received by dnsmasq running in the container.
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p udp -m udp --sport 53 -j SNAT --to-source $DOCKER_IF_IP
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p udp -m udp --dport 53 -j SNAT --to-source $DOCKER_IF_IP
+    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s "$QEMU_BRIDGE_IP/32" -p udp -m udp --sport 53 -j SNAT --to-source "$DOCKER_IF_IP"
+    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s "$QEMU_BRIDGE_IP/32" -p udp -m udp --dport 53 -j SNAT --to-source "$DOCKER_IF_IP"
 
     # Match traffic on TCP port $SSHD_PORT, outgoing via the QEMU bridge, from the bridge's own IP:
     # -> Masquerade it as if from the DNS_IP.
     #    This is necessary to allow SSH from within the container to the VM.
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o $QEMU_BRIDGE -s $QEMU_BRIDGE_IP/32 -p tcp -m tcp --dport $SSHD_PORT -j SNAT --to-source $RUNCVM_DNS_IP
+    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s "$QEMU_BRIDGE_IP/32" -p tcp -m tcp --dport "$SSHD_PORT" -j SNAT --to-source "$RUNCVM_DNS_IP"
   fi
 
 done
