@@ -394,8 +394,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [+] `--memory` (or `-m`) is supported to specify VM memory (and limit container memory to this value plus a 256Mb contingency)
       - [-] Other container resource limit options such as (`--cpu-*`), block IO (`--blkio-*`), kernel memory (`--kernel-memory`) are unsupported or untested
    - Exit code
-      - [+] Returning the entrypoint's exit code is supported, but it currently requires application support
-      - [-] To return an exit code, your entrypoint may either write its exit code to `/.runcvm/exit-code` (supported exit codes 0-255) or call `/opt/runcvm/sbin/qemu-exit <code>` (supported exit codes 0-127). Automatic handling of exit codes from the entrypoint will be provided in a later version.
+      - [+] Returning an exit code is supported, but it currently requires application support, which must either write the exit code to `/.runcvm/exitcode` (supported exit codes 0-255) or call `/opt/runcvm/sbin/qemu-exit <code>` (supported exit codes 0-127). Automatic handling of exit codes from the entrypoint may be provided in a later release.
    - Disk performance
       - [+] No mountpoints are required for basic operation for most applications. Volume or disk mountpoints may be needed for running `dockerd` or to improve disk performance
       - [-] `dockerd` mileage will vary unless a volume or disk is mounted over `/var/lib/docker`
@@ -742,7 +741,7 @@ The `runcvm-ctr-entrypoint`:
 The `runcvm-init` process:
 - Is RunCVM's custom init process, that takes over as PID1 within the container, supervising `runcvm-ctr-qemu` to launch the VM.
 - Waits for a TERM signal. On receiving one, it spawns `runcvm-ctr-shutdown`, which cycles through a number of methods to try to shut down the VM cleanly.
-- Waits for its child (QEMU) to exit. When it does, execs `runcvm-ctr-exit` to retrieve any saved exit code (written by the application to `/.runcvm/exit-code`) and exit with this code.
+- Waits for its child (QEMU) to exit. When it does, execs `runcvm-ctr-exit` to retrieve any saved exit code (written by the application to `/.runcvm/exitcode`) and exit with this code.
 
 The `runcvm-ctr-qemu` script:
 - Prepares disk backing files as specified by `--env=RUNCVM_DISKS=<disks>`
