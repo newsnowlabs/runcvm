@@ -73,6 +73,7 @@ do
     --name=$NODE$n \
     --hostname=$NODE$n \
     --memory=512m \
+    --env=RUNCVM_VIRTIOFSD_CACHE=none \
     --env=NODE=$n \
     --env=NODES=$NODES \
     --env=MTU=$MTU \

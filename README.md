@@ -636,6 +636,10 @@ Specify whether QEMU VM memory should be preallocated, or allocated on the host 
 
 Default is `off`, but `on` may deliver improved performance in some scenarios at expense of ability to overcommit.
 
+### `--env=RUNCVM_VIRTIOFSD_CACHE=<auto|none|always>`
+
+Specifies the cache policy passed to `virtiofsd` via `-o cache=<value>`. The default policy is `auto`. Use `none` to avoid caching issues when multiple RunCVM instances need to share access to a volume or bind-mount on the host.
+
 ### `--env=RUNCVM_CGROUPFS=<value>`
 
 Configures cgroupfs mountpoints in the VM, which may be needed to run applications like Docker if systemd is not running. Acceptable values are:

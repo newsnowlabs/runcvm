@@ -7,11 +7,8 @@ if [ "$RUNCVM_SYS_ADMIN" = "1" ]; then
   OPTS+=(-o modcaps=+sys_admin)
 fi
 
-OPTS+=(-o cache=always)
-
-# Experimental options that may improve performance.
-# OPTS+=(-o cache=auto)
-# OPTS+=(--thread-pool-size=1)
+VIRTIOFSD_CACHE=${RUNCVM_VIRTIOFSD_CACHE:-auto}
+OPTS+=(-o "cache=$VIRTIOFSD_CACHE")
 
 # Send logs to /run in container (not in VM)
 exec "$(which virtiofsd)" "${OPTS[@]}" -o announce_submounts -o xattr --socket-path=$QEMU_VIRTIOFSD_SOCKET -o source=$RUNCVM_VM_MOUNTPOINT -o sandbox=chroot >/run/.virtiofsd.log 2>&1
