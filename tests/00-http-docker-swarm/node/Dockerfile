@@ -1,4 +1,4 @@
-FROM alpine:3.18
+FROM alpine:3.22
 
 RUN apk add --update --no-cache docker bash curl jq iproute2
 
