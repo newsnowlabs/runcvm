@@ -51,7 +51,7 @@ fi
 log "Launching $NODES x RunCVM nodes with image $IMAGE ..."
 for n in $(seq 1 $NODES)
 do
-  log -n "Launching RunCVM node $n/$NODES ... "
+  log -n "Launching RunCVM node $n/$NODES (name=$NODE$n) ... "
 
   # Enables Docker's use of overlay2 storage driver in a file-backed disk stored in a dedicated Docker volume
   # diskopt="--mount=type=volume,src=$NODE$n,dst=/disks --env=RUNCVM_DISKS=/disks/disk1,/var/lib/docker,ext4,500M"
@@ -140,7 +140,12 @@ do
   if [ $ERROR -eq 0 ]; then
     response=$(tr '\012\015' '  ' <<<$response)
     grep -q "remote_addr=$DOCKER_IPV4" <<<$response
-    [ $? -ne 0 ] && log "#$loop Response error: $response" && ERROR=1
+    if [ $? -ne 0 ]; then
+      log "#$loop Response error: $response"
+      ERROR=1
+    else
+      log "#$loop Response error: $response"
+    fi
   else
     log "#$loop Response error: curl error $ERROR"
     ERROR=1

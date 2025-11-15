@@ -177,7 +177,7 @@ if [ "$NodeState" = "inactive" ] || [ "$NodeState" = "pending" ]; then
   fi
 
   log "Log memory consumption ..."
-  free
+  free -m
 
   # Log this trigger line last BUT before (optionally) running DIRD.
   # This is because the test script waits for this line to appear before proceeding to launch the service.
@@ -194,8 +194,9 @@ if [ "$NodeState" = "inactive" ] || [ "$NodeState" = "pending" ]; then
     log "Detected node ingress network IP '$(cat /swarm/nodes/$NODE)'"
 
     log "Waiting for all nodes' ingress network IPs ..."
-    for i in $(seq 1 30 | sort -nr)
+    for i in $(seq 1 60 | sort -nr)
     do
+      ls /swarm/nodes
       [ $(ls /swarm/nodes/ | wc -l) -eq $NODES ] && break
       [ $i -eq 1 ] && log "Ingress IP detection for all nodes failed!" && exit 1
       sleep 0.5
@@ -210,7 +211,7 @@ if [ "$NodeState" = "inactive" ] || [ "$NodeState" = "pending" ]; then
     IPs=$(echo $IPs | sed 's/,$//')
 
     log "Running docker-ingress-routing-daemon --preexisting --ingress-gateway-ips $IPs --install ..."
-    while true; do /usr/local/bin/docker-ingress-routing-daemon --preexisting --iptables-wait-seconds 3 --ingress-gateway-ips "$IPs" --install; sleep 1; done &
+    ( sleep 1; while true; do /usr/local/bin/docker-ingress-routing-daemon --preexisting --iptables-wait-seconds 3 --ingress-gateway-ips "$IPs" --install; sleep 1; done ) &
   
   fi
     
