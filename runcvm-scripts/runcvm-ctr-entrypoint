@@ -118,56 +118,45 @@ setup_kubernetes_networking() {
   # Mark that we're in Kubernetes mode
   touch /.runcvm/network/kubernetes_mode
   
-  # Identify default gateway device and IP address
-  read -r DOCKER_GW_IF DOCKER_GW_IF_IP < \
-    <(ip -json route show | jq -r '.[] | (select(.dst == "default") | [.dev, .gateway]) | @tsv') || true
+  # In Kubernetes/SLIRP mode, we need to configure the VM with SLIRP's network
+  # SLIRP uses: 10.0.2.0/24 network, 10.0.2.2 gateway, 10.0.2.15 for VM
+  # The VM will get its IP via SLIRP's DHCP, but we need to provide the config
+  # for the VM init script to work
   
-  # If no default gateway found, try to find any interface
-  if [ -z "$DOCKER_GW_IF" ]; then
-    DOCKER_GW_IF=$(ip -json link show | jq -r '.[] | select(.ifname != "lo") | .ifname' | head -1)
+  # Get the MAC address from the first non-lo interface (we'll use it for the VM)
+  DOCKER_GW_IF=$(ip -json link show | jq -r '.[] | select(.ifname != "lo") | .ifname' | head -1)
+  
+  if [ -n "$DOCKER_GW_IF" ]; then
+    read -r DOCKER_IF_MAC DOCKER_IF_MTU < \
+      <(ip -json addr show "$DOCKER_GW_IF" | jq -r '.[0] | [.address, .mtu] | @tsv') || true
   fi
   
-  # Save routes for VM (but don't modify them)
-  ip -json route show | jq -r '.[] | select(.scope != "link" and .dst != "default") | "\(.dst) \(.gateway // "-") \(.dev) \(.prefsrc // "-")"' >/.runcvm/network/routes 2>/dev/null || true
+  # Use SLIRP network configuration for the VM
+  # Format: ifname mac mtu ip prefix gateway
+  SLIRP_VM_IP="10.0.2.15"
+  SLIRP_VM_PREFIX="24"
+  SLIRP_VM_GW="10.0.2.2"
+  SLIRP_VM_MTU="${DOCKER_IF_MTU:-1500}"
   
-  for if in $(ip -json link show | jq -r '.[] | .ifname'); do
-    [ "$if" = "lo" ] && continue
-    
-    read -r DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_MAC DOCKER_IF_MTU < \
-      <(ip -json addr show "$if" | jq -r '.[0] | [.addr_info[0].local // "-", .addr_info[0].prefixlen // "24", .address, .mtu] | @tsv') || continue
-    
-    # Skip interfaces without IP
-    [ "$DOCKER_IF_IP" = "-" ] || [ -z "$DOCKER_IF_IP" ] && continue
-    
-    # Save container network parameters (without modifying anything)
-    if [ "$if" = "$DOCKER_GW_IF" ]; then
-      printf "%s %s %s %s %s %s\n" \
-        "$if" "$DOCKER_IF_MAC" "$DOCKER_IF_MTU" "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX" "${DOCKER_GW_IF_IP:--}" \
-        >/.runcvm/network/devices/$if
-      ln -sf "$if" /.runcvm/network/devices/default
-    else
-      printf "%s %s %s %s %s %s\n" \
-        "$if" "$DOCKER_IF_MAC" "$DOCKER_IF_MTU" "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX" "-" \
-        >/.runcvm/network/devices/$if
-    fi
-  done
+  # Write SLIRP network config for the VM
+  printf "%s %s %s %s %s %s\n" \
+    "eth0" "${DOCKER_IF_MAC:-52:54:00:12:34:56}" "$SLIRP_VM_MTU" "$SLIRP_VM_IP" "$SLIRP_VM_PREFIX" "$SLIRP_VM_GW" \
+    >/.runcvm/network/devices/eth0
+  ln -sf "eth0" /.runcvm/network/devices/default
   
-  # In Kubernetes mode, we use the container's network directly
-  # Set up DNS to use the existing resolv.conf
-  RUNCVM_DNS_IP="169.254.169.254"
+  # No additional routes needed for SLIRP - default gateway handles everything
+  echo "" >/.runcvm/network/routes
   
-  # Only modify /vm/etc/resolv.conf for the VM, leave container's resolv.conf alone
+  # Set up DNS - SLIRP provides DNS at 10.0.2.3
+  # Point VM's resolv.conf to SLIRP's DNS server
   if [ -f /vm/etc/resolv.conf ]; then
-    # Point VM's DNS to our dnsmasq which will forward to cluster DNS
-    RESOLV_CONF_NEW=$(busybox sed -r "s/127.0.0.11/$RUNCVM_DNS_IP/" /vm/etc/resolv.conf 2>/dev/null || cat /vm/etc/resolv.conf)
-    echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
+    echo "nameserver 10.0.2.3" >/vm/etc/resolv.conf
   fi
   
-  # Launch dnsmasq for DNS forwarding (it will use the existing resolv.conf)
+  # Launch dnsmasq for local DNS forwarding (for container-side lookups)
   dnsmasq -u root --no-hosts 2>/dev/null || true
   
   # For Kubernetes mode, we need to tell QEMU to use user-mode networking
-  # or macvtap instead of the bridge setup
   export RUNCVM_KUBERNETES_MODE=1
 }
 

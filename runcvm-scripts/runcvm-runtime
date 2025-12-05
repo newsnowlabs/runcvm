@@ -519,9 +519,12 @@ if [ "$COMMAND" = "create" ]; then
     # --shm-size applies; default 64m.
   fi
 
-  # Set the container memory limit with a reasonable additionak reserve to allow for
+  # Set the container memory limit with a reasonable additional reserve to allow for
   # QEMU, virtiofsd, dnsmasq and other container memory footprint.
-  jq_set "$CFG" --arg size "$((($RUNCVM_MEM_SIZE + $RUNCVM_CONTAINER_MEM_OVERHEAD)*1024*1024))" '.linux.resources.memory.limit = ($size | tonumber)'
+  RUNCVM_MEM_TOTAL_BYTES="$((($RUNCVM_MEM_SIZE + $RUNCVM_CONTAINER_MEM_OVERHEAD)*1024*1024))"
+  jq_set "$CFG" --arg size "$RUNCVM_MEM_TOTAL_BYTES" '.linux.resources.memory.limit = ($size | tonumber)'
+  # Also set swap limit to same value to avoid "memory+swap limit >= memory limit" error on cgroup v2
+  jq_set "$CFG" --arg size "$RUNCVM_MEM_TOTAL_BYTES" '.linux.resources.memory.swap = ($size | tonumber)'
 
   # Add non-default capabilities needed by:
   # - Docker: CAP_NET_ADMIN
