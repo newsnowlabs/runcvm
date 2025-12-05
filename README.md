@@ -195,6 +195,7 @@ RunCVM features:
 - Uses a lightweight 'wrapper-runtime' technology that subverts the behaviour of the standard container runtime `runc` to cause a VM to be launched within the container (making its code footprint and external dependencies extremely small, and its internals extremely simple and easy to understand and tailor for specific purposes).
 - Highly portable among Linux distributions and development platforms providing KVM. Can even be installed on [GitHub Codespaces](https://github.com/features/codespaces)!
 - Written, using off-the-shelf open-source components, almost entirely in shell script for simplicity, portability and ease of development.
+- **Supports both x86_64 (amd64) and ARM64 (aarch64) architectures**, including Apple Silicon Macs running Docker Desktop or Lima.
 
 > RunCVM makes some trade-offs in return for this simplicity. See the full list of [features and limitations](#features-and-limitations).
 
@@ -209,6 +210,7 @@ RunCVM features:
 - [Applications for RunCVM](#applications-for-runcvm)
 - [How RunCVM works](#how-runcvm-works)
 - [System requirements](#system-requirements)
+- [Architecture support](#architecture-support)
 - [Installation](#installation)
 - [Upgrading](#upgrading)
 - [Features and Limitations](#features-and-limitations)
@@ -241,6 +243,7 @@ RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. 
 - Intelligent kernel selection, according to the distribution used in the image being launched
 - No external dependencies, except for Docker/Podman and relevant Linux kernel modules (`kvm` and `tun`)
 - Support multiple Docker network interfaces attached to a created (but not yet running) container using `docker run --network=<network>` and `docker network connect` (excluding IPv6)
+- **Support both x86_64 and ARM64 architectures natively**
 
 ## Project ambitions
 
@@ -271,11 +274,74 @@ For a deep dive into RunCVM's internals, see the section on [Developing RunCVM](
 
 ## System requirements
 
-RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM.
+RunCVM should run on any hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM.
 
 RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and the `kvm` and `tun` kernel modules. RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
 RunCVM is tested on Debian Bullseye and [GitHub Codespaces](https://github.com/codespaces/new?hide_repo_select=true&ref=main&repo=514606231).
+
+## Architecture support
+
+RunCVM supports both **x86_64 (amd64)** and **ARM64 (aarch64)** architectures.
+
+### x86_64 (amd64)
+
+The original and primary architecture. Uses:
+- QEMU with `qemu-system-x86_64`
+- SeaBIOS or OVMF EFI firmware
+- KVM acceleration with `-enable-kvm`
+- Machine type: `q35`
+
+### ARM64 (aarch64)
+
+Full support for ARM64 systems including Apple Silicon Macs (M1/M2/M3/M4) running Docker Desktop or Lima, and native ARM64 Linux servers. Uses:
+- QEMU with `qemu-system-aarch64`
+- AAVMF (ARM64 UEFI) firmware - ARM64 always boots via UEFI
+- Machine type: `virt` with GIC (Generic Interrupt Controller)
+- CPU: `max` for optimal feature support
+
+#### ARM64 Technical Details
+
+The ARM64 port includes several architecture-specific adaptations:
+
+| Component | x86_64 | ARM64 |
+|-----------|--------|-------|
+| QEMU binary | `qemu-system-x86_64` | `qemu-system-aarch64` |
+| Firmware | SeaBIOS / OVMF | AAVMF (UEFI only) |
+| Machine type | `q35` | `virt,gic-version=max` |
+| Debug exit | I/O port (`isa-debug-exit`) | PSCI (`reboot()` syscall) |
+| VGA device | `virtio-vga` | `virtio-gpu` |
+| Kernel packages | `linux-image-amd64` | `linux-image-arm64` |
+
+#### Building for ARM64
+
+To build the ARM64 version:
+
+```console
+cd runcvm
+docker buildx build --platform linux/arm64 -t runcvm:arm64 -f Dockerfile.arm64 .
+```
+
+Or use the standard build script which auto-detects architecture:
+
+```console
+./build/build.sh
+```
+
+#### ARM64 Quick Start
+
+On ARM64 systems (including Apple Silicon Macs with Docker Desktop):
+
+```console
+# Install RunCVM
+curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
+
+# Run a container in a VM
+docker run --runtime=runcvm --rm -it alpine
+
+# Run nginx in detached mode
+docker run --runtime=runcvm --rm -d -p 8080:80 nginx
+```
 
 ### rp_filter sysctl settings
 
@@ -345,6 +411,27 @@ EOF
 gcloud compute instances create runcvm-vmx-test --zone=us-central1-a --machine-type=n2-highmem-2 --network-interface=network-tier=PREMIUM,stack-type=IPV4_ONLY,subnet=default --metadata-from-file=startup-script=/tmp/startup-script.sh --no-restart-on-failure --maintenance-policy=TERMINATE --provisioning-model=SPOT --instance-termination-action=STOP  --no-service-account --no-scopes --create-disk=auto-delete=yes,boot=yes,image=debian-12-vmx,mode=rw,size=50,type=pd-ssd --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --labels=goog-ec-src=vm_add-gcloud --reservation-affinity=any
 ```
 
+### Install on Apple Silicon (ARM64)
+
+RunCVM works on Apple Silicon Macs (M1/M2/M3/M4) with Docker Desktop or Lima.
+
+**Using Docker Desktop:**
+
+1. Ensure Docker Desktop is installed and running
+2. Run the standard installation command:
+
+```console
+curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
+```
+
+3. Test with:
+
+```console
+docker run --runtime=runcvm --rm -it alpine
+```
+
+**Note:** On Docker Desktop, KVM acceleration is available through the virtualization framework, providing near-native performance for ARM64 VMs.
+
 ## Upgrading
 
 To upgrade, follow this procedure:
@@ -407,8 +494,12 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
    - [+] Use any kernel, either one pre-packaged with RunCVM or roll your own
    - [+] RunCVM will try to select an appropriate kernel to use based on examination of `/etc/os-release` within the image being launched.
 - Firmware
-  - [+] [SeaBIOS](https://github.com/qemu/seabios)
-  - [+] [OVMF EFI](https://github.com/tianocore/tianocore.github.io/wiki/OVMF)
+  - [+] [SeaBIOS](https://github.com/qemu/seabios) (x86_64 only)
+  - [+] [OVMF EFI](https://github.com/tianocore/tianocore.github.io/wiki/OVMF) (x86_64)
+  - [+] [AAVMF](https://wiki.ubuntu.com/UEFI/AAVMF) (ARM64 - UEFI boot, always enabled)
+- Architectures
+  - [+] x86_64 (amd64) - full support
+  - [+] ARM64 (aarch64) - full support including Apple Silicon
 
 ## RunCVM vs Kata comparison
 
@@ -424,6 +515,7 @@ This table provides a high-level comparison of RunCVM and Kata across various fe
 | **CPUs** | VM assigned and reports CPUs as per `--cpus <cpus>` | CPUs must be hardcoded in Kata host config |
 | **Performance** | | Custom kernel optimisations may deliver improved startup (~3.2s) or operational performance (~15%) |
 | **virtiofsd** | Runs `virtiofsd` in container namespace | Unknown |
+| **Architecture** | Supports x86_64 and ARM64 natively | Primarily x86_64 |
 
 [^1]: `docker network create --scope=local testnet >/dev/null && docker run --name=test --rm --runtime=kata --network=testnet --entrypoint=/bin/ash alpine -c 'for n in test google.com 8.8.8.8; do echo "ping $n ..."; ping -q -c 8 -i 0.5 $n; done'; docker network rm testnet >/dev/null` succeeds on `runc` and `runcvm` but at time of writing (2023-12-31) the DNS lookups needed fail on `kata`.
     ```
@@ -498,6 +590,7 @@ command line. The following env options are user-configurable:
 
 Specify with which RunCVM kernel (from `/opt/runcvm/kernels`) to boot the VM. Values must be of the form `<dist>/<version>`, where `<dist>` is a directory under `/opt/runcvm/kernels` and `<version>` is a subdirectory (or symlink to a subdirectory) under that. If `<version>` is omitted, `latest` will be assumed. Here is an example command that will list available values of `<dist>/<version>` on your installation.
 
+**x86_64:**
 ```console
 $ find /opt/runcvm/kernels/ -maxdepth 2 | sed 's!^/opt/runcvm/kernels/!!; /^$/d'
 debian
@@ -514,10 +607,24 @@ ol/5.14.0-70.22.1.0.1.el9_0.x86_64
 ol/latest
 ```
 
+**ARM64:**
+```console
+$ find /opt/runcvm/kernels/ -maxdepth 2 | sed 's!^/opt/runcvm/kernels/!!; /^$/d'
+debian
+debian/latest
+debian/6.1.0-41-arm64
+alpine
+alpine/latest
+alpine/6.6.63-0-virt
+ubuntu
+ubuntu/latest
+ubuntu/6.8.0-51-generic
+```
+
 Example:
 
 ```console
-docker run --rm --runtime=runcvm --env=RUNCVM_KERNEL=ol hello-world
+docker run --rm --runtime=runcvm --env=RUNCVM_KERNEL=debian hello-world
 ```
 
 ### `--env=RUNCVM_KERNEL_APPEND=1`
@@ -572,6 +679,8 @@ Shortcut to select a display mode:
 
 Selects a QEMU guest VGA adaptor: `none`, `virtio`, `std`, `cirrus`. Can be used with `--env=RUNCVM_DISPLAY_MODE=vnc` to override default `virtio` VGA device.
 
+> Note: On ARM64, `virtio-gpu` is used instead of `virtio-vga` as VGA is not available on ARM architecture.
+
 ### `--env=RUNCVM_QEMU_VNC_DISPLAY=<display>`
 
 With `--env=RUNCVM_DISPLAY_MODE=vnc`, overrides the VNC display number (and hence `<guestport>`).
@@ -588,7 +697,17 @@ Enable USB interface.
 
 ### `--env=RUNCVM_BIOS=EFI`
 
-By default SeaBIOS is used to boot the VM. Enable OVMF EFI boot with this option.
+By default SeaBIOS is used to boot the VM on x86_64. Enable OVMF EFI boot with this option.
+
+> Note: On ARM64, UEFI boot (via AAVMF) is always used regardless of this setting, as ARM64 does not support legacy BIOS.
+
+### `--env=RUNCVM_QEMU_ARCH=<value>`
+
+Explicitly specify the QEMU architecture to use. Supported values:
+- `x86_64` - Use x86_64 emulation
+- `arm64` - Use ARM64 emulation
+
+By default, RunCVM auto-detects the host architecture and uses the appropriate QEMU binary.
 
 ### `--env=RUNCVM_QEMU_NET_VHOST=1`
 
@@ -609,6 +728,8 @@ Enable kernel logging (sets kernel `console=ttyS0`).
 ### `--env=RUNCVM_BIOS_DEBUG=1`
 
 By default BIOS console output is hidden. Enable it with this option. With `--env=RUNCVM_BIOS=EFI`, this option has no effect.
+
+> Note: This option is only applicable to x86_64. ARM64 uses UEFI which does not have traditional BIOS debug output.
 
 ### `--env=RUNCVM_RUNTIME_DEBUG=1`
 
@@ -746,6 +867,9 @@ The `runcvm-init` process:
 The `runcvm-ctr-qemu` script:
 - Prepares disk backing files as specified by `--env=RUNCVM_DISKS=<disks>`
 - Prepares network configuration as saved from the container (modifying the MAC address of each container interface)
+- Detects the host architecture and selects appropriate QEMU configuration:
+  - **x86_64**: Uses `qemu-system-x86_64` with `q35` machine type, KVM acceleration, and optional SeaBIOS/OVMF firmware
+  - **ARM64**: Uses `qemu-system-aarch64` with `virt` machine type, GIC interrupt controller, and AAVMF UEFI firmware
 - Launches [QEMU](https://www.qemu.org/) with the required kernel, network interfaces, disks, display, and with a root filesystem mounted via virtiofs from the container and with `runcvm-vm-init` as the VM's init process.
 
 The `runcvm-vm-init` process:
@@ -771,6 +895,35 @@ The RunCVM runtime `exec` process:
 The `runcvm-ctr-exec` script:
 - Uses the Dropbear `dbclient` SSH client to execute the intended command, with the intended arguments within the VM, via the `runcvm-vm-exec` process, propagate the returned stdout and stderr and return the command's exit code.
 
+### Architecture-specific components
+
+#### qemu-exit
+
+The `qemu-exit` binary provides a way for the VM to signal exit to the host. The implementation differs by architecture:
+
+**x86_64:** Uses the `isa-debug-exit` device with I/O port instructions (`outw`/`outb`) to write the exit code.
+
+**ARM64:** Uses the PSCI (Power State Coordination Interface) via the `reboot()` syscall to trigger VM shutdown, as ARM64 does not have I/O ports.
+
+#### QEMU machine configuration
+
+The QEMU configuration is architecture-aware:
+
+**x86_64:**
+```
+-enable-kvm
+-cpu host,pmu=off
+-machine q35,accel=kvm,...
+-device isa-debug-exit
+```
+
+**ARM64:**
+```
+-cpu max
+-machine virt,gic-version=max,usb=off
+-rtc base=utc,driftfix=slew
+```
+
 ## Building
 
 Building RunCVM requires Docker. To build RunCVM, first clone the repo, then run the build script, as follows:
@@ -781,6 +934,18 @@ cd runcvm
 ```
 
 The build script creates a Docker image named `newsnowlabs/runcvm:latest`.
+
+### Building for a specific architecture
+
+**x86_64:**
+```console
+docker buildx build --platform linux/amd64 -t runcvm:amd64 .
+```
+
+**ARM64:**
+```console
+docker buildx build --platform linux/arm64 -t runcvm:arm64 -f Dockerfile.arm64 .
+```
 
 Now follow the main [installation instructions](#installation) to install your built RunCVM from the Docker image.
 
