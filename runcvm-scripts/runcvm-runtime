@@ -30,8 +30,8 @@ RUNCVM_EXEC="$RUNCVM_GUEST/scripts/runcvm-ctr-exec"
 RUNCVM_KERNELS=$RUNCVM/kernels
 RUNCVM_GUEST_KERNELS=$RUNCVM_GUEST/kernels
 RUNCVM_KERNEL_DEFAULT=debian
-RUNCVM_MEM_SIZE_DEFAULT="512" # Default VM memory size (Mb) if not specified in container config
-RUNCVM_CONTAINER_MEM_OVERHEAD="256" # Memory (Mb) overhead to allow for QEMU, virtiofsd, dnsmasq and other container memory footprint: 128Mb minimum, 256Mb recommended
+RUNCVM_MEM_SIZE_DEFAULT="256" # Default VM memory size (Mb) if not specified in container config
+RUNCVM_CONTAINER_MEM_OVERHEAD="384" # Memory (Mb) overhead to allow for QEMU, virtiofsd, dnsmasq and other container memory footprint: 768Mb minimum, 1024Mb recommended
 RUNCVM_DEBUG=""
 
 debug() {
