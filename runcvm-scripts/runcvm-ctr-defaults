@@ -51,7 +51,7 @@ create_aliases() {
       dnsmasq \
       blkid findmnt getent mke2fs mount nc \
       xtables-nft-multi xtables-legacy-multi \
-      qemu-system-x86_64 qemu-ga \
+      qemu-system-aarch64 qemu-ga \
       dbclient dropbear dropbearkey \
       s6-applyuidgid \
       tput

@@ -169,11 +169,21 @@ fi
 # TODO:
 # - Consider using '-device pvpanic'
 
+# Auto-detect architecture if not set
+if [ -z "$RUNCVM_QEMU_ARCH" ]; then
+  case "$(cat /proc/sys/kernel/arch 2>/dev/null || busybox uname -m 2>/dev/null || echo aarch64)" in
+    aarch64|arm64) RUNCVM_QEMU_ARCH="arm64" ;;
+    x86_64) RUNCVM_QEMU_ARCH="x86_64" ;;
+    *) RUNCVM_QEMU_ARCH="x86_64" ;;
+  esac
+fi
+
 if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
   CMD="$(which qemu-system-aarch64)"
   MACHINE+=(-cpu max -machine virt,gic-version=max,usb=off)
+  MACHINE+=(-rtc base=utc,driftfix=slew)
 else
-  CMD="$(which qemu-system-x86_64)"
+  CMD="$(which qemu-system-aarch64)"
   MACHINE+=(-enable-kvm)
   MACHINE+=(-cpu host,pmu=off)
 
@@ -289,20 +299,20 @@ if [ "$NOMODESET" = "1" ]; then
   APPEND+=(nomodeset)
 fi
 
-if [ "$RUNCVM_BIOS_DEBUG" != "1" ]; then
+if [ "$RUNCVM_QEMU_ARCH" != "arm64" ] && [ "$RUNCVM_BIOS_DEBUG" != "1" ]; then
   # Disable SeaBIOS serial console.
   # This -cfw_cfg path is modified from the SeaBIOS default (to avoid an otherwise-inevitable QEMU
   # warning being emitted) and so requires patched bios.bin file(s) (see Dockerfile)
   OPTS+=(-fw_cfg opt/org.seabios/etc/sercon-port,string=0)
 fi
 
-if [ "$RUNCVM_BIOS" = "EFI" ]; then
-  # UEFI firmware
-  OPTS+=(
-    # -drive if=pflash,format=raw,unit=0,readonly=on,file=$RUNCVM_GUEST/usr/share/OVMF/OVMF_CODE.fd
-    # -drive if=pflash,format=raw,unit=1,readonly=on,file=$RUNCVM_GUEST/usr/share/OVMF/OVMF_VARS.fd
-    -bios $RUNCVM_GUEST/usr/share/OVMF/OVMF.fd
-  )
+if [ "$RUNCVM_BIOS" = "EFI" ] || [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
+  # UEFI firmware - use AAVMF for ARM64, OVMF for x86
+  if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
+    OPTS+=(-bios $RUNCVM_GUEST/usr/share/AAVMF/QEMU_EFI.fd)
+  else
+    OPTS+=(-bios $RUNCVM_GUEST/usr/share/OVMF/OVMF.fd)
+  fi
 fi
 
 MEM_BACKEND=(-numa node,memdev=mem)

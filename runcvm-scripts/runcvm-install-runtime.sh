@@ -4,7 +4,7 @@ RUNCVM=/opt/runcvm
 RUNCVM_LD=$RUNCVM/lib/ld
 RUNCVM_JQ=$RUNCVM/usr/bin/jq
 MNT=/runcvm
-REPO=${REPO:-newsnowlabs/runcvm}
+REPO=${REPO:-runcvm:arm64}
 
 log() {
     echo "$@"

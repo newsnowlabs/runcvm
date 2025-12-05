@@ -1,4 +1,4 @@
-#!/opt/runcvm/lib/ld-musl-x86_64.so.1 /opt/runcvm/bin/bash
+#!/opt/runcvm/lib/ld-musl-aarch64.so.1 /opt/runcvm/bin/bash
 
 # REFERENCES
 
