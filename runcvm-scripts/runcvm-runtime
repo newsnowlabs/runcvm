@@ -50,7 +50,7 @@ error() {
   # Dump message to stderr
   echo "RunCVM: Error: $1" >&2
 
-  # Dump error also to the logfile
+  # Dump error also to the logfile
   log "RunCVM: Error: $1"
   exit -1
 }
@@ -142,6 +142,52 @@ set_config_env() {
   jq_set "$CFG" --arg env "$var=$value" '.process.env |= (.+ [$env] | unique)'
 }
 
+# is_sandbox_container - Detect Kubernetes sandbox/pause containers
+# These should bypass RunCVM and run directly with runc
+# Returns 0 if sandbox container detected, 1 otherwise
+is_sandbox_container() {
+  local config_file="$1"
+  
+  # Check for Kubernetes CRI sandbox annotation
+  # containerd sets this annotation for pause containers
+  if jq_get "$config_file" '.annotations["io.kubernetes.cri.container-type"]' 2>/dev/null | grep -q "sandbox"; then
+    log "Detected sandbox container via annotation io.kubernetes.cri.container-type=sandbox"
+    return 0
+  fi
+  
+  # Check for pause in image name (annotations may contain image info)
+  local image_name=$(jq_get "$config_file" '.annotations["io.kubernetes.cri.image-name"]' 2>/dev/null)
+  if echo "$image_name" | grep -qiE "(^|/)pause[:@]|/mirrored-pause[:@]"; then
+    log "Detected sandbox container via image name: $image_name"
+    return 0
+  fi
+  
+  # Check process args for /pause binary
+  local arg0=$(jq_get "$config_file" '.process.args[0]' 2>/dev/null)
+  if [ "$arg0" = "/pause" ]; then
+    log "Detected sandbox container via entrypoint: /pause"
+    return 0
+  fi
+  
+  # Check root path for pause-related paths (containerd naming)
+  local root_path=$(jq_get "$config_file" '.root.path' 2>/dev/null)
+  if echo "$root_path" | grep -qE "pause"; then
+    log "Detected sandbox container via root path: $root_path"
+    return 0
+  fi
+
+  # Check for io.kubernetes.cri.sandbox-id being equal to container id
+  # (sandbox containers have their own id as sandbox-id)
+  local sandbox_id=$(jq_get "$config_file" '.annotations["io.kubernetes.cri.sandbox-id"]' 2>/dev/null)
+  local container_id=$(jq_get "$config_file" '.annotations["io.kubernetes.cri.container-id"]' 2>/dev/null)
+  if [ -n "$sandbox_id" ] && [ "$sandbox_id" = "$container_id" ] && [ "$sandbox_id" != "null" ]; then
+    log "Detected sandbox container via matching sandbox-id and container-id: $sandbox_id"
+    return 0
+  fi
+  
+  return 1
+}
+
 
 # PARSE RUNC GLOBAL OPTIONS:
 # --debug             enable debug logging
@@ -213,6 +259,17 @@ if [ "$COMMAND" = "create" ]; then
     jq -r . <$CFG >/tmp/config.json-$$-1
     
   fi
+
+  # ============================================================
+  # SANDBOX CONTAINER DETECTION
+  # If this is a Kubernetes sandbox/pause container, bypass RunCVM
+  # and pass directly to runc without modification
+  # ============================================================
+  if is_sandbox_container "$CFG"; then
+    log "Sandbox container detected - bypassing RunCVM, passing to runc"
+    exec /usr/bin/runc "${COMMAND_LINE[@]}"
+  fi
+  # ============================================================
   
   # Pending support for user-specified mountpoint for the guest (VM) binaries and scripts
   set_config_env "RUNCVM_GUEST" "$RUNCVM_GUEST"
