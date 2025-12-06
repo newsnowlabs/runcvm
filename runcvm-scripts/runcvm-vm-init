@@ -138,14 +138,14 @@ fi
 mkdir -p /.runcvm/dropbear
 
 # Create dropbear RSA public/private key pair
-KEY_PUBLIC=$(dropbearkey -t rsa -s 2048 -f /.runcvm/dropbear/key 2>/dev/null | grep ^ssh | cut -d' ' -f2)
+KEY_PUBLIC=$(dropbearkey -t ed25519 -f /.runcvm/dropbear/key 2>/dev/null | grep ^ssh | cut -d' ' -f2)
 
 # Create json for dropbear EPKA module
 cat <<_EOE_ >/.runcvm/dropbear/epka.json && chmod 400 /.runcvm/dropbear/epka.json
 [
     {
         "user": "root",
-        "keytype": "ssh-rsa",
+        "keytype": "ssh-ed25519",
         "key": "$KEY_PUBLIC",
         "options":"no-X11-forwarding",
         "comments": ""
