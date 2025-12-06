@@ -145,8 +145,22 @@ if [ -f /.runcvm/entrypoint ]; then
   
   log "Executing: $CMD"
   
-  # Use eval to handle quoted arguments properly
-  eval exec $CMD
+  # Run the command (not exec - we need to capture exit and shutdown)
+  eval $CMD
+  EXIT_CODE=$?
+  
+  log "Command exited with code: $EXIT_CODE"
+  
+  # Save exit code for potential retrieval
+  echo "$EXIT_CODE" > /.runcvm/exitcode 2>/dev/null || true
+  
+  # Trigger clean shutdown via reboot syscall
+  # Firecracker will catch this and exit cleanly
+  log "Shutting down VM..."
+  reboot -f 2>/dev/null || poweroff -f 2>/dev/null || true
+  
+  # If reboot didn't work, just exit (will cause kernel panic but that's ok)
+  exit $EXIT_CODE
 else
   log "No entrypoint found, starting shell"
   exec /bin/sh -l
