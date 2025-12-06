@@ -137,11 +137,13 @@ fi
 # Make directory for dropbear host keys and public/private keypair
 mkdir -p /.runcvm/dropbear
 
-# Create dropbear RSA public/private key pair
-KEY_PUBLIC=$(dropbearkey -t ed25519 -f /.runcvm/dropbear/key 2>/dev/null | grep ^ssh | cut -d' ' -f2)
+# Only generate if not pre-generated
+if [ ! -f /.runcvm/dropbear/key ]; then
+  # Create dropbear RSA public/private key pair
+  KEY_PUBLIC=$(dropbearkey -t ed25519 -f /.runcvm/dropbear/key 2>/dev/null | grep ^ssh | cut -d' ' -f2)
 
-# Create json for dropbear EPKA module
-cat <<_EOE_ >/.runcvm/dropbear/epka.json && chmod 400 /.runcvm/dropbear/epka.json
+  # Create json for dropbear EPKA module
+  cat <<_EOE_ >/.runcvm/dropbear/epka.json && chmod 400 /.runcvm/dropbear/epka.json
 [
     {
         "user": "root",
@@ -152,6 +154,7 @@ cat <<_EOE_ >/.runcvm/dropbear/epka.json && chmod 400 /.runcvm/dropbear/epka.jso
     }
 ]
 _EOE_
+fi
 
 # Load choice of console device
 read -r CONSOLE_DEVICE </.runcvm/console

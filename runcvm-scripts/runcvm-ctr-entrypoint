@@ -323,6 +323,17 @@ fi
 # DEBUG
 if [[ "$RUNCVM_BREAK" =~ postnet ]]; then bash; fi
 
+# Pre-generate SSH keys (saves ~1-2s during VM boot)
+mkdir -p /.runcvm/dropbear
+if [ ! -f /.runcvm/dropbear/key ]; then
+  $RUNCVM_GUEST/usr/bin/dropbearkey -t ed25519 -f /.runcvm/dropbear/key >/dev/null 2>&1
+  KEY_PUBLIC=$($RUNCVM_GUEST/usr/bin/dropbearkey -y -f /.runcvm/dropbear/key 2>/dev/null | grep ^ssh | cut -d' ' -f2)
+  cat <<_EOE_ >/.runcvm/dropbear/epka.json
+[{"user":"root","keytype":"ssh-ed25519","key":"$KEY_PUBLIC","options":"no-X11-forwarding","comments":""}]
+_EOE_
+  chmod 400 /.runcvm/dropbear/epka.json /.runcvm/dropbear/key
+fi
+
 # LAUNCH INIT SUPERVISING QEMU
 # FIXME: Add -v to debug
 exec $RUNCVM_GUEST/sbin/runcvm-init -c $RUNCVM_GUEST/scripts/runcvm-ctr-qemu
