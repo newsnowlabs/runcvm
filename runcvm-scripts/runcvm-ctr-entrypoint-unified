@@ -1,0 +1,192 @@
+#!/.runcvm/guest/bin/bash -e
+
+# RunCVM Container Entrypoint
+# Modified to support both QEMU and Firecracker hypervisors
+#
+# Selection via RUNCVM_HYPERVISOR env var:
+#   - qemu (default): Use QEMU with virtiofs
+#   - firecracker: Use Firecracker with virtio-blk rootfs
+
+# DEBUG
+if [[ "$RUNCVM_BREAK" =~ (prenet|postnet) ]]; then set -x; fi
+
+# Determine hypervisor
+RUNCVM_HYPERVISOR="${RUNCVM_HYPERVISOR:-qemu}"
+
+log() {
+  echo "RunCVM-Entrypoint: $1" >&2
+}
+
+log "Starting with hypervisor: $RUNCVM_HYPERVISOR"
+
+# ============================================================
+# SAVE ENTRYPOINT AND ENVIRONMENT
+# ============================================================
+
+args=("$@")
+printf "%s\n" "${args[@]}" >/.runcvm/entrypoint
+
+# Handle HOME env var
+if [ "$RUNCVM_HAS_HOME" == "0" ]; then
+  HOME=$($RUNCVM_GUEST/usr/bin/getent passwd "${RUNCVM_UIDGID%%:*}" | $RUNCVM_GUEST/bin/cut -d':' -f6)
+fi
+
+if [ -z "$RUNCVM_CPUS" ] || [ "$RUNCVM_CPUS" -le 0 ]; then
+  RUNCVM_CPUS=$($RUNCVM_GUEST/bin/busybox nproc)
+fi
+
+# Save environment
+export -n SHLVL OLDPWD
+export >/.runcvm/config
+
+# Load defaults and path
+. $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
+. $RUNCVM_GUEST/scripts/runcvm-ip-functions
+
+# Save working directory
+busybox pwd >/.runcvm/pwd
+
+# DEBUG
+if [[ "$RUNCVM_BREAK" =~ prenet ]]; then bash; fi
+
+# ============================================================
+# NETWORK SETUP (Common for both hypervisors)
+# ============================================================
+
+setup_docker_networking() {
+  # [Previous Docker networking code - same as original]
+  
+  read -r DOCKER_GW_IF DOCKER_GW_IF_IP < \
+    <(ip -json route show | jq -r '.[] | (select(.dst == "default") | [.dev, .gateway]) | @tsv')
+  
+  QEMU_BRIDGE_IP=169.254.1.1
+  RUNCVM_DNS_IP=169.254.169.254
+  
+  mkdir -p /.runcvm/network/devices
+  
+  ip -json route show | jq -r '.[] | select(.scope != "link" and .dst != "default") | "\(.dst) \(.gateway) \(.dev) \(.prefsrc)"' >/.runcvm/network/routes
+  
+  for if in $(ip -json link show | jq -r '.[] | .ifname'); do
+    [ "$if" = "lo" ] && continue
+    
+    read -r DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_MAC DOCKER_IF_MTU < \
+      <(ip -json addr show "$if" | jq -r '.[0] | [.addr_info[0].local, .addr_info[0].prefixlen, .address, .mtu] | @tsv')
+    
+    # Save container network parameters
+    if [ "$if" = "$DOCKER_GW_IF" ]; then
+      printf "%s %s %s %s %s %s\n" \
+        "$if" "$DOCKER_IF_MAC" "$DOCKER_IF_MTU" "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX" "$DOCKER_GW_IF_IP" \
+        >/.runcvm/network/devices/$if
+      ln -s "$if" /.runcvm/network/devices/default
+    else
+      printf "%s %s %s %s %s %s\n" \
+        "$if" "$DOCKER_IF_MAC" "$DOCKER_IF_MTU" "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX" "-" \
+        >/.runcvm/network/devices/$if
+    fi
+    
+    # Reconfigure container network
+    ip addr flush dev "$if"
+    
+    QEMU_BRIDGE="br-$if"
+    
+    ip link add "$QEMU_BRIDGE" type bridge forward_delay 0 ageing 0
+    ip link set dev "$if" master "$QEMU_BRIDGE"
+    ip link set dev "$if" up
+    ip link set dev "$QEMU_BRIDGE" up
+    
+    DOCKER_NET=$(ip_prefix_to_network "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX")/"$DOCKER_IF_IP_NETPREFIX"
+    ip route add "$DOCKER_NET" dev "$QEMU_BRIDGE"
+    
+    if [ "$if" = "$DOCKER_GW_IF" ]; then
+      ip addr add "$QEMU_BRIDGE_IP" dev "$QEMU_BRIDGE"
+      ip route add default via "$DOCKER_GW_IF_IP" dev "$QEMU_BRIDGE"
+      
+      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -d "$RUNCVM_DNS_IP/32" -p udp -m udp --dport 53 -j REDIRECT
+      
+      if [[ "$RUNCVM_DISPLAY_MODE" = "vnc" ]] || is_natural_int "$RUNCVM_QEMU_VNC_DISPLAY"; then
+        XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -p tcp -m tcp --dport $((RUNCVM_QEMU_VNC_DISPLAY+5900)) -j REDIRECT
+      fi
+      
+      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s "$QEMU_BRIDGE_IP/32" -p udp -m udp --sport 53 -j SNAT --to-source "$DOCKER_IF_IP"
+      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s "$QEMU_BRIDGE_IP/32" -p udp -m udp --dport 53 -j SNAT --to-source "$DOCKER_IF_IP"
+      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s "$QEMU_BRIDGE_IP/32" -p tcp -m tcp --dport "$SSHD_PORT" -j SNAT --to-source "$RUNCVM_DNS_IP"
+    fi
+  done
+  
+  cat /vm/etc/resolv.conf >/etc/resolv.conf
+  RESOLV_CONF_NEW=$(busybox sed -r "s/127.0.0.11/$RUNCVM_DNS_IP/" /vm/etc/resolv.conf)
+  echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
+  
+  dnsmasq -u root --no-hosts
+}
+
+# Run network setup
+setup_docker_networking
+
+# DEBUG
+if [[ "$RUNCVM_BREAK" =~ postnet ]]; then bash; fi
+
+# ============================================================
+# HYPERVISOR-SPECIFIC LAUNCH
+# ============================================================
+
+case "$RUNCVM_HYPERVISOR" in
+  firecracker|fc)
+    log "Launching Firecracker microVM..."
+    
+    # For Firecracker, we need to:
+    # 1. Create rootfs image from container filesystem
+    # 2. Embed network config into rootfs
+    # 3. Launch Firecracker
+    
+    # Pre-generate SSH keys
+    mkdir -p /.runcvm/dropbear
+    if [ ! -f /.runcvm/dropbear/key ]; then
+      $RUNCVM_GUEST/usr/bin/dropbearkey -t ed25519 -f /.runcvm/dropbear/key >/dev/null 2>&1
+      KEY_PUBLIC=$($RUNCVM_GUEST/usr/bin/dropbearkey -y -f /.runcvm/dropbear/key 2>/dev/null | grep ^ssh | cut -d' ' -f2)
+      cat <<EOF >/.runcvm/dropbear/epka.json
+[{"user":"root","keytype":"ssh-ed25519","key":"$KEY_PUBLIC","options":"no-X11-forwarding","comments":""}]
+EOF
+      chmod 400 /.runcvm/dropbear/epka.json /.runcvm/dropbear/key
+    fi
+    
+    # Copy network config to VM mountpoint for embedding in rootfs
+    mkdir -p "$RUNCVM_VM_MOUNTPOINT/.runcvm/network"
+    cp -a /.runcvm/network/. "$RUNCVM_VM_MOUNTPOINT/.runcvm/network/"
+    cp -a /.runcvm/config "$RUNCVM_VM_MOUNTPOINT/.runcvm/"
+    cp -a /.runcvm/entrypoint "$RUNCVM_VM_MOUNTPOINT/.runcvm/"
+    cp -a /.runcvm/pwd "$RUNCVM_VM_MOUNTPOINT/.runcvm/"
+    cp -a /.runcvm/dropbear "$RUNCVM_VM_MOUNTPOINT/.runcvm/"
+    
+    # Launch Firecracker
+    exec $RUNCVM_GUEST/sbin/runcvm-init -c $RUNCVM_GUEST/scripts/runcvm-ctr-firecracker
+    ;;
+    
+  qemu|*)
+    log "Launching QEMU VM..."
+    
+    # Launch virtiofsd
+    $RUNCVM_GUEST/scripts/runcvm-ctr-virtiofsd &
+    
+    # Wait for virtiofsd socket
+    SOCKET_PATH="${QEMU_VIRTIOFSD_SOCKET:-/run/.virtiofs.sock}"
+    for i in $(seq 1 100); do
+      [ -S "$SOCKET_PATH" ] && break
+      sleep 0.1
+    done
+    
+    # Pre-generate SSH keys
+    mkdir -p /.runcvm/dropbear
+    if [ ! -f /.runcvm/dropbear/key ]; then
+      $RUNCVM_GUEST/usr/bin/dropbearkey -t ed25519 -f /.runcvm/dropbear/key >/dev/null 2>&1
+      KEY_PUBLIC=$($RUNCVM_GUEST/usr/bin/dropbearkey -y -f /.runcvm/dropbear/key 2>/dev/null | grep ^ssh | cut -d' ' -f2)
+      cat <<EOF >/.runcvm/dropbear/epka.json
+[{"user":"root","keytype":"ssh-ed25519","key":"$KEY_PUBLIC","options":"no-X11-forwarding","comments":""}]
+EOF
+      chmod 400 /.runcvm/dropbear/epka.json /.runcvm/dropbear/key
+    fi
+    
+    # Launch QEMU
+    exec $RUNCVM_GUEST/sbin/runcvm-init -c $RUNCVM_GUEST/scripts/runcvm-ctr-qemu
+    ;;
+esac
