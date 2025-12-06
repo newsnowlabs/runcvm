@@ -303,7 +303,7 @@ if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
   CMD="$(which qemu-system-aarch64)"
   MACHINE+=(-cpu max -machine virt,gic-version=max,usb=off)
   # Note: driftfix=slew is not supported on ARM virt machine, removed
-  MACHINE+=(-rtc base=utc)
+  MACHINE+=(-rtc base=utc,clock=host)
 else
   CMD="$(which qemu-system-aarch64)"
   MACHINE+=(-enable-kvm)
@@ -428,7 +428,7 @@ if [ "$RUNCVM_QEMU_ARCH" != "arm64" ] && [ "$RUNCVM_BIOS_DEBUG" != "1" ]; then
   OPTS+=(-fw_cfg opt/org.seabios/etc/sercon-port,string=0)
 fi
 
-if [ "$RUNCVM_BIOS" = "EFI" ] || [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
+if [ "$RUNCVM_BIOS" = "EFI" ]; then
   # UEFI firmware - use AAVMF for ARM64, OVMF for x86
   if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
     OPTS+=(-bios $RUNCVM_GUEST/usr/share/AAVMF/QEMU_EFI.fd)
