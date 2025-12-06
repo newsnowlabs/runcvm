@@ -1,35 +1,153 @@
 #!/bin/sh
+# RunCVM VM Init for Firecracker
+# 
+# This script runs inside the Firecracker VM where the rootfs is from the container image.
+# We use /bin/sh (busybox from Alpine) instead of bundled bash.
+
 set -e
-log() { echo "RunCVM-FC-Init: $1"; }
+
+RUNCVM_GUEST="${RUNCVM_GUEST:-/.runcvm/guest}"
+SSHD_PORT="${SSHD_PORT:-22222}"
+
+log() {
+  echo "RunCVM-FC-Init: $1"
+}
+
 log "Starting Firecracker VM initialization..."
 
+# ============================================================
+# MOUNT ESSENTIAL FILESYSTEMS
+# ============================================================
+
+# Root should already be mounted by kernel, remount rw if needed
 mount -o remount,rw / 2>/dev/null || true
-[ -d /proc ] || mkdir -p /proc; mountpoint -q /proc || mount -t proc proc /proc
-[ -d /sys ] || mkdir -p /sys; mountpoint -q /sys || mount -t sysfs sysfs /sys
-[ -d /dev ] || mkdir -p /dev; mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev
+
+# Mount proc if not mounted
+if ! mountpoint -q /proc 2>/dev/null; then
+  mkdir -p /proc
+  mount -t proc proc /proc
+fi
+
+# Mount sysfs if not mounted
+if ! mountpoint -q /sys 2>/dev/null; then
+  mkdir -p /sys
+  mount -t sysfs sysfs /sys
+fi
+
+# Mount devtmpfs if not mounted  
+if ! mountpoint -q /dev 2>/dev/null; then
+  mkdir -p /dev
+  mount -t devtmpfs devtmpfs /dev
+fi
+
+# Create pts and shm
 mkdir -p /dev/pts /dev/shm
 mount -t devpts devpts /dev/pts 2>/dev/null || true
 mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
+
+# Create /dev/fd symlinks
 [ -e /dev/fd ] || ln -sf /proc/self/fd /dev/fd
+[ -e /dev/stdin ] || ln -sf /proc/self/fd/0 /dev/stdin
+[ -e /dev/stdout ] || ln -sf /proc/self/fd/1 /dev/stdout
+[ -e /dev/stderr ] || ln -sf /proc/self/fd/2 /dev/stderr
+
 log "Filesystems mounted"
 
-[ -f /.runcvm/config ] && . /.runcvm/config
+# ============================================================
+# LOAD CONFIGURATION
+# The config file may contain bash 'declare -x' syntax
+# We need to convert it to sh-compatible format
+# ============================================================
 
-ip link set lo up 2>/dev/null || true
-if [ -f "/.runcvm/network/devices/eth0" ]; then
-  read DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW < /.runcvm/network/devices/eth0
-  [ -n "$DOCKER_IF_IP" ] && ip addr add "$DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX" broadcast + dev eth0 2>/dev/null || true
-  ip link set eth0 up mtu "${DOCKER_IF_MTU:-1500}" 2>/dev/null || true
-  [ -n "$DOCKER_IF_IP_GW" ] && [ "$DOCKER_IF_IP_GW" != "-" ] && ip route add default via "$DOCKER_IF_IP_GW" dev eth0 2>/dev/null || true
-  log "Network: $DOCKER_IF_IP"
+if [ -f /.runcvm/config ]; then
+  # Convert 'declare -x VAR="value"' to 'export VAR="value"'
+  # and source it
+  sed 's/^declare -x /export /' /.runcvm/config > /tmp/config.sh 2>/dev/null || true
+  . /tmp/config.sh 2>/dev/null || true
+  rm -f /tmp/config.sh
 fi
 
-[ -f /etc/hostname ] && hostname -F /etc/hostname
-[ -f /.runcvm/pwd ] && cd "$(cat /.runcvm/pwd)" 2>/dev/null || cd /
+# ============================================================
+# NETWORK CONFIGURATION
+# ============================================================
 
-log "Launching entrypoint..."
-if [ -f /.runcvm/entrypoint ]; then
-  exec $(cat /.runcvm/entrypoint | tr '\n' ' ')
+log "Configuring network..."
+
+# Bring up loopback
+ip link set lo up 2>/dev/null || true
+
+# Configure eth0 if network config exists
+if [ -f "/.runcvm/network/devices/eth0" ]; then
+  read DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW < /.runcvm/network/devices/eth0
+  
+  if [ -n "$DOCKER_IF_IP" ] && [ -n "$DOCKER_IF_IP_NETPREFIX" ]; then
+    ip addr add "$DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX" broadcast + dev eth0 2>/dev/null || true
+    ip link set eth0 up mtu "${DOCKER_IF_MTU:-1500}" 2>/dev/null || true
+    
+    if [ -n "$DOCKER_IF_IP_GW" ] && [ "$DOCKER_IF_IP_GW" != "-" ]; then
+      ip route add default via "$DOCKER_IF_IP_GW" dev eth0 2>/dev/null || true
+    fi
+    
+    log "Network configured: $DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX gw $DOCKER_IF_IP_GW"
+  fi
 else
+  # Try to bring up eth0 anyway
+  ip link set eth0 up 2>/dev/null || true
+  log "Network: eth0 up (no config file)"
+fi
+
+# Install supplementary routes
+if [ -f "/.runcvm/network/routes" ]; then
+  while read rt_net rt_gw rt_dev rt_prefsrc; do
+    [ -n "$rt_net" ] && [ -n "$rt_gw" ] && [ -n "$rt_dev" ] && \
+      ip route add "$rt_net" via "$rt_gw" dev "$rt_dev" 2>/dev/null || true
+  done < /.runcvm/network/routes
+fi
+
+# ============================================================
+# HOSTNAME
+# ============================================================
+
+if [ -f /etc/hostname ]; then
+  hostname -F /etc/hostname
+  log "Hostname: $(hostname)"
+fi
+
+# ============================================================
+# WORKING DIRECTORY
+# ============================================================
+
+if [ -f /.runcvm/pwd ]; then
+  cd "$(cat /.runcvm/pwd)" 2>/dev/null || cd /
+fi
+
+# ============================================================
+# LAUNCH ENTRYPOINT
+# ============================================================
+
+log "Preparing to launch entrypoint..."
+
+# Read and execute entrypoint
+if [ -f /.runcvm/entrypoint ]; then
+  # Build command from entrypoint file (one arg per line)
+  CMD=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ -z "$CMD" ]; then
+      CMD="$line"
+    else  
+      # Quote arguments that contain spaces
+      case "$line" in
+        *\ *) CMD="$CMD \"$line\"" ;;
+        *) CMD="$CMD $line" ;;
+      esac
+    fi
+  done < /.runcvm/entrypoint
+  
+  log "Executing: $CMD"
+  
+  # Use eval to handle quoted arguments properly
+  eval exec $CMD
+else
+  log "No entrypoint found, starting shell"
   exec /bin/sh -l
 fi
