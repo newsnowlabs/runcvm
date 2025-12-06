@@ -1,13 +1,7 @@
 #!/.runcvm/guest/bin/bash
 
 # RunCVM Firecracker Launcher
-# Creates rootfs image from container filesystem and launches Firecracker microVM
-#
-# Key differences from QEMU:
-# - Uses REST API instead of command-line arguments
-# - Uses virtio-blk for rootfs (no virtiofs support)
-# - Uses virtio-mmio instead of virtio-pci
-# - Minimal device model (faster boot, lower memory)
+# Launches a Firecracker microVM using config file mode (for console output)
 
 set -o errexit -o pipefail
 
@@ -17,12 +11,8 @@ set -o errexit -o pipefail
 # Load defaults
 . $RUNCVM_GUEST/scripts/runcvm-ctr-defaults && unset PATH
 
-# Firecracker-specific paths
-FIRECRACKER_BIN="$RUNCVM_GUEST/bin/firecracker"
-FIRECRACKER_SOCKET="/run/.firecracker.sock"
-
-# Rootfs image path
-ROOTFS_IMAGE="/.runcvm/rootfs.ext4"
+FIRECRACKER_BIN="$RUNCVM_GUEST/sbin/firecracker"
+FIRECRACKER_CONFIG="/run/.firecracker-config.json"
 
 log() {
   echo "RunCVM-FC: $1" >&2
@@ -33,299 +23,114 @@ error() {
   exit 1
 }
 
-# ============================================================
-# FIRECRACKER API FUNCTIONS
-# ============================================================
-
-wait_for_api() {
-  local max_attempts=50
-  local attempt=0
-  
-  while [ $attempt -lt $max_attempts ]; do
-    if [ -S "$FIRECRACKER_SOCKET" ]; then
-      if curl --silent --unix-socket "$FIRECRACKER_SOCKET" \
-           -X GET "http://localhost/" >/dev/null 2>&1; then
-        return 0
-      fi
-    fi
-    attempt=$((attempt + 1))
-    sleep 0.1
-  done
-  
-  error "Firecracker API not ready after ${max_attempts} attempts"
-}
-
-fc_api() {
-  local method="$1"
-  local endpoint="$2"
-  local data="$3"
-  
-  local curl_args=(
-    --silent
-    --show-error
-    --unix-socket "$FIRECRACKER_SOCKET"
-    -X "$method"
-    -H "Content-Type: application/json"
-  )
-  
-  if [ -n "$data" ]; then
-    curl_args+=(-d "$data")
-  fi
-  
-  curl "${curl_args[@]}" "http://localhost${endpoint}"
-}
-
-configure_boot_source() {
-  local kernel_path="$1"
-  local boot_args="$2"
-  
-  log "Configuring boot source: $kernel_path"
-  
-  fc_api PUT /boot-source "{
-    \"kernel_image_path\": \"$kernel_path\",
-    \"boot_args\": \"$boot_args\"
-  }"
-}
-
-configure_root_drive() {
-  local rootfs_path="$1"
-  local is_read_only="${2:-false}"
-  
-  log "Configuring root drive: $rootfs_path"
-  
-  fc_api PUT /drives/rootfs "{
-    \"drive_id\": \"rootfs\",
-    \"path_on_host\": \"$rootfs_path\",
-    \"is_root_device\": true,
-    \"is_read_only\": $is_read_only
-  }"
-}
-
-configure_network() {
-  local iface_id="$1"
-  local host_dev="$2"
-  local guest_mac="$3"
-  
-  log "Configuring network $iface_id: $host_dev ($guest_mac)"
-  
-  fc_api PUT "/network-interfaces/$iface_id" "{
-    \"iface_id\": \"$iface_id\",
-    \"host_dev_name\": \"$host_dev\",
-    \"guest_mac\": \"$guest_mac\"
-  }"
-}
-
-configure_machine() {
-  local vcpu_count="$1"
-  local mem_size_mib="$2"
-  
-  log "Configuring machine: ${vcpu_count} vCPUs, ${mem_size_mib} MiB RAM"
-  
-  fc_api PUT /machine-config "{
-    \"vcpu_count\": $vcpu_count,
-    \"mem_size_mib\": $mem_size_mib,
-    \"smt\": false
-  }"
-}
-
-start_instance() {
-  log "Starting microVM instance..."
-  
-  fc_api PUT /actions "{
-    \"action_type\": \"InstanceStart\"
-  }"
-}
-
-# ============================================================
-# ROOTFS CREATION
-# ============================================================
-
-create_rootfs_image() {
+# Create rootfs image from container filesystem
+create_rootfs() {
   local source_dir="$1"
-  local dest_image="$2"
+  local image_path="$2"
   local size_mb="$3"
   
-  log "Creating rootfs image from $source_dir (${size_mb}MB)"
+  log "Creating rootfs: $image_path (${size_mb}MB) from $source_dir"
   
   # Create sparse file
-  busybox truncate -s "${size_mb}M" "$dest_image"
+  busybox truncate -s "${size_mb}M" "$image_path"
   
-  # Create ext4 filesystem with contents
-  mke2fs -q -F -t ext4 -d "$source_dir" "$dest_image"
+  # Create ext4 filesystem populated with source directory contents
+  mke2fs -q -F -t ext4 -d "$source_dir" "$image_path" >/dev/null 2>&1
   
-  log "Rootfs image created: $dest_image"
+  log "Rootfs created"
 }
 
-# ============================================================
-# NETWORK SETUP
-# ============================================================
-
-setup_networks() {
-  local id=0
-  local ifpath if mac
-  
-  for ifpath in /.runcvm/network/devices/*; do
-    if=$(busybox basename "$ifpath")
-    [ "$if" = "default" ] && continue
-    
-    load_network "$if"
-    
-    # Convert MAC address format for Firecracker (AA:FC:00 prefix)
-    mac=$(busybox sed -r 's/^..:..:../AA:FC:00/' <<<"$DOCKER_IF_MAC")
-    
-    # Firecracker expects TAP device to exist
-    configure_network "eth${id}" "tap-$DOCKER_IF" "$mac"
-    
-    id=$((id + 1))
-  done
-}
-
-# ============================================================
-# DISK SETUP (for RUNCVM_DISKS)
-# ============================================================
-
-setup_disks() {
-  local IFS=';'
-  local disk
-  local id=1  # Start from 1, 0 is rootfs
-  
-  [ -z "$RUNCVM_DISKS" ] && return
-  
-  for disk in $RUNCVM_DISKS; do
-    local src dst fs size
-    IFS=',' read src dst fs size <<<"$disk"
-    
-    [ -z "$src" ] || [ -z "$dst" ] || [ -z "$fs" ] && continue
-    
-    # Create disk if it doesn't exist
-    if [ ! -f "$src" ]; then
-      [ -z "$size" ] && continue
-      
-      busybox truncate -s "$size" "$src"
-      mke2fs -q -F -t "$fs" "$src"
-    fi
-    
-    # Add fstab entry
-    local uuid
-    read -r uuid <<<"$(blkid -o value "$src" | head -1)"
-    echo "UUID=$uuid $dst $fs defaults,noatime 0 0" >>/.runcvm/fstab
-    
-    # Configure drive in Firecracker
-    fc_api PUT "/drives/drive${id}" "{
-      \"drive_id\": \"drive${id}\",
-      \"path_on_host\": \"$src\",
-      \"is_root_device\": false,
-      \"is_read_only\": false
-    }"
-    
-    id=$((id + 1))
-  done
-}
-
-# ============================================================
-# MAIN
-# ============================================================
-
+# Main function
 main() {
   log "Starting Firecracker microVM launcher..."
   
-  # Validate Firecracker binary
+  # Check for Firecracker binary
   if [ ! -x "$FIRECRACKER_BIN" ]; then
-    # Try system path
-    FIRECRACKER_BIN=$(which firecracker 2>/dev/null || echo "")
-    if [ -z "$FIRECRACKER_BIN" ] || [ ! -x "$FIRECRACKER_BIN" ]; then
-      error "Firecracker binary not found"
-    fi
+    error "Firecracker binary not found: $FIRECRACKER_BIN"
   fi
-  log "Using Firecracker: $FIRECRACKER_BIN"
   
-  # Clean up any existing socket
-  rm -f "$FIRECRACKER_SOCKET"
+  # Calculate rootfs size (source size + 256MB headroom, minimum 512MB)
+  local rootfs_size=$(( $(busybox du -sm "$RUNCVM_VM_MOUNTPOINT" | busybox cut -f1) + 256 ))
+  [ "$rootfs_size" -lt 512 ] && rootfs_size=512
   
-  # Calculate rootfs size (container usage + 256MB headroom)
-  local rootfs_size_mb
-  rootfs_size_mb=$(( $(busybox du -sm "$RUNCVM_VM_MOUNTPOINT" 2>/dev/null | cut -f1) + 256 ))
-  [ $rootfs_size_mb -lt 512 ] && rootfs_size_mb=512
+  # Create rootfs in /dev/shm (tmpfs, sized to VM memory)
+  local rootfs_path="/dev/shm/rootfs.ext4"
+  create_rootfs "$RUNCVM_VM_MOUNTPOINT" "$rootfs_path" "$rootfs_size"
   
-  log "Creating rootfs image (${rootfs_size_mb}MB) from $RUNCVM_VM_MOUNTPOINT..."
-  create_rootfs_image "$RUNCVM_VM_MOUNTPOINT" "$ROOTFS_IMAGE" "$rootfs_size_mb"
+  # Determine kernel path - USE FIRECRACKER KERNEL BY DEFAULT
+  local fc_default_kernel="$RUNCVM_GUEST/firecracker-kernel"
+  local kernel_path="${RUNCVM_FC_KERNEL_PATH:-$fc_default_kernel}"
+  
+  log "Kernel: $kernel_path"
+  
+  if [ ! -f "$kernel_path" ]; then
+    error "Firecracker kernel not found: $kernel_path"
+  fi
+  
+  # Build boot arguments
+  local boot_args="init=$RUNCVM_GUEST/scripts/runcvm-vm-init-firecracker console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw"
   
   # Parse memory size (remove 'M' suffix if present)
-  local mem_size_mib="${RUNCVM_MEM_SIZE%M}"
-  mem_size_mib="${mem_size_mib:-768}"
+  local mem_mb="${RUNCVM_MEM_SIZE%M}"
+  [ -z "$mem_mb" ] && mem_mb=768
   
   # Parse CPU count
   local vcpu_count="${RUNCVM_CPUS:-1}"
   [ "$vcpu_count" -le 0 ] && vcpu_count=$(busybox nproc)
   
-  # Determine kernel path
-  # For Firecracker, we need a vmlinux (uncompressed) kernel
-  local kernel_path="$RUNCVM_KERNEL_PATH"
+  log "VM config: $vcpu_count vCPUs, $mem_mb MiB RAM"
   
-  # Check if it's a vmlinux or compressed kernel
-  if [ ! -f "$kernel_path" ]; then
-    error "Kernel not found: $kernel_path"
+  # Build network config if available
+  local network_config=""
+  if [ -f "/.runcvm/network/devices/eth0" ]; then
+    read DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW < /.runcvm/network/devices/eth0
+    local fc_mac=$(echo "$DOCKER_IF_MAC" | busybox sed 's/^..:..:../AA:FC:00/')
+    log "Network: tap-$DOCKER_IF ($fc_mac)"
+    network_config=",\"network-interfaces\":[{\"iface_id\":\"eth0\",\"guest_mac\":\"$fc_mac\",\"host_dev_name\":\"tap-$DOCKER_IF\"}]"
   fi
   
-  # Build kernel boot arguments
-  local boot_args="init=$RUNCVM_GUEST/scripts/runcvm-vm-init-firecracker"
-  boot_args="$boot_args console=ttyS0"
-  boot_args="$boot_args reboot=k panic=1 pci=off"
-  boot_args="$boot_args root=/dev/vda rw"
+  # Create Firecracker config file
+  # Note: Using config file mode allows console to be connected to stdio
+  cat > "$FIRECRACKER_CONFIG" << CFGEOF
+{
+  "boot-source": {
+    "kernel_image_path": "$kernel_path",
+    "boot_args": "$boot_args"
+  },
+  "drives": [
+    {
+      "drive_id": "rootfs",
+      "path_on_host": "$rootfs_path",
+      "is_root_device": true,
+      "is_read_only": false
+    }
+  ],
+  "machine-config": {
+    "vcpu_count": $vcpu_count,
+    "mem_size_mib": $mem_mb
+  }${network_config}
+}
+CFGEOF
+
+  log "Config file created: $FIRECRACKER_CONFIG"
   
-  if [ "$RUNCVM_KERNEL_DEBUG" != "1" ]; then
-    boot_args="$boot_args quiet"
-  fi
+  # Show config for debugging
+  log "Config contents:"
+  cat "$FIRECRACKER_CONFIG" >&2
   
-  # Add user-specified kernel arguments
-  [ -n "$RUNCVM_KERNEL_APPEND" ] && boot_args="$boot_args $RUNCVM_KERNEL_APPEND"
+  log "Starting Firecracker VM..."
   
-  # Save console device for VM init
-  echo "ttyS0" >/.runcvm/console
+  # Run Firecracker with config file (this connects console to stdio)
+  # --no-api disables the API server, which is fine since we're using config file
+  "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"
   
-  # Start Firecracker process in background
-  log "Starting Firecracker process..."
-  "$FIRECRACKER_BIN" \
-    --api-sock "$FIRECRACKER_SOCKET" \
-    --level Warning \
-    --show-level &
-  
-  FIRECRACKER_PID=$!
-  log "Firecracker started with PID $FIRECRACKER_PID"
-  
-  # Wait for API to be ready
-  wait_for_api
-  
-  # Configure the microVM
-  configure_machine "$vcpu_count" "$mem_size_mib"
-  configure_boot_source "$kernel_path" "$boot_args"
-  configure_root_drive "$ROOTFS_IMAGE" false
-  
-  # Configure networks
-  setup_networks
-  
-  # Configure additional disks
-  setup_disks
-  
-  # Start the instance
-  start_instance
-  
-  log "MicroVM started successfully"
-  
-  # Wait for Firecracker process
-  wait $FIRECRACKER_PID
-  exit_code=$?
-  
+  local exit_code=$?
   log "Firecracker exited with code $exit_code"
   
-  # Check for saved exit code from VM
-  if [ -f "/.runcvm/exitcode" ]; then
-    read -r exit_code </.runcvm/exitcode
-    exit_code=$(( exit_code & 255 ))
-  fi
+  # Cleanup
+  rm -f "$rootfs_path" "$FIRECRACKER_CONFIG"
   
-  exit ${exit_code:-0}
+  return $exit_code
 }
 
-# Run main
 main "$@"

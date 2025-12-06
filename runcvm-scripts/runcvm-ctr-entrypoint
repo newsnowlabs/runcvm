@@ -336,4 +336,29 @@ fi
 
 # LAUNCH INIT SUPERVISING QEMU
 # FIXME: Add -v to debug
-exec $RUNCVM_GUEST/sbin/runcvm-init -c $RUNCVM_GUEST/scripts/runcvm-ctr-qemu
+# ============================================================
+# HYPERVISOR SELECTION
+# ============================================================
+
+case "${RUNCVM_HYPERVISOR:-qemu}" in
+  firecracker|fc)
+    echo "RunCVM: Launching Firecracker microVM..." >&2
+    
+    # Copy runtime state to VM mountpoint (will be embedded in rootfs image)
+    mkdir -p "$RUNCVM_VM_MOUNTPOINT/.runcvm/network"
+    mkdir -p "$RUNCVM_VM_MOUNTPOINT/.runcvm/dropbear"
+    cp -a /.runcvm/network/. "$RUNCVM_VM_MOUNTPOINT/.runcvm/network/" 2>/dev/null || true
+    cp -a /.runcvm/config "$RUNCVM_VM_MOUNTPOINT/.runcvm/" 2>/dev/null || true
+    cp -a /.runcvm/entrypoint "$RUNCVM_VM_MOUNTPOINT/.runcvm/" 2>/dev/null || true
+    cp -a /.runcvm/pwd "$RUNCVM_VM_MOUNTPOINT/.runcvm/" 2>/dev/null || true
+    cp -a /.runcvm/dropbear/. "$RUNCVM_VM_MOUNTPOINT/.runcvm/dropbear/" 2>/dev/null || true
+    [ -f /.runcvm/fstab ] && cp -a /.runcvm/fstab "$RUNCVM_VM_MOUNTPOINT/.runcvm/"
+    
+    exec $RUNCVM_GUEST/sbin/runcvm-init -c $RUNCVM_GUEST/scripts/runcvm-ctr-firecracker
+    ;;
+    
+  qemu|*)
+    echo "RunCVM: Launching QEMU VM..." >&2
+    exec $RUNCVM_GUEST/sbin/runcvm-init -c $RUNCVM_GUEST/scripts/runcvm-ctr-qemu
+    ;;
+esac

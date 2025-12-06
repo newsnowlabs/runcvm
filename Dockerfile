@@ -209,6 +209,25 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
     cp -a /boot/config-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/modules/$BASENAME/config && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/ubuntu
 
+# --- BUILD STAGE ---
+# Download Firecracker-compatible kernel (uncompressed vmlinux format)
+FROM alpine:3.19 as firecracker-kernel
+
+RUN apk add --no-cache curl
+
+RUN ARCH=$(uname -m) && \
+    echo "Downloading Firecracker kernel for $ARCH..." && \
+    mkdir -p /opt/firecracker-kernel && \
+    if [ "$ARCH" = "aarch64" ]; then \
+      curl -fsSL -o /opt/firecracker-kernel/vmlinux \
+        "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.5/aarch64/vmlinux-5.10.186" ; \
+    elif [ "$ARCH" = "x86_64" ]; then \
+      curl -fsSL -o /opt/firecracker-kernel/vmlinux \
+        "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.5/x86_64/vmlinux-5.10.186" ; \
+    fi && \
+    ls -la /opt/firecracker-kernel/vmlinux && \
+    echo "Kernel download complete"
+
 # Add this to your Dockerfile BEFORE the "installer" stage
 # This downloads and extracts the Firecracker binary for ARM64
 
@@ -252,6 +271,7 @@ COPY --from=binaries /opt/runcvm /opt/runcvm
 COPY --from=runcvm-init /root/runcvm-init/runcvm-init /opt/runcvm/sbin/
 COPY --from=qemu-exit /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
 COPY --from=firecracker-bin /usr/local/bin/firecracker /opt/runcvm/sbin/
+COPY --from=firecracker-kernel /opt/firecracker-kernel/vmlinux /opt/runcvm/firecracker-kernel
 
 RUN apk update && apk add --no-cache rsync
 

@@ -1,297 +1,35 @@
-#!/.runcvm/guest/bin/bash -e
-
-# RunCVM VM Init for Firecracker
-# 
-# Key differences from QEMU init:
-# - Root filesystem is on virtio-blk (not virtiofs)
-# - Devices use virtio-mmio (not virtio-pci)
-# - Network device is /dev/vethX mapped from tap
-# - Simpler device model
-
-# Load original environment
-. /.runcvm/config
-
-# Load defaults and aliases
-. $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
-
-log() {
-  echo "RunCVM-FC-Init: $1"
-}
-
-error() {
-  echo "RunCVM-FC-Init ERROR: $1" >&2
-  exec /bin/sh  # Fall to shell on error
-}
-
+#!/bin/sh
+set -e
+log() { echo "RunCVM-FC-Init: $1"; }
 log "Starting Firecracker VM initialization..."
 
-# ============================================================
-# MOUNT ESSENTIAL FILESYSTEMS
-# ============================================================
-
-log "Mounting essential filesystems..."
-
-# Root should already be mounted by kernel, remount rw if needed
-if ! mount | grep -q "/ .*rw"; then
-  mount -o remount,rw /
-fi
-
-# Mount proc if not mounted
-if ! mountpoint -q /proc 2>/dev/null; then
-  mount -t proc proc /proc
-fi
-
-# Mount sysfs if not mounted
-if ! mountpoint -q /sys 2>/dev/null; then
-  mount -t sysfs sysfs /sys
-fi
-
-# Mount devtmpfs if not mounted
-if ! mountpoint -q /dev 2>/dev/null; then
-  mount -t devtmpfs devtmpfs /dev
-fi
-
-# Create essential device nodes if missing
-[ -e /dev/null ] || mknod -m 666 /dev/null c 1 3
-[ -e /dev/zero ] || mknod -m 666 /dev/zero c 1 5
-[ -e /dev/random ] || mknod -m 444 /dev/random c 1 8
-[ -e /dev/urandom ] || mknod -m 444 /dev/urandom c 1 9
-[ -e /dev/tty ] || mknod -m 666 /dev/tty c 5 0
-[ -e /dev/console ] || mknod -m 600 /dev/console c 5 1
-
-# Create pts directory and mount devpts
-mkdir -p /dev/pts
+mount -o remount,rw / 2>/dev/null || true
+[ -d /proc ] || mkdir -p /proc; mountpoint -q /proc || mount -t proc proc /proc
+[ -d /sys ] || mkdir -p /sys; mountpoint -q /sys || mount -t sysfs sysfs /sys
+[ -d /dev ] || mkdir -p /dev; mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /dev/shm
 mount -t devpts devpts /dev/pts 2>/dev/null || true
-
-# Create shm directory and mount
-mkdir -p /dev/shm
 mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
-
-# Create /dev/fd symlink
 [ -e /dev/fd ] || ln -sf /proc/self/fd /dev/fd
-[ -e /dev/stdin ] || ln -sf /proc/self/fd/0 /dev/stdin
-[ -e /dev/stdout ] || ln -sf /proc/self/fd/1 /dev/stdout
-[ -e /dev/stderr ] || ln -sf /proc/self/fd/2 /dev/stderr
+log "Filesystems mounted"
 
-log "Essential filesystems mounted"
+[ -f /.runcvm/config ] && . /.runcvm/config
 
-# ============================================================
-# RUNCVM DIRECTORY SETUP
-# ============================================================
-
-# Mount tmpfs for runcvm runtime data if needed
-if [ ! -d /.runcvm ] || ! mountpoint -q /.runcvm 2>/dev/null; then
-  mkdir -p /.runcvm
-  mount -t tmpfs -o size=1M,mode=700 tmpfs /.runcvm 2>/dev/null || true
-fi
-
-# ============================================================
-# NETWORK CONFIGURATION
-# ============================================================
-
-log "Configuring network..."
-
-# Bring up loopback
 ip link set lo up 2>/dev/null || true
-
-# Firecracker presents network as eth0, eth1, etc.
-# Find network interfaces (excluding lo)
-for iface in $(ls /sys/class/net/ | grep -v '^lo$'); do
-  log "Found network interface: $iface"
-  
-  # Check if we have network config
-  # In Firecracker mode, network config is embedded in rootfs at build time
-  # or passed via kernel cmdline
-  
-  if [ -f "/.runcvm/network/devices/$iface" ]; then
-    load_network "$iface"
-    
-    ip addr add "$DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX" broadcast + dev "$iface"
-    ip link set "$iface" up mtu "${DOCKER_IF_MTU:-1500}"
-    
-    # Set default gateway if this is the gateway interface
-    if [ -n "$DOCKER_IF_IP_GW" ] && [ "$DOCKER_IF_IP_GW" != "-" ]; then
-      ip route add default via "$DOCKER_IF_IP_GW" dev "$iface"
-    fi
-    
-    log "Configured $iface: $DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX"
-  else
-    # Fallback: try DHCP or static config from kernel cmdline
-    log "No static config for $iface, attempting DHCP..."
-    
-    ip link set "$iface" up
-    
-    # Simple DHCP client if available
-    if command -v udhcpc >/dev/null 2>&1; then
-      udhcpc -i "$iface" -n -q 2>/dev/null || true
-    fi
-  fi
-done
-
-# Read and install supplementary routes
-if [ -f "/.runcvm/network/routes" ]; then
-  while read -r rt_net rt_gw rt_dev rt_prefsrc; do
-    [ -n "$rt_net" ] && [ -n "$rt_gw" ] && [ -n "$rt_dev" ] && \
-      ip route add "$rt_net" via "$rt_gw" dev "$rt_dev" 2>/dev/null || true
-  done </.runcvm/network/routes
+if [ -f "/.runcvm/network/devices/eth0" ]; then
+  read DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW < /.runcvm/network/devices/eth0
+  [ -n "$DOCKER_IF_IP" ] && ip addr add "$DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX" broadcast + dev eth0 2>/dev/null || true
+  ip link set eth0 up mtu "${DOCKER_IF_MTU:-1500}" 2>/dev/null || true
+  [ -n "$DOCKER_IF_IP_GW" ] && [ "$DOCKER_IF_IP_GW" != "-" ] && ip route add default via "$DOCKER_IF_IP_GW" dev eth0 2>/dev/null || true
+  log "Network: $DOCKER_IF_IP"
 fi
 
-log "Network configuration complete"
+[ -f /etc/hostname ] && hostname -F /etc/hostname
+[ -f /.runcvm/pwd ] && cd "$(cat /.runcvm/pwd)" 2>/dev/null || cd /
 
-# ============================================================
-# HOSTNAME
-# ============================================================
-
-if [ -f /etc/hostname ]; then
-  hostname -F /etc/hostname
-  log "Hostname set to $(hostname)"
-fi
-
-# ============================================================
-# MOUNT ADDITIONAL DISKS
-# ============================================================
-
-if [ -f /.runcvm/fstab ]; then
-  log "Mounting additional disks from fstab..."
-  
-  # Load ext4 module if needed
-  modprobe ext4 2>/dev/null || true
-  
-  # Mount all entries
-  while read -r line; do
-    [ -z "$line" ] && continue
-    [[ "$line" =~ ^# ]] && continue
-    
-    # Parse fstab entry
-    read -r device mountpoint fstype options dump pass <<<"$line"
-    
-    # Create mountpoint if needed
-    mkdir -p "$mountpoint"
-    
-    # Mount
-    if mount -t "$fstype" -o "$options" "$device" "$mountpoint" 2>/dev/null; then
-      log "Mounted $device at $mountpoint"
-    else
-      log "Warning: Failed to mount $device at $mountpoint"
-    fi
-  done </.runcvm/fstab
-fi
-
-# ============================================================
-# TMPFS MOUNTS
-# ============================================================
-
-if [ -n "$RUNCVM_TMPFS" ]; then
-  log "Processing tmpfs mounts..."
-  
-  echo "$RUNCVM_TMPFS" | while read -r line; do
-    [ -z "$line" ] && continue
-    
-    # Parse: source dest fstype options dump pass
-    read -r src dst fstype opts dump pass <<<"$line"
-    
-    if [ "$fstype" = "tmpfs" ]; then
-      mkdir -p "$dst"
-      mount -t tmpfs -o "$opts" tmpfs "$dst" 2>/dev/null || true
-      log "Mounted tmpfs at $dst"
-    fi
-  done
-fi
-
-# ============================================================
-# CGROUP SETUP
-# ============================================================
-
-. $RUNCVM_GUEST/scripts/functions/cgroupfs
-
-# Load original entrypoint to check for systemd
-mapfile -t ARGS </.runcvm/entrypoint 2>/dev/null || ARGS=("/bin/sh")
-
-ARGS_INIT="${ARGS[0]}"
-[ -L "$ARGS_INIT" ] && ARGS_INIT=$(readlink -f "$ARGS_INIT")
-
-if [[ "$ARGS_INIT" =~ /systemd$ ]]; then
-  cgroupfs_mount "${RUNCVM_CGROUPFS:-none}"
+log "Launching entrypoint..."
+if [ -f /.runcvm/entrypoint ]; then
+  exec $(cat /.runcvm/entrypoint | tr '\n' ' ')
 else
-  cgroupfs_mount "${RUNCVM_CGROUPFS:-hybrid}"
-fi
-
-# ============================================================
-# SSH SERVER (for docker exec support)
-# ============================================================
-
-log "Setting up SSH server..."
-
-mkdir -p /.runcvm/dropbear
-
-# Generate SSH keys if not present
-if [ ! -f /.runcvm/dropbear/key ]; then
-  log "Generating SSH keys..."
-  
-  KEY_PUBLIC=$(dropbearkey -t ed25519 -f /.runcvm/dropbear/key 2>/dev/null | grep ^ssh | cut -d' ' -f2)
-  
-  cat <<EOF >/.runcvm/dropbear/epka.json
-[{"user":"root","keytype":"ssh-ed25519","key":"$KEY_PUBLIC","options":"no-X11-forwarding","comments":""}]
-EOF
-  chmod 400 /.runcvm/dropbear/epka.json /.runcvm/dropbear/key
-fi
-
-# Start dropbear SSH server
-dropbear -REF -p $SSHD_PORT \
-  -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json \
-  -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
-
-log "SSH server started on port $SSHD_PORT"
-
-# ============================================================
-# PREPARE ENVIRONMENT
-# ============================================================
-
-# Remove .dockerenv to prevent systemd from detecting container
-[ -f "/.dockerenv" ] && mv /.dockerenv /.dockerenv.runcvm
-
-# Load console device
-CONSOLE_DEV="ttyS0"
-[ -f /.runcvm/console ] && read -r CONSOLE_DEV </.runcvm/console
-
-log "Console device: $CONSOLE_DEV"
-
-# ============================================================
-# LAUNCH ENTRYPOINT
-# ============================================================
-
-log "Launching entrypoint: ${ARGS[*]}"
-
-# Clean RUNCVM env vars
-clean_env
-
-# Parse user info
-IFS=':' read -r uid gid additionalGids <<<"$RUNCVM_UIDGID"
-
-# Change to saved working directory
-if [ -f /.runcvm/pwd ]; then
-  cd "$(cat /.runcvm/pwd)" 2>/dev/null || cd /
-fi
-
-if [ "$RUNCVM_INIT" = "1" ]; then
-  # Run with init process supervision
-  log "Running with init supervision..."
-  
-  cat >/etc/inittab <<EOF
-$CONSOLE_DEV::respawn:-$RUNCVM_GUEST/scripts/runcvm-vm-start-wrapper
-null::ctrlaltdel:$RUNCVM_GUEST/bin/poweroff
-null::restart:$RUNCVM_GUEST/bin/poweroff
-null::shutdown:$RUNCVM_GUEST/bin/poweroff
-EOF
-
-  rm -f /.runcvm/once
-  exec -c $RUNCVM_GUEST/bin/init &>/dev/null
-else
-  # Direct execution
-  log "Direct execution mode..."
-  
-  exec </dev/$CONSOLE_DEV >/dev/$CONSOLE_DEV 2>&1
-  exec -c $RUNCVM_GUEST/sbin/runcvm-init --no-fork \
-    $RUNCVM_GUEST/bin/s6-applyuidgid -u "$uid" -g "$gid" -G "$additionalGids" \
-    "${ARGS[@]}"
+  exec /bin/sh -l
 fi
