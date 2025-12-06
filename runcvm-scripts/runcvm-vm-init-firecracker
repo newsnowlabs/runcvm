@@ -154,12 +154,29 @@ if [ -f /.runcvm/entrypoint ]; then
   # Save exit code for potential retrieval
   echo "$EXIT_CODE" > /.runcvm/exitcode 2>/dev/null || true
   
-  # Trigger clean shutdown via reboot syscall
-  # Firecracker will catch this and exit cleanly
+  # Trigger clean shutdown
+  # Firecracker catches the reboot syscall and exits cleanly
   log "Shutting down VM..."
-  reboot -f 2>/dev/null || poweroff -f 2>/dev/null || true
   
-  # If reboot didn't work, just exit (will cause kernel panic but that's ok)
+  # Sync filesystems first
+  sync
+  
+  # Try multiple methods to trigger reboot/shutdown
+  # Method 1: Use /proc/sysrq-trigger (most reliable)
+  if [ -w /proc/sysrq-trigger ]; then
+    echo s > /proc/sysrq-trigger 2>/dev/null  # sync
+    echo o > /proc/sysrq-trigger 2>/dev/null  # poweroff
+  fi
+  
+  # Method 2: reboot syscall via busybox or coreutils
+  reboot -f 2>/dev/null || /sbin/reboot -f 2>/dev/null || true
+  
+  # Method 3: Direct poweroff
+  poweroff -f 2>/dev/null || /sbin/poweroff -f 2>/dev/null || true
+  
+  # If we get here, sleep briefly and let kernel handle it
+  # The kernel panic on init exit is actually fine - Firecracker sees it as clean exit
+  sleep 1
   exit $EXIT_CODE
 else
   log "No entrypoint found, starting shell"
