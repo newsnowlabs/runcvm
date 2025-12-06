@@ -10,6 +10,9 @@ KERNEL_PATH="${KERNEL_PATH:-/path/to/vmlinux}"
 FIRECRACKER_BIN="${FIRECRACKER_BIN:-firecracker}"
 FIRECRACKER_SOCKET="$TEST_DIR/firecracker.sock"
 
+export KERNEL_PATH=/home/reski/firecracker/vmlinux
+export FIRECRACKER_BIN=/usr/local/bin/firecracker
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -78,43 +81,93 @@ create_test_rootfs() {
   local ROOTFS_DIR="$TEST_DIR/rootfs"
   mkdir -p "$ROOTFS_DIR"
   
-  # Download Alpine minirootfs
-  local ALPINE_VERSION="3.19"
-  local ARCH="x86_64"
-  local ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/releases/${ARCH}/alpine-minirootfs-${ALPINE_VERSION}.0-${ARCH}.tar.gz"
+  # Detect host architecture
+  local HOST_ARCH=$(uname -m)
+  local ALPINE_ARCH
   
-  log "Downloading Alpine minirootfs..."
+  case "$HOST_ARCH" in
+    x86_64|amd64)
+      ALPINE_ARCH="x86_64"
+      ;;
+    aarch64|arm64)
+      ALPINE_ARCH="aarch64"
+      ;;
+    armv7l|armhf)
+      ALPINE_ARCH="armhf"
+      ;;
+    *)
+      error "Unsupported architecture: $HOST_ARCH"
+      ;;
+  esac
+  
+  log "Detected architecture: $HOST_ARCH -> Alpine arch: $ALPINE_ARCH"
+  
+  # Download Alpine minirootfs for the correct architecture
+  local ALPINE_VERSION="3.19"
+  local ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/releases/${ALPINE_ARCH}/alpine-minirootfs-${ALPINE_VERSION}.0-${ALPINE_ARCH}.tar.gz"
+  
+  log "Downloading Alpine minirootfs from: $ALPINE_URL"
   curl -fsSL "$ALPINE_URL" | tar -xz -C "$ROOTFS_DIR"
   
-  # Create init script
+  if [ ! -x "$ROOTFS_DIR/bin/busybox" ]; then
+    error "Failed to download or extract Alpine rootfs - busybox not found"
+  fi
+  
+  # Create init script as a proper ELF-compatible script
+  # The shebang must point to an existing interpreter in the rootfs
   cat > "$ROOTFS_DIR/init" <<'EOF'
-#!/bin/sh
+#!/bin/busybox sh
 # Minimal init for Firecracker test
 
-# Mount essential filesystems
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev
+# Mount essential filesystems (ignore if already mounted)
+/bin/busybox mount -t proc proc /proc 2>/dev/null || true
+/bin/busybox mount -t sysfs sysfs /sys 2>/dev/null || true
+/bin/busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+
+# Create device nodes if missing
+/bin/busybox mknod -m 666 /dev/null c 1 3 2>/dev/null || true
+/bin/busybox mknod -m 666 /dev/zero c 1 5 2>/dev/null || true
+/bin/busybox mknod -m 666 /dev/ttyS0 c 4 64 2>/dev/null || true
+/bin/busybox mknod -m 620 /dev/tty c 5 0 2>/dev/null || true
+/bin/busybox mknod -m 666 /dev/ptmx c 5 2 2>/dev/null || true
+
+# Create /dev/pts for proper PTY support
+/bin/busybox mkdir -p /dev/pts 2>/dev/null || true
+/bin/busybox mount -t devpts devpts /dev/pts 2>/dev/null || true
 
 # Setup hostname
-hostname firecracker-test
+/bin/busybox hostname firecracker-test
 
+# Clear screen and show banner
 echo ""
 echo "======================================"
 echo "  RunCVM Firecracker Test Successful!"
 echo "======================================"
 echo ""
-echo "Kernel: $(uname -r)"
-echo "Hostname: $(hostname)"
-echo "Uptime: $(cat /proc/uptime | cut -d' ' -f1)s"
+echo "Kernel: $(/bin/busybox uname -r)"
+echo "Arch:   $(/bin/busybox uname -m)"
+echo "Host:   $(/bin/busybox hostname)"
+echo "Uptime: $(/bin/busybox cat /proc/uptime | /bin/busybox cut -d' ' -f1)s"
 echo ""
-echo "Type commands or 'poweroff' to exit"
+echo "Type 'poweroff' to exit"
 echo ""
 
-# Start shell on serial console
-exec /bin/sh </dev/ttyS0 >/dev/ttyS0 2>&1
+# Use setsid to create a proper session with controlling TTY
+exec /bin/busybox setsid /bin/busybox sh -l </dev/ttyS0 >/dev/ttyS0 2>&1
 EOF
   chmod +x "$ROOTFS_DIR/init"
+  
+  # Also create a symlink for /bin/sh -> busybox if it doesn't exist
+  if [ ! -e "$ROOTFS_DIR/bin/sh" ] && [ -e "$ROOTFS_DIR/bin/busybox" ]; then
+    ln -sf busybox "$ROOTFS_DIR/bin/sh"
+  fi
+  
+  # Verify busybox exists and is executable
+  if [ ! -x "$ROOTFS_DIR/bin/busybox" ]; then
+    error "busybox not found or not executable in rootfs"
+  fi
+  
+  log "Init script created, busybox location: $(ls -la "$ROOTFS_DIR/bin/busybox" 2>/dev/null || echo 'not found')"
   
   # Ensure /dev directory exists
   mkdir -p "$ROOTFS_DIR/dev"
@@ -150,9 +203,9 @@ start_firecracker() {
   rm -f "$FIRECRACKER_SOCKET"
   
   # Start Firecracker in background
+  # Note: --log-path removed as it can cause issues in some environments
   "$FIRECRACKER_BIN" \
     --api-sock "$FIRECRACKER_SOCKET" \
-    --log-path "$TEST_DIR/firecracker.log" \
     --level Debug \
     --show-level \
     --show-log-origin &
