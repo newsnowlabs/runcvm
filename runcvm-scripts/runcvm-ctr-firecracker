@@ -2,6 +2,9 @@
 
 # RunCVM Firecracker Launcher
 # Launches a Firecracker microVM using config file mode (for console output)
+#
+# STRATEGY: Copy container files to /dev/shm, then create rootfs on overlay
+# This avoids the self-copy problem where mke2fs would copy the rootfs into itself
 
 set -o errexit -o pipefail
 
@@ -23,21 +26,28 @@ error() {
   exit 1
 }
 
-# Create rootfs image from container filesystem
-create_rootfs() {
+# Create rootfs image from a source directory
+create_rootfs_from_dir() {
   local source_dir="$1"
   local image_path="$2"
   local size_mb="$3"
   
-  log "Creating rootfs: $image_path (${size_mb}MB) from $source_dir"
+  log "Creating ext4 rootfs: $image_path (${size_mb}MB) from $source_dir"
   
   # Create sparse file
-  busybox truncate -s "${size_mb}M" "$image_path"
+  if ! busybox truncate -s "${size_mb}M" "$image_path"; then
+    error "Failed to create sparse file"
+  fi
   
   # Create ext4 filesystem populated with source directory contents
-  mke2fs -q -F -t ext4 -d "$source_dir" "$image_path" >/dev/null 2>&1
+  if ! mke2fs -F -t ext4 -E root_owner=0:0 -d "$source_dir" "$image_path" 2>&1; then
+    log "mke2fs failed"
+    busybox rm -f "$image_path"
+    return 1
+  fi
   
-  log "Rootfs created"
+  log "Rootfs created successfully"
+  return 0
 }
 
 # Main function
@@ -49,19 +59,121 @@ main() {
     error "Firecracker binary not found: $FIRECRACKER_BIN"
   fi
   
-  # Calculate rootfs size (source size + 256MB headroom, minimum 512MB)
-  local rootfs_size=$(( $(busybox du -sm "$RUNCVM_VM_MOUNTPOINT" | busybox cut -f1) + 256 ))
+  # ==========================================================================
+  # STRATEGY: Copy container files to /dev/shm, then create rootfs on overlay
+  # ==========================================================================
+  # Problem: /vm is a bind mount of /, so any file at /x is also at /vm/x
+  #          This causes mke2fs -d /vm to copy the rootfs into itself
+  #
+  # Solution: 
+  #   1. Copy /vm contents to /dev/shm/rootfs-staging (separate tmpfs)
+  #   2. Create rootfs at /rootfs.ext4 (on overlay, has disk space)
+  #   3. mke2fs reads from /dev/shm, writes to /rootfs.ext4
+  #   4. No self-copy because source (/dev/shm) != destination parent (/)
+  # ==========================================================================
+  
+  local staging_dir="/dev/shm/rootfs-staging"
+  local rootfs_path="/rootfs.ext4"
+  
+  # Calculate source size (excluding .runcvm which has RunCVM binaries)
+  log "Calculating container size (excluding .runcvm)..."
+  
+  local source_size=$(busybox du -sm --exclude='.runcvm' "$RUNCVM_VM_MOUNTPOINT" 2>/dev/null | busybox cut -f1)
+  [ -z "$source_size" ] && source_size=100
+  
+  log "Container filesystem size: ${source_size}MB"
+  
+  # Check if /dev/shm has enough space for staging
+  local shm_avail=$(busybox df -m /dev/shm 2>/dev/null | busybox awk 'NR==2 {print $4}')
+  local shm_needed=$(( source_size + 50 ))  # Add 50MB buffer
+  
+  log "/dev/shm available: ${shm_avail}MB, need for staging: ${shm_needed}MB"
+  
+  if [ "$shm_avail" -lt "$shm_needed" ]; then
+    log ""
+    log "============================================================"
+    log "ERROR: /dev/shm too small for staging"
+    log "============================================================"
+    log ""
+    log "Container size: ${source_size}MB"
+    log "/dev/shm available: ${shm_avail}MB"
+    log "/dev/shm is sized by the -m (memory) flag"
+    log ""
+    log "SOLUTION: Increase VM memory to at least ${shm_needed}m"
+    log ""
+    log "  docker run --runtime=runcvm -m ${shm_needed}m \\"
+    log "    -e RUNCVM_HYPERVISOR=firecracker nginx"
+    log ""
+    log "============================================================"
+    error "Insufficient /dev/shm for staging (need ${shm_needed}MB, have ${shm_avail}MB)"
+  fi
+  
+  # Step 1: Copy container files to staging area
+  log "Step 1/3: Copying container files to staging area..."
+  log "  Source: $RUNCVM_VM_MOUNTPOINT (excluding .runcvm)"
+  log "  Destination: $staging_dir"
+  log "  This may take 30-60 seconds for large images..."
+  
+  busybox rm -rf "$staging_dir"
+  busybox mkdir -p "$staging_dir"
+  
+  # Use tar to copy, excluding .runcvm directory
+  local copy_start=$(busybox date +%s)
+  
+  if ! (cd "$RUNCVM_VM_MOUNTPOINT" && busybox tar -cf - --exclude='.runcvm' . 2>/dev/null | busybox tar -xf - -C "$staging_dir" 2>/dev/null); then
+    error "Failed to copy container files to staging"
+  fi
+  
+  local copy_end=$(busybox date +%s)
+  local copy_time=$(( copy_end - copy_start ))
+  
+  local staged_size=$(busybox du -sm "$staging_dir" 2>/dev/null | busybox cut -f1)
+  log "  Staging complete: ${staged_size}MB copied in ${copy_time}s"
+  
+  # Step 2: Calculate rootfs size
+  # Add 50% overhead + 256MB for ext4 metadata
+  local rootfs_size=$(( (staged_size * 3 / 2) + 256 ))
   [ "$rootfs_size" -lt 512 ] && rootfs_size=512
   
-  # Create rootfs in /dev/shm (tmpfs, sized to VM memory)
-  local rootfs_path="/dev/shm/rootfs.ext4"
-  create_rootfs "$RUNCVM_VM_MOUNTPOINT" "$rootfs_path" "$rootfs_size"
+  log "Step 2/3: Creating rootfs image..."
+  log "  Rootfs size: ${rootfs_size}MB (${staged_size}MB content + overhead)"
   
-  # Determine kernel path - USE FIRECRACKER KERNEL BY DEFAULT
+  # Check overlay disk space
+  local overlay_avail=$(busybox df -m / 2>/dev/null | busybox awk 'NR==2 {print $4}')
+  log "  Overlay (/) available: ${overlay_avail}MB"
+  
+  if [ "$overlay_avail" -lt "$rootfs_size" ]; then
+    busybox rm -rf "$staging_dir"
+    error "Insufficient disk space on overlay (need ${rootfs_size}MB, have ${overlay_avail}MB)"
+  fi
+  
+  # Create rootfs from staging directory
+  log "  Source: $staging_dir"  
+  log "  Destination: $rootfs_path"
+  
+  local mke2fs_start=$(busybox date +%s)
+  
+  if ! create_rootfs_from_dir "$staging_dir" "$rootfs_path" "$rootfs_size"; then
+    log "mke2fs debug info:"
+    log "  Staged content size: $(busybox du -sm "$staging_dir" | busybox cut -f1)MB"
+    log "  Image size: ${rootfs_size}MB"
+    busybox rm -rf "$staging_dir"
+    error "Failed to create rootfs"
+  fi
+  
+  local mke2fs_end=$(busybox date +%s)
+  local mke2fs_time=$(( mke2fs_end - mke2fs_start ))
+  
+  # Cleanup staging
+  log "  Cleaning up staging area..."
+  busybox rm -rf "$staging_dir"
+  
+  local final_size=$(busybox du -sm "$rootfs_path" 2>/dev/null | busybox cut -f1)
+  log "  Rootfs ready: ${final_size}MB (created in ${mke2fs_time}s)"
+  
+  # Determine kernel path
   local fc_default_kernel="$RUNCVM_GUEST/firecracker-kernel"
   local kernel_path="${RUNCVM_FC_KERNEL_PATH:-$fc_default_kernel}"
-  
-  log "Kernel: $kernel_path"
   
   if [ ! -f "$kernel_path" ]; then
     error "Firecracker kernel not found: $kernel_path"
@@ -78,19 +190,20 @@ main() {
   local vcpu_count="${RUNCVM_CPUS:-1}"
   [ "$vcpu_count" -le 0 ] && vcpu_count=$(busybox nproc)
   
-  log "VM config: $vcpu_count vCPUs, $mem_mb MiB RAM"
+  log "Step 3/3: Starting Firecracker VM..."
+  log "  Kernel: $kernel_path"
+  log "  Config: $vcpu_count vCPUs, ${mem_mb}MB RAM"
   
   # Build network config if available
   local network_config=""
   if [ -f "/.runcvm/network/devices/eth0" ]; then
     read DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW < /.runcvm/network/devices/eth0
     local fc_mac=$(echo "$DOCKER_IF_MAC" | busybox sed 's/^..:..:../AA:FC:00/')
-    log "Network: tap-$DOCKER_IF ($fc_mac)"
+    log "  Network: tap-$DOCKER_IF ($fc_mac)"
     network_config=",\"network-interfaces\":[{\"iface_id\":\"eth0\",\"guest_mac\":\"$fc_mac\",\"host_dev_name\":\"tap-$DOCKER_IF\"}]"
   fi
   
   # Create Firecracker config file
-  # Note: Using config file mode allows console to be connected to stdio
   cat > "$FIRECRACKER_CONFIG" << CFGEOF
 {
   "boot-source": {
@@ -112,23 +225,14 @@ main() {
 }
 CFGEOF
 
-  log "Config file created: $FIRECRACKER_CONFIG"
-  
-  # Show config for debugging
-  log "Config contents:"
-  cat "$FIRECRACKER_CONFIG" >&2
-  
-  log "Starting Firecracker VM..."
-  
-  # Run Firecracker with config file (this connects console to stdio)
-  # --no-api disables the API server, which is fine since we're using config file
+  # Run Firecracker
   "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"
   
   local exit_code=$?
   log "Firecracker exited with code $exit_code"
   
   # Cleanup
-  rm -f "$rootfs_path" "$FIRECRACKER_CONFIG"
+  busybox rm -f "$rootfs_path" "$FIRECRACKER_CONFIG"
   
   return $exit_code
 }
