@@ -209,6 +209,41 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
     cp -a /boot/config-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/modules/$BASENAME/config && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/ubuntu
 
+# Add this to your Dockerfile BEFORE the "installer" stage
+# This downloads and extracts the Firecracker binary for ARM64
+
+# --- BUILD STAGE ---
+# Download Firecracker binary
+FROM alpine:3.19 as firecracker-bin
+
+RUN apk add --no-cache curl tar gzip
+
+# Firecracker version
+ARG FIRECRACKER_VERSION=v1.13.1
+
+# Detect architecture and download appropriate binary
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ]; then \
+        FC_ARCH="aarch64"; \
+    elif [ "$ARCH" = "x86_64" ]; then \
+        FC_ARCH="x86_64"; \
+    else \
+        echo "Unsupported architecture: $ARCH"; exit 1; \
+    fi && \
+    echo "Downloading Firecracker ${FIRECRACKER_VERSION} for ${FC_ARCH}..." && \
+    curl -L -o /tmp/firecracker.tgz \
+        "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${FC_ARCH}.tgz" && \
+    cd /tmp && \
+    tar -xzf firecracker.tgz && \
+    mv release-${FIRECRACKER_VERSION}-${FC_ARCH}/firecracker-${FIRECRACKER_VERSION}-${FC_ARCH} /usr/local/bin/firecracker && \
+    chmod +x /usr/local/bin/firecracker && \
+    rm -rf /tmp/firecracker.tgz /tmp/release-*
+
+# ============================================================
+# Then in your "installer" stage, add this line after the other COPY commands:
+# ============================================================
+# COPY --from=firecracker-bin /usr/local/bin/firecracker /opt/runcvm/bin/firecracker
+
 # --- BUILD STAGE ---
 # Build RunCVM installer
 FROM alpine:$ALPINE_VERSION as installer
@@ -216,6 +251,7 @@ FROM alpine:$ALPINE_VERSION as installer
 COPY --from=binaries /opt/runcvm /opt/runcvm
 COPY --from=runcvm-init /root/runcvm-init/runcvm-init /opt/runcvm/sbin/
 COPY --from=qemu-exit /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
+COPY --from=firecracker-bin /usr/local/bin/firecracker /opt/runcvm/sbin/
 
 RUN apk update && apk add --no-cache rsync
 
