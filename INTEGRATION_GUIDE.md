@@ -144,7 +144,7 @@ Option B: Build your own kernel
 ```bash
 # Use the provided config-firecracker-x86_64
 cd /tmp
-curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.10.204.tar.xz" | tar -xJ
+curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-5.10.204.tar.xz" | tar -xJ
 cd linux-5.10.204
 cp /path/to/config-firecracker-x86_64 .config
 make olddefconfig
