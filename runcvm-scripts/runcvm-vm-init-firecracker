@@ -1,146 +1,184 @@
 #!/bin/sh
-# /init - Firecracker VM init script
-# This runs as PID 1 and sets up the system before starting the container entrypoint
+# RunCVM VM Init for Firecracker
+# 
+# This script runs inside the Firecracker VM where the rootfs is from the container image.
+# We use /bin/sh (busybox from Alpine) instead of bundled bash.
 
-# Fail on errors (but we handle some specially)
 set -e
 
-echo "RunCVM-FC: Init starting..."
+RUNCVM_GUEST="${RUNCVM_GUEST:-/.runcvm/guest}"
+SSHD_PORT="${SSHD_PORT:-22222}"
+
+log() {
+  echo "RunCVM-FC-Init: $1"
+}
+
+log "Starting Firecracker VM initialization..."
 
 # ============================================================
 # MOUNT ESSENTIAL FILESYSTEMS
 # ============================================================
 
+# Root should already be mounted by kernel, remount rw if needed
+mount -o remount,rw / 2>/dev/null || true
+
 # Mount proc if not mounted
 if ! mountpoint -q /proc 2>/dev/null; then
-    echo "RunCVM-FC: Mounting /proc..."
-    mkdir -p /proc
-    mount -t proc proc /proc
+  mkdir -p /proc
+  mount -t proc proc /proc
 fi
 
 # Mount sysfs if not mounted
 if ! mountpoint -q /sys 2>/dev/null; then
-    echo "RunCVM-FC: Mounting /sys..."
-    mkdir -p /sys
-    mount -t sysfs sysfs /sys
+  mkdir -p /sys
+  mount -t sysfs sysfs /sys
 fi
 
-# Mount devtmpfs if not mounted (kernel should auto-mount if CONFIG_DEVTMPFS_MOUNT=y)
+# Mount devtmpfs if not mounted  
 if ! mountpoint -q /dev 2>/dev/null; then
-    echo "RunCVM-FC: Mounting /dev..."
-    mkdir -p /dev
-    mount -t devtmpfs devtmpfs /dev
+  mkdir -p /dev
+  mount -t devtmpfs devtmpfs /dev
 fi
 
-# Create essential device nodes if they don't exist
-echo "RunCVM-FC: Setting up device nodes..."
-[ -e /dev/null ]    || mknod -m 666 /dev/null c 1 3
-[ -e /dev/zero ]    || mknod -m 666 /dev/zero c 1 5
-[ -e /dev/random ]  || mknod -m 666 /dev/random c 1 8
-[ -e /dev/urandom ] || mknod -m 666 /dev/urandom c 1 9
-[ -e /dev/tty ]     || mknod -m 666 /dev/tty c 5 0
-[ -e /dev/console ] || mknod -m 600 /dev/console c 5 1
-[ -e /dev/ptmx ]    || mknod -m 666 /dev/ptmx c 5 2
+# Create pts and shm
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
 
-# Create pts directory and mount devpts
-mkdir -p /dev/pts
-if ! mountpoint -q /dev/pts 2>/dev/null; then
-    mount -t devpts devpts /dev/pts
-fi
+# Create /dev/fd symlinks
+[ -e /dev/fd ] || ln -sf /proc/self/fd /dev/fd
+[ -e /dev/stdin ] || ln -sf /proc/self/fd/0 /dev/stdin
+[ -e /dev/stdout ] || ln -sf /proc/self/fd/1 /dev/stdout
+[ -e /dev/stderr ] || ln -sf /proc/self/fd/2 /dev/stderr
 
-# Create shm directory and mount tmpfs
-mkdir -p /dev/shm
-if ! mountpoint -q /dev/shm 2>/dev/null; then
-    mount -t tmpfs tmpfs /dev/shm
-fi
+log "Filesystems mounted"
 
-# Mount tmpfs on /run
-mkdir -p /run
-if ! mountpoint -q /run 2>/dev/null; then
-    mount -t tmpfs tmpfs /run
+# ============================================================
+# LOAD CONFIGURATION
+# The config file may contain bash 'declare -x' syntax
+# We need to convert it to sh-compatible format
+# ============================================================
+
+if [ -f /.runcvm/config ]; then
+  # Convert 'declare -x VAR="value"' to 'export VAR="value"'
+  # and source it
+  sed 's/^declare -x /export /' /.runcvm/config > /tmp/config.sh 2>/dev/null || true
+  . /tmp/config.sh 2>/dev/null || true
+  rm -f /tmp/config.sh
 fi
 
 # ============================================================
-# SETUP CONSOLE
+# NETWORK CONFIGURATION
 # ============================================================
 
-# Redirect console output
-exec 0</dev/console
-exec 1>/dev/console
-exec 2>/dev/console
+log "Configuring network..."
 
-echo "RunCVM-FC: Console setup complete"
+# Bring up loopback
+ip link set lo up 2>/dev/null || true
 
-# ============================================================
-# NETWORK SETUP (if config exists)
-# ============================================================
-
-if [ -f /.runcvm/network.conf ]; then
-    echo "RunCVM-FC: Configuring network..."
-    . /.runcvm/network.conf
+# Configure eth0 if network config exists
+if [ -f "/.runcvm/network/devices/eth0" ]; then
+  read DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW < /.runcvm/network/devices/eth0
+  
+  if [ -n "$DOCKER_IF_IP" ] && [ -n "$DOCKER_IF_IP_NETPREFIX" ]; then
+    ip addr add "$DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX" broadcast + dev eth0 2>/dev/null || true
+    ip link set eth0 up mtu "${DOCKER_IF_MTU:-1500}" 2>/dev/null || true
     
-    if [ -n "$RUNCVM_IP" ] && [ -n "$RUNCVM_GW" ]; then
-        # Bring up eth0
-        ip link set eth0 up 2>/dev/null || true
-        ip addr add "$RUNCVM_IP" dev eth0 2>/dev/null || true
-        ip route add default via "${RUNCVM_GW%/*}" 2>/dev/null || true
-        echo "RunCVM-FC: Network configured: $RUNCVM_IP via $RUNCVM_GW"
+    if [ -n "$DOCKER_IF_IP_GW" ] && [ "$DOCKER_IF_IP_GW" != "-" ]; then
+      ip route add default via "$DOCKER_IF_IP_GW" dev eth0 2>/dev/null || true
     fi
     
-    # Setup DNS
-    if [ -n "$RUNCVM_DNS" ]; then
-        echo "nameserver $RUNCVM_DNS" > /etc/resolv.conf
-    fi
+    log "Network configured: $DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX gw $DOCKER_IF_IP_GW"
+  fi
+else
+  # Try to bring up eth0 anyway
+  ip link set eth0 up 2>/dev/null || true
+  log "Network: eth0 up (no config file)"
+fi
+
+# Install supplementary routes
+if [ -f "/.runcvm/network/routes" ]; then
+  while read rt_net rt_gw rt_dev rt_prefsrc; do
+    [ -n "$rt_net" ] && [ -n "$rt_gw" ] && [ -n "$rt_dev" ] && \
+      ip route add "$rt_net" via "$rt_gw" dev "$rt_dev" 2>/dev/null || true
+  done < /.runcvm/network/routes
 fi
 
 # ============================================================
 # HOSTNAME
 # ============================================================
 
-if [ -f /.runcvm/hostname ]; then
-    hostname $(cat /.runcvm/hostname)
-    echo "RunCVM-FC: Hostname set to $(hostname)"
+if [ -f /etc/hostname ]; then
+  hostname -F /etc/hostname
+  log "Hostname: $(hostname)"
 fi
 
 # ============================================================
-# EXECUTE THE ACTUAL ENTRYPOINT
+# WORKING DIRECTORY
 # ============================================================
 
-# Read saved entrypoint
-ENTRYPOINT=""
-ENTRYPOINT_ARGS=""
+if [ -f /.runcvm/pwd ]; then
+  cd "$(cat /.runcvm/pwd)" 2>/dev/null || cd /
+fi
 
+# ============================================================
+# LAUNCH ENTRYPOINT
+# ============================================================
+
+log "Preparing to launch entrypoint..."
+
+# Read and execute entrypoint
 if [ -f /.runcvm/entrypoint ]; then
-    ENTRYPOINT=$(cat /.runcvm/entrypoint)
+  # Build command from entrypoint file (one arg per line)
+  CMD=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ -z "$CMD" ]; then
+      CMD="$line"
+    else  
+      # Quote arguments that contain spaces
+      case "$line" in
+        *\ *) CMD="$CMD \"$line\"" ;;
+        *) CMD="$CMD $line" ;;
+      esac
+    fi
+  done < /.runcvm/entrypoint
+  
+  log "Executing: $CMD"
+  
+  # Run the command (not exec - we need to capture exit and shutdown)
+  eval $CMD
+  EXIT_CODE=$?
+  
+  log "Command exited with code: $EXIT_CODE"
+  
+  # Save exit code for potential retrieval
+  echo "$EXIT_CODE" > /.runcvm/exitcode 2>/dev/null || true
+  
+  # Trigger clean shutdown
+  # Firecracker catches the reboot syscall and exits cleanly
+  log "Shutting down VM..."
+  
+  # Sync filesystems first
+  sync
+  
+  # Try multiple methods to trigger reboot/shutdown
+  # Method 1: Use /proc/sysrq-trigger (most reliable)
+  if [ -w /proc/sysrq-trigger ]; then
+    echo s > /proc/sysrq-trigger 2>/dev/null  # sync
+    echo o > /proc/sysrq-trigger 2>/dev/null  # poweroff
+  fi
+  
+  # Method 2: reboot syscall via busybox or coreutils
+  reboot -f 2>/dev/null || /sbin/reboot -f 2>/dev/null || true
+  
+  # Method 3: Direct poweroff
+  poweroff -f 2>/dev/null || /sbin/poweroff -f 2>/dev/null || true
+  
+  # If we get here, sleep briefly and let kernel handle it
+  # The kernel panic on init exit is actually fine - Firecracker sees it as clean exit
+  sleep 1
+  exit $EXIT_CODE
+else
+  log "No entrypoint found, starting shell"
+  exec /bin/sh -l
 fi
-
-if [ -f /.runcvm/entrypoint_args ]; then
-    ENTRYPOINT_ARGS=$(cat /.runcvm/entrypoint_args)
-fi
-
-# Default to /bin/sh if no entrypoint
-if [ -z "$ENTRYPOINT" ]; then
-    ENTRYPOINT="/bin/sh"
-fi
-
-echo "RunCVM-FC: Starting entrypoint: $ENTRYPOINT $ENTRYPOINT_ARGS"
-
-# Change to working directory if specified
-if [ -f /.runcvm/workdir ]; then
-    cd $(cat /.runcvm/workdir) 2>/dev/null || true
-fi
-
-# Load environment variables if they exist
-if [ -f /.runcvm/environment ]; then
-    set -a
-    . /.runcvm/environment
-    set +a
-fi
-
-# Execute the entrypoint
-# Use exec to replace this init process
-exec $ENTRYPOINT $ENTRYPOINT_ARGS
-
-# If exec fails, drop to shell
-echo "RunCVM-FC: ERROR - Failed to exec entrypoint, dropping to shell"
-exec /bin/sh
