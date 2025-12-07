@@ -144,6 +144,8 @@ main() {
 # Firecracker minimal init for RunCVM
 # This runs as PID 1 inside the Firecracker VM
 
+echo "RunCVM-FC init: Starting..."
+
 # Mount essential filesystems
 mount -t proc proc /proc 2>/dev/null || true
 mount -t sysfs sys /sys 2>/dev/null || true
@@ -179,14 +181,189 @@ ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null || true
 # Setup hostname
 [ -f /etc/hostname ] && hostname -F /etc/hostname 2>/dev/null || true
 
-# Setup networking if eth0 exists
-if [ -d /sys/class/net/eth0 ]; then
-  ip link set lo up 2>/dev/null || true
-  ip link set eth0 up 2>/dev/null || true
-  # Try DHCP or use static IP from kernel cmdline
+# Setup networking
+echo "RunCVM-FC init: ========== NETWORK SETUP START =========="
+
+# Setup RunCVM tools if available
+# These tools use BundELF and need the dynamic linker from the same directory
+# IMPORTANT: Path must match the original /.runcvm/guest/ because of relative RPATH
+RUNCVM_GUEST="/.runcvm/guest"
+if [ -d "$RUNCVM_GUEST/lib" ]; then
+  # The dynamic linker is at /.runcvm/guest/lib/ld
+  RUNCVM_LD="$RUNCVM_GUEST/lib/ld"
+  if [ -x "$RUNCVM_LD" ]; then
+    echo "RunCVM-FC init: Found RunCVM tools at $RUNCVM_GUEST"
+    echo "RunCVM-FC init: Checking tools structure:"
+    echo "  lib/ld: $(ls -la $RUNCVM_GUEST/lib/ld 2>&1)"
+    echo "  bin contents: $(ls -la $RUNCVM_GUEST/bin/ 2>&1 | head -10)"
+    echo "  bin/ip: $(ls -la $RUNCVM_GUEST/bin/ip 2>&1)"
+    echo "  bin/busybox: $(ls -la $RUNCVM_GUEST/bin/busybox 2>&1)"
+    
+    # Test the dynamic linker directly
+    echo "RunCVM-FC init: Testing dynamic linker..."
+    echo "  Test 1 - ld exists: $(test -x $RUNCVM_LD && echo yes || echo no)"
+    echo "  Test 2 - busybox via ld: $($RUNCVM_LD $RUNCVM_GUEST/bin/busybox echo 'works' 2>&1)"
+    
+    # ip is likely a symlink to busybox, so we need to call busybox ip
+    # Create wrapper functions that use the dynamic linker with busybox
+    runcvm_ip() { "$RUNCVM_LD" "$RUNCVM_GUEST/bin/busybox" ip "$@"; }
+    runcvm_busybox() { "$RUNCVM_LD" "$RUNCVM_GUEST/bin/busybox" "$@"; }
+    HAVE_RUNCVM_TOOLS=1
+  else
+    echo "RunCVM-FC init: Dynamic linker not found at $RUNCVM_LD"
+  fi
+else
+  echo "RunCVM-FC init: RunCVM tools not found at $RUNCVM_GUEST"
+fi
+
+# Bring up loopback
+if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
+  runcvm_ip link set lo up 2>/dev/null || true
+else
+  ip link set lo up 2>/dev/null || ifconfig lo up 2>/dev/null || true
+fi
+
+# First, check what kernel modules are loaded for networking
+echo "RunCVM-FC init: Checking for virtio_net module..."
+if [ -f /proc/modules ]; then
+  grep -i virtio /proc/modules 2>/dev/null || echo "  No virtio modules loaded"
+fi
+
+# Check /sys/class/net to see what the kernel sees
+echo "RunCVM-FC init: Kernel network interfaces in /sys/class/net:"
+ls -la /sys/class/net/ 2>/dev/null || echo "  Cannot list /sys/class/net"
+
+# Check dmesg for network-related messages
+echo "RunCVM-FC init: Recent dmesg network messages:"
+dmesg 2>/dev/null | grep -iE "(eth|net|virtio)" | tail -10 || echo "  Cannot read dmesg"
+
+# Configure eth0 with static IP from saved network config
+if [ -f /.runcvm-network ]; then
+  echo "RunCVM-FC init: Loading network config from /.runcvm-network"
+  cat /.runcvm-network
+  . /.runcvm-network
+  
+  # Check if eth0 exists at all
+  if [ -d /sys/class/net/eth0 ]; then
+    echo "RunCVM-FC init: eth0 exists in /sys/class/net"
+    echo "  Address: $(cat /sys/class/net/eth0/address 2>/dev/null || echo 'unknown')"
+    echo "  Operstate: $(cat /sys/class/net/eth0/operstate 2>/dev/null || echo 'unknown')"
+    echo "  Carrier: $(cat /sys/class/net/eth0/carrier 2>/dev/null || echo 'unknown')"
+  else
+    echo "RunCVM-FC init: ERROR - eth0 does NOT exist!"
+    echo "RunCVM-FC init: Available interfaces:"
+    for iface in /sys/class/net/*; do
+      name=$(basename "$iface")
+      echo "  $name: $(cat $iface/address 2>/dev/null || echo 'no-mac')"
+    done
+  fi
+  
+  if [ -n "$FC_IP" ] && [ -n "$FC_PREFIX" ] && [ -d /sys/class/net/eth0 ]; then
+    echo "RunCVM-FC init: Configuring eth0 with $FC_IP/$FC_PREFIX (MTU: ${FC_MTU:-1500})"
+    
+    # Determine which ip command to use
+    if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
+      echo "RunCVM-FC init: Using RunCVM tools (via dynamic linker)"
+      IP_CMD="runcvm_ip"
+    elif command -v ip >/dev/null 2>&1; then
+      echo "RunCVM-FC init: Using system ip command"
+      IP_CMD="ip"
+    elif command -v ifconfig >/dev/null 2>&1; then
+      echo "RunCVM-FC init: Using ifconfig (fallback)"
+      IP_CMD=""
+      USE_IFCONFIG=1
+    else
+      echo "RunCVM-FC init: ERROR - No network configuration tools available!"
+      echo "  Checking PATH: $PATH"
+      echo "  RUNCVM_GUEST dir contents:"
+      ls -la "$RUNCVM_GUEST" 2>/dev/null || echo "    not found"
+      echo "  RUNCVM_GUEST/bin dir contents:"
+      ls -la "$RUNCVM_GUEST/bin" 2>/dev/null || echo "    not found"
+      IP_CMD=""
+    fi
+    
+    if [ -n "$IP_CMD" ]; then
+      # Bring interface up first
+      echo "RunCVM-FC init: Bringing eth0 up..."
+      $IP_CMD link set eth0 up
+      RET=$?
+      echo "  ip link set eth0 up returned: $RET"
+      sleep 0.5
+      
+      # Set MTU if specified
+      if [ -n "$FC_MTU" ]; then
+        $IP_CMD link set eth0 mtu "$FC_MTU" 2>/dev/null || true
+      fi
+      
+      # Add IP address
+      echo "RunCVM-FC init: Adding IP $FC_IP/$FC_PREFIX to eth0..."
+      $IP_CMD addr add "$FC_IP/$FC_PREFIX" dev eth0
+      RET=$?
+      echo "  ip addr add returned: $RET"
+      
+      if [ -n "$FC_GW" ] && [ "$FC_GW" != "-" ]; then
+        echo "RunCVM-FC init: Setting default gateway to $FC_GW..."
+        $IP_CMD route add default via "$FC_GW" dev eth0
+        RET=$?
+        echo "  ip route add returned: $RET"
+      fi
+      
+      # Show network config for debugging
+      echo "RunCVM-FC init: Final eth0 configuration:"
+      $IP_CMD addr show eth0
+      echo "RunCVM-FC init: Final routing table:"
+      $IP_CMD route show
+      echo "RunCVM-FC init: Link state:"
+      $IP_CMD link show eth0
+      
+    elif [ "$USE_IFCONFIG" = "1" ]; then
+      echo "RunCVM-FC init: Using ifconfig"
+      # Convert prefix to netmask (simplified for common cases)
+      case "$FC_PREFIX" in
+        8)  FC_NETMASK="255.0.0.0" ;;
+        16) FC_NETMASK="255.255.0.0" ;;
+        24) FC_NETMASK="255.255.255.0" ;;
+        *)  FC_NETMASK="255.255.255.0" ;;
+      esac
+      
+      ifconfig eth0 "$FC_IP" netmask "$FC_NETMASK" up
+      
+      if [ -n "$FC_GW" ] && [ "$FC_GW" != "-" ]; then
+        route add default gw "$FC_GW" 2>/dev/null || true
+      fi
+      
+      ifconfig eth0
+      route -n
+    fi
+    
+    # Test connectivity (optional, non-blocking)
+    if [ -n "$FC_GW" ] && [ "$FC_GW" != "-" ]; then
+      echo "RunCVM-FC init: Testing connectivity to gateway $FC_GW..."
+      if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
+        runcvm_busybox ping -c 1 -W 1 "$FC_GW" 2>&1 && echo "  Gateway reachable!" || echo "  Gateway not reachable (this may be normal)"
+      elif command -v ping >/dev/null 2>&1; then
+        ping -c 1 -W 1 "$FC_GW" 2>&1 && echo "  Gateway reachable!" || echo "  Gateway not reachable (this may be normal)"
+      fi
+    fi
+  elif [ ! -d /sys/class/net/eth0 ]; then
+    echo "RunCVM-FC init: SKIPPING network config - eth0 not found"
+  fi
+elif [ -d /sys/class/net/eth0 ]; then
+  # Fallback: Try DHCP
+  echo "RunCVM-FC init: No network config file, trying DHCP..."
+  ip link set eth0 up 2>/dev/null || ifconfig eth0 up 2>/dev/null || true
   if command -v udhcpc >/dev/null 2>&1; then
     udhcpc -i eth0 -n -q 2>/dev/null || true
   fi
+else
+  echo "RunCVM-FC init: No network config and no eth0 interface!"
+fi
+
+echo "RunCVM-FC init: ========== NETWORK SETUP END =========="
+
+# Setup DNS
+if [ -f /.runcvm-resolv.conf ]; then
+  cp /.runcvm-resolv.conf /etc/resolv.conf 2>/dev/null || true
 fi
 
 # Determine what to run
@@ -230,6 +407,76 @@ INITEOF
   if [ -f "$entrypoint_file" ]; then
     busybox cp "$entrypoint_file" "${staging_dir}/.runcvm-entrypoint"
     log "  Saved entrypoint: $(busybox head -1 ${staging_dir}/.runcvm-entrypoint)"
+  fi
+  
+  # Copy essential networking tools from RunCVM guest
+  # These are needed because minimal images (like nginx) don't have ip/ifconfig
+  # IMPORTANT: We must copy to the SAME path (/.runcvm/guest) because the binaries
+  # use relative RPATH that depends on the directory structure
+  log "  Copying network tools to rootfs..."
+  
+  if [ -d "$RUNCVM_GUEST" ]; then
+    # Create the same directory structure
+    busybox mkdir -p "${staging_dir}/.runcvm/guest"
+    
+    # Copy the dynamic linker and libraries
+    if [ -d "$RUNCVM_GUEST/lib" ]; then
+      busybox cp -a "$RUNCVM_GUEST/lib" "${staging_dir}/.runcvm/guest/"
+      log "    Copied lib/ (dynamic linker)"
+    fi
+    
+    # Copy usr/lib for additional libraries
+    if [ -d "$RUNCVM_GUEST/usr/lib" ]; then
+      busybox mkdir -p "${staging_dir}/.runcvm/guest/usr"
+      busybox cp -a "$RUNCVM_GUEST/usr/lib" "${staging_dir}/.runcvm/guest/usr/"
+      log "    Copied usr/lib/"
+    fi
+    
+    # Copy bin directory with busybox and symlinks
+    if [ -d "$RUNCVM_GUEST/bin" ]; then
+      busybox cp -a "$RUNCVM_GUEST/bin" "${staging_dir}/.runcvm/guest/"
+      log "    Copied bin/ (busybox, ip, etc.)"
+    fi
+    
+    # Copy sbin if exists
+    if [ -d "$RUNCVM_GUEST/sbin" ]; then
+      busybox cp -a "$RUNCVM_GUEST/sbin" "${staging_dir}/.runcvm/guest/"
+      log "    Copied sbin/"
+    fi
+    
+    # Copy usr/bin and usr/sbin
+    if [ -d "$RUNCVM_GUEST/usr/bin" ]; then
+      busybox mkdir -p "${staging_dir}/.runcvm/guest/usr"
+      busybox cp -a "$RUNCVM_GUEST/usr/bin" "${staging_dir}/.runcvm/guest/usr/"
+      log "    Copied usr/bin/"
+    fi
+    if [ -d "$RUNCVM_GUEST/usr/sbin" ]; then
+      busybox mkdir -p "${staging_dir}/.runcvm/guest/usr"
+      busybox cp -a "$RUNCVM_GUEST/usr/sbin" "${staging_dir}/.runcvm/guest/usr/"
+      log "    Copied usr/sbin/"
+    fi
+  else
+    log "  WARNING: RUNCVM_GUEST not found, network tools may not work"
+  fi
+  
+  # Save network configuration for the VM
+  if [ -f "/.runcvm/network/devices/eth0" ]; then
+    read DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW < /.runcvm/network/devices/eth0
+    # Firecracker uses a different MAC (AA:FC:00:xx:xx:xx)
+    local fc_mac=$(echo "$DOCKER_IF_MAC" | busybox sed 's/^..:..:../AA:FC:00/')
+    log "  Saving network config: IP=$DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX GW=$DOCKER_IF_IP_GW MAC=$fc_mac"
+    cat > "${staging_dir}/.runcvm-network" << NETEOF
+FC_IP="$DOCKER_IF_IP"
+FC_PREFIX="$DOCKER_IF_IP_NETPREFIX"
+FC_GW="$DOCKER_IF_IP_GW"
+FC_MTU="$DOCKER_IF_MTU"
+FC_MAC="$fc_mac"
+NETEOF
+  fi
+  
+  # Save resolv.conf
+  if [ -f "/etc/resolv.conf" ]; then
+    busybox cp /etc/resolv.conf "${staging_dir}/.runcvm-resolv.conf"
   fi
   
   # Step 2: Calculate rootfs size
@@ -301,8 +548,30 @@ INITEOF
   if [ -f "/.runcvm/network/devices/eth0" ]; then
     read DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW < /.runcvm/network/devices/eth0
     local fc_mac=$(echo "$DOCKER_IF_MAC" | busybox sed 's/^..:..:../AA:FC:00/')
-    log "  Network: tap-$DOCKER_IF ($fc_mac)"
-    network_config=",\"network-interfaces\":[{\"iface_id\":\"eth0\",\"guest_mac\":\"$fc_mac\",\"host_dev_name\":\"tap-$DOCKER_IF\"}]"
+    local tap_name="tap-$DOCKER_IF"
+    local bridge_name="br-$DOCKER_IF"
+    
+    log "  Network: $tap_name ($fc_mac)"
+    
+    # Create TAP device for Firecracker
+    # Unlike QEMU which uses scripts (qemu-ifup), Firecracker expects the TAP to exist
+    log "  Creating TAP device $tap_name..."
+    ip tuntap add dev "$tap_name" mode tap
+    
+    # Add TAP to the bridge (which was created by runcvm-ctr-entrypoint)
+    log "  Adding $tap_name to bridge $bridge_name..."
+    ip link set dev "$tap_name" master "$bridge_name"
+    
+    # Set MTU and bring up
+    ip link set dev "$tap_name" up mtu "${DOCKER_IF_MTU:-1500}"
+    
+    # Debug: show bridge and tap status
+    log "  Bridge status:"
+    ip link show "$bridge_name" 2>&1 | busybox sed 's/^/    /'
+    log "  TAP status:"
+    ip link show "$tap_name" 2>&1 | busybox sed 's/^/    /'
+    
+    network_config=",\"network-interfaces\":[{\"iface_id\":\"eth0\",\"guest_mac\":\"$fc_mac\",\"host_dev_name\":\"$tap_name\"}]"
   fi
   
   # Create Firecracker config file
