@@ -19,7 +19,7 @@
 # ============================================================
 
 ARG ALPINE_VERSION=3.19
-ARG KERNEL_VERSION=6.6.5-r0
+ARG KERNEL_VERSION=6.6.5
 
 # ============================================================
 # FIRECRACKER KERNEL STAGE (x86_64)
@@ -29,7 +29,7 @@ ARG KERNEL_VERSION=6.6.5-r0
 
 FROM alpine:${ALPINE_VERSION} AS firecracker-kernel-x86
 
-ARG KERNEL_VERSION=5.10.204
+ARG KERNEL_VERSION=6.6.5
 
 # Install build dependencies
 RUN apk add --no-cache \
@@ -88,7 +88,7 @@ RUN mkdir -p /opt/runcvm/kernels/firecracker/x86_64/${KERNEL_VERSION} && \
 
 FROM alpine:${ALPINE_VERSION} AS firecracker-kernel-arm64
 
-ARG KERNEL_VERSION=5.10.204
+ARG KERNEL_VERSION=6.6.5
 
 # Install build dependencies
 RUN apk add --no-cache \
@@ -146,7 +146,7 @@ RUN mkdir -p /opt/runcvm/kernels/firecracker/aarch64/${KERNEL_VERSION} && \
 
 FROM ubuntu:22.04 AS firecracker-kernel-arm64-cross
 
-ARG KERNEL_VERSION=5.10.204
+ARG KERNEL_VERSION=6.6.5
 ARG DEBIAN_FRONTEND=noninteractive
 
 # Install build dependencies + cross-compiler
