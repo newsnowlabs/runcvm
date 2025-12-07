@@ -721,6 +721,16 @@ NETEOF
     log "  TAP status:"
     ip link show "$tap_name" 2>&1 | busybox sed 's/^/    /'
     
+
+    # Add MASQUERADE rule for outbound traffic from the VM
+    # This allows the VM to reach external networks (internet)
+    log "  Adding NAT MASQUERADE rule for VM outbound traffic..."
+    if [ -n "$RUNCVM_GUEST" ] && [ -d "$RUNCVM_GUEST/usr/lib/xtables" ]; then
+      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables         -t nat -A POSTROUTING -s "$DOCKER_IF_IP" -o eth0 -j MASQUERADE 2>/dev/null &&         log "    Added MASQUERADE via xtables-nft-multi" || true
+    elif command -v iptables >/dev/null 2>&1; then
+      iptables -t nat -A POSTROUTING -s "$DOCKER_IF_IP" -o eth0 -j MASQUERADE 2>/dev/null &&         log "    Added MASQUERADE via iptables" || true
+    fi
+
     network_config=",\"network-interfaces\":[{\"iface_id\":\"eth0\",\"guest_mac\":\"$fc_mac\",\"host_dev_name\":\"$tap_name\"}]"
   fi
   
