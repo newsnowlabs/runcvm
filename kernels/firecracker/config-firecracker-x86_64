@@ -90,6 +90,16 @@ CONFIG_CPU_SUP_AMD=y
 # CONFIG_ARM_GIC_V3=y
 
 # ============================================================
+# 9P FILESYSTEM (for live volume mounts via vsock)
+# ============================================================
+
+CONFIG_NET_9P=y
+CONFIG_NET_9P_VIRTIO=y
+CONFIG_9P_FS=y
+CONFIG_9P_FS_POSIX_ACL=y
+CONFIG_9P_FS_SECURITY=y
+
+# ============================================================
 # POWER MANAGEMENT
 # ============================================================
 
