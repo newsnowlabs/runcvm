@@ -1,0 +1,357 @@
+# RunCVM Firecracker Kernel Configuration (ARM64/aarch64)
+# Minimal kernel config for fast boot times with Firecracker on ARM64
+#
+# Based on: https://github.com/firecracker-microvm/firecracker/blob/main/resources/guest_configs/
+# Forked from: config-firecracker-x86_64
+#
+# Key requirements:
+# - virtio-mmio (NOT virtio-pci) - Firecracker uses MMIO transport
+# - virtio-blk, virtio-net, virtio-vsock
+# - ext4 filesystem
+# - Serial console (ttyAMA0 for ARM64)
+# - GIC (Generic Interrupt Controller)
+# - PSCI for power management
+#
+# Build instructions:
+#   make ARCH=arm64 olddefconfig
+#   make ARCH=arm64 -j$(nproc) Image
+#   Output: arch/arm64/boot/Image
+
+# ============================================================
+# GENERAL SETUP
+# ============================================================
+
+CONFIG_LOCALVERSION="-firecracker"
+CONFIG_DEFAULT_HOSTNAME="firecracker"
+CONFIG_SYSVIPC=y
+CONFIG_POSIX_MQUEUE=y
+CONFIG_NO_HZ_IDLE=y
+CONFIG_HIGH_RES_TIMERS=y
+CONFIG_PREEMPT_VOLUNTARY=y
+CONFIG_BSD_PROCESS_ACCT=y
+CONFIG_TASKSTATS=y
+CONFIG_TASK_DELAY_ACCT=y
+CONFIG_TASK_XACCT=y
+CONFIG_TASK_IO_ACCOUNTING=y
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+CONFIG_LOG_BUF_SHIFT=17
+CONFIG_CGROUPS=y
+CONFIG_MEMCG=y
+CONFIG_BLK_CGROUP=y
+CONFIG_CGROUP_SCHED=y
+CONFIG_CFS_BANDWIDTH=y
+CONFIG_CGROUP_PIDS=y
+CONFIG_CGROUP_FREEZER=y
+CONFIG_CGROUP_DEVICE=y
+CONFIG_CGROUP_CPUACCT=y
+CONFIG_NAMESPACES=y
+CONFIG_USER_NS=y
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_EXPERT=y
+CONFIG_KALLSYMS=y
+CONFIG_KALLSYMS_ALL=y
+CONFIG_PRINTK=y
+CONFIG_BUG=y
+CONFIG_ELF_CORE=y
+CONFIG_BASE_FULL=y
+CONFIG_FUTEX=y
+CONFIG_EPOLL=y
+CONFIG_SIGNALFD=y
+CONFIG_TIMERFD=y
+CONFIG_EVENTFD=y
+CONFIG_AIO=y
+CONFIG_IO_URING=y
+CONFIG_ADVISE_SYSCALLS=y
+CONFIG_MEMBARRIER=y
+CONFIG_EMBEDDED=y
+
+# ============================================================
+# ARM64 ARCHITECTURE SPECIFIC
+# ============================================================
+
+CONFIG_ARM64=y
+CONFIG_64BIT=y
+CONFIG_ARCH_VIRT=y
+CONFIG_SMP=y
+CONFIG_NR_CPUS=32
+
+# GIC (Generic Interrupt Controller) - Required for Firecracker ARM64
+CONFIG_ARM_GIC=y
+CONFIG_ARM_GIC_V3=y
+CONFIG_ARM_GIC_V3_ITS=y
+
+# PSCI (Power State Coordination Interface) - Used for shutdown/reboot
+CONFIG_ARM_PSCI_FW=y
+CONFIG_ARM_PSCI_CPUIDLE=y
+
+# ARM64 CPU features
+CONFIG_ARM64_4K_PAGES=y
+CONFIG_ARM64_VA_BITS_48=y
+CONFIG_ARM64_PA_BITS_48=y
+CONFIG_SCHED_MC=y
+CONFIG_SCHED_SMT=y
+
+# Hardware capabilities
+CONFIG_ARM64_HW_AFDBM=y
+CONFIG_ARM64_PAN=y
+CONFIG_ARM64_UAO=y
+CONFIG_ARM64_VHE=y
+CONFIG_ARM64_TAGGED_ADDR_ABI=y
+
+# Crypto acceleration (ARM64 specific)
+CONFIG_ARM64_CRYPTO=y
+CONFIG_CRYPTO_SHA1_ARM64_CE=y
+CONFIG_CRYPTO_SHA2_ARM64_CE=y
+CONFIG_CRYPTO_AES_ARM64_CE_BLK=y
+
+# ============================================================
+# POWER MANAGEMENT (minimal for VM)
+# ============================================================
+
+CONFIG_SUSPEND=n
+CONFIG_HIBERNATION=n
+CONFIG_PM=y
+# No ACPI on ARM64 - uses Device Tree
+CONFIG_ACPI=n
+CONFIG_OF=y
+CONFIG_OF_EARLY_FLATTREE=y
+CONFIG_OF_KOBJ=y
+CONFIG_OF_ADDRESS=y
+CONFIG_OF_IRQ=y
+
+# ============================================================
+# VIRTUALIZATION
+# ============================================================
+
+CONFIG_VIRTUALIZATION=y
+CONFIG_PARAVIRT=y
+CONFIG_VHOST_NET=y
+CONFIG_VHOST_VSOCK=y
+
+# ============================================================
+# VIRTIO (MMIO transport for Firecracker)
+# ============================================================
+
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_MMIO=y
+# NOT using PCI - Firecracker uses MMIO
+CONFIG_VIRTIO_PCI=n
+CONFIG_VIRTIO_BLK=y
+CONFIG_VIRTIO_NET=y
+CONFIG_VIRTIO_CONSOLE=y
+CONFIG_VIRTIO_BALLOON=y
+CONFIG_VIRTIO_INPUT=y
+
+# ============================================================
+# VSOCK (for host-guest communication & 9P)
+# ============================================================
+
+CONFIG_VSOCKETS=y
+CONFIG_VIRTIO_VSOCKETS=y
+CONFIG_VIRTIO_VSOCKETS_COMMON=y
+CONFIG_VSOCKETS_DIAG=y
+CONFIG_VSOCKETS_LOOPBACK=y
+
+# ============================================================
+# 9P FILESYSTEM (for live volume mounts via vsock)
+# ============================================================
+
+CONFIG_NET_9P=y
+CONFIG_NET_9P_VIRTIO=y
+CONFIG_9P_FS=y
+CONFIG_9P_FS_POSIX_ACL=y
+CONFIG_9P_FS_SECURITY=y
+
+# ============================================================
+# BLOCK DEVICES
+# ============================================================
+
+CONFIG_BLK_DEV=y
+CONFIG_BLK_DEV_LOOP=y
+CONFIG_BLK_DEV_RAM=y
+CONFIG_BLK_DEV_RAM_COUNT=16
+CONFIG_BLK_DEV_RAM_SIZE=65536
+
+# ============================================================
+# NETWORKING
+# ============================================================
+
+CONFIG_NET=y
+CONFIG_PACKET=y
+CONFIG_UNIX=y
+CONFIG_INET=y
+CONFIG_IP_MULTICAST=y
+CONFIG_IP_ADVANCED_ROUTER=y
+CONFIG_IP_MULTIPLE_TABLES=y
+CONFIG_IP_ROUTE_MULTIPATH=y
+CONFIG_IP_ROUTE_VERBOSE=y
+CONFIG_IP_PNP=y
+CONFIG_IP_PNP_DHCP=y
+CONFIG_IP_PNP_BOOTP=y
+CONFIG_IP_PNP_RARP=y
+CONFIG_NET_IPIP=y
+CONFIG_NET_IPGRE_DEMUX=y
+CONFIG_NET_IPGRE=y
+CONFIG_NET_IPGRE_BROADCAST=y
+CONFIG_SYN_COOKIES=y
+CONFIG_INET_TUNNEL=y
+CONFIG_IPV6=y
+CONFIG_IPV6_ROUTER_PREF=y
+CONFIG_IPV6_ROUTE_INFO=y
+CONFIG_IPV6_OPTIMISTIC_DAD=y
+CONFIG_INET6_AH=y
+CONFIG_INET6_ESP=y
+CONFIG_INET6_IPCOMP=y
+CONFIG_IPV6_MIP6=y
+CONFIG_IPV6_TUNNEL=y
+CONFIG_IPV6_GRE=y
+CONFIG_IPV6_MULTIPLE_TABLES=y
+CONFIG_BRIDGE=y
+CONFIG_BRIDGE_VLAN_FILTERING=y
+CONFIG_VLAN_8021Q=y
+CONFIG_NET_SCHED=y
+CONFIG_NET_SCH_FQ_CODEL=y
+CONFIG_NET_CLS_CGROUP=y
+CONFIG_NETFILTER=y
+CONFIG_NETFILTER_ADVANCED=y
+CONFIG_NF_CONNTRACK=y
+CONFIG_NF_TABLES=y
+CONFIG_NFT_CT=y
+CONFIG_NFT_COUNTER=y
+CONFIG_NFT_LOG=y
+CONFIG_NFT_LIMIT=y
+CONFIG_NFT_NAT=y
+CONFIG_NFT_MASQ=y
+CONFIG_NF_TABLES_IPV4=y
+CONFIG_NF_TABLES_IPV6=y
+
+# ============================================================
+# FILESYSTEMS
+# ============================================================
+
+CONFIG_EXT4_FS=y
+CONFIG_EXT4_FS_POSIX_ACL=y
+CONFIG_EXT4_FS_SECURITY=y
+CONFIG_OVERLAY_FS=y
+CONFIG_OVERLAY_FS_REDIRECT_DIR=y
+CONFIG_OVERLAY_FS_INDEX=y
+CONFIG_FUSE_FS=y
+CONFIG_TMPFS=y
+CONFIG_TMPFS_POSIX_ACL=y
+CONFIG_TMPFS_XATTR=y
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_XZ=y
+CONFIG_SQUASHFS_ZSTD=y
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_DEVPTS_FS=y
+CONFIG_HUGETLBFS=y
+CONFIG_HUGETLB_PAGE=y
+CONFIG_CONFIGFS_FS=y
+CONFIG_CGROUP_FS=y
+
+# ============================================================
+# TTY/SERIAL CONSOLE (ARM64 uses ttyAMA0 / PL011)
+# ============================================================
+
+CONFIG_TTY=y
+CONFIG_SERIAL_CORE=y
+CONFIG_SERIAL_CORE_CONSOLE=y
+CONFIG_SERIAL_AMBA_PL011=y
+CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
+# Also enable 8250 for virtio-console compatibility
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_SERIAL_8250_NR_UARTS=4
+CONFIG_HVC_DRIVER=y
+CONFIG_VIRTIO_CONSOLE=y
+
+# Early console for debugging
+CONFIG_SERIAL_EARLYCON=y
+CONFIG_SERIAL_EARLYCON_ARM_SEMIHOST=y
+
+# ============================================================
+# CRYPTO
+# ============================================================
+
+CONFIG_CRYPTO=y
+CONFIG_CRYPTO_ALGAPI=y
+CONFIG_CRYPTO_AES=y
+CONFIG_CRYPTO_SHA256=y
+CONFIG_CRYPTO_SHA512=y
+CONFIG_CRYPTO_CRC32C=y
+CONFIG_CRYPTO_CRC32=y
+CONFIG_CRYPTO_GHASH=y
+CONFIG_CRYPTO_GCM=y
+
+# ============================================================
+# MISC DRIVERS
+# ============================================================
+
+CONFIG_HW_RANDOM=y
+CONFIG_HW_RANDOM_VIRTIO=y
+CONFIG_RTC_CLASS=y
+CONFIG_RTC_DRV_PL031=y
+
+# ============================================================
+# DISABLE UNNECESSARY FEATURES (for faster boot)
+# ============================================================
+
+# No USB (Firecracker doesn't support it)
+CONFIG_USB_SUPPORT=n
+
+# No sound
+CONFIG_SOUND=n
+
+# No graphics
+CONFIG_DRM=n
+CONFIG_FB=n
+
+# No wireless
+CONFIG_WIRELESS=n
+CONFIG_WLAN=n
+CONFIG_CFG80211=n
+
+# No Bluetooth
+CONFIG_BT=n
+
+# No SCSI (use virtio-blk instead)
+CONFIG_SCSI=n
+CONFIG_ATA=n
+
+# No NVMe
+CONFIG_NVME_CORE=n
+CONFIG_BLK_DEV_NVME=n
+
+# No PCI (Firecracker uses MMIO)
+CONFIG_PCI=n
+
+# Reduce debugging (faster boot)
+CONFIG_DEBUG_KERNEL=n
+CONFIG_DEBUG_INFO=n
+CONFIG_MAGIC_SYSRQ=n
+CONFIG_PROFILING=n
+CONFIG_STACKTRACE=n
+
+# ============================================================
+# BUILD OPTIONS
+# ============================================================
+
+CONFIG_MODULES=y
+CONFIG_MODULE_UNLOAD=y
+CONFIG_MODVERSIONS=y
+CONFIG_TRIM_UNUSED_KSYMS=y
+
+CONFIG_INITRAMFS_SOURCE=""
+CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
+
+# ============================================================
+# KERNEL COMPRESSION (for ARM64 Image format)
+# ============================================================
+
+CONFIG_BUILD_ARM64_UNCOMPRESSED_KERNEL=n
+CONFIG_KERNEL_GZIP=y
+# Alternatively: CONFIG_KERNEL_LZ4=y for faster decompression
