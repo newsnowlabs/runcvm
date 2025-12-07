@@ -130,6 +130,108 @@ main() {
   local staged_size=$(busybox du -sm "$staging_dir" 2>/dev/null | busybox cut -f1)
   log "  Staging complete: ${staged_size}MB copied in ${copy_time}s"
   
+  # Step 1b: Create init script in staging area
+  # This init script will be /init in the rootfs and runs the container's entrypoint
+  log "  Creating init script..."
+  
+  # Read the original entrypoint from runcvm config
+  local entrypoint_file="/.runcvm/entrypoint"
+  local init_script="${staging_dir}/init"
+  
+  # Create a minimal init script
+  cat > "$init_script" << 'INITEOF'
+#!/bin/sh
+# Firecracker minimal init for RunCVM
+# This runs as PID 1 inside the Firecracker VM
+
+# Mount essential filesystems
+mount -t proc proc /proc 2>/dev/null || true
+mount -t sysfs sys /sys 2>/dev/null || true
+mount -t devtmpfs dev /dev 2>/dev/null || true
+
+# Create essential device nodes if devtmpfs failed
+if [ ! -c /dev/null ]; then
+  mknod -m 666 /dev/null c 1 3
+  mknod -m 666 /dev/zero c 1 5
+  mknod -m 666 /dev/random c 1 8
+  mknod -m 666 /dev/urandom c 1 9
+  mknod -m 666 /dev/tty c 5 0
+  mknod -m 620 /dev/console c 5 1
+  mknod -m 666 /dev/ptmx c 5 2
+fi
+
+# Mount pts for proper terminal support
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
+
+# Create tmpfs for /run and /tmp
+mkdir -p /run /tmp
+mount -t tmpfs tmpfs /run 2>/dev/null || true
+mount -t tmpfs tmpfs /tmp 2>/dev/null || true
+
+# Create symlinks
+ln -sf /proc/self/fd /dev/fd 2>/dev/null || true
+ln -sf /proc/self/fd/0 /dev/stdin 2>/dev/null || true
+ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null || true
+ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null || true
+
+# Setup hostname
+[ -f /etc/hostname ] && hostname -F /etc/hostname 2>/dev/null || true
+
+# Setup networking if eth0 exists
+if [ -d /sys/class/net/eth0 ]; then
+  ip link set lo up 2>/dev/null || true
+  ip link set eth0 up 2>/dev/null || true
+  # Try DHCP or use static IP from kernel cmdline
+  if command -v udhcpc >/dev/null 2>&1; then
+    udhcpc -i eth0 -n -q 2>/dev/null || true
+  fi
+fi
+
+# Determine what to run
+# Priority:
+# 1. /.runcvm-entrypoint (saved by RunCVM)
+# 2. /docker-entrypoint.sh (nginx and many others)
+# 3. Direct nginx execution
+# 4. /bin/sh fallback
+
+if [ -f /.runcvm-entrypoint ] && [ -s /.runcvm-entrypoint ]; then
+  # Read entrypoint line by line into an array-like structure
+  set --
+  while IFS= read -r line || [ -n "$line" ]; do
+    set -- "$@" "$line"
+  done < /.runcvm-entrypoint
+  
+  echo "RunCVM-FC init: Running saved entrypoint: $@"
+  exec "$@"
+  
+elif [ -x /docker-entrypoint.sh ]; then
+  echo "RunCVM-FC init: Running /docker-entrypoint.sh"
+  # For nginx, docker-entrypoint.sh expects "nginx" "-g" "daemon off;" as args
+  if [ -f /etc/nginx/nginx.conf ]; then
+    exec /docker-entrypoint.sh nginx -g "daemon off;"
+  else
+    exec /docker-entrypoint.sh
+  fi
+  
+elif [ -f /etc/nginx/nginx.conf ] && command -v nginx >/dev/null 2>&1; then
+  echo "RunCVM-FC init: Running nginx directly"
+  exec nginx -g "daemon off;"
+  
+else
+  echo "RunCVM-FC init: No entrypoint found, starting shell"
+  exec /bin/sh
+fi
+INITEOF
+  busybox chmod +x "$init_script"
+  
+  # Save the original entrypoint if we have it
+  if [ -f "$entrypoint_file" ]; then
+    busybox cp "$entrypoint_file" "${staging_dir}/.runcvm-entrypoint"
+    log "  Saved entrypoint: $(busybox head -1 ${staging_dir}/.runcvm-entrypoint)"
+  fi
+  
   # Step 2: Calculate rootfs size
   # Add 50% overhead + 256MB for ext4 metadata
   local rootfs_size=$(( (staged_size * 3 / 2) + 256 ))
@@ -179,8 +281,8 @@ main() {
     error "Firecracker kernel not found: $kernel_path"
   fi
   
-  # Build boot arguments
-  local boot_args="init=$RUNCVM_GUEST/scripts/runcvm-vm-init-firecracker console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw"
+  # Build boot arguments - use /init which we created in the rootfs
+  local boot_args="init=/init console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw"
   
   # Parse memory size (remove 'M' suffix if present)
   local mem_mb="${RUNCVM_MEM_SIZE%M}"
