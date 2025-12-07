@@ -2,6 +2,8 @@
 
 # Alpine version to build with
 ARG ALPINE_VERSION=3.19
+ARG FIRECRACKER_VERSION=1.13.1
+ARG FIRECRACKER_KERNEL_VERSION=6.6.50
 
 # --- BUILD STAGE ---
 # Build base alpine-sdk image for later build stages
@@ -211,22 +213,70 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
 
 # --- BUILD STAGE ---
 # Download Firecracker-compatible kernel (uncompressed vmlinux format)
-FROM alpine:3.19 as firecracker-kernel
+# FROM alpine:3.19 as firecracker-kernel
 
-RUN apk add --no-cache curl
+# RUN apk add --no-cache curl
 
-RUN ARCH=$(uname -m) && \
-    echo "Downloading Firecracker kernel for $ARCH..." && \
-    mkdir -p /opt/firecracker-kernel && \
-    if [ "$ARCH" = "aarch64" ]; then \
-      curl -fsSL -o /opt/firecracker-kernel/vmlinux \
-        "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.5/aarch64/vmlinux-5.10.186" ; \
-    elif [ "$ARCH" = "x86_64" ]; then \
-      curl -fsSL -o /opt/firecracker-kernel/vmlinux \
-        "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.5/x86_64/vmlinux-5.10.186" ; \
+# RUN ARCH=$(uname -m) && \
+#     echo "Downloading Firecracker kernel for $ARCH..." && \
+#     mkdir -p /opt/firecracker-kernel && \
+#     if [ "$ARCH" = "aarch64" ]; then \
+#       curl -fsSL -o /opt/firecracker-kernel/vmlinux \
+#         "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.5/aarch64/vmlinux-5.10.186" ; \
+#     elif [ "$ARCH" = "x86_64" ]; then \
+#       curl -fsSL -o /opt/firecracker-kernel/vmlinux \
+#         "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.5/x86_64/vmlinux-5.10.186" ; \
+#     fi && \
+#     ls -la /opt/firecracker-kernel/vmlinux && \
+#     echo "Kernel download complete"
+
+# --- BUILD STAGE ---
+# Build Firecracker kernel with 9P support (auto-detect architecture)
+FROM alpine:$ALPINE_VERSION as firecracker-kernel-build
+
+ARG FIRECRACKER_KERNEL_VERSION
+
+RUN apk add --no-cache \
+    build-base bc flex bison perl \
+    linux-headers elfutils-dev openssl-dev ncurses-dev \
+    xz curl bash diffutils findutils
+
+RUN echo "$(uname -m)" > /tmp/build-arch
+
+WORKDIR /build
+RUN MAJOR_VERSION=$(echo $FIRECRACKER_KERNEL_VERSION | cut -d. -f1) && \
+    curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v${MAJOR_VERSION}.x/linux-${FIRECRACKER_KERNEL_VERSION}.tar.xz" \
+      -o linux.tar.xz && \
+    tar -xJf linux.tar.xz && \
+    rm linux.tar.xz && \
+    mv linux-${FIRECRACKER_KERNEL_VERSION} linux
+
+COPY kernels/firecracker/config-firecracker-x86_64 /build/config-x86_64
+COPY kernels/firecracker/config-firecracker-aarch64 /build/config-aarch64
+
+RUN ARCH=$(cat /tmp/build-arch) && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        cp /build/config-x86_64 /build/linux/.config; \
+    elif [ "$ARCH" = "aarch64" ]; then \
+        cp /build/config-aarch64 /build/linux/.config; \
+    fi
+
+WORKDIR /build/linux
+RUN ARCH=$(cat /tmp/build-arch) && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        make olddefconfig && \
+        make -j$(nproc) vmlinux && \
+        mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
+        cp vmlinux /opt/runcvm/kernels/firecracker/ && \
+        cp .config /opt/runcvm/kernels/firecracker/config; \
+    elif [ "$ARCH" = "aarch64" ]; then \
+        make ARCH=arm64 olddefconfig && \
+        make ARCH=arm64 -j$(nproc) Image && \
+        mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
+        cp arch/arm64/boot/Image /opt/runcvm/kernels/firecracker/vmlinux && \
+        cp .config /opt/runcvm/kernels/firecracker/config; \
     fi && \
-    ls -la /opt/firecracker-kernel/vmlinux && \
-    echo "Kernel download complete"
+    ls -alh /opt/runcvm/kernels/firecracker/vmlinux
 
 # Add this to your Dockerfile BEFORE the "installer" stage
 # This downloads and extracts the Firecracker binary for ARM64
@@ -271,7 +321,8 @@ COPY --from=binaries /opt/runcvm /opt/runcvm
 COPY --from=runcvm-init /root/runcvm-init/runcvm-init /opt/runcvm/sbin/
 COPY --from=qemu-exit /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
 COPY --from=firecracker-bin /usr/local/bin/firecracker /opt/runcvm/sbin/
-COPY --from=firecracker-kernel /opt/firecracker-kernel/vmlinux /opt/runcvm/firecracker-kernel
+# COPY --from=firecracker-kernel /opt/firecracker-kernel/vmlinux /opt/runcvm/firecracker-kernel
+COPY --from=firecracker-kernel-build  /opt/runcvm/kernels/firecracker/vmlinux /opt/runcvm/firecracker-kernel
 
 RUN apk update && apk add --no-cache rsync
 

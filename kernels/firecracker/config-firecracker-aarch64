@@ -8,7 +8,7 @@
 # - virtio-mmio (NOT virtio-pci) - Firecracker uses MMIO transport
 # - virtio-blk, virtio-net, virtio-vsock
 # - ext4 filesystem
-# - Serial console (ttyAMA0 for ARM64)
+# - Serial console (ttyS0 for ARM64 Firecracker)
 # - GIC (Generic Interrupt Controller)
 # - PSCI for power management
 #
@@ -47,6 +47,8 @@ CONFIG_CGROUP_DEVICE=y
 CONFIG_CGROUP_CPUACCT=y
 CONFIG_NAMESPACES=y
 CONFIG_USER_NS=y
+CONFIG_PID_NS=y
+CONFIG_NET_NS=y
 CONFIG_BLK_DEV_INITRD=y
 CONFIG_EXPERT=y
 CONFIG_KALLSYMS=y
@@ -65,6 +67,21 @@ CONFIG_IO_URING=y
 CONFIG_ADVISE_SYSCALLS=y
 CONFIG_MEMBARRIER=y
 CONFIG_EMBEDDED=y
+CONFIG_MULTIUSER=y
+CONFIG_SGETMASK_SYSCALL=y
+CONFIG_SYSFS_SYSCALL=y
+CONFIG_FHANDLE=y
+
+# ============================================================
+# BINARY FORMATS - CRITICAL FOR RUNNING USERSPACE
+# ============================================================
+
+CONFIG_BINFMT_ELF=y
+CONFIG_ELFCORE=y
+CONFIG_CORE_DUMP_DEFAULT_ELF_HEADERS=y
+CONFIG_BINFMT_SCRIPT=y
+CONFIG_BINFMT_MISC=y
+CONFIG_COREDUMP=y
 
 # ============================================================
 # ARM64 ARCHITECTURE SPECIFIC
@@ -98,6 +115,10 @@ CONFIG_ARM64_PAN=y
 CONFIG_ARM64_UAO=y
 CONFIG_ARM64_VHE=y
 CONFIG_ARM64_TAGGED_ADDR_ABI=y
+
+# Compat - for 32-bit binaries if needed (optional)
+# CONFIG_COMPAT=y
+# CONFIG_BINFMT_ELF32=y
 
 # Crypto acceleration (ARM64 specific)
 CONFIG_ARM64_CRYPTO=y
@@ -134,7 +155,9 @@ CONFIG_VHOST_VSOCK=y
 # ============================================================
 
 CONFIG_VIRTIO=y
+CONFIG_VIRTIO_MENU=y
 CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
 # NOT using PCI - Firecracker uses MMIO
 CONFIG_VIRTIO_PCI=n
 CONFIG_VIRTIO_BLK=y
@@ -180,6 +203,7 @@ CONFIG_BLK_DEV_RAM_SIZE=65536
 CONFIG_NET=y
 CONFIG_PACKET=y
 CONFIG_UNIX=y
+CONFIG_UNIX_SCM=y
 CONFIG_INET=y
 CONFIG_IP_MULTICAST=y
 CONFIG_IP_ADVANCED_ROUTER=y
@@ -244,6 +268,7 @@ CONFIG_SQUASHFS=y
 CONFIG_SQUASHFS_XZ=y
 CONFIG_SQUASHFS_ZSTD=y
 CONFIG_PROC_FS=y
+CONFIG_PROC_SYSCTL=y
 CONFIG_SYSFS=y
 CONFIG_DEVTMPFS=y
 CONFIG_DEVTMPFS_MOUNT=y
@@ -251,27 +276,50 @@ CONFIG_DEVPTS_FS=y
 CONFIG_HUGETLBFS=y
 CONFIG_HUGETLB_PAGE=y
 CONFIG_CONFIGFS_FS=y
-CONFIG_CGROUP_FS=y
 
 # ============================================================
-# TTY/SERIAL CONSOLE (ARM64 uses ttyAMA0 / PL011)
+# TTY/SERIAL CONSOLE - CRITICAL FOR FIRECRACKER
 # ============================================================
 
 CONFIG_TTY=y
+CONFIG_VT=y
+CONFIG_CONSOLE_TRANSLATIONS=y
+CONFIG_VT_CONSOLE=y
+CONFIG_VT_CONSOLE_SLEEP=y
+CONFIG_HW_CONSOLE=y
+CONFIG_UNIX98_PTYS=y
+CONFIG_LEGACY_PTYS=n
+
+# Serial drivers
 CONFIG_SERIAL_CORE=y
 CONFIG_SERIAL_CORE_CONSOLE=y
-CONFIG_SERIAL_AMBA_PL011=y
-CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
-# Also enable 8250 for virtio-console compatibility
+
+# 8250 UART - Firecracker uses this on ARM64 too (ttyS0)
 CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_DEPRECATED_OPTIONS=y
 CONFIG_SERIAL_8250_CONSOLE=y
 CONFIG_SERIAL_8250_NR_UARTS=4
+CONFIG_SERIAL_8250_RUNTIME_UARTS=4
+CONFIG_SERIAL_OF_PLATFORM=y
+
+# PL011 UART (ARM)
+CONFIG_SERIAL_AMBA_PL011=y
+CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
+
+# Earlycon for boot debugging
+CONFIG_SERIAL_EARLYCON=y
+
+# HVC console (virtio-console)
 CONFIG_HVC_DRIVER=y
 CONFIG_VIRTIO_CONSOLE=y
 
-# Early console for debugging
-CONFIG_SERIAL_EARLYCON=y
-CONFIG_SERIAL_EARLYCON_ARM_SEMIHOST=y
+# ============================================================
+# CHARACTER DEVICES - CRITICAL
+# ============================================================
+
+CONFIG_DEVMEM=y
+CONFIG_DEVKMEM=y
+CONFIG_NULL_TTY=y
 
 # ============================================================
 # CRYPTO
@@ -306,7 +354,7 @@ CONFIG_USB_SUPPORT=n
 # No sound
 CONFIG_SOUND=n
 
-# No graphics
+# No graphics/framebuffer (but keep VT for console)
 CONFIG_DRM=n
 CONFIG_FB=n
 
@@ -329,12 +377,23 @@ CONFIG_BLK_DEV_NVME=n
 # No PCI (Firecracker uses MMIO)
 CONFIG_PCI=n
 
-# Reduce debugging (faster boot)
-CONFIG_DEBUG_KERNEL=n
+# ============================================================
+# DEBUG OPTIONS - Enable some for troubleshooting
+# ============================================================
+
+CONFIG_DEBUG_KERNEL=y
 CONFIG_DEBUG_INFO=n
-CONFIG_MAGIC_SYSRQ=n
+CONFIG_DEBUG_INFO_NONE=y
+CONFIG_MAGIC_SYSRQ=y
 CONFIG_PROFILING=n
-CONFIG_STACKTRACE=n
+CONFIG_PRINTK_TIME=y
+CONFIG_DYNAMIC_DEBUG=y
+CONFIG_SYMBOLIC_ERRNAME=y
+CONFIG_DEBUG_BUGVERBOSE=y
+
+# Panic behavior
+CONFIG_PANIC_ON_OOPS=y
+CONFIG_PANIC_TIMEOUT=1
 
 # ============================================================
 # BUILD OPTIONS
@@ -343,7 +402,6 @@ CONFIG_STACKTRACE=n
 CONFIG_MODULES=y
 CONFIG_MODULE_UNLOAD=y
 CONFIG_MODVERSIONS=y
-CONFIG_TRIM_UNUSED_KSYMS=y
 
 CONFIG_INITRAMFS_SOURCE=""
 CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
@@ -354,4 +412,3 @@ CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
 
 CONFIG_BUILD_ARM64_UNCOMPRESSED_KERNEL=n
 CONFIG_KERNEL_GZIP=y
-# Alternatively: CONFIG_KERNEL_LZ4=y for faster decompression
