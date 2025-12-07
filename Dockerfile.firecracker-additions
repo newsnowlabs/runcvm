@@ -39,7 +39,7 @@ RUN apk add --no-cache \
 
 # Download and build kernel
 WORKDIR /kernel
-RUN curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-${FIRECRACKER_KERNEL_VERSION}.tar.xz" \
+RUN curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${FIRECRACKER_KERNEL_VERSION}.tar.xz" \
       -o linux.tar.xz && \
     tar -xJf linux.tar.xz && \
     cd linux-${FIRECRACKER_KERNEL_VERSION}

@@ -1,0 +1,259 @@
+# ============================================================
+# RunCVM Firecracker Kernel Build Stages
+# ============================================================
+# This file contains Docker build stages for compiling Firecracker
+# kernels with 9P filesystem support for both x86_64 and ARM64.
+#
+# Usage:
+#   # Build x86_64 kernel
+#   docker buildx build --target firecracker-kernel-x86 -o type=local,dest=./out .
+#
+#   # Build ARM64 kernel (native)
+#   docker buildx build --platform linux/arm64 --target firecracker-kernel-arm64 -o type=local,dest=./out .
+#
+#   # Build ARM64 kernel (cross-compile from x86)
+#   docker buildx build --target firecracker-kernel-arm64-cross -o type=local,dest=./out .
+#
+#   # Build multi-arch (both kernels)
+#   docker buildx build --target firecracker-kernels-all -o type=local,dest=./out .
+# ============================================================
+
+ARG ALPINE_VERSION=3.19
+ARG KERNEL_VERSION=6.6.5-r0
+
+# ============================================================
+# FIRECRACKER KERNEL STAGE (x86_64)
+# ============================================================
+# Builds vmlinux for x86_64 with 9P support
+# Output: /opt/runcvm/kernels/firecracker/x86_64/vmlinux
+
+FROM alpine:${ALPINE_VERSION} AS firecracker-kernel-x86
+
+ARG KERNEL_VERSION=5.10.204
+
+# Install build dependencies
+RUN apk add --no-cache \
+    build-base \
+    bc \
+    flex \
+    bison \
+    perl \
+    linux-headers \
+    elfutils-dev \
+    openssl-dev \
+    ncurses-dev \
+    xz \
+    curl \
+    bash \
+    diffutils \
+    findutils \
+    gawk \
+    grep \
+    sed \
+    coreutils
+
+# Download kernel source
+WORKDIR /build
+RUN echo "Downloading Linux kernel ${KERNEL_VERSION}..." && \
+    curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz" \
+      -o linux.tar.xz && \
+    tar -xJf linux.tar.xz && \
+    rm linux.tar.xz && \
+    mv linux-${KERNEL_VERSION} linux
+
+# Copy kernel config
+COPY kernels/firecracker/config-firecracker-x86_64 /build/linux/.config
+
+# Build kernel
+WORKDIR /build/linux
+RUN echo "Building x86_64 kernel..." && \
+    make olddefconfig && \
+    make -j$(nproc) vmlinux && \
+    echo "Kernel build complete!"
+
+# Prepare output
+RUN mkdir -p /opt/runcvm/kernels/firecracker/x86_64/${KERNEL_VERSION} && \
+    cp vmlinux /opt/runcvm/kernels/firecracker/x86_64/${KERNEL_VERSION}/ && \
+    cp .config /opt/runcvm/kernels/firecracker/x86_64/${KERNEL_VERSION}/config && \
+    ln -sf ${KERNEL_VERSION} /opt/runcvm/kernels/firecracker/x86_64/latest && \
+    echo "x86_64 kernel installed to /opt/runcvm/kernels/firecracker/x86_64/${KERNEL_VERSION}/vmlinux"
+
+
+# ============================================================
+# FIRECRACKER KERNEL STAGE (ARM64 - Native Build)
+# ============================================================
+# Builds Image for ARM64 with 9P support
+# Must be built on ARM64 host or with --platform linux/arm64
+# Output: /opt/runcvm/kernels/firecracker/aarch64/Image
+
+FROM alpine:${ALPINE_VERSION} AS firecracker-kernel-arm64
+
+ARG KERNEL_VERSION=5.10.204
+
+# Install build dependencies
+RUN apk add --no-cache \
+    build-base \
+    bc \
+    flex \
+    bison \
+    perl \
+    linux-headers \
+    elfutils-dev \
+    openssl-dev \
+    ncurses-dev \
+    xz \
+    curl \
+    bash \
+    diffutils \
+    findutils \
+    gawk \
+    grep \
+    sed \
+    coreutils
+
+# Download kernel source
+WORKDIR /build
+RUN echo "Downloading Linux kernel ${KERNEL_VERSION}..." && \
+    curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz" \
+      -o linux.tar.xz && \
+    tar -xJf linux.tar.xz && \
+    rm linux.tar.xz && \
+    mv linux-${KERNEL_VERSION} linux
+
+# Copy kernel config
+COPY kernels/firecracker/config-firecracker-aarch64 /build/linux/.config
+
+# Build kernel (native ARM64)
+WORKDIR /build/linux
+RUN echo "Building ARM64 kernel (native)..." && \
+    make ARCH=arm64 olddefconfig && \
+    make ARCH=arm64 -j$(nproc) Image && \
+    echo "Kernel build complete!"
+
+# Prepare output
+RUN mkdir -p /opt/runcvm/kernels/firecracker/aarch64/${KERNEL_VERSION} && \
+    cp arch/arm64/boot/Image /opt/runcvm/kernels/firecracker/aarch64/${KERNEL_VERSION}/ && \
+    cp .config /opt/runcvm/kernels/firecracker/aarch64/${KERNEL_VERSION}/config && \
+    ln -sf ${KERNEL_VERSION} /opt/runcvm/kernels/firecracker/aarch64/latest && \
+    echo "ARM64 kernel installed to /opt/runcvm/kernels/firecracker/aarch64/${KERNEL_VERSION}/Image"
+
+
+# ============================================================
+# FIRECRACKER KERNEL STAGE (ARM64 - Cross-compile from x86)
+# ============================================================
+# Cross-compiles ARM64 kernel from x86_64 host
+# Output: /opt/runcvm/kernels/firecracker/aarch64/Image
+
+FROM ubuntu:22.04 AS firecracker-kernel-arm64-cross
+
+ARG KERNEL_VERSION=5.10.204
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Install build dependencies + cross-compiler
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    bc \
+    flex \
+    bison \
+    libelf-dev \
+    libssl-dev \
+    libncurses-dev \
+    xz-utils \
+    curl \
+    gcc-aarch64-linux-gnu \
+    binutils-aarch64-linux-gnu \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download kernel source
+WORKDIR /build
+RUN echo "Downloading Linux kernel ${KERNEL_VERSION}..." && \
+    curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz" \
+      -o linux.tar.xz && \
+    tar -xJf linux.tar.xz && \
+    rm linux.tar.xz && \
+    mv linux-${KERNEL_VERSION} linux
+
+# Copy kernel config
+COPY kernels/firecracker/config-firecracker-aarch64 /build/linux/.config
+
+# Cross-compile kernel
+WORKDIR /build/linux
+RUN echo "Cross-compiling ARM64 kernel from x86_64..." && \
+    make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig && \
+    make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image && \
+    echo "Kernel build complete!"
+
+# Prepare output
+RUN mkdir -p /opt/runcvm/kernels/firecracker/aarch64/${KERNEL_VERSION} && \
+    cp arch/arm64/boot/Image /opt/runcvm/kernels/firecracker/aarch64/${KERNEL_VERSION}/ && \
+    cp .config /opt/runcvm/kernels/firecracker/aarch64/${KERNEL_VERSION}/config && \
+    ln -sf ${KERNEL_VERSION} /opt/runcvm/kernels/firecracker/aarch64/latest && \
+    echo "ARM64 kernel installed to /opt/runcvm/kernels/firecracker/aarch64/${KERNEL_VERSION}/Image"
+
+
+# ============================================================
+# PREBUILT KERNEL DOWNLOAD STAGE
+# ============================================================
+# Downloads pre-built kernels from Firecracker CI
+# NOTE: These do NOT have 9P support - use only for testing
+
+FROM alpine:${ALPINE_VERSION} AS firecracker-kernel-prebuilt
+
+ARG TARGETARCH
+ARG FC_CI_VERSION=1.10
+
+RUN apk add --no-cache curl
+
+# Download pre-built kernel based on architecture
+RUN mkdir -p /opt/runcvm/kernels/firecracker/prebuilt && \
+    case "$(uname -m)" in \
+      x86_64) \
+        echo "Downloading pre-built x86_64 kernel..." && \
+        curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v${FC_CI_VERSION}/x86_64/vmlinux-5.10.217" \
+          -o /opt/runcvm/kernels/firecracker/prebuilt/vmlinux || \
+        echo "WARNING: Could not download pre-built kernel" \
+        ;; \
+      aarch64) \
+        echo "Downloading pre-built aarch64 kernel..." && \
+        curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v${FC_CI_VERSION}/aarch64/vmlinux-5.10.217" \
+          -o /opt/runcvm/kernels/firecracker/prebuilt/vmlinux || \
+        echo "WARNING: Could not download pre-built kernel" \
+        ;; \
+      *) \
+        echo "Unsupported architecture: $(uname -m)" && exit 1 \
+        ;; \
+    esac && \
+    echo "NOTE: Pre-built kernels do NOT include 9P support!"
+
+
+# ============================================================
+# COMBINED OUTPUT STAGE
+# ============================================================
+# Combines both architectures into single output
+
+FROM alpine:${ALPINE_VERSION} AS firecracker-kernels-all
+
+# Copy x86_64 kernel
+COPY --from=firecracker-kernel-x86 /opt/runcvm/kernels/firecracker/x86_64 /opt/runcvm/kernels/firecracker/x86_64
+
+# Copy ARM64 kernel (from cross-compile by default)
+COPY --from=firecracker-kernel-arm64-cross /opt/runcvm/kernels/firecracker/aarch64 /opt/runcvm/kernels/firecracker/aarch64
+
+# Create architecture symlinks for convenience
+RUN ln -sf x86_64 /opt/runcvm/kernels/firecracker/amd64 && \
+    ln -sf aarch64 /opt/runcvm/kernels/firecracker/arm64
+
+# Verify outputs
+RUN echo "=== Built Kernels ===" && \
+    ls -la /opt/runcvm/kernels/firecracker/*/latest/ && \
+    echo "====================="
+
+
+# ============================================================
+# FINAL OUTPUT STAGE (for use in main Dockerfile)
+# ============================================================
+# Use this stage in your main Dockerfile:
+#   COPY --from=firecracker-kernels /opt/runcvm/kernels/firecracker /opt/runcvm/kernels/firecracker
+
+FROM scratch AS firecracker-kernels
+COPY --from=firecracker-kernels-all /opt/runcvm/kernels/firecracker /opt/runcvm/kernels/firecracker
