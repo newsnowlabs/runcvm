@@ -118,7 +118,7 @@ RUN /usr/local/bin/make-bundelf-bundle.sh --bundle && \
     mkdir -p $BUNDELF_CODE_PATH/bin && \
     cd $BUNDELF_CODE_PATH/bin && \
     for cmd in \
-    uname mkdir rmdir cp mv free ip awk base64 cat chgrp chmod cut grep head hostname init ln ls \
+    uname mkdir rmdir cp mv free ip awk sleep base64 cat chgrp chmod cut grep head hostname init ln ls \
     mkdir poweroff ps rm rmdir route sh sysctl tr touch; \
     do \
     ln -s busybox $cmd; \
@@ -254,39 +254,51 @@ RUN MAJOR_VERSION=$(echo $FIRECRACKER_KERNEL_VERSION | cut -d. -f1) && \
 COPY kernels/firecracker/config-firecracker-x86_64 /build/config-x86_64
 COPY kernels/firecracker/config-firecracker-aarch64 /build/config-aarch64
 
+# Copy kernel patches (if any exist)
+COPY kernels/firecracker/patches/ /build/patches/
+
 RUN ARCH=$(cat /tmp/build-arch) && \
     if [ "$ARCH" = "x86_64" ]; then \
-        cp /build/config-x86_64 /build/linux/.config; \
+    cp /build/config-x86_64 /build/linux/.config; \
     elif [ "$ARCH" = "aarch64" ]; then \
-        cp /build/config-aarch64 /build/linux/.config; \
+    cp /build/config-aarch64 /build/linux/.config; \
     fi
+
+# Apply kernel patches (if any)
+# The 9pnet_fd patch changes module_init to subsys_initcall to fix ARM64 init order
+RUN cd /build/linux && \
+    echo "=== Applying 9pnet_fd initcall fix ===" && \
+    echo "Before:" && grep -n "module_init(p9_trans_fd_init)" net/9p/trans_fd.c || echo "(not found)" && \
+    sed -i 's/module_init(p9_trans_fd_init);/subsys_initcall(p9_trans_fd_init); \/* ARM64 fix: earlier init *\//' net/9p/trans_fd.c && \
+    echo "After:" && grep -n "subsys_initcall(p9_trans_fd_init)" net/9p/trans_fd.c && \
+    echo "=== Patch applied successfully ==="
 
 RUN  mkdir -p /opt/runcvm/kernels/firecracker/ && cp /build/linux/.config /build/linux/.config.bak
 
 WORKDIR /build/linux
 RUN ARCH=$(cat /tmp/build-arch) && \
     if [ "$ARCH" = "x86_64" ]; then \
-        make -j$(nproc) vmlinux && \
-        mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
-        cp vmlinux /opt/runcvm/kernels/firecracker/ && \
-        cp .config /opt/runcvm/kernels/firecracker/config; \
+    make -j$(nproc) vmlinux && \
+    mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
+    cp vmlinux /opt/runcvm/kernels/firecracker/ && \
+    cp .config /opt/runcvm/kernels/firecracker/config; \
     elif [ "$ARCH" = "aarch64" ]; then \
-        make ARCH=arm64 olddefconfig && \
-        make ARCH=arm64 -j$(nproc) && \
-        mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
-        mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION}/modules && \
-        make ARCH=arm64 INSTALL_MOD_PATH=/opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} modules_install && \
-        cp arch/arm64/boot/Image /opt/runcvm/kernels/firecracker/vmlinux && \
-        cp .config /opt/runcvm/kernels/firecracker/config; \
+    make ARCH=arm64 olddefconfig && \
+    make ARCH=arm64 -j$(nproc) Image && \
+    mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
+    mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION}/modules && \
+    make ARCH=arm64 INSTALL_MOD_PATH=/opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} modules_install && \
+    cp arch/arm64/boot/Image /opt/runcvm/kernels/firecracker/vmlinux && \
+    cp .config /opt/runcvm/kernels/firecracker/config; \
     fi
 
 RUN ls -alh /opt/runcvm/kernels/firecracker/vmlinux && \
     echo "=== Checking if modules were built ===" && \
     if [ -d /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION}/modules ]; then \
-        echo "Modules directory exists:"; \
-        ls -la /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION}/modules/; \
+    echo "Modules directory exists:"; \
+    ls -la /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION}/modules/; \
     else \
-        echo "WARNING: Modules directory not created!"; \
+    echo "WARNING: Modules directory not created!"; \
     fi
 
 # RUN echo "=== Checking 9P VSOCK config after build ===" && \

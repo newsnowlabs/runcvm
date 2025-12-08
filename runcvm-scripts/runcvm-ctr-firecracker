@@ -71,28 +71,67 @@ create_volumes_from_vm_mounts() {
 setup_9p_volumes() {
   local port=5640
   
-  # Read volume mounts from OCI config
+  # Read volume mounts from OCI config  
   if [ -f "/.runcvm/volumes" ]; then
     > "$MOUNT_CONFIG"
+    
+    log "Setting up 9P volumes (TCP transport)"
     
     while IFS=: read -r src dst opts; do
       [ -z "$src" ] && continue
       
-      log "Setting up 9P export: $src → $dst (TCP port $port)"
+      log "  Exporting: $src → $dst (TCP port $port)"
       
-      # Start diod server for this volume on TCP
-      # Use 0.0.0.0 so VM can connect via bridge/TAP network
+      # Start diod server on TCP
+      # 9pnet_fd is now working so we can use TCP transport
+      log "    Starting diod: $DIOD_BIN --export $src --listen 0.0.0.0:$port"
+      
+      # Capture stderr to see startup errors
       $DIOD_BIN \
         --export "$src" \
         --listen "0.0.0.0:$port" \
         --logdest "/run/diod-$port.log" \
-        --no-auth &
+        --no-auth 2>"/run/diod-$port.err" &
+      local diod_pid=$!
+      DIOD_PIDS+=($diod_pid)
       
-      DIOD_PIDS+=($!)
+      # Wait a moment for diod to start
+      busybox sleep 1
       
-      # Record mount for guest (format: port:dst:host_ip)
-      # The host IP will be the gateway from the VM's perspective
-      echo "$port:$dst" >> "$MOUNT_CONFIG"
+      # Check if process is still running
+      if kill -0 $diod_pid 2>/dev/null; then
+        log "    ✓ diod process $diod_pid is running"
+      else
+        log "    ✗ diod process $diod_pid died!"
+        # Show stderr
+        if [ -f "/run/diod-$port.err" ] && [ -s "/run/diod-$port.err" ]; then
+          log "    stderr output:"
+          busybox cat "/run/diod-$port.err" 2>/dev/null | busybox head -10 | while read line; do log "      $line"; done
+        fi
+        # Show log
+        if [ -f "/run/diod-$port.log" ] && [ -s "/run/diod-$port.log" ]; then
+          log "    log output:"
+          busybox cat "/run/diod-$port.log" 2>/dev/null | busybox tail -10 | while read line; do log "      $line"; done
+        fi
+      fi
+      
+      # Verify diod is listening (check with any available tool)
+      local listening=0
+      if busybox netstat -tln 2>/dev/null | busybox grep -q ":$port "; then
+        listening=1
+      elif ss -tln 2>/dev/null | grep -q ":$port "; then
+        listening=1
+      fi
+      
+      if [ $listening -eq 1 ]; then
+        log "    ✓ diod listening on TCP port $port"
+      else
+        log "    WARNING: diod may not be listening on port $port (continuing anyway)"
+      fi
+      
+      # Record mount for guest (format: port:dst:src)
+      # The src is needed as the aname for diod
+      echo "$port:$dst:$src" >> "$MOUNT_CONFIG"
       
       port=$((port + 1))
     done < /.runcvm/volumes
@@ -524,51 +563,54 @@ mount_9p_volumes() {
   
   echo "RunCVM-FC init: Mounting 9P volumes via TCP..."
   
-  while IFS=: read -r port dst; do
+  # Config format: port:dst:src (where src is the export path for aname)
+  while IFS=: read -r port dst aname_path; do
     [ -z "$port" ] && continue
     [ -z "$dst" ] && continue
+    # Use the export path as aname, default to / if not specified
+    [ -z "$aname_path" ] && aname_path="/"
     
-    echo "RunCVM-FC init:   Mounting $dst from $host_ip:$port..."
+    echo "RunCVM-FC init:   Mounting $dst from port $port (aname=$aname_path)..."
     mkdir -p "$dst"
     
-    # Debug: show we're running as root
-    echo "RunCVM-FC init:   Running as uid=$(id -u 2>/dev/null || echo unknown)"
+    echo "RunCVM-FC init:   uid=$(id -u)"
     
-    # Test TCP connectivity first
-    echo "RunCVM-FC init:   Testing TCP connectivity to $host_ip:$port..."
-    if timeout 2 sh -c "echo >/dev/tcp/$host_ip/$port" 2>/dev/null; then
-      echo "    TCP connection successful"
-    else
-      # Try with nc if available
-      if command -v nc >/dev/null 2>&1; then
-        if timeout 2 nc -z "$host_ip" "$port" 2>/dev/null; then
-          echo "    TCP connection successful (nc)"
-        else
-          echo "    WARNING: Cannot connect to $host_ip:$port"
-        fi
-      else
-        echo "    (cannot test - no nc available)"
-      fi
-    fi
+    mount_success=0
     
-    # Try mount with simpler options first
-    echo "RunCVM-FC init:   Trying mount..."
-    mount_result=$(mount -t 9p -o "trans=tcp,port=$port,version=9p2000.L" "$host_ip" "$dst" 2>&1)
+    # Mount using 9P over TCP with diod
+    # Key settings:
+    # - trans=tcp: use TCP transport (9pnet_fd)
+    # - aname: must match the path diod is exporting
+    # - -n: don't write to /etc/mtab (may not exist in minimal env)
+    # - access=0: root access
+    mount_opts="version=9p2000.L,trans=tcp,aname=$aname_path,uname=root,access=0,port=$port"
+    
+    echo "RunCVM-FC init:   Mounting 9P: $host_ip → $dst"
+    echo "RunCVM-FC init:   Options: $mount_opts"
+    
+    mount_result=$(mount -t 9p -n -o "$mount_opts" "$host_ip" "$dst" 2>&1)
     mount_rc=$?
     
     if [ $mount_rc -eq 0 ]; then
-      echo "RunCVM-FC init:   OK - Mounted $dst"
+      echo "RunCVM-FC init:   ✓ Successfully mounted $dst"
+      mount_success=1
     else
-      echo "RunCVM-FC init:   FAILED (rc=$mount_rc) - $mount_result"
-      echo "RunCVM-FC init:   Checking if 9p is in /proc/filesystems..."
-      if grep -q 9p /proc/filesystems 2>/dev/null; then
-        echo "    9p filesystem IS supported"
+      echo "RunCVM-FC init:   Mount failed (rc=$mount_rc): $mount_result"
+      
+      # Try fallback with access=client
+      echo "RunCVM-FC init:   Trying fallback with access=client..."
+      mount_opts="version=9p2000.L,trans=tcp,aname=$aname_path,uname=root,access=client,port=$port"
+      mount_result=$(mount -t 9p -n -o "$mount_opts" "$host_ip" "$dst" 2>&1)
+      mount_rc=$?
+      
+      if [ $mount_rc -eq 0 ]; then
+        echo "RunCVM-FC init:   ✓ Successfully mounted $dst (with access=client)"
+        mount_success=1
       else
-        echo "    ERROR: 9p filesystem NOT in /proc/filesystems!"
-        cat /proc/filesystems 2>/dev/null | head -20 | sed 's/^/    /'
+        echo "RunCVM-FC init:   ✗ Failed to mount $dst: $mount_result"
+        # Show debug info
+        dmesg 2>/dev/null | grep -i 9p | tail -5 | sed 's/^/    /'
       fi
-      echo "RunCVM-FC init:   Checking dmesg for 9p errors..."
-      dmesg 2>/dev/null | grep -i 9p | tail -10 | sed 's/^/    /' || echo "    (no 9p messages found)"
     fi
   done < "$mount_config"
 }
@@ -960,7 +1002,8 @@ NETEOF
   fi
   
   # Build boot arguments - use /init which we created in the rootfs
-  local boot_args="init=/init console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw"
+  # Note: 9p.debug=0xff enables verbose 9P logging to debug transport issues
+  local boot_args="init=/init console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw 9p.debug=0xff"
   
   # Parse memory size (remove 'M' suffix if present)
   local mem_mb="${RUNCVM_MEM_SIZE%M}"
