@@ -542,7 +542,36 @@ STEP 3: VM boots and runs command
 | Changes sync to host | ❌ Not implemented |
 | Long-running containers | ⚠️ Limited (no live sync) |
 
----
+### Phase 1 Implementation Status (December 2025)
+
+✅ **COMPLETE**: Basic bind mount functionality
+
+| Feature | Status | Test Coverage |
+|---------|--------|---------------|
+| Read-only bind mounts | ✅ Working | BM-001 |
+| Read-write bind mounts | ✅ Working | BM-002 |
+| Read-only enforcement | ✅ Working | BM-003 |
+| Multiple bind mounts | ✅ Working | BM-004 |
+| 9P diagnostics | ✅ Documented | 9P-001 |
+| Performance baseline | ✅ Measured | PERF-001 |
+
+**Test Script**: [`test-storage.sh`](file:///runcvm-arm64/test-storage.sh)  
+**Test Report**: Generated at `/tmp/runcvm-storage-test-report.md` and [`docs/docker/storage/test-report.md`](file:///runcvm-arm64/docs/docker/storage/test-report.md)
+
+**What Works**:
+- Volume data is successfully copied into the container at start time
+- Containers can read host files via bind mounts
+- Containers can write to mounted volumes (data persists in rootfs)
+- Multiple volumes can be mounted simultaneously
+- Read-only enforcement works correctly
+
+**Known Limitations**:
+- Changes made inside the container are **NOT synced back** to the host
+- This is a temporary limitation until 9P over TCP is working
+- Suitable for read-only workloads and short-lived containers
+- Not suitable for databases or long-running stateful applications (yet)
+
+
 
 ## Future Work
 
@@ -644,9 +673,9 @@ This may require:
 
 | Field | Value |
 |-------|-------|
-| Version | 2.0 |
+| Version | 2.1 |
 | Created | December 7, 2025 |
 | Updated | December 9, 2025 |
 | Author | RunCVM Team |
-| Status | **In Progress** - Blocked on 9pnet_fd initialization |
+| Status | **Phase 1 Complete** - Basic bind mounts working, 9P blocked on kernel |
 | Next Review | When 9P TCP works |
