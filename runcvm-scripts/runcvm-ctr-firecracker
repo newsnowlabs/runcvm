@@ -474,9 +474,43 @@ mount_9p_volumes() {
     return 0
   fi
   
+  # Check if 9P filesystem is supported
   if ! grep -q 9p /proc/filesystems 2>/dev/null; then
     echo "RunCVM-FC init: ERROR - Kernel does not support 9P filesystem!"
+    echo "RunCVM-FC init: Available filesystems:"
+    cat /proc/filesystems 2>/dev/null | sed 's/^/  /' || echo "  (cannot read /proc/filesystems)"
     return 1
+  fi
+  
+  # Check for vsock device
+  echo "RunCVM-FC init: Checking vsock support..."
+  if [ ! -c /dev/vsock ]; then
+    echo "RunCVM-FC init: WARNING - /dev/vsock device not found!"
+    echo "RunCVM-FC init: This may indicate vsock is not initialized by the kernel"
+    echo "RunCVM-FC init: Devices in /dev:"
+    ls -la /dev/ 2>/dev/null | grep -i vsock || echo "  (no vsock device)"
+  else
+    echo "RunCVM-FC init: ✓ /dev/vsock exists"
+  fi
+  
+  # Check available 9P transports
+  if [ -f /proc/net/9p/transports ]; then
+    local transports=$(cat /proc/net/9p/transports 2>/dev/null)
+    echo "RunCVM-FC init: Available 9P transports: $transports"
+    if ! echo "$transports" | grep -q vsock; then
+      echo "RunCVM-FC init: ERROR - vsock transport not available for 9P!"
+      echo "RunCVM-FC init: "
+      echo "RunCVM-FC init: This means the kernel was not built with CONFIG_NET_9P_VSOCK=y"
+      echo "RunCVM-FC init: You need to rebuild the Docker image to compile a new kernel:"
+      echo "RunCVM-FC init:   cd /path/to/runcvm-arm64"
+      echo "RunCVM-FC init:   docker build -t runcvm-arm64:latest ."
+      echo "RunCVM-FC init: "
+      echo "RunCVM-FC init: Checking dmesg for vsock errors:"
+      dmesg 2>/dev/null | grep -i "9p\|vsock" | tail -10 | sed 's/^/  /' || echo "  (cannot read dmesg)"
+      return 1
+    fi
+  else
+    echo "RunCVM-FC init: WARNING - /proc/net/9p/transports not found"
   fi
   
   echo "RunCVM-FC init: Mounting 9P volumes..."
@@ -499,6 +533,12 @@ mount_9p_volumes() {
 }
 
 echo "RunCVM-FC init: ========== 9P VOLUME MOUNT =========="
+# Load 9P modules if they exist
+echo "RunCVM-FC init: Loading 9P kernel modules..."
+modprobe 9pnet 2>/dev/null && echo "  ✓ Loaded 9pnet" || echo "  (9pnet built-in or unavailable)"
+modprobe 9pnet_virtio 2>/dev/null && echo "  ✓ Loaded 9pnet_virtio" || echo "  (9pnet_virtio built-in or unavailable)"
+modprobe 9pnet_vsock 2>/dev/null && echo "  ✓ Loaded 9pnet_vsock" || echo "  (9pnet_vsock built-in or unavailable)"
+modprobe 9p 2>/dev/null && echo "  ✓ Loaded 9p" || echo "  (9p built-in or unavailable)"
 mount_9p_volumes
 echo "RunCVM-FC init: ========== 9P VOLUME MOUNT END =========="
 
@@ -687,6 +727,45 @@ INITEOF
     fi
   else
     log "WARNING: MOUNT_CONFIG does not exist at $MOUNT_CONFIG"
+  fi
+
+  # Copy kernel modules for 9P support
+  log "  Copying 9P kernel modules..."
+  local fc_modules_dir="/opt/runcvm/kernels/firecracker/modules"
+  if [ -d "$fc_modules_dir" ]; then
+    # Find the kernel version directory
+    local kernel_ver=$(busybox ls "$fc_modules_dir/lib/modules" 2>/dev/null | busybox head -1)
+    if [ -n "$kernel_ver" ] && [ -d "$fc_modules_dir/lib/modules/$kernel_ver" ]; then
+      log "    Found kernel modules for version: $kernel_ver"
+      
+      # Create modules directory in staging
+      busybox mkdir -p "${staging_dir}/lib/modules/$kernel_ver"
+      
+      # Copy 9P modules specifically
+      if [ -d "$fc_modules_dir/lib/modules/$kernel_ver/kernel/net/9p" ]; then
+        busybox mkdir -p "${staging_dir}/lib/modules/$kernel_ver/kernel/net"
+        busybox cp -a "$fc_modules_dir/lib/modules/$kernel_ver/kernel/net/9p" \
+          "${staging_dir}/lib/modules/$kernel_ver/kernel/net/"
+        log "      Copied 9P modules"
+      fi
+      
+      # Copy vsock modules if they exist
+      if [ -d "$fc_modules_dir/lib/modules/$kernel_ver/kernel/net/vmw_vsock" ]; then
+        busybox mkdir -p "${staging_dir}/lib/modules/$kernel_ver/kernel/net"
+        busybox cp -a "$fc_modules_dir/lib/modules/$kernel_ver/kernel/net/vmw_vsock" \
+          "${staging_dir}/lib/modules/$kernel_ver/kernel/net/"
+        log "      Copied vsock modules"
+      fi
+      
+      # Copy modules.* files (needed for modprobe)
+      busybox cp "$fc_modules_dir/lib/modules/$kernel_ver"/modules.* \
+        "${staging_dir}/lib/modules/$kernel_ver/" 2>/dev/null || true
+      log "      Copied module metadata files"
+    else
+      log "    WARNING: No kernel modules found in $fc_modules_dir"
+    fi
+  else
+    log "    WARNING: Firecracker modules directory not found: $fc_modules_dir"
   fi
 
   
