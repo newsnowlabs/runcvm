@@ -239,7 +239,7 @@ ARG FIRECRACKER_KERNEL_VERSION
 RUN apk add --no-cache \
     build-base bc flex bison perl \
     linux-headers elfutils-dev openssl-dev ncurses-dev \
-    xz curl bash diffutils findutils
+    xz curl bash diffutils findutils kmod
 
 RUN echo "$(uname -m)" > /tmp/build-arch
 
@@ -278,7 +278,14 @@ RUN ARCH=$(cat /tmp/build-arch) && \
     cp arch/arm64/boot/Image /opt/runcvm/kernels/firecracker/vmlinux && \
     cp .config /opt/runcvm/kernels/firecracker/config; \
     fi && \
-    ls -alh /opt/runcvm/kernels/firecracker/vmlinux
+    ls -alh /opt/runcvm/kernels/firecracker/vmlinux && \
+    echo "=== Checking if modules were built ===" && \
+    if [ -d /opt/runcvm/kernels/firecracker/modules ]; then \
+    echo "Modules directory exists:"; \
+    ls -la /opt/runcvm/kernels/firecracker/modules/lib/modules/; \
+    else \
+    echo "WARNING: Modules directory not created!"; \
+    fi
 
 # Add this to your Dockerfile BEFORE the "installer" stage
 # This downloads and extracts the Firecracker binary for ARM64
@@ -346,9 +353,8 @@ COPY --from=binaries /opt/runcvm /opt/runcvm
 COPY --from=runcvm-init /root/runcvm-init/runcvm-init /opt/runcvm/sbin/
 COPY --from=qemu-exit /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
 COPY --from=firecracker-bin /usr/local/bin/firecracker /opt/runcvm/sbin/
-# COPY --from=firecracker-kernel /opt/firecracker-kernel/vmlinux /opt/runcvm/firecracker-kernel
-COPY --from=firecracker-kernel-build  /opt/runcvm/kernels/firecracker/vmlinux /opt/runcvm/firecracker-kernel
-COPY --from=firecracker-kernel-build  /opt/runcvm/kernels/firecracker/config /opt/runcvm/firecracker-config
+# Use Alpine kernel for Firecracker (has working 9P vsock support)
+COPY --from=alpine-kernel /opt/runcvm/kernels/alpine /opt/runcvm/kernels/firecracker
 COPY --from=diod-builder /diod-install/usr/sbin/diod /opt/runcvm/bin/diod
 
 RUN apk update && apk add --no-cache rsync

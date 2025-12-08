@@ -729,36 +729,36 @@ INITEOF
     log "WARNING: MOUNT_CONFIG does not exist at $MOUNT_CONFIG"
   fi
 
-  # Copy kernel modules for 9P support
+  # Copy kernel modules for 9P support from Alpine kernel
   log "  Copying 9P kernel modules..."
-  local fc_modules_dir="/opt/runcvm/kernels/firecracker/modules"
+  local fc_modules_dir="/opt/runcvm/kernels/firecracker/latest/modules"
   if [ -d "$fc_modules_dir" ]; then
     # Find the kernel version directory
-    local kernel_ver=$(busybox ls "$fc_modules_dir/lib/modules" 2>/dev/null | busybox head -1)
-    if [ -n "$kernel_ver" ] && [ -d "$fc_modules_dir/lib/modules/$kernel_ver" ]; then
+    local kernel_ver=$(busybox ls "$fc_modules_dir" 2>/dev/null | busybox head -1)
+    if [ -n "$kernel_ver" ] && [ -d "$fc_modules_dir/$kernel_ver" ]; then
       log "    Found kernel modules for version: $kernel_ver"
       
       # Create modules directory in staging
       busybox mkdir -p "${staging_dir}/lib/modules/$kernel_ver"
       
       # Copy 9P modules specifically
-      if [ -d "$fc_modules_dir/lib/modules/$kernel_ver/kernel/net/9p" ]; then
+      if [ -d "$fc_modules_dir/$kernel_ver/kernel/net/9p" ]; then
         busybox mkdir -p "${staging_dir}/lib/modules/$kernel_ver/kernel/net"
-        busybox cp -a "$fc_modules_dir/lib/modules/$kernel_ver/kernel/net/9p" \
+        busybox cp -a "$fc_modules_dir/$kernel_ver/kernel/net/9p" \
           "${staging_dir}/lib/modules/$kernel_ver/kernel/net/"
         log "      Copied 9P modules"
       fi
       
       # Copy vsock modules if they exist
-      if [ -d "$fc_modules_dir/lib/modules/$kernel_ver/kernel/net/vmw_vsock" ]; then
+      if [ -d "$fc_modules_dir/$kernel_ver/kernel/net/vmw_vsock" ]; then
         busybox mkdir -p "${staging_dir}/lib/modules/$kernel_ver/kernel/net"
-        busybox cp -a "$fc_modules_dir/lib/modules/$kernel_ver/kernel/net/vmw_vsock" \
+        busybox cp -a "$fc_modules_dir/$kernel_ver/kernel/net/vmw_vsock" \
           "${staging_dir}/lib/modules/$kernel_ver/kernel/net/"
         log "      Copied vsock modules"
       fi
       
       # Copy modules.* files (needed for modprobe)
-      busybox cp "$fc_modules_dir/lib/modules/$kernel_ver"/modules.* \
+      busybox cp "$fc_modules_dir/$kernel_ver"/modules.* \
         "${staging_dir}/lib/modules/$kernel_ver/" 2>/dev/null || true
       log "      Copied module metadata files"
     else
@@ -900,8 +900,8 @@ NETEOF
   local final_size=$(busybox du -sm "$rootfs_path" 2>/dev/null | busybox cut -f1)
   log "  Rootfs ready: ${final_size}MB (created in ${mke2fs_time}s)"
   
-  # Determine kernel path
-  local fc_default_kernel="$RUNCVM_GUEST/firecracker-kernel"
+  # Determine kernel path - using Alpine kernel for Firecracker
+  local fc_default_kernel="$RUNCVM_GUEST/../kernels/firecracker/latest/vmlinuz"
   local kernel_path="${RUNCVM_FC_KERNEL_PATH:-$fc_default_kernel}"
   
   if [ ! -f "$kernel_path" ]; then

@@ -428,6 +428,18 @@ CONFIG_BLK_DEV_LOOP=y
 CONFIG_BLK_DEV_LOOP_MIN_COUNT=8
 CONFIG_VIRTIO_BLK=y
 
+# ============================================================
+# 9P FILESYSTEM (for live volume mounts via vsock)
+# ============================================================
+
+CONFIG_NET_9P=m
+CONFIG_NET_9P_VIRTIO=m
+CONFIG_NET_9P_VSOCK=m
+CONFIG_9P_FS=m
+CONFIG_9P_FS_POSIX_ACL=y
+CONFIG_9P_FS_SECURITY=y
+CONFIG_NET_9P_DEBUG=y
+
 # ============================================================================
 # SCSI (for virtio-scsi if needed)
 # ============================================================================
@@ -1154,18 +1166,6 @@ CONFIG_TEXTSEARCH_KMP=y
 CONFIG_TEXTSEARCH_BM=y
 CONFIG_TEXTSEARCH_FSM=y
 CONFIG_HAVE_ARCH_KGDB=y
-
-# ============================================================
-# 9P FILESYSTEM (for live volume mounts via vsock)
-# ============================================================
-
-CONFIG_NET_9P=m
-CONFIG_NET_9P_VIRTIO=m
-CONFIG_NET_9P_VSOCK=m
-CONFIG_9P_FS=m
-CONFIG_9P_FS_POSIX_ACL=y
-CONFIG_9P_FS_SECURITY=y
-CONFIG_NET_9P_DEBUG=y
 
 # =================
 # Auto Mount
