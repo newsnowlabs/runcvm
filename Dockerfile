@@ -118,7 +118,7 @@ RUN /usr/local/bin/make-bundelf-bundle.sh --bundle && \
     mkdir -p $BUNDELF_CODE_PATH/bin && \
     cd $BUNDELF_CODE_PATH/bin && \
     for cmd in \
-        uname awk base64 cat chgrp chmod cut grep head hostname init ln ls \
+        uname mkdir rmdir cp mv free ip awk base64 cat chgrp chmod cut grep head hostname init ln ls \
         mkdir poweroff ps rm rmdir route sh sysctl tr touch; \
     do \
         ln -s busybox $cmd; \
@@ -287,26 +287,21 @@ FROM alpine:3.19 as diod-builder
 
 # Install ALL required build dependencies
 RUN apk add --no-cache \
-    build-base \
-    autoconf \
-    automake \
-    libtool \
-    git \
-    pkgconf \
-    ncurses-dev \
-    libcap-dev \
-    attr-dev \
-    linux-headers
+    build-base autoconf automake libtool git \
+    linux-headers libcap-dev libcap-static musl-dev \
+    lua5.3-dev ncurses-dev ncurses-static
 
 # Clone and build diod
 RUN git clone https://github.com/chaos/diod.git -b v1.1.0 && \
     cd diod && \
     ./autogen.sh && \
-    ./configure --prefix=/usr \
+    LDFLAGS="-static" ./configure --prefix=/usr \
         --disable-diodmount \
         --disable-auth \
-        --disable-config && \
-    make && \
+        --disable-config \
+        CFLAGS="-static" \
+        LDFLAGS="-static" && \
+    make CFLAGS="-static" LDFLAGS="-static" && \
     make DESTDIR=/diod-install install
 
 # --- BUILD STAGE ---
@@ -351,6 +346,7 @@ COPY --from=qemu-exit /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
 COPY --from=firecracker-bin /usr/local/bin/firecracker /opt/runcvm/sbin/
 # COPY --from=firecracker-kernel /opt/firecracker-kernel/vmlinux /opt/runcvm/firecracker-kernel
 COPY --from=firecracker-kernel-build  /opt/runcvm/kernels/firecracker/vmlinux /opt/runcvm/firecracker-kernel
+COPY --from=firecracker-kernel-build  /opt/runcvm/kernels/firecracker/config /opt/runcvm/firecracker-config
 COPY --from=diod-builder /diod-install/usr/sbin/diod /opt/runcvm/bin/diod
 
 RUN apk update && apk add --no-cache rsync

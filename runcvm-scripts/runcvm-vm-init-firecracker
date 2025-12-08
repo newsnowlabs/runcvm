@@ -71,6 +71,11 @@ mkdir -p /dev/pts /dev/shm
 mount -t devpts devpts /dev/pts 2>/dev/null || true
 mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
 
+# Mount devtmpfs if not already mounted
+if ! mountpoint -q /dev; then
+    mount -t devtmpfs devtmpfs /dev
+fi
+
 # Create /dev/fd symlinks
 [ -e /dev/fd ] || ln -sf /proc/self/fd /dev/fd
 [ -e /dev/stdin ] || ln -sf /proc/self/fd/0 /dev/stdin
@@ -150,6 +155,10 @@ fi
 # ============================================================
 # LAUNCH ENTRYPOINT
 # ============================================================
+
+# In guest init script, before mounting 9P
+modprobe virtio_vsock 2>/dev/null || true
+modprobe 9pnet_vsock 2>/dev/null || true
 
 log "mount 9p volumes"
 mount_9p_volumes
