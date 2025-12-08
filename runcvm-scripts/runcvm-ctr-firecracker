@@ -29,6 +29,44 @@ error() {
   exit 1
 }
 
+extract_volumes_from_mounts() {
+  local volumes_file="/.runcvm/volumes"
+  local vm_mountpoint="${RUNCVM_VM_MOUNTPOINT:-/vm}"
+  
+  log "Extracting volumes from current mounts under $vm_mountpoint..."
+  
+  > "$volumes_file"
+  
+  while read -r device mountpoint fstype options rest; do
+    case "$mountpoint" in
+      ${vm_mountpoint}/*) ;;
+      *) continue ;;
+    esac
+    
+    case "$mountpoint" in
+      */etc/resolv.conf|*/etc/hosts|*/etc/hostname) continue ;;
+      */.runcvm|*/.runcvm/*) continue ;;
+    esac
+    
+    local container_path="${mountpoint#${vm_mountpoint}}"
+    local host_path="$device"
+    
+    if [ -d "$mountpoint" ] || [ -f "$mountpoint" ]; then
+      if [ -n "$container_path" ] && [ "$host_path" != "/" ]; then
+        log "  Found volume: $host_path -> $container_path"
+        echo "${host_path}:${container_path}:rw" >> "$volumes_file"
+      fi
+    fi
+  done < /proc/mounts
+  
+  if [ -s "$volumes_file" ]; then
+    sort -u "$volumes_file" > "$volumes_file.tmp" && mv "$volumes_file.tmp" "$volumes_file"
+    log "Volumes file created with $(wc -l < "$volumes_file") volume(s)"
+  else
+    log "No user volumes detected"
+  fi
+}
+
 setup_9p_volumes() {
   local port=5640
   
@@ -90,7 +128,6 @@ create_rootfs_from_dir() {
     busybox rm -f "$image_path"
     return 1
   fi
-  
   log "Rootfs created successfully"
   return 0
 }
@@ -98,6 +135,12 @@ create_rootfs_from_dir() {
 # Main function
 main() {
   log "Starting Firecracker microVM launcher..."
+  # ==========================================================================
+  # STEP 0: Extract volumes and start 9P servers BEFORE creating rootfs
+  # ==========================================================================
+  extract_volumes_from_mounts
+  setup_9p_volumes
+
   
   # Check for Firecracker binary
   if [ ! -x "$FIRECRACKER_BIN" ]; then
@@ -411,6 +454,47 @@ if [ -f /.runcvm-resolv.conf ]; then
   cp /.runcvm-resolv.conf /etc/resolv.conf 2>/dev/null || true
 fi
 
+# ==========================================================================
+# 9P VOLUME MOUNTING - Mount host volumes via 9P over vsock
+# ==========================================================================
+mount_9p_volumes() {
+  local mount_config="/.runcvm/9p-mounts"
+  
+  echo "RunCVM-FC init: Checking for 9P volumes..."
+  
+  if [ ! -f "$mount_config" ]; then
+    echo "RunCVM-FC init: No 9p-mounts config found - volumes are static copies"
+    return 0
+  fi
+  
+  if ! grep -q 9p /proc/filesystems 2>/dev/null; then
+    echo "RunCVM-FC init: ERROR - Kernel does not support 9P filesystem!"
+    return 1
+  fi
+  
+  echo "RunCVM-FC init: Mounting 9P volumes..."
+  
+  while IFS=: read -r port dst; do
+    [ -z "$port" ] && continue
+    [ -z "$dst" ] && continue
+    
+    echo "RunCVM-FC init:   Mounting $dst (vsock port $port)..."
+    mkdir -p "$dst"
+    
+    if mount -t 9p \
+      -o "trans=vsock,dfltuid=0,dfltgid=0,version=9p2000.L,port=$port,msize=65536,cache=none" \
+      "hostshare" "$dst" 2>&1; then
+      echo "RunCVM-FC init:   OK - Mounted $dst"
+    else
+      echo "RunCVM-FC init:   FAILED - Could not mount $dst"
+    fi
+  done < "$mount_config"
+}
+
+echo "RunCVM-FC init: ========== 9P VOLUME MOUNT =========="
+mount_9p_volumes
+echo "RunCVM-FC init: ========== 9P VOLUME MOUNT END =========="
+
 # ========== DROPBEAR SSH SERVER FOR DOCKER EXEC ==========
 # docker exec uses SSH to connect to the VM, so we need dropbear running
 echo "RunCVM-FC init: ========== DROPBEAR SSH SETUP =========="
@@ -583,6 +667,12 @@ INITEOF
     busybox cp "/.runcvm/config" "${staging_dir}/.runcvm/config"
     log "    Copied /.runcvm/config"
   fi
+  # Copy 9p-mounts file - CRITICAL for volume mounting in VM
+  if [ -f "$MOUNT_CONFIG" ] && [ -s "$MOUNT_CONFIG" ]; then
+    busybox cp "$MOUNT_CONFIG" "${staging_dir}/.runcvm/9p-mounts"
+    log "    Copied 9p-mounts file"
+  fi
+
   
   # Create a simpler runcvm-vm-exec for Firecracker that doesn't depend on complex paths
   # This is called by dropbear when docker exec connects via SSH
@@ -778,6 +868,13 @@ NETEOF
 
     network_config=",\"network-interfaces\":[{\"iface_id\":\"eth0\",\"guest_mac\":\"$fc_mac\",\"host_dev_name\":\"$tap_name\"}]"
   fi
+
+  # Build vsock config for 9P volumes
+  local vsock_config=""
+  if [ -s "$MOUNT_CONFIG" ]; then
+    vsock_config=',"vsock-device":{"guest_cid":3,"uds_path":"/run/firecracker.vsock"}'
+    log "  vsock: enabled for 9P volumes"
+  fi
   
   # Create Firecracker config file
   cat > "$FIRECRACKER_CONFIG" << CFGEOF
@@ -797,11 +894,9 @@ NETEOF
   "machine-config": {
     "vcpu_count": $vcpu_count,
     "mem_size_mib": $mem_mb
-  }${network_config}
+  }${network_config}${vsock_config}
 }
 CFGEOF
-
-  setup_9p_volumes
 
   # Run Firecracker
   "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"
