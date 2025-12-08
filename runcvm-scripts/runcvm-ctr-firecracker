@@ -32,31 +32,35 @@ error() {
 setup_9p_volumes() {
   local port=5640
   
-  > "$MOUNT_CONFIG"
-  
   # Read volume mounts from OCI config
-  while IFS=: read -r src dst opts; do
-    [ -z "$src" ] && continue
+  if [ -f "/.runcvm/volumes" ]; then
+    > "$MOUNT_CONFIG"
     
-    log "Setting up 9P export: $src → $dst (port $port)"
+    while IFS=: read -r src dst opts; do
+      [ -z "$src" ] && continue
+      
+      log "Setting up 9P export: $src → $dst (port $port)"
+      
+      # Start diod server for this volume
+      $DIOD_BIN \
+        --export "$src" \
+        --listen "vsock:3:$port" \
+        --logdest "/run/diod-$port.log" \
+        --no-auth &
+      
+      DIOD_PIDS+=($!)
+      
+      # Record mount for guest
+      echo "$port:$dst" >> "$MOUNT_CONFIG"
+      
+      port=$((port + 1))
+    done < /.runcvm/volumes
     
-    # Start diod server for this volume
-    $DIOD_BIN \
-      --export "$src" \
-      --listen "vsock:3:$port" \
-      --logdest "/run/diod-$port.log" \
-      --no-auth &
-    
-    DIOD_PIDS+=($!)
-    
-    # Record mount for guest
-    echo "$port:$dst" >> "$MOUNT_CONFIG"
-    
-    port=$((port + 1))
-  done < /.runcvm/volumes
-  
-  # Copy mount config to rootfs
-  cp "$MOUNT_CONFIG" "$RUNCVM_VM_MOUNTPOINT/.runcvm/"
+    # Copy mount config to rootfs
+    cp "$MOUNT_CONFIG" "$RUNCVM_VM_MOUNTPOINT/.runcvm/"
+  else
+    log "  No volumes file found, skipping 9P volume setup"
+  fi
 }
 
 cleanup_9p_volumes() {
