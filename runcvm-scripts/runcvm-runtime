@@ -341,7 +341,47 @@ if [ "$COMMAND" = "create" ]; then
   #
   # N.B. A mount at or underneath /disks will NOT be mapped to /vm/disks - this path is reserved for mounting disk files to the container
   jq_set "$CFG" --arg vm "$RUNCVM_VM_MOUNTPOINT" '( .mounts[] | select(.type == "bind" and (.destination | test("^/disks(/|$)") | not) ) ).destination |= $vm + .'
-
+  # ==========================================================================
+  # CREATE VOLUMES FILE FOR FIRECRACKER 9P MOUNTS
+  # ==========================================================================
+  log "DEBUG: Checking RUNCVM_HYPERVISOR env..."
+  HYPERVISOR="$(get_config_env RUNCVM_HYPERVISOR)"
+  log "DEBUG: HYPERVISOR=$HYPERVISOR"
+  log "DEBUG: ROOT=$ROOT"
+  if [ "$HYPERVISOR" = "firecracker" ]; then
+    VOLUMES_FILE="$ROOT/.runcvm/volumes"
+    mkdir -p "$ROOT/.runcvm"
+    > "$VOLUMES_FILE"
+    
+    log "FIRECRACKER: Creating volumes file for 9P..."
+    
+    jq -r --arg vm "$RUNCVM_VM_MOUNTPOINT" '
+      .mounts[] | 
+      select(.type == "bind") | 
+      select(.destination | startswith($vm + "/")) |
+      "\(.source):\(.destination | ltrimstr($vm))"
+    ' "$CFG" 2>/dev/null | while IFS=: read -r src dst; do
+      [ -z "$src" ] && continue
+      [ -z "$dst" ] && continue
+      case "$dst" in
+        /etc/resolv.conf|/etc/hosts|/etc/hostname) continue ;;
+      esac
+      case "$src" in
+        */.runcvm*) continue ;;
+      esac
+      if [ -e "$src" ]; then
+        log "FIRECRACKER:   Volume: $src -> $dst"
+        echo "${src}:${dst}:rw" >> "$VOLUMES_FILE"
+      fi
+    done
+    
+    if [ -s "$VOLUMES_FILE" ]; then
+      log "FIRECRACKER: Created volumes file with $(wc -l < "$VOLUMES_FILE") entries"
+    else
+      log "FIRECRACKER: No user volumes found"
+      rm -f "$VOLUMES_FILE"
+    fi
+  fi
   # Mount / from container to $RUNCVM_VM_MOUNTPOINT, recursively binding all pre-existing mount points
   # (these being only the ones defined ahead of this item in the mounts[] array - so order matters!)
   jq_set "$CFG" --arg root "$ROOT" --arg vm "$RUNCVM_VM_MOUNTPOINT" '.mounts |= [{"destination":$vm,"type":"bind","source":$root,"options":["rbind","private","rw"]}] + .'

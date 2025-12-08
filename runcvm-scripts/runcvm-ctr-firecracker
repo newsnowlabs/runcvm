@@ -29,41 +29,42 @@ error() {
   exit 1
 }
 
-extract_volumes_from_mounts() {
+create_volumes_from_vm_mounts() {
   local volumes_file="/.runcvm/volumes"
   local vm_mountpoint="${RUNCVM_VM_MOUNTPOINT:-/vm}"
   
-  log "Extracting volumes from current mounts under $vm_mountpoint..."
+  log "Creating volumes file from mounted directories..."
   
   > "$volumes_file"
   
-  while read -r device mountpoint fstype options rest; do
-    case "$mountpoint" in
-      ${vm_mountpoint}/*) ;;
-      *) continue ;;
+  # Look at directories under /vm that are mountpoints
+  for dir in "$vm_mountpoint"/*; do
+    [ -d "$dir" ] || continue
+    
+    # Skip system directories
+    case "$dir" in
+      */etc|*/proc|*/sys|*/dev|*/run|*/.runcvm) continue ;;
     esac
     
-    case "$mountpoint" in
-      */etc/resolv.conf|*/etc/hosts|*/etc/hostname) continue ;;
-      */.runcvm|*/.runcvm/*) continue ;;
-    esac
-    
-    local container_path="${mountpoint#${vm_mountpoint}}"
-    local host_path="$device"
-    
-    if [ -d "$mountpoint" ] || [ -f "$mountpoint" ]; then
-      if [ -n "$container_path" ] && [ "$host_path" != "/" ]; then
-        log "  Found volume: $host_path -> $container_path"
-        echo "${host_path}:${container_path}:rw" >> "$volumes_file"
+    # Check if it's a mountpoint (different device than parent)
+    if busybox mountpoint -q "$dir" 2>/dev/null; then
+      local container_path="${dir#$vm_mountpoint}"
+      # Get the source from findmnt or /proc/mounts
+      local source=$(busybox awk -v mp="$dir" '$2 == mp {print $1; exit}' /proc/mounts)
+      
+      # If source is a device, try to find the actual bind source
+      if [ -n "$source" ]; then
+        log "  Found mountpoint: $dir (source: $source)"
+        echo "${dir}:${container_path}:rw" >> "$volumes_file"
       fi
     fi
-  done < /proc/mounts
+  done
   
   if [ -s "$volumes_file" ]; then
-    sort -u "$volumes_file" > "$volumes_file.tmp" && mv "$volumes_file.tmp" "$volumes_file"
-    log "Volumes file created with $(wc -l < "$volumes_file") volume(s)"
+    log "Volumes file created with $(busybox wc -l < "$volumes_file") entries"
+    busybox cat "$volumes_file" | while read line; do log "  $line"; done
   else
-    log "No user volumes detected"
+    log "No volume mountpoints detected"
   fi
 }
 
@@ -94,8 +95,6 @@ setup_9p_volumes() {
       port=$((port + 1))
     done < /.runcvm/volumes
     
-    # Copy mount config to rootfs
-    cp "$MOUNT_CONFIG" "$RUNCVM_VM_MOUNTPOINT/.runcvm/"
   else
     log "  No volumes file found, skipping 9P volume setup"
   fi
@@ -138,9 +137,17 @@ main() {
   # ==========================================================================
   # STEP 0: Extract volumes and start 9P servers BEFORE creating rootfs
   # ==========================================================================
-  extract_volumes_from_mounts
+  
+  # Create volumes file if it doesn't exist
+  if [ ! -f "/.runcvm/volumes" ]; then
+    create_volumes_from_vm_mounts
+  fi
+
   setup_9p_volumes
 
+  log "DEBUG: MOUNT_CONFIG=$MOUNT_CONFIG"
+  log "DEBUG: Contents of $MOUNT_CONFIG:"
+  busybox cat "$MOUNT_CONFIG" 2>&1 | while read line; do log "  $line"; done
   
   # Check for Firecracker binary
   if [ ! -x "$FIRECRACKER_BIN" ]; then
@@ -668,9 +675,18 @@ INITEOF
     log "    Copied /.runcvm/config"
   fi
   # Copy 9p-mounts file - CRITICAL for volume mounting in VM
-  if [ -f "$MOUNT_CONFIG" ] && [ -s "$MOUNT_CONFIG" ]; then
-    busybox cp "$MOUNT_CONFIG" "${staging_dir}/.runcvm/9p-mounts"
-    log "    Copied 9p-mounts file"
+  log "DEBUG: Checking MOUNT_CONFIG at $MOUNT_CONFIG"
+  if [ -f "$MOUNT_CONFIG" ]; then
+    log "DEBUG: File exists, size=$(busybox stat -c%s "$MOUNT_CONFIG" 2>/dev/null || echo unknown)"
+    if [ -s "$MOUNT_CONFIG" ]; then
+      busybox cp "$MOUNT_CONFIG" "${staging_dir}/.runcvm/9p-mounts"
+      log "    Copied 9p-mounts file to staging"
+      log "DEBUG: Verify copy: $(busybox ls -la "${staging_dir}/.runcvm/9p-mounts" 2>&1)"
+    else
+      log "WARNING: MOUNT_CONFIG exists but is empty"
+    fi
+  else
+    log "WARNING: MOUNT_CONFIG does not exist at $MOUNT_CONFIG"
   fi
 
   
@@ -897,6 +913,9 @@ NETEOF
   }${network_config}${vsock_config}
 }
 CFGEOF
+
+  log "DEBUG: Firecracker config:"
+  busybox cat "$FIRECRACKER_CONFIG" | while read line; do log "  $line"; done
 
   # Run Firecracker
   "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"
