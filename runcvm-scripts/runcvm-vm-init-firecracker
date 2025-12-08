@@ -153,12 +153,78 @@ if [ -f /.runcvm/pwd ]; then
 fi
 
 # ============================================================
+# KERNEL AND 9P DEBUG INFORMATION
+# ============================================================
+
+log "========== KERNEL DEBUG INFO =========="
+
+# Show kernel version and build date
+log "Kernel version: $(uname -r)"
+log "Kernel build: $(uname -v)"
+
+# Check if 9P is built into the kernel or available as modules
+log "9P Filesystem Support:"
+if grep -q "^nodev.*9p$" /proc/filesystems 2>/dev/null; then
+  log "  ✓ 9P filesystem: BUILT-IN (in /proc/filesystems)"
+else
+  log "  ✗ 9P filesystem: NOT in /proc/filesystems (may need module load)"
+fi
+
+# Check for 9P transports
+if [ -f /proc/net/9p/transports ]; then
+  log "  ✓ /proc/net/9p/transports exists"
+  log "  Available transports: $(cat /proc/net/9p/transports 2>/dev/null || echo 'ERROR reading file')"
+else
+  log "  ✗ /proc/net/9p/transports NOT FOUND (9P networking not initialized)"
+fi
+
+# Check if vsock is available
+if [ -c /dev/vsock ]; then
+  log "  ✓ /dev/vsock device exists"
+else
+  log "  ✗ /dev/vsock device NOT FOUND"
+fi
+
+# Check loaded modules related to 9P
+log "Loaded 9P/vsock modules:"
+if [ -f /proc/modules ]; then
+  grep -E "9p|vsock" /proc/modules 2>/dev/null | while read mod rest; do
+    log "  - $mod"
+  done || log "  (no 9P/vsock modules loaded)"
+else
+  log "  /proc/modules not available"
+fi
+
+log "======================================="
+
+# ============================================================
 # LAUNCH ENTRYPOINT
 # ============================================================
 
-# In guest init script, before mounting 9P
-modprobe virtio_vsock 2>/dev/null || true
-modprobe 9pnet_vsock 2>/dev/null || true
+# Load 9P modules directly with insmod (bypass version check)
+# Modules are from Alpine kernel but work with 6.6.50-firecracker
+log "Loading 9P kernel modules..."
+MOD_DIR="/lib/modules"
+if [ -d "$MOD_DIR" ]; then
+  # Find the module directory (6.6.117-0-lts from Alpine)
+  KVER=$(ls "$MOD_DIR" | head -1)
+  if [ -n "$KVER" ] && [ -d "$MOD_DIR/$KVER/kernel/net" ]; then
+    log "  Found modules for $KVER"
+    
+    # Load in dependency order
+    insmod "$MOD_DIR/$KVER/kernel/net/9p/9pnet.ko" 2>/dev/null && log "  ✓ Loaded 9pnet" || log " (9pnet built-in or unavailable)"
+    insmod "$MOD_DIR/$KVER/kernel/net/9p/9pnet_virtio.ko" 2>/dev/null && log "  ✓ Loaded 9pnet_virtio" || log "  (9pnet_virtio built-in or unavailable)"
+    insmod "$MOD_DIR/$KVER/kernel/net/vmw_vsock/vsock.ko" 2>/dev/null && log "  ✓ Loaded vsock" || log "  (vsock built-in or unavailable)"
+    insmod "$MOD_DIR/$KVER/kernel/net/9p/9pnet_vsock.ko" 2>/dev/null && log "  ✓ Loaded 9pnet_vsock" || log "  (9pnet_vsock built-in or unavailable)"
+    insmod "$MOD_DIR/$KVER/kernel/fs/9p/9p.ko" 2>/dev/null && log "  ✓ Loaded 9p" || log "  (9p built-in or unavailable)"
+  else
+    log "  WARNING: Module directory not found in $MOD_DIR"
+  fi
+else
+  log "  WARNING: /lib/modules not found, trying modprobe..."
+  modprobe virtio_vsock 2>/dev/null || true
+  modprobe 9pnet_vsock 2>/dev/null || true
+fi
 
 log "mount 9p volumes"
 mount_9p_volumes

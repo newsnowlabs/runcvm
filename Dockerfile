@@ -264,27 +264,28 @@ RUN ARCH=$(cat /tmp/build-arch) && \
 WORKDIR /build/linux
 RUN ARCH=$(cat /tmp/build-arch) && \
     if [ "$ARCH" = "x86_64" ]; then \
-    make olddefconfig && \
-    make -j$(nproc) vmlinux && \
-    mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
-    cp vmlinux /opt/runcvm/kernels/firecracker/ && \
-    cp .config /opt/runcvm/kernels/firecracker/config; \
+        make olddefconfig && \
+        make -j$(nproc) vmlinux && \
+        mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
+        cp vmlinux /opt/runcvm/kernels/firecracker/ && \
+        cp .config /opt/runcvm/kernels/firecracker/config; \
     elif [ "$ARCH" = "aarch64" ]; then \
-    make ARCH=arm64 olddefconfig && \
-    make ARCH=arm64 -j$(nproc) Image modules && \
-    mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
-    mkdir -p /opt/runcvm/kernels/firecracker/modules && \
-    make ARCH=arm64 INSTALL_MOD_PATH=/opt/runcvm/kernels/firecracker/modules modules_install && \
-    cp arch/arm64/boot/Image /opt/runcvm/kernels/firecracker/vmlinux && \
-    cp .config /opt/runcvm/kernels/firecracker/config; \
-    fi && \
-    ls -alh /opt/runcvm/kernels/firecracker/vmlinux && \
+        make ARCH=arm64 olddefconfig && \
+        make ARCH=arm64 -j$(nproc) Image modules && \
+        mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
+        mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION}/modules && \
+        make ARCH=arm64 INSTALL_MOD_PATH=/opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} modules_install && \
+        cp arch/arm64/boot/Image /opt/runcvm/kernels/firecracker/vmlinux && \
+        cp .config /opt/runcvm/kernels/firecracker/config; \
+    fi
+
+RUN ls -alh /opt/runcvm/kernels/firecracker/vmlinux && \
     echo "=== Checking if modules were built ===" && \
-    if [ -d /opt/runcvm/kernels/firecracker/modules ]; then \
-    echo "Modules directory exists:"; \
-    ls -la /opt/runcvm/kernels/firecracker/modules/lib/modules/; \
+    if [ -d /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION}/modules ]; then \
+        echo "Modules directory exists:"; \
+        ls -la /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION}/modules/; \
     else \
-    echo "WARNING: Modules directory not created!"; \
+        echo "WARNING: Modules directory not created!"; \
     fi
 
 # Add this to your Dockerfile BEFORE the "installer" stage
@@ -353,8 +354,15 @@ COPY --from=binaries /opt/runcvm /opt/runcvm
 COPY --from=runcvm-init /root/runcvm-init/runcvm-init /opt/runcvm/sbin/
 COPY --from=qemu-exit /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
 COPY --from=firecracker-bin /usr/local/bin/firecracker /opt/runcvm/sbin/
-# Use Alpine kernel for Firecracker (has working 9P vsock support)
-COPY --from=alpine-kernel /opt/runcvm/kernels/alpine /opt/runcvm/kernels/firecracker
+# ============================================================================
+# FIRECRACKER KERNEL SETUP
+# ============================================================================
+# Copy custom Firecracker kernel (with built-in 9P vsock) to the location
+# that runcvm-ctr-firecracker expects: /opt/runcvm/firecracker-kernel
+COPY --from=firecracker-kernel-build /opt/runcvm/kernels/firecracker/ /opt/runcvm/kernels/firecracker/
+# Also copy config for debugging/verification
+COPY --from=firecracker-kernel-build /build/config-aarch64 /opt/runcvm/kernels/firecracker/.config
+
 COPY --from=diod-builder /diod-install/usr/sbin/diod /opt/runcvm/bin/diod
 
 RUN apk update && apk add --no-cache rsync
@@ -364,11 +372,21 @@ ADD runcvm-scripts /opt/runcvm/scripts/
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]
 
-# Install needed kernels.
-# Comment out any kernels that are unneeded.
-COPY --from=alpine-kernel /opt/runcvm/kernels/alpine /opt/runcvm/kernels/alpine
-COPY --from=debian-kernel /opt/runcvm/kernels/debian /opt/runcvm/kernels/debian
-# COPY --from=ubuntu-kernel /opt/runcvm/kernels/ubuntu /opt/runcvm/kernels/ubuntu
+# ============================================================================
+# KERNEL MODULES FOR RUNCVM-RUNTIME
+# ============================================================================
+# NOTE: runcvm-runtime reads the container's /etc/os-release (e.g., "alpine")
+# and expects to find kernel modules at /opt/runcvm/kernels/<distro>/
+# Even though Firecracker uses its own kernel, we need Alpine modules here
+# to satisfy the runtime's bind-mount requirements during container setup.
+# COPY --from=alpine-kernel /opt/runcvm/kernels/alpine /opt/runcvm/kernels/alpine
+
+# Optional: Copy Debian kernel for containers that use Debian base images
+# COPY --from=debian-kernel /opt/runcvm/kernels/debian /opt/runcvm/kernels/debian
+
+# Optional: Also copy Firecracker kernel to kernels directory for consistency
+# (This is separate from /opt/runcvm/firecracker-kernel which Firecracker uses)
+# COPY --from=firecracker-kernel-build /opt/runcvm/kernels/firecracker /opt/runcvm/kernels/firecracker
 
 # Add 'latest' symlinks for available kernels
 RUN for d in /opt/runcvm/kernels/*; do \

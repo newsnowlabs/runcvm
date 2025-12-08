@@ -29,7 +29,7 @@ RUNCVM_ENTRYPOINT=$RUNCVM_GUEST/scripts/runcvm-ctr-entrypoint
 RUNCVM_EXEC="$RUNCVM_GUEST/scripts/runcvm-ctr-exec"
 RUNCVM_KERNELS=$RUNCVM/kernels
 RUNCVM_GUEST_KERNELS=$RUNCVM_GUEST/kernels
-RUNCVM_KERNEL_DEFAULT=debian
+RUNCVM_KERNEL_DEFAULT=firecracker
 RUNCVM_MEM_SIZE_DEFAULT="768" # Default VM memory size (Mb) if not specified in container config
 RUNCVM_CONTAINER_MEM_OVERHEAD="256" # Memory (Mb) overhead to allow for QEMU, virtiofsd, dnsmasq and other container memory footprint: 768Mb minimum, 1024Mb recommended
 RUNCVM_DEBUG=""
@@ -493,21 +493,32 @@ if [ "$COMMAND" = "create" ]; then
     # If RUNCVM_KERNEL was specified, or we didn't find a kernel and initramfs at the expected paths in the container image,
     # select the latest RUNCVM kernel version and arrange to mount it.
 
-    RUNCVM_KERNEL_VERSION=$(basename $(readlink -f "$RUNCVM_KERNELS/$RUNCVM_KERNEL_IDVER")) # Returns e.g. 5.15.53-0-virt
-
-    RUNCVM_KERNEL_MOUNT_LIB_MODULES=$(get_config_env 'RUNCVM_KERNEL_MOUNT_LIB_MODULES')
-    if [ -n "$RUNCVM_KERNEL_MOUNT_LIB_MODULES" ]; then
-      RUNCVM_KERNEL_MODULES_SRC="$RUNCVM_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/modules"
-      RUNCVM_KERNEL_MODULES_DST="/lib/modules"
+    # Check if Firecracker hypervisor is being used - skip module mounting since
+    # Firecracker uses its own kernel with built-in modules (no external .ko files needed)
+    RUNCVM_HYPERVISOR=$(get_config_env 'RUNCVM_HYPERVISOR')
+    if [ "$RUNCVM_HYPERVISOR" = "firecracker" ]; then
+      log "Firecracker hypervisor detected - skipping kernel module bind-mount"
+      # Set dummy values for logging
+      RUNCVM_KERNEL_VERSION="firecracker"
+      RUNCVM_KERNEL_MODULES_SRC=""
+      RUNCVM_KERNEL_MODULES_DST=""
     else
-      RUNCVM_KERNEL_MODULES_SRC="$RUNCVM_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/modules/$RUNCVM_KERNEL_VERSION"
-      RUNCVM_KERNEL_MODULES_DST="/lib/modules/$RUNCVM_KERNEL_VERSION"
-    fi
-    
-    RUNCVM_KERNEL_PATH="$RUNCVM_GUEST_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/vmlinuz"
-    RUNCVM_KERNEL_INITRAMFS_PATH="$RUNCVM_GUEST_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/initrd"
+      RUNCVM_KERNEL_VERSION=$(basename $(readlink -f "$RUNCVM_KERNELS/$RUNCVM_KERNEL_IDVER")) # Returns e.g. 5.15.53-0-virt
 
-    jq_set "$CFG" --arg modules_dst "$RUNCVM_VM_MOUNTPOINT$RUNCVM_KERNEL_MODULES_DST" --arg modules_src "$RUNCVM_KERNEL_MODULES_SRC" '.mounts += [{"destination":$modules_dst,"type":"bind","source":$modules_src,"options":["bind","private","ro"]}]'
+      RUNCVM_KERNEL_MOUNT_LIB_MODULES=$(get_config_env 'RUNCVM_KERNEL_MOUNT_LIB_MODULES')
+      if [ -n "$RUNCVM_KERNEL_MOUNT_LIB_MODULES" ]; then
+        RUNCVM_KERNEL_MODULES_SRC="$RUNCVM_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/modules"
+        RUNCVM_KERNEL_MODULES_DST="/lib/modules"
+      else
+        RUNCVM_KERNEL_MODULES_SRC="$RUNCVM_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/modules/$RUNCVM_KERNEL_VERSION"
+        RUNCVM_KERNEL_MODULES_DST="/lib/modules/$RUNCVM_KERNEL_VERSION"
+      fi
+      
+      RUNCVM_KERNEL_PATH="$RUNCVM_GUEST_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/vmlinuz"
+      RUNCVM_KERNEL_INITRAMFS_PATH="$RUNCVM_GUEST_KERNELS/$RUNCVM_KERNEL_ID/$RUNCVM_KERNEL_VERSION/initrd"
+
+      jq_set "$CFG" --arg modules_dst "$RUNCVM_VM_MOUNTPOINT$RUNCVM_KERNEL_MODULES_DST" --arg modules_src "$RUNCVM_KERNEL_MODULES_SRC" '.mounts += [{"destination":$modules_dst,"type":"bind","source":$modules_src,"options":["bind","private","ro"]}]'
+    fi
   fi
 
   log "RUNCVM_KERNEL='$RUNCVM_KERNEL'"

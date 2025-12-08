@@ -731,7 +731,7 @@ INITEOF
 
   # Copy kernel modules for 9P support from Alpine kernel
   log "  Copying 9P kernel modules..."
-  local fc_modules_dir="/opt/runcvm/kernels/firecracker/latest/modules"
+  local fc_modules_dir="$RUNCVM_GUEST/kernels/firecracker/latest/modules"
   if [ -d "$fc_modules_dir" ]; then
     # Find the kernel version directory
     local kernel_ver=$(busybox ls "$fc_modules_dir" 2>/dev/null | busybox head -1)
@@ -900,12 +900,22 @@ NETEOF
   local final_size=$(busybox du -sm "$rootfs_path" 2>/dev/null | busybox cut -f1)
   log "  Rootfs ready: ${final_size}MB (created in ${mke2fs_time}s)"
   
-  # Determine kernel path - using Alpine kernel for Firecracker
-  local fc_default_kernel="$RUNCVM_GUEST/../kernels/firecracker/latest/vmlinuz"
+  # Determine kernel path - using Firecracker kernel Image (uncompressed)
+  # Note: Alpine modules are used for 9P support (has vsock transport)
+  local fc_default_kernel="$RUNCVM_GUEST/kernels/firecracker/vmlinux"
   local kernel_path="${RUNCVM_FC_KERNEL_PATH:-$fc_default_kernel}"
   
   if [ ! -f "$kernel_path" ]; then
     error "Firecracker kernel not found: $kernel_path"
+  fi
+  
+  # DEBUG: Show kernel file details
+  log "DEBUG: Kernel file information:"
+  log "  Path: $kernel_path"
+  log "  Size: $(busybox ls -lh "$kernel_path" 2>/dev/null | busybox awk '{print $5}')"
+  log "  Modified: $(busybox ls -l "$kernel_path" 2>/dev/null | busybox awk '{print $6, $7, $8}')"
+  if command -v sha256sum >/dev/null 2>&1; then
+    log "  SHA256: $(sha256sum "$kernel_path" 2>/dev/null | busybox cut -d' ' -f1)"
   fi
   
   # Build boot arguments - use /init which we created in the rootfs
