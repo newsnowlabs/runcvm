@@ -85,16 +85,16 @@ FROM alpine:$ALPINE_VERSION as binaries
 
 RUN apk update && \
     apk add --no-cache file bash \
-        qemu-system-aarch64 \
-        qemu-virtiofsd \
-        qemu-ui-curses \
-        qemu-guest-agent \
-        qemu-hw-display-virtio-gpu \
-        aavmf \
-        jq iproute2 netcat-openbsd e2fsprogs blkid util-linux \
-        s6 dnsmasq iptables nftables \
-        ncurses coreutils \
-        patchelf
+    qemu-system-aarch64 \
+    qemu-virtiofsd \
+    qemu-ui-curses \
+    qemu-guest-agent \
+    qemu-hw-display-virtio-gpu \
+    aavmf \
+    jq iproute2 netcat-openbsd e2fsprogs blkid util-linux \
+    s6 dnsmasq iptables nftables \
+    ncurses coreutils \
+    patchelf
 
 # Install patched dnsmasq
 COPY --from=alpine-dnsmasq /root/packages/main/aarch64 /tmp/dnsmasq/
@@ -118,10 +118,10 @@ RUN /usr/local/bin/make-bundelf-bundle.sh --bundle && \
     mkdir -p $BUNDELF_CODE_PATH/bin && \
     cd $BUNDELF_CODE_PATH/bin && \
     for cmd in \
-        uname mkdir rmdir cp mv free ip awk base64 cat chgrp chmod cut grep head hostname init ln ls \
-        mkdir poweroff ps rm rmdir route sh sysctl tr touch; \
+    uname mkdir rmdir cp mv free ip awk base64 cat chgrp chmod cut grep head hostname init ln ls \
+    mkdir poweroff ps rm rmdir route sh sysctl tr touch; \
     do \
-        ln -s busybox $cmd; \
+    ln -s busybox $cmd; \
     done && \
     mkdir -p $BUNDELF_CODE_PATH/usr/share && \
     cp -a /usr/share/qemu $BUNDELF_CODE_PATH/usr/share && \
@@ -246,7 +246,7 @@ RUN echo "$(uname -m)" > /tmp/build-arch
 WORKDIR /build
 RUN MAJOR_VERSION=$(echo $FIRECRACKER_KERNEL_VERSION | cut -d. -f1) && \
     curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v${MAJOR_VERSION}.x/linux-${FIRECRACKER_KERNEL_VERSION}.tar.xz" \
-      -o linux.tar.xz && \
+    -o linux.tar.xz && \
     tar -xJf linux.tar.xz && \
     rm linux.tar.xz && \
     mv linux-${FIRECRACKER_KERNEL_VERSION} linux
@@ -256,25 +256,27 @@ COPY kernels/firecracker/config-firecracker-aarch64 /build/config-aarch64
 
 RUN ARCH=$(cat /tmp/build-arch) && \
     if [ "$ARCH" = "x86_64" ]; then \
-        cp /build/config-x86_64 /build/linux/.config; \
+    cp /build/config-x86_64 /build/linux/.config; \
     elif [ "$ARCH" = "aarch64" ]; then \
-        cp /build/config-aarch64 /build/linux/.config; \
+    cp /build/config-aarch64 /build/linux/.config; \
     fi
 
 WORKDIR /build/linux
 RUN ARCH=$(cat /tmp/build-arch) && \
     if [ "$ARCH" = "x86_64" ]; then \
-        make olddefconfig && \
-        make -j$(nproc) vmlinux && \
-        mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
-        cp vmlinux /opt/runcvm/kernels/firecracker/ && \
-        cp .config /opt/runcvm/kernels/firecracker/config; \
+    make olddefconfig && \
+    make -j$(nproc) vmlinux && \
+    mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
+    cp vmlinux /opt/runcvm/kernels/firecracker/ && \
+    cp .config /opt/runcvm/kernels/firecracker/config; \
     elif [ "$ARCH" = "aarch64" ]; then \
-        make ARCH=arm64 olddefconfig && \
-        make ARCH=arm64 -j$(nproc) Image && \
-        mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
-        cp arch/arm64/boot/Image /opt/runcvm/kernels/firecracker/vmlinux && \
-        cp .config /opt/runcvm/kernels/firecracker/config; \
+    make ARCH=arm64 olddefconfig && \
+    make ARCH=arm64 -j$(nproc) Image modules && \
+    mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
+    mkdir -p /opt/runcvm/kernels/firecracker/modules && \
+    make ARCH=arm64 INSTALL_MOD_PATH=/opt/runcvm/kernels/firecracker/modules modules_install && \
+    cp arch/arm64/boot/Image /opt/runcvm/kernels/firecracker/vmlinux && \
+    cp .config /opt/runcvm/kernels/firecracker/config; \
     fi && \
     ls -alh /opt/runcvm/kernels/firecracker/vmlinux
 
@@ -296,11 +298,11 @@ RUN git clone https://github.com/chaos/diod.git -b v1.1.0 && \
     cd diod && \
     ./autogen.sh && \
     LDFLAGS="-static" ./configure --prefix=/usr \
-        --disable-diodmount \
-        --disable-auth \
-        --disable-config \
-        CFLAGS="-static" \
-        LDFLAGS="-static" && \
+    --disable-diodmount \
+    --disable-auth \
+    --disable-config \
+    CFLAGS="-static" \
+    LDFLAGS="-static" && \
     make CFLAGS="-static" LDFLAGS="-static" && \
     make DESTDIR=/diod-install install
 
@@ -316,15 +318,15 @@ ARG FIRECRACKER_VERSION=v1.13.1
 # Detect architecture and download appropriate binary
 RUN ARCH=$(uname -m) && \
     if [ "$ARCH" = "aarch64" ]; then \
-        FC_ARCH="aarch64"; \
+    FC_ARCH="aarch64"; \
     elif [ "$ARCH" = "x86_64" ]; then \
-        FC_ARCH="x86_64"; \
+    FC_ARCH="x86_64"; \
     else \
-        echo "Unsupported architecture: $ARCH"; exit 1; \
+    echo "Unsupported architecture: $ARCH"; exit 1; \
     fi && \
     echo "Downloading Firecracker ${FIRECRACKER_VERSION} for ${FC_ARCH}..." && \
     curl -L -o /tmp/firecracker.tgz \
-        "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${FC_ARCH}.tgz" && \
+    "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${FC_ARCH}.tgz" && \
     cd /tmp && \
     tar -xzf firecracker.tgz && \
     mv release-${FIRECRACKER_VERSION}-${FC_ARCH}/firecracker-${FIRECRACKER_VERSION}-${FC_ARCH} /usr/local/bin/firecracker && \
@@ -364,7 +366,7 @@ COPY --from=debian-kernel /opt/runcvm/kernels/debian /opt/runcvm/kernels/debian
 
 # Add 'latest' symlinks for available kernels
 RUN for d in /opt/runcvm/kernels/*; do \
-      cd "$d" && \
-      tgt="$(ls -d */ 2>/dev/null | sed 's:/$::' | grep -v '^latest$' | sort -Vr | head -n 1)"; \
-      [ -n "$tgt" ] && ln -sfn "$tgt" latest; \
+    cd "$d" && \
+    tgt="$(ls -d */ 2>/dev/null | sed 's:/$::' | grep -v '^latest$' | sort -Vr | head -n 1)"; \
+    [ -n "$tgt" ] && ln -sfn "$tgt" latest; \
     done
