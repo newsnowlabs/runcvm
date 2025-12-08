@@ -4,7 +4,13 @@
 
 This document outlines the storage architecture design for RunCVM's Firecracker integration. Unlike QEMU which supports virtiofs for live filesystem sharing, Firecracker has a minimal device model that requires alternative approaches for Docker volume mounts.
 
-**Key Decision**: We will implement a 3-layer architecture using **virtio-blk** (transport) + **Single Block Device with Bind Mounts** (volume strategy) + **9P over vsock** (sync strategy) to achieve feature parity with QEMU's virtiofs while maintaining Firecracker's fast boot times.
+> [!CAUTION]
+> **December 2025 Update**: After extensive debugging, we discovered that `CONFIG_NET_9P_VSOCK` **does NOT exist** in the Linux kernel. The original design assumed this existed. See [Known Issues](#known-issues) for details.
+
+**Current Status**: 
+- **Working**: Static copy of volume data into rootfs image (read-only at container start)
+- **Not Working**: Live 9P mounts (9pnet_fd transport not initializing on ARM64)
+- **Future Goal**: 9P over TCP once kernel issues are resolved
 
 ---
 
@@ -15,10 +21,11 @@ This document outlines the storage architecture design for RunCVM's Firecracker 
 3. [Layer 1: Transport](#layer-1-transport)
 4. [Layer 2: Volume Strategy](#layer-2-volume-strategy)
 5. [Layer 3: Sync Strategy](#layer-3-sync-strategy)
-6. [Final Architecture Decision](#final-architecture-decision)
-7. [Implementation Plan](#implementation-plan)
-8. [Kernel Configuration Requirements](#kernel-configuration-requirements)
-9. [References](#references)
+6. [Known Issues](#known-issues)
+7. [Current Implementation](#current-implementation)
+8. [Future Work](#future-work)
+9. [Kernel Configuration Requirements](#kernel-configuration-requirements)
+10. [References](#references)
 
 ---
 
@@ -307,37 +314,61 @@ done
 
 ---
 
-#### Option 4: 9P over vsock (Recommended)
+#### Option 4: 9P over vsock ❌ NOT FEASIBLE
+
+> [!CAUTION]
+> **This approach was the original design choice, but it is NOT feasible.**
+> After extensive debugging (December 2025), we discovered that `CONFIG_NET_9P_VSOCK` **does NOT exist** in the Linux kernel.
+
+**Original Design (Invalid):**
+```
+HOST                                                       
+  diod (9P server)                                         
+  Listens: vsock CID=3, port=5640                          
+                               ▲ vsock
+GUEST VM                       │                              
+  mount -t 9p -o trans=vsock hostshare /data              
+```
+
+**Why It Doesn't Work:**
+
+The Linux kernel (as of 6.6) only supports these 9P transports:
+
+| Config Option | Transport | Status |
+|--------------|-----------|--------|
+| `NET_9P_FD` | TCP/Unix sockets | ⚠️ Not initializing on ARM64 |
+| `NET_9P_VIRTIO` | virtio-9p device | ❌ Firecracker doesn't support |
+| `NET_9P_XEN` | Xen | ❌ Not relevant |
+| `NET_9P_RDMA` | RDMA | ❌ Not relevant |
+| ~~`NET_9P_VSOCK`~~ | ~~vsock~~ | ❌ **Does NOT exist** |
+
+---
+
+#### Option 4b: 9P over TCP 🔧 EXPERIMENTAL
+
+Since vsock transport doesn't exist, we attempted TCP transport:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  HOST                                                       │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  diod (9P server)                                   │   │
-│  │  Exports: /host/data                                │   │
-│  │  Listens: vsock CID=3, port=5640                    │   │
-│  └─────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────┘
-                               ▲ vsock
-┌──────────────────────────────┼──────────────────────────────┐
-│  GUEST VM                    │                              │
-│                              ▼                              │
-│  mount -t 9p -o trans=vsock hostshare /data                │
-│                                                             │
-│  # /data is LIVE - no sync needed!                         │
-│  echo "hello" > /data/file.txt  # Instantly on host        │
-└─────────────────────────────────────────────────────────────┘
+HOST (Container)
+  diod (9P server)
+  Listens: 0.0.0.0:5640
+  Bridge IP: 169.254.1.1
+                               ▲ TCP over TAP/bridge
+GUEST VM                       │
+  mount -t 9p -o trans=tcp,port=5640 169.254.1.1 /data
 ```
 
 | Attribute | Value |
 |-----------|-------|
-| Latency | ~1-5ms |
+| Latency | ~1-10ms |
 | Data Loss Risk | None (live filesystem) |
 | CPU Overhead | Medium |
-| Complexity | Medium |
-| Best For | Long-running containers, full POSIX |
+| Complexity | High |
+| Status | ⚠️ **Not working** - 9pnet_fd not initializing |
 
-✅ **Best option for long-running containers**
+**Problem**: Despite `CONFIG_NET_9P_FD=y` in kernel config, the 9pnet_fd transport doesn't register on ARM64. See [Known Issues](#known-issues).
+
+⚠️ **TCP transport is the path forward, but requires fixing kernel initialization**
 
 ---
 
@@ -375,350 +406,218 @@ Build a custom FUSE filesystem that tunnels over vsock.
 
 ### Sync Strategy Comparison Matrix
 
-| Strategy | Latency | Data Loss Risk | CPU Overhead | Complexity | Long-Running? |
-|----------|---------|----------------|--------------|------------|---------------|
-| Sync on Exit | High | High | None | Low | ❌ |
-| Periodic Sync | 5-60s | Medium | Low | Low | ⚠️ |
-| Inotify | <1s | Low | Medium | Medium | ✅ |
-| **9P over vsock** | **~1-5ms** | **None** | **Medium** | **Medium** | **✅** |
-| NFS over vsock | ~1-10ms | None | Medium-High | High | ✅ |
-| Custom FUSE | ~1-5ms | None | Medium | High | ✅ |
+| Strategy | Latency | Data Loss Risk | Status | Long-Running? |
+|----------|---------|----------------|--------|---------------|
+| Sync on Exit | High | High | ✅ Works | ❌ |
+| Periodic Sync | 5-60s | Medium | ✅ Implementable | ⚠️ |
+| Inotify | <1s | Low | ✅ Implementable | ✅ |
+| **9P over vsock** | — | — | ❌ **NOT FEASIBLE** | — |
+| **9P over TCP** | ~1-10ms | None | ⚠️ **Experimental** | ✅ |
+| NFS over TCP | ~1-10ms | None | 🔧 **Not tested** | ✅ |
 
-### Decision: 9P over vsock
+### Current Decision: Static Copy + Future 9P over TCP
 
-**Rationale**:
-1. **True live filesystem** - no sync mechanism needed, changes are instant
-2. **Good POSIX compatibility** - supports most filesystem operations
-3. **Low latency** - ~1-5ms per operation
-4. **Proven technology** - same protocol used by WSL2, Plan 9, QEMU
-5. **Automatic operation** - no user intervention required
-6. **Supports long-running containers** - critical for our use case
+**Current Reality (December 2025)**:
+1. Volume data is **copied into rootfs** at container start (read-only snapshot)
+2. Changes inside VM are **NOT synced back** to host
+3. Live filesystem sharing is **not yet working**
+
+**Future Goal**:
+1. Fix 9pnet_fd kernel initialization on ARM64
+2. Enable 9P over TCP for live volume mounts
 
 ---
 
-## Final Architecture Decision
+## Known Issues
 
-### Selected Architecture
+### Issue 1: CONFIG_NET_9P_VSOCK Does Not Exist
+
+**Status**: ❌ Not Fixable - Not a kernel option
+
+The Linux kernel does NOT have a vsock transport for 9P. The available transports are:
+
+```
+net/9p/Kconfig (Linux 6.6):
+  - NET_9P_FD     → TCP, Unix sockets, file descriptors
+  - NET_9P_VIRTIO → virtio-9p device (Firecracker doesn't support)
+  - NET_9P_XEN    → Xen transport
+  - NET_9P_RDMA   → RDMA transport
+```
+
+**Impact**: Original design based on `trans=vsock` is not implementable.
+
+---
+
+### Issue 2: 9pnet_fd Transport Not Initializing (ARM64)
+
+**Status**: ⚠️ Under Investigation
+
+Despite kernel config having `CONFIG_NET_9P_FD=y`:
+- `/proc/net/9p` directory is NOT created
+- 9pnet_fd transport doesn't register
+- Mount fails with "permission denied"
+
+**Evidence from debugging**:
+```
+dmesg shows:
+  9p: Installing v9fs 9p2000 file system support
+  9pnet: Installing 9P2000 support
+  (but NO 9pnet_fd registration!)
+
+/sys/bus shows:
+  /sys/bus/virtio/drivers/9pnet_virtio  ← virtio transport exists
+  (but NO 9pnet_fd driver!)
+
+/proc/net shows:
+  Various network entries, but NO /proc/net/9p directory
+```
+
+**Possible Causes**:
+1. Kernel build issue - 9pnet_fd might not be compiling despite config
+2. Initialization order issue - 9pnet_fd initializing before dependencies
+3. ARM64-specific issue - works on x86_64 but not ARM64
+
+**Next Steps** (in order of priority):
+1. Verify `modules.builtin` includes 9pnet_fd.ko
+2. Check kernel compile output for 9pnet_fd
+3. Compare with x86_64 kernel build
+4. Try building 9pnet_fd as module (=m) instead of built-in
+
+---
+
+## Current Implementation
+
+### What Currently Works
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  LAYER 3: 9P over vsock                                                │
-│  - Live filesystem access                                               │
-│  - No sync needed                                                       │
-│  - diod server on host, 9p mount in guest                              │
+│  CURRENT ARCHITECTURE (December 2025)                                   │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  LAYER 2: Single Block Device + Bind Mounts                            │
-│  - Rootfs as single ext4 image                                          │
-│  - Volume mounts via 9P (not in rootfs image)                          │
+│  LAYER 2: Static Copy                                                   │
+│  - Volume data copied INTO rootfs at container start                    │
+│  - Read-only snapshot of volume at start time                          │
+│  - No live sync (changes in VM are lost)                               │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  LAYER 1: virtio-blk                                                   │
-│  - Rootfs via virtio-blk                                                │
-│  - Volumes via 9P over vsock (no additional block devices)             │
+│  - Single rootfs.ext4 containing container files + volume data         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Complete Data Flow
+### Data Flow (Current)
 
 ```
 USER RUNS:
 docker run --runtime=runcvm -e RUNCVM_HYPERVISOR=firecracker \
   -v /host/data:/data \
-  -v /host/config:/etc/myapp \
-  alpine sh -c 'echo "hello" > /data/file.txt'
+  alpine sh -c 'cat /data/file.txt && echo "new" > /data/file.txt'
 
-STEP 1: runcvm-runtime parses volume mounts
+STEP 1: Volume data copied to staging
 ┌─────────────────────────────────────────────────────────────┐
-│  Extracts from OCI config:                                  │
-│    - Volume 1: /host/data → /data                          │
-│    - Volume 2: /host/config → /etc/myapp                   │
+│  cp -a /host/data /staging/data                              │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
-STEP 2: runcvm-ctr-firecracker starts 9P servers
+STEP 2: Create rootfs.ext4 with volume data embedded
 ┌─────────────────────────────────────────────────────────────┐
-│  diod --export /host/data --listen vsock:3:5640 &          │
-│  diod --export /host/config --listen vsock:3:5641 &        │
-│                                                             │
-│  Write mount config to /.runcvm/9p-mounts:                 │
-│    5640:/data                                               │
-│    5641:/etc/myapp                                          │
+│  rootfs.ext4 contains:                                       │
+│    /data/file.txt  ← copy of host file (read at start)      │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
-STEP 3: Launch Firecracker with vsock enabled
+STEP 3: VM boots and runs command
 ┌─────────────────────────────────────────────────────────────┐
-│  firecracker --config:                                      │
-│    - boot-source: vmlinux                                   │
-│    - drives: rootfs.ext4                                    │
-│    - vsock: cid=3                                           │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-STEP 4: runcvm-vm-init-firecracker mounts 9P volumes
-┌─────────────────────────────────────────────────────────────┐
-│  mount -t 9p -o trans=vsock,port=5640 host /data           │
-│  mount -t 9p -o trans=vsock,port=5641 host /etc/myapp      │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-STEP 5: Container entrypoint runs
-┌─────────────────────────────────────────────────────────────┐
-│  sh -c 'echo "hello" > /data/file.txt'                     │
-│                                                             │
-│  Write goes directly to host via 9P!                       │
-│  /host/data/file.txt now contains "hello"                  │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-STEP 6: Cleanup on exit
-┌─────────────────────────────────────────────────────────────┐
-│  Kill Firecracker process                                   │
-│  Kill all diod processes                                    │
-│  Cleanup temp files                                         │
+│  cat /data/file.txt      ← reads copied data ✓             │
+│  echo "new" > /data/file.txt  ← writes to rootfs only      │
+│                                                              │
+│  ⚠️ Changes NOT synced back to /host/data                   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### User Experience
+### Limitations of Current Implementation
 
-The implementation is **completely transparent** to users:
-
-```bash
-# User runs exactly the same command as with QEMU
-docker run --runtime=runcvm \
-  -e RUNCVM_HYPERVISOR=firecracker \
-  -v /my/data:/data \
-  -v /my/config:/etc/myapp \
-  alpine sh
-
-# Inside container - volumes just work!
-$ echo "test" > /data/file.txt      # Instantly on host
-$ cat /etc/myapp/config.yaml        # Reads from host in real-time
-$ ls -la /data/                     # Full directory listing
-
-# User doesn't know or care that 9P is being used internally
-```
+| Feature | Status |
+|---------|--------|
+| Read volume at start | ✅ Works |
+| Write to volume | ❌ Writes to rootfs only |
+| Changes sync to host | ❌ Not implemented |
+| Long-running containers | ⚠️ Limited (no live sync) |
 
 ---
 
-## Implementation Plan
+## Future Work
 
-### Phase 1: Kernel Configuration (Day 1)
+### Priority 1: Fix 9pnet_fd Initialization (Required for TCP transport)
 
-Add 9P support to Firecracker kernel:
+1. Debug kernel build to verify 9pnet_fd is being compiled
+2. Check modules.builtin includes 9pnet_fd.ko  
+3. Test building as module (=m) instead of built-in
+4. Compare ARM64 build with x86_64
 
-```bash
-# Add to kernels/firecracker/config-firecracker-x86_64
+### Priority 2: Alternative Sync Strategies (if 9P TCP fails)
 
-# ============================================================
-# 9P FILESYSTEM (for live volume mounts via vsock)
-# ============================================================
+| Alternative | Effort | Notes |
+|-------------|--------|-------|
+| NFS over TCP | Medium | Requires nfs-utils, more config |
+| Periodic rsync over vsock | Low | High latency, data loss risk |
+| Custom sync daemon | Medium | Build vsock-based file sync |
 
-CONFIG_NET_9P=y
-CONFIG_NET_9P_VIRTIO=y
-CONFIG_9P_FS=y
-CONFIG_9P_FS_POSIX_ACL=y
-CONFIG_9P_FS_SECURITY=y
+### Target Architecture (Once 9P TCP Works)
+
 ```
-
-### Phase 2: Bundle diod (Day 1-2)
-
-Add 9P server to RunCVM image:
-
-```dockerfile
-# Add to Dockerfile
-FROM alpine:3.19 as diod-builder
-RUN apk add --no-cache build-base autoconf automake libtool
-RUN git clone https://github.com/chaos/diod.git && \
-    cd diod && ./autogen.sh && ./configure --prefix=/usr && make
-
-FROM ... as final
-COPY --from=diod-builder /diod/diod /opt/runcvm/bin/diod
+┌─────────────────────────────────────────────────────────────────────────┐
+│  LAYER 3: 9P over TCP (via bridge network)                             │
+│  - Live filesystem access                                               │
+│  - diod server on host (0.0.0.0:5640)                                  │
+│  - 9p mount in guest (trans=tcp to 169.254.1.1)                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│  LAYER 2: Single Block Device for rootfs only                          │
+│  - Rootfs as ext4 image (container files only)                         │
+│  - Volumes mounted live via 9P                                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│  LAYER 1: virtio-blk + virtio-net                                      │
+│  - Rootfs via virtio-blk                                                │
+│  - 9P over TCP via TAP/bridge network                                   │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
-
-### Phase 3: Host-side Implementation (Day 2-3)
-
-Modify `runcvm-ctr-firecracker`:
-
-```bash
-#!/bin/bash
-# runcvm-ctr-firecracker additions
-
-DIOD_BIN="$RUNCVM_GUEST/bin/diod"
-MOUNT_CONFIG="/.runcvm/9p-mounts"
-DIOD_PIDS=()
-
-setup_9p_volumes() {
-  local port=5640
-  
-  > "$MOUNT_CONFIG"
-  
-  # Read volume mounts from OCI config
-  while IFS=: read -r src dst opts; do
-    [ -z "$src" ] && continue
-    
-    log "Setting up 9P export: $src → $dst (port $port)"
-    
-    # Start diod server for this volume
-    $DIOD_BIN \
-      --export "$src" \
-      --listen "vsock:3:$port" \
-      --logdest "/run/diod-$port.log" \
-      --no-auth &
-    
-    DIOD_PIDS+=($!)
-    
-    # Record mount for guest
-    echo "$port:$dst" >> "$MOUNT_CONFIG"
-    
-    port=$((port + 1))
-  done < /.runcvm/volumes
-  
-  # Copy mount config to rootfs
-  cp "$MOUNT_CONFIG" "$RUNCVM_VM_MOUNTPOINT/.runcvm/"
-}
-
-cleanup_9p_volumes() {
-  for pid in "${DIOD_PIDS[@]}"; do
-    kill "$pid" 2>/dev/null || true
-  done
-}
-
-trap cleanup_9p_volumes EXIT SIGTERM SIGINT
-
-# Call during container setup
-setup_9p_volumes
-```
-
-### Phase 4: Guest-side Implementation (Day 3-4)
-
-Modify `runcvm-vm-init-firecracker`:
-
-```bash
-#!/bin/sh
-# runcvm-vm-init-firecracker additions
-
-mount_9p_volumes() {
-  local mount_config="/.runcvm/9p-mounts"
-  
-  [ -f "$mount_config" ] || return 0
-  
-  log "Mounting 9P volumes..."
-  
-  while IFS=: read -r port dst; do
-    [ -z "$port" ] && continue
-    
-    log "  Mounting $dst (vsock port $port)"
-    
-    mkdir -p "$dst"
-    
-    mount -t 9p \
-      -o trans=vsock,dfltuid=0,dfltgid=0,version=9p2000.L,port=$port,msize=65536,cache=loose \
-      "hostshare" "$dst"
-    
-    if [ $? -eq 0 ]; then
-      log "  ✓ Mounted $dst successfully"
-    else
-      log "  ✗ Failed to mount $dst"
-    fi
-  done < "$mount_config"
-}
-
-# Call during VM init, after basic setup
-mount_9p_volumes
-```
-
-### Phase 5: Testing (Day 4-5)
-
-```bash
-#!/bin/bash
-# Test script: test-firecracker-volumes.sh
-
-set -e
-
-echo "=== Test 1: Basic read/write ==="
-mkdir -p /tmp/test-vol
-echo "initial" > /tmp/test-vol/data.txt
-
-docker run --rm \
-  --runtime=runcvm \
-  -e RUNCVM_HYPERVISOR=firecracker \
-  -v /tmp/test-vol:/data \
-  alpine sh -c 'echo "modified" >> /data/data.txt && cat /data/data.txt'
-
-grep -q "modified" /tmp/test-vol/data.txt && echo "✓ PASS" || echo "✗ FAIL"
-
-echo "=== Test 2: Multiple volumes ==="
-mkdir -p /tmp/vol-{a,b,c}
-echo "A" > /tmp/vol-a/file.txt
-echo "B" > /tmp/vol-b/file.txt
-echo "C" > /tmp/vol-c/file.txt
-
-docker run --rm \
-  --runtime=runcvm \
-  -e RUNCVM_HYPERVISOR=firecracker \
-  -v /tmp/vol-a:/data/a \
-  -v /tmp/vol-b:/data/b \
-  -v /tmp/vol-c:/data/c \
-  alpine sh -c 'cat /data/a/file.txt /data/b/file.txt /data/c/file.txt'
-
-echo "=== Test 3: Long-running with live updates ==="
-docker run -d --name fc-test \
-  --runtime=runcvm \
-  -e RUNCVM_HYPERVISOR=firecracker \
-  -v /tmp/test-vol:/data \
-  alpine sh -c 'while true; do cat /data/data.txt; sleep 1; done'
-
-sleep 2
-echo "host-update-$(date +%s)" >> /tmp/test-vol/data.txt
-sleep 2
-docker logs fc-test | tail -5
-docker rm -f fc-test
-
-echo "=== All tests completed ==="
-```
-
-### Phase 6: Documentation (Day 5)
-
-Update ROADMAP-DOCKER.md with:
-- Volume mount feature status: ✅ Complete
-- Known limitations
-- Performance characteristics
 
 ---
 
 ## Kernel Configuration Requirements
 
-### Current Kernel Config (Verified Present)
+### Current Kernel Config (ARM64 - Kernel 6.6)
 
-```
-CONFIG_VSOCKETS=y              ✅ vsock enabled
-CONFIG_VIRTIO_VSOCKETS=y       ✅ virtio-vsock enabled
-CONFIG_VIRTIO_VSOCKETS_COMMON=y ✅ vsock common enabled
-```
-
-### Required Additions
+The following configurations are set, based on our debugging:
 
 ```bash
-# Add to kernels/firecracker/config-firecracker-x86_64
+# 9P Filesystem Support
+CONFIG_NET_9P=y              # ✅ 9P network protocol
+CONFIG_NET_9P_FD=y           # ⚠️ TCP/FD transport (not initializing!)
+CONFIG_NET_9P_VIRTIO=y       # ✅ Virtio transport (works, but no device)
+CONFIG_9P_FS=y               # ✅ 9P filesystem
+CONFIG_9P_FS_POSIX_ACL=y     # ✅ POSIX ACL support
+CONFIG_9P_FS_SECURITY=y      # ✅ Security label support
+CONFIG_NET_9P_DEBUG=y        # ✅ Debug logging
 
-# ============================================================
-# 9P FILESYSTEM (for live volume mounts via vsock)
-# ============================================================
+# Networking Dependencies
+CONFIG_UNIX=y                # ✅ Unix sockets
+CONFIG_INET=y                # ✅ TCP/IP networking
 
-CONFIG_NET_9P=y                # 9P network protocol
-CONFIG_NET_9P_VIRTIO=y         # 9P over virtio transport
-CONFIG_9P_FS=y                 # 9P filesystem support
-CONFIG_9P_FS_POSIX_ACL=y       # POSIX ACL support for 9P
-CONFIG_9P_FS_SECURITY=y        # Security label support
+# vsock (for future use)
+CONFIG_VSOCKETS=y            # ✅ vsock support  
+CONFIG_VIRTIO_VSOCKETS=y     # ✅ virtio-vsock
 ```
 
-### Dependencies Summary
+### Known Issue with Kernel Config
 
-| Component | Location | Required | Size |
-|-----------|----------|----------|------|
-| diod (9P server) | Host container | Yes | ~500KB |
-| 9P kernel module | Guest kernel | Yes | Built-in |
-| vsock kernel module | Guest kernel | Yes | Already present |
+Despite `CONFIG_NET_9P_FD=y`:
+- 9pnet_fd transport is **NOT registering** on ARM64
+- `/proc/net/9p` directory doesn't get created
+- TCP mount fails with "permission denied"
+
+This may require:
+1. Different kernel build options
+2. Building 9pnet_fd as module (=m) instead of built-in
+3. Further investigation of ARM64-specific issues
 
 ---
 
@@ -733,14 +632,11 @@ CONFIG_9P_FS_SECURITY=y        # Security label support
 - [9P Protocol Specification](http://9p.cat-v.org/)
 - [Linux 9P Documentation](https://www.kernel.org/doc/Documentation/filesystems/9p.txt)
 - [diod - 9P Server](https://github.com/chaos/diod)
+- [Linux net/9p/Kconfig](https://github.com/torvalds/linux/blob/v6.6/net/9p/Kconfig) - Available transports
 
 ### Related Technologies
 - [virtiofs](https://virtio-fs.gitlab.io/) - What QEMU uses (not available in Firecracker)
 - [WSL2 9P](https://docs.microsoft.com/en-us/windows/wsl/) - Uses 9P for Windows↔Linux file sharing
-
-### RunCVM Internal Documentation
-- [ROADMAP-DOCKER.md](./ROADMAP-DOCKER.md) - Phase 3 roadmap
-- [INTEGRATION_GUIDE.md](./INTEGRATION_GUIDE.md) - Architecture differences QEMU vs Firecracker
 
 ---
 
@@ -748,8 +644,9 @@ CONFIG_9P_FS_SECURITY=y        # Security label support
 
 | Field | Value |
 |-------|-------|
-| Version | 1.0 |
+| Version | 2.0 |
 | Created | December 7, 2025 |
+| Updated | December 9, 2025 |
 | Author | RunCVM Team |
-| Status | Approved for Implementation |
-| Next Review | December 14, 2025 |
+| Status | **In Progress** - Blocked on 9pnet_fd initialization |
+| Next Review | When 9P TCP works |
