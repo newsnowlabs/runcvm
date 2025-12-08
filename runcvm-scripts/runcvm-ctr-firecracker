@@ -78,18 +78,20 @@ setup_9p_volumes() {
     while IFS=: read -r src dst opts; do
       [ -z "$src" ] && continue
       
-      log "Setting up 9P export: $src → $dst (port $port)"
+      log "Setting up 9P export: $src → $dst (TCP port $port)"
       
-      # Start diod server for this volume
+      # Start diod server for this volume on TCP
+      # Use 0.0.0.0 so VM can connect via bridge/TAP network
       $DIOD_BIN \
         --export "$src" \
-        --listen "vsock:3:$port" \
+        --listen "0.0.0.0:$port" \
         --logdest "/run/diod-$port.log" \
         --no-auth &
       
       DIOD_PIDS+=($!)
       
-      # Record mount for guest
+      # Record mount for guest (format: port:dst:host_ip)
+      # The host IP will be the gateway from the VM's perspective
       echo "$port:$dst" >> "$MOUNT_CONFIG"
       
       port=$((port + 1))
@@ -401,6 +403,11 @@ if [ -f /.runcvm-network ]; then
         $IP_CMD route add default via "$FC_GW" dev eth0
         RET=$?
         echo "  ip route add returned: $RET"
+        
+        # Add route to container bridge IP (169.254.1.1) for 9P diod server
+        # The bridge IP is directly reachable via same network segment
+        echo "RunCVM-FC init: Adding route to container bridge 169.254.1.1..."
+        $IP_CMD route add 169.254.1.1/32 dev eth0 2>/dev/null || true
       fi
       
       # Show network config for debugging
@@ -482,62 +489,95 @@ mount_9p_volumes() {
     return 1
   fi
   
-  # Check for vsock device
-  echo "RunCVM-FC init: Checking vsock support..."
-  if [ ! -c /dev/vsock ]; then
-    echo "RunCVM-FC init: WARNING - /dev/vsock device not found!"
-    echo "RunCVM-FC init: This may indicate vsock is not initialized by the kernel"
-    echo "RunCVM-FC init: Devices in /dev:"
-    ls -la /dev/ 2>/dev/null | grep -i vsock || echo "  (no vsock device)"
-  else
-    echo "RunCVM-FC init: ✓ /dev/vsock exists"
-  fi
+  # Connect to container's bridge IP for diod server
+  # The bridge IP 169.254.1.1 is set in runcvm-ctr-entrypoint
+  # This is reachable from the VM since it's on the same bridge network
+  local host_ip="169.254.1.1"
+  
+  echo "RunCVM-FC init: 9P host: $host_ip (diod server on bridge)"
   
   # Check available 9P transports
-  if [ -f /proc/net/9p/transports ]; then
-    local transports=$(cat /proc/net/9p/transports 2>/dev/null)
-    echo "RunCVM-FC init: Available 9P transports: $transports"
-    if ! echo "$transports" | grep -q vsock; then
-      echo "RunCVM-FC init: ERROR - vsock transport not available for 9P!"
-      echo "RunCVM-FC init: "
-      echo "RunCVM-FC init: This means the kernel was not built with CONFIG_NET_9P_VSOCK=y"
-      echo "RunCVM-FC init: You need to rebuild the Docker image to compile a new kernel:"
-      echo "RunCVM-FC init:   cd /path/to/runcvm-arm64"
-      echo "RunCVM-FC init:   docker build -t runcvm-arm64:latest ."
-      echo "RunCVM-FC init: "
-      echo "RunCVM-FC init: Checking dmesg for vsock errors:"
-      dmesg 2>/dev/null | grep -i "9p\|vsock" | tail -10 | sed 's/^/  /' || echo "  (cannot read dmesg)"
-      return 1
+  echo "RunCVM-FC init: Checking 9P transport registration..."
+  if [ -d /proc/net/9p ]; then
+    echo "    /proc/net/9p exists"
+    ls -la /proc/net/9p/ 2>&1 | sed 's/^/    /'
+    if [ -f /proc/net/9p/transports ]; then
+      echo "    Registered transports:"
+      cat /proc/net/9p/transports 2>&1 | sed 's/^/      /'
+    else
+      echo "    WARNING: /proc/net/9p/transports not found!"
     fi
   else
-    echo "RunCVM-FC init: WARNING - /proc/net/9p/transports not found"
+    echo "    ERROR: /proc/net/9p directory does not exist!"
+    echo "    Contents of /proc/net:"
+    ls /proc/net/ 2>&1 | head -20 | sed 's/^/      /'
+    echo "    Checking kernel's built-in 9P modules..."
+    if [ -f /lib/modules/*/modules.builtin ]; then
+      cat /lib/modules/*/modules.builtin 2>/dev/null | grep -E "9p|net/9p" | sed 's/^/      /'
+    else
+      echo "      (modules.builtin not found)"
+    fi
+    # Try manual init of 9pnet transports
+    echo "    Attempting to access /sys for 9pnet info..."
+    find /sys -name "*9p*" 2>/dev/null | head -5 | sed 's/^/      /' || echo "      (no 9p in /sys)"
   fi
   
-  echo "RunCVM-FC init: Mounting 9P volumes..."
+  echo "RunCVM-FC init: Mounting 9P volumes via TCP..."
   
   while IFS=: read -r port dst; do
     [ -z "$port" ] && continue
     [ -z "$dst" ] && continue
     
-    echo "RunCVM-FC init:   Mounting $dst (vsock port $port)..."
+    echo "RunCVM-FC init:   Mounting $dst from $host_ip:$port..."
     mkdir -p "$dst"
     
-    if mount -t 9p \
-      -o "trans=vsock,dfltuid=0,dfltgid=0,version=9p2000.L,port=$port,msize=65536,cache=none" \
-      "hostshare" "$dst" 2>&1; then
+    # Debug: show we're running as root
+    echo "RunCVM-FC init:   Running as uid=$(id -u 2>/dev/null || echo unknown)"
+    
+    # Test TCP connectivity first
+    echo "RunCVM-FC init:   Testing TCP connectivity to $host_ip:$port..."
+    if timeout 2 sh -c "echo >/dev/tcp/$host_ip/$port" 2>/dev/null; then
+      echo "    TCP connection successful"
+    else
+      # Try with nc if available
+      if command -v nc >/dev/null 2>&1; then
+        if timeout 2 nc -z "$host_ip" "$port" 2>/dev/null; then
+          echo "    TCP connection successful (nc)"
+        else
+          echo "    WARNING: Cannot connect to $host_ip:$port"
+        fi
+      else
+        echo "    (cannot test - no nc available)"
+      fi
+    fi
+    
+    # Try mount with simpler options first
+    echo "RunCVM-FC init:   Trying mount..."
+    mount_result=$(mount -t 9p -o "trans=tcp,port=$port,version=9p2000.L" "$host_ip" "$dst" 2>&1)
+    mount_rc=$?
+    
+    if [ $mount_rc -eq 0 ]; then
       echo "RunCVM-FC init:   OK - Mounted $dst"
     else
-      echo "RunCVM-FC init:   FAILED - Could not mount $dst"
+      echo "RunCVM-FC init:   FAILED (rc=$mount_rc) - $mount_result"
+      echo "RunCVM-FC init:   Checking if 9p is in /proc/filesystems..."
+      if grep -q 9p /proc/filesystems 2>/dev/null; then
+        echo "    9p filesystem IS supported"
+      else
+        echo "    ERROR: 9p filesystem NOT in /proc/filesystems!"
+        cat /proc/filesystems 2>/dev/null | head -20 | sed 's/^/    /'
+      fi
+      echo "RunCVM-FC init:   Checking dmesg for 9p errors..."
+      dmesg 2>/dev/null | grep -i 9p | tail -10 | sed 's/^/    /' || echo "    (no 9p messages found)"
     fi
   done < "$mount_config"
 }
 
 echo "RunCVM-FC init: ========== 9P VOLUME MOUNT =========="
-# Load 9P modules if they exist
+# Load 9P modules if they exist (TCP transport uses 9pnet_fd)
 echo "RunCVM-FC init: Loading 9P kernel modules..."
 modprobe 9pnet 2>/dev/null && echo "  ✓ Loaded 9pnet" || echo "  (9pnet built-in or unavailable)"
-modprobe 9pnet_virtio 2>/dev/null && echo "  ✓ Loaded 9pnet_virtio" || echo "  (9pnet_virtio built-in or unavailable)"
-modprobe 9pnet_vsock 2>/dev/null && echo "  ✓ Loaded 9pnet_vsock" || echo "  (9pnet_vsock built-in or unavailable)"
+modprobe 9pnet_fd 2>/dev/null && echo "  ✓ Loaded 9pnet_fd" || echo "  (9pnet_fd built-in or unavailable)"
 modprobe 9p 2>/dev/null && echo "  ✓ Loaded 9p" || echo "  (9p built-in or unavailable)"
 mount_9p_volumes
 echo "RunCVM-FC init: ========== 9P VOLUME MOUNT END =========="
@@ -901,7 +941,8 @@ NETEOF
   log "  Rootfs ready: ${final_size}MB (created in ${mke2fs_time}s)"
   
   # Determine kernel path - using Firecracker kernel Image (uncompressed)
-  # Note: Alpine modules are used for 9P support (has vsock transport)
+  # The kernel is copied to /opt/runcvm/kernels/firecracker/vmlinux in Dockerfile
+  # which becomes /.runcvm/guest/kernels/firecracker/vmlinux at runtime
   local fc_default_kernel="$RUNCVM_GUEST/kernels/firecracker/vmlinux"
   local kernel_path="${RUNCVM_FC_KERNEL_PATH:-$fc_default_kernel}"
   

@@ -256,22 +256,23 @@ COPY kernels/firecracker/config-firecracker-aarch64 /build/config-aarch64
 
 RUN ARCH=$(cat /tmp/build-arch) && \
     if [ "$ARCH" = "x86_64" ]; then \
-    cp /build/config-x86_64 /build/linux/.config; \
+        cp /build/config-x86_64 /build/linux/.config; \
     elif [ "$ARCH" = "aarch64" ]; then \
-    cp /build/config-aarch64 /build/linux/.config; \
+        cp /build/config-aarch64 /build/linux/.config; \
     fi
+
+RUN  mkdir -p /opt/runcvm/kernels/firecracker/ && cp /build/linux/.config /build/linux/.config.bak
 
 WORKDIR /build/linux
 RUN ARCH=$(cat /tmp/build-arch) && \
     if [ "$ARCH" = "x86_64" ]; then \
-        make olddefconfig && \
         make -j$(nproc) vmlinux && \
         mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
         cp vmlinux /opt/runcvm/kernels/firecracker/ && \
         cp .config /opt/runcvm/kernels/firecracker/config; \
     elif [ "$ARCH" = "aarch64" ]; then \
         make ARCH=arm64 olddefconfig && \
-        make ARCH=arm64 -j$(nproc) Image modules && \
+        make ARCH=arm64 -j$(nproc) && \
         mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
         mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION}/modules && \
         make ARCH=arm64 INSTALL_MOD_PATH=/opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} modules_install && \
@@ -287,6 +288,16 @@ RUN ls -alh /opt/runcvm/kernels/firecracker/vmlinux && \
     else \
         echo "WARNING: Modules directory not created!"; \
     fi
+
+# RUN echo "=== Checking 9P VSOCK config after build ===" && \
+#     grep "CONFIG_NET_9P_VSOCK" /opt/runcvm/kernels/firecracker/config && \
+#     grep "CONFIG_NET_9P" /opt/runcvm/kernels/firecracker/config && \
+#     grep "CONFIG_VSOCK" /opt/runcvm/kernels/firecracker/config && \
+#     echo "=== If CONFIG_NET_9P_VSOCK is not 'y', rebuild with dependencies fixed ===" && \
+#     if ! grep -q "CONFIG_NET_9P_VSOCK=y" /opt/runcvm/kernels/firecracker/config; then \
+#         echo "ERROR: CONFIG_NET_9P_VSOCK is NOT enabled!"; \
+#         # exit 1; \
+#     fi
 
 # Add this to your Dockerfile BEFORE the "installer" stage
 # This downloads and extracts the Firecracker binary for ARM64
@@ -360,8 +371,10 @@ COPY --from=firecracker-bin /usr/local/bin/firecracker /opt/runcvm/sbin/
 # Copy custom Firecracker kernel (with built-in 9P vsock) to the location
 # that runcvm-ctr-firecracker expects: /opt/runcvm/firecracker-kernel
 COPY --from=firecracker-kernel-build /opt/runcvm/kernels/firecracker/ /opt/runcvm/kernels/firecracker/
-# Also copy config for debugging/verification
-COPY --from=firecracker-kernel-build /build/config-aarch64 /opt/runcvm/kernels/firecracker/.config
+# Copy the ACTUAL config used for building (after make olddefconfig), NOT the original input
+# This is important for debugging - to see what was actually compiled
+COPY --from=firecracker-kernel-build /opt/runcvm/kernels/firecracker/config /opt/runcvm/kernels/firecracker/.config
+COPY --from=firecracker-kernel-build /build/linux/.config.bak /opt/runcvm/kernels/firecracker/.config.bak
 
 COPY --from=diod-builder /diod-install/usr/sbin/diod /opt/runcvm/bin/diod
 
