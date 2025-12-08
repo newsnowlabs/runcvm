@@ -16,6 +16,9 @@ set -o errexit -o pipefail
 
 FIRECRACKER_BIN="$RUNCVM_GUEST/sbin/firecracker"
 FIRECRACKER_CONFIG="/run/.firecracker-config.json"
+DIOD_BIN="$RUNCVM_GUEST/bin/diod"
+MOUNT_CONFIG="/.runcvm/9p-mounts"
+DIOD_PIDS=()
 
 log() {
   echo "RunCVM-FC: $1" >&2
@@ -25,6 +28,44 @@ error() {
   echo "RunCVM-FC ERROR: $1" >&2
   exit 1
 }
+
+setup_9p_volumes() {
+  local port=5640
+  
+  > "$MOUNT_CONFIG"
+  
+  # Read volume mounts from OCI config
+  while IFS=: read -r src dst opts; do
+    [ -z "$src" ] && continue
+    
+    log "Setting up 9P export: $src → $dst (port $port)"
+    
+    # Start diod server for this volume
+    $DIOD_BIN \
+      --export "$src" \
+      --listen "vsock:3:$port" \
+      --logdest "/run/diod-$port.log" \
+      --no-auth &
+    
+    DIOD_PIDS+=($!)
+    
+    # Record mount for guest
+    echo "$port:$dst" >> "$MOUNT_CONFIG"
+    
+    port=$((port + 1))
+  done < /.runcvm/volumes
+  
+  # Copy mount config to rootfs
+  cp "$MOUNT_CONFIG" "$RUNCVM_VM_MOUNTPOINT/.runcvm/"
+}
+
+cleanup_9p_volumes() {
+  for pid in "${DIOD_PIDS[@]}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+}
+
+trap cleanup_9p_volumes EXIT SIGTERM SIGINT
 
 # Create rootfs image from a source directory
 create_rootfs_from_dir() {
@@ -755,6 +796,8 @@ NETEOF
   }${network_config}
 }
 CFGEOF
+
+  setup_9p_volumes
 
   # Run Firecracker
   "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"

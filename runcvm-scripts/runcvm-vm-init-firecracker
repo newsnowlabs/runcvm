@@ -13,6 +13,32 @@ log() {
   echo "RunCVM-FC-Init: $1"
 }
 
+mount_9p_volumes() {
+  local mount_config="/.runcvm/9p-mounts"
+  
+  [ -f "$mount_config" ] || return 0
+  
+  log "Mounting 9P volumes..."
+  
+  while IFS=: read -r port dst; do
+    [ -z "$port" ] && continue
+    
+    log "  Mounting $dst (vsock port $port)"
+    
+    mkdir -p "$dst"
+    
+    mount -t 9p \
+      -o trans=vsock,dfltuid=0,dfltgid=0,version=9p2000.L,port=$port,msize=65536,cache=loose \
+      "hostshare" "$dst"
+    
+    if [ $? -eq 0 ]; then
+      log "  ✓ Mounted $dst successfully"
+    else
+      log "  ✗ Failed to mount $dst"
+    fi
+  done < "$mount_config"
+}
+
 log "Starting Firecracker VM initialization..."
 
 # ============================================================
@@ -124,6 +150,9 @@ fi
 # ============================================================
 # LAUNCH ENTRYPOINT
 # ============================================================
+
+log "mount 9p volumes"
+mount_9p_volumes
 
 log "Preparing to launch entrypoint..."
 

@@ -281,6 +281,34 @@ RUN ARCH=$(cat /tmp/build-arch) && \
 # Add this to your Dockerfile BEFORE the "installer" stage
 # This downloads and extracts the Firecracker binary for ARM64
 
+# -- BUILD STAGE ---
+# Add DIOD bundled
+FROM alpine:3.19 as diod-builder
+
+# Install ALL required build dependencies
+RUN apk add --no-cache \
+    build-base \
+    autoconf \
+    automake \
+    libtool \
+    git \
+    pkgconf \
+    ncurses-dev \
+    libcap-dev \
+    attr-dev \
+    linux-headers
+
+# Clone and build diod
+RUN git clone https://github.com/chaos/diod.git -b v1.1.0 && \
+    cd diod && \
+    ./autogen.sh && \
+    ./configure --prefix=/usr \
+        --disable-diodmount \
+        --disable-auth \
+        --disable-config && \
+    make && \
+    make DESTDIR=/diod-install install
+
 # --- BUILD STAGE ---
 # Download Firecracker binary
 FROM alpine:3.19 as firecracker-bin
@@ -323,6 +351,7 @@ COPY --from=qemu-exit /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
 COPY --from=firecracker-bin /usr/local/bin/firecracker /opt/runcvm/sbin/
 # COPY --from=firecracker-kernel /opt/firecracker-kernel/vmlinux /opt/runcvm/firecracker-kernel
 COPY --from=firecracker-kernel-build  /opt/runcvm/kernels/firecracker/vmlinux /opt/runcvm/firecracker-kernel
+COPY --from=diod-builder /diod-install/usr/sbin/diod /opt/runcvm/bin/diod
 
 RUN apk update && apk add --no-cache rsync
 
