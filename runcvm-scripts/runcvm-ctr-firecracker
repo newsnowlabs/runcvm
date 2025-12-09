@@ -20,12 +20,60 @@ DIOD_BIN="$RUNCVM_GUEST/bin/diod"
 MOUNT_CONFIG="/.runcvm/9p-mounts"
 DIOD_PIDS=()
 
+# ============================================================
+# LOGGING SYSTEM
+# Severity levels: DEBUG, INFO, ERROR, OFF
+# Control via: RUNCVM_LOG_LEVEL environment variable
+# ============================================================
+
+# Default log level (can be overridden by environment)
+RUNCVM_LOG_LEVEL="${RUNCVM_LOG_LEVEL:-OFF}"
+
+# Log severity levels (numeric for comparison)
+declare -A LOG_LEVELS=(
+  [DEBUG]=0
+  [INFO]=1
+  [LOG]=1      # Alias for INFO
+  [ERROR]=2
+  [OFF]=999
+)
+
+# Get numeric level for current log level (default to OFF=999)
+CURRENT_LOG_LEVEL="${LOG_LEVELS[$RUNCVM_LOG_LEVEL]:-999}"
+
+# Core logging function
+_log() {
+  local severity="$1"
+  shift
+  local message="$*"
+  local severity_level="${LOG_LEVELS[$severity]:-1}"
+  
+  # Only log if severity meets threshold
+  if [ "$severity_level" -ge "$CURRENT_LOG_LEVEL" ]; then
+    echo "[$(busybox date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC] [$severity] $message" >&2
+  fi
+}
+
+# Convenience functions for different severity levels
+log_debug() {
+  _log DEBUG "$@"
+}
+
+log_info() {
+  _log INFO "$@"
+}
+
 log() {
-  echo "RunCVM-FC: $1" >&2
+  # Default log function - maps to INFO for backward compatibility
+  _log INFO "$@"
+}
+
+log_error() {
+  _log ERROR "$@"
 }
 
 error() {
-  echo "RunCVM-FC ERROR: $1" >&2
+  log_error "$@"
   exit 1
 }
 
@@ -186,9 +234,9 @@ main() {
 
   setup_9p_volumes
 
-  log "DEBUG: MOUNT_CONFIG=$MOUNT_CONFIG"
-  log "DEBUG: Contents of $MOUNT_CONFIG:"
-  busybox cat "$MOUNT_CONFIG" 2>&1 | while read line; do log "  $line"; done
+  log_debug "MOUNT_CONFIG=$MOUNT_CONFIG"
+  log_debug "Contents of $MOUNT_CONFIG:"
+  busybox cat "$MOUNT_CONFIG" 2>&1 | while read line; do log_debug "  $line"; done
   
   # Check for Firecracker binary
   if [ ! -x "$FIRECRACKER_BIN" ]; then
@@ -280,7 +328,50 @@ main() {
 # Firecracker minimal init for RunCVM
 # This runs as PID 1 inside the Firecracker VM
 
-echo "RunCVM-FC init: Starting..."
+# ============================================================
+# LOGGING SYSTEM (sh-compatible)
+# ============================================================
+
+# Try to load RUNCVM_LOG_LEVEL from config if it exists
+if [ -f /.runcvm/config ]; then
+  # Extract RUNCVM_LOG_LEVEL from config (format: declare -x RUNCVM_LOG_LEVEL="VALUE")
+  RUNCVM_LOG_LEVEL=$(grep '^declare -x RUNCVM_LOG_LEVEL=' /.runcvm/config 2>/dev/null | sed 's/^declare -x RUNCVM_LOG_LEVEL="\(.*\)"$/\1/' | head -1)
+fi
+
+# Default to OFF if not set
+RUNCVM_LOG_LEVEL="${RUNCVM_LOG_LEVEL:-OFF}"
+
+# Logging function (simplified for sh)
+log() {
+  local severity="$1"
+  shift
+  local message="$*"
+  
+  # Check log level and output accordingly
+  case "$RUNCVM_LOG_LEVEL" in
+    DEBUG)
+      # Show all messages
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC-Init] [$severity] $message"
+      ;;
+    INFO|LOG)
+      # Show INFO and ERROR
+      case "$severity" in
+        INFO|ERROR) echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC-Init] [$severity] $message" ;;
+      esac
+      ;;
+    ERROR)
+      # Show only ERROR
+      case "$severity" in
+        ERROR) echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC-Init] [$severity] $message" ;;
+      esac
+      ;;
+    OFF|*)
+      # Show nothing
+      ;;
+  esac
+}
+
+log INFO "Starting..."
 
 # Mount essential filesystems
 mount -t proc proc /proc 2>/dev/null || true
@@ -318,7 +409,7 @@ ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null || true
 [ -f /etc/hostname ] && hostname -F /etc/hostname 2>/dev/null || true
 
 # Setup networking
-echo "RunCVM-FC init: ========== NETWORK SETUP START =========="
+log INFO "========== NETWORK SETUP START =========="
 
 # Setup RunCVM tools if available
 # These tools use BundELF and need the dynamic linker from the same directory
@@ -328,17 +419,17 @@ if [ -d "$RUNCVM_GUEST/lib" ]; then
   # The dynamic linker is at /.runcvm/guest/lib/ld
   RUNCVM_LD="$RUNCVM_GUEST/lib/ld"
   if [ -x "$RUNCVM_LD" ]; then
-    echo "RunCVM-FC init: Found RunCVM tools at $RUNCVM_GUEST"
-    echo "RunCVM-FC init: Checking tools structure:"
-    echo "  lib/ld: $(ls -la $RUNCVM_GUEST/lib/ld 2>&1)"
-    echo "  bin contents: $(ls -la $RUNCVM_GUEST/bin/ 2>&1 | head -10)"
-    echo "  bin/ip: $(ls -la $RUNCVM_GUEST/bin/ip 2>&1)"
-    echo "  bin/busybox: $(ls -la $RUNCVM_GUEST/bin/busybox 2>&1)"
+    log INFO "Found RunCVM tools at $RUNCVM_GUEST"
+    log INFO "Checking tools structure:"
+    log DEBUG "lib/ld: $(ls -la $RUNCVM_GUEST/lib/ld 2>&1)"
+    log DEBUG "bin contents: $(ls -la $RUNCVM_GUEST/bin/ 2>&1 | head -10)"
+    log DEBUG "bin/ip: $(ls -la $RUNCVM_GUEST/bin/ip 2>&1)"
+    log DEBUG "bin/busybox: $(ls -la $RUNCVM_GUEST/bin/busybox 2>&1)"
     
     # Test the dynamic linker directly
-    echo "RunCVM-FC init: Testing dynamic linker..."
-    echo "  Test 1 - ld exists: $(test -x $RUNCVM_LD && echo yes || echo no)"
-    echo "  Test 2 - busybox via ld: $($RUNCVM_LD $RUNCVM_GUEST/bin/busybox echo 'works' 2>&1)"
+    log INFO "Testing dynamic linker..."
+    log DEBUG "Test 1 - ld exists: $(test -x $RUNCVM_LD && echo yes || echo no)"
+    log DEBUG "Test 2 - busybox via ld: $($RUNCVM_LD $RUNCVM_GUEST/bin/busybox echo 'works' 2>&1)"
     
     # ip is likely a symlink to busybox, so we need to call busybox ip
     # Create wrapper functions that use the dynamic linker with busybox
@@ -346,10 +437,10 @@ if [ -d "$RUNCVM_GUEST/lib" ]; then
     runcvm_busybox() { "$RUNCVM_LD" "$RUNCVM_GUEST/bin/busybox" "$@"; }
     HAVE_RUNCVM_TOOLS=1
   else
-    echo "RunCVM-FC init: Dynamic linker not found at $RUNCVM_LD"
+    log INFO "Dynamic linker not found at $RUNCVM_LD"
   fi
 else
-  echo "RunCVM-FC init: RunCVM tools not found at $RUNCVM_GUEST"
+  log INFO "RunCVM tools not found at $RUNCVM_GUEST"
 fi
 
 # Bring up loopback
@@ -360,70 +451,70 @@ else
 fi
 
 # First, check what kernel modules are loaded for networking
-echo "RunCVM-FC init: Checking for virtio_net module..."
+log INFO "Checking for virtio_net module..."
 if [ -f /proc/modules ]; then
   grep -i virtio /proc/modules 2>/dev/null || echo "  No virtio modules loaded"
 fi
 
 # Check /sys/class/net to see what the kernel sees
-echo "RunCVM-FC init: Kernel network interfaces in /sys/class/net:"
+log INFO "Kernel network interfaces in /sys/class/net:"
 ls -la /sys/class/net/ 2>/dev/null || echo "  Cannot list /sys/class/net"
 
 # Check dmesg for network-related messages
-echo "RunCVM-FC init: Recent dmesg network messages:"
+log INFO "Recent dmesg network messages:"
 dmesg 2>/dev/null | grep -iE "(eth|net|virtio)" | tail -10 || echo "  Cannot read dmesg"
 
 # Configure eth0 with static IP from saved network config
 if [ -f /.runcvm-network ]; then
-  echo "RunCVM-FC init: Loading network config from /.runcvm-network"
+  log INFO "Loading network config from /.runcvm-network"
   cat /.runcvm-network
   . /.runcvm-network
   
   # Check if eth0 exists at all
   if [ -d /sys/class/net/eth0 ]; then
-    echo "RunCVM-FC init: eth0 exists in /sys/class/net"
-    echo "  Address: $(cat /sys/class/net/eth0/address 2>/dev/null || echo 'unknown')"
-    echo "  Operstate: $(cat /sys/class/net/eth0/operstate 2>/dev/null || echo 'unknown')"
-    echo "  Carrier: $(cat /sys/class/net/eth0/carrier 2>/dev/null || echo 'unknown')"
+    log INFO "eth0 exists in /sys/class/net"
+    log DEBUG "Address: $(cat /sys/class/net/eth0/address 2>/dev/null || echo 'unknown')"
+    log DEBUG "Operstate: $(cat /sys/class/net/eth0/operstate 2>/dev/null || echo 'unknown')"
+    log DEBUG "Carrier: $(cat /sys/class/net/eth0/carrier 2>/dev/null || echo 'unknown')"
   else
-    echo "RunCVM-FC init: ERROR - eth0 does NOT exist!"
-    echo "RunCVM-FC init: Available interfaces:"
+    log ERROR "eth0 does NOT exist!"
+    log INFO "Available interfaces:"
     for iface in /sys/class/net/*; do
       name=$(basename "$iface")
-      echo "  $name: $(cat $iface/address 2>/dev/null || echo 'no-mac')"
+      log DEBUG "$name: $(cat $iface/address 2>/dev/null || echo 'no-mac')"
     done
   fi
   
   if [ -n "$FC_IP" ] && [ -n "$FC_PREFIX" ] && [ -d /sys/class/net/eth0 ]; then
-    echo "RunCVM-FC init: Configuring eth0 with $FC_IP/$FC_PREFIX (MTU: ${FC_MTU:-1500})"
+    log INFO "Configuring eth0 with $FC_IP/$FC_PREFIX (MTU: ${FC_MTU:-1500})"
     
     # Determine which ip command to use
     if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
-      echo "RunCVM-FC init: Using RunCVM tools (via dynamic linker)"
+      log INFO "Using RunCVM tools (via dynamic linker)"
       IP_CMD="runcvm_ip"
     elif command -v ip >/dev/null 2>&1; then
-      echo "RunCVM-FC init: Using system ip command"
+      log INFO "Using system ip command"
       IP_CMD="ip"
     elif command -v ifconfig >/dev/null 2>&1; then
-      echo "RunCVM-FC init: Using ifconfig (fallback)"
+      log INFO "Using ifconfig (fallback)"
       IP_CMD=""
       USE_IFCONFIG=1
     else
-      echo "RunCVM-FC init: ERROR - No network configuration tools available!"
-      echo "  Checking PATH: $PATH"
-      echo "  RUNCVM_GUEST dir contents:"
+      log ERROR "No network configuration tools available!"
+      log DEBUG "Checking PATH: $PATH"
+      log DEBUG "RUNCVM_GUEST dir contents:"
       ls -la "$RUNCVM_GUEST" 2>/dev/null || echo "    not found"
-      echo "  RUNCVM_GUEST/bin dir contents:"
+      log DEBUG "RUNCVM_GUEST/bin dir contents:"
       ls -la "$RUNCVM_GUEST/bin" 2>/dev/null || echo "    not found"
       IP_CMD=""
     fi
     
     if [ -n "$IP_CMD" ]; then
       # Bring interface up first
-      echo "RunCVM-FC init: Bringing eth0 up..."
+      log INFO "Bringing eth0 up..."
       $IP_CMD link set eth0 up
       RET=$?
-      echo "  ip link set eth0 up returned: $RET"
+      log DEBUG "ip link set eth0 up returned: $RET"
       sleep 0.5
       
       # Set MTU if specified
@@ -432,33 +523,33 @@ if [ -f /.runcvm-network ]; then
       fi
       
       # Add IP address
-      echo "RunCVM-FC init: Adding IP $FC_IP/$FC_PREFIX to eth0..."
+      log INFO "Adding IP $FC_IP/$FC_PREFIX to eth0..."
       $IP_CMD addr add "$FC_IP/$FC_PREFIX" dev eth0
       RET=$?
-      echo "  ip addr add returned: $RET"
+      log DEBUG "ip addr add returned: $RET"
       
       if [ -n "$FC_GW" ] && [ "$FC_GW" != "-" ]; then
-        echo "RunCVM-FC init: Setting default gateway to $FC_GW..."
+        log INFO "Setting default gateway to $FC_GW..."
         $IP_CMD route add default via "$FC_GW" dev eth0
         RET=$?
-        echo "  ip route add returned: $RET"
+        log DEBUG "ip route add returned: $RET"
         
         # Add route to container bridge IP (169.254.1.1) for 9P diod server
         # The bridge IP is directly reachable via same network segment
-        echo "RunCVM-FC init: Adding route to container bridge 169.254.1.1..."
+        log INFO "Adding route to container bridge 169.254.1.1..."
         $IP_CMD route add 169.254.1.1/32 dev eth0 2>/dev/null || true
       fi
       
       # Show network config for debugging
-      echo "RunCVM-FC init: Final eth0 configuration:"
+      log INFO "Final eth0 configuration:"
       $IP_CMD addr show eth0
-      echo "RunCVM-FC init: Final routing table:"
+      log INFO "Final routing table:"
       $IP_CMD route show
-      echo "RunCVM-FC init: Link state:"
+      log INFO "Link state:"
       $IP_CMD link show eth0
       
     elif [ "$USE_IFCONFIG" = "1" ]; then
-      echo "RunCVM-FC init: Using ifconfig"
+      log INFO "Using ifconfig"
       # Convert prefix to netmask (simplified for common cases)
       case "$FC_PREFIX" in
         8)  FC_NETMASK="255.0.0.0" ;;
@@ -479,7 +570,7 @@ if [ -f /.runcvm-network ]; then
     
     # Test connectivity (optional, non-blocking)
     if [ -n "$FC_GW" ] && [ "$FC_GW" != "-" ]; then
-      echo "RunCVM-FC init: Testing connectivity to gateway $FC_GW..."
+      log INFO "Testing connectivity to gateway $FC_GW..."
       if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
         runcvm_busybox ping -c 1 -W 1 "$FC_GW" 2>&1 && echo "  Gateway reachable!" || echo "  Gateway not reachable (this may be normal)"
       elif command -v ping >/dev/null 2>&1; then
@@ -487,20 +578,20 @@ if [ -f /.runcvm-network ]; then
       fi
     fi
   elif [ ! -d /sys/class/net/eth0 ]; then
-    echo "RunCVM-FC init: SKIPPING network config - eth0 not found"
+    log INFO "SKIPPING network config - eth0 not found"
   fi
 elif [ -d /sys/class/net/eth0 ]; then
   # Fallback: Try DHCP
-  echo "RunCVM-FC init: No network config file, trying DHCP..."
+  log INFO "No network config file, trying DHCP..."
   ip link set eth0 up 2>/dev/null || ifconfig eth0 up 2>/dev/null || true
   if command -v udhcpc >/dev/null 2>&1; then
     udhcpc -i eth0 -n -q 2>/dev/null || true
   fi
 else
-  echo "RunCVM-FC init: No network config and no eth0 interface!"
+  log INFO "No network config and no eth0 interface!"
 fi
 
-echo "RunCVM-FC init: ========== NETWORK SETUP END =========="
+log INFO "========== NETWORK SETUP END =========="
 
 # Setup DNS
 if [ -f /.runcvm-resolv.conf ]; then
@@ -513,17 +604,17 @@ fi
 mount_9p_volumes() {
   local mount_config="/.runcvm/9p-mounts"
   
-  echo "RunCVM-FC init: Checking for 9P volumes..."
+  log INFO "Checking for 9P volumes..."
   
   if [ ! -f "$mount_config" ]; then
-    echo "RunCVM-FC init: No 9p-mounts config found - volumes are static copies"
+    log INFO "No 9p-mounts config found - volumes are static copies"
     return 0
   fi
   
   # Check if 9P filesystem is supported
   if ! grep -q 9p /proc/filesystems 2>/dev/null; then
-    echo "RunCVM-FC init: ERROR - Kernel does not support 9P filesystem!"
-    echo "RunCVM-FC init: Available filesystems:"
+    log ERROR "Kernel does not support 9P filesystem!"
+    log INFO "Available filesystems:"
     cat /proc/filesystems 2>/dev/null | sed 's/^/  /' || echo "  (cannot read /proc/filesystems)"
     return 1
   fi
@@ -533,35 +624,35 @@ mount_9p_volumes() {
   # This is reachable from the VM since it's on the same bridge network
   local host_ip="169.254.1.1"
   
-  echo "RunCVM-FC init: 9P host: $host_ip (diod server on bridge)"
+  log INFO "9P host: $host_ip (diod server on bridge)"
   
   # Check available 9P transports
-  echo "RunCVM-FC init: Checking 9P transport registration..."
+  log INFO "Checking 9P transport registration..."
   if [ -d /proc/net/9p ]; then
-    echo "    /proc/net/9p exists"
+    log DEBUG "  /proc/net/9p exists"
     ls -la /proc/net/9p/ 2>&1 | sed 's/^/    /'
     if [ -f /proc/net/9p/transports ]; then
-      echo "    Registered transports:"
+      log DEBUG "  Registered transports:"
       cat /proc/net/9p/transports 2>&1 | sed 's/^/      /'
     else
-      echo "    WARNING: /proc/net/9p/transports not found!"
+      log DEBUG "  WARNING: /proc/net/9p/transports not found!"
     fi
   else
-    echo "    ERROR: /proc/net/9p directory does not exist!"
-    echo "    Contents of /proc/net:"
+    log DEBUG "  ERROR: /proc/net/9p directory does not exist!"
+    log DEBUG "  Contents of /proc/net:"
     ls /proc/net/ 2>&1 | head -20 | sed 's/^/      /'
-    echo "    Checking kernel's built-in 9P modules..."
+    log DEBUG "  Checking kernel's built-in 9P modules..."
     if [ -f /lib/modules/*/modules.builtin ]; then
       cat /lib/modules/*/modules.builtin 2>/dev/null | grep -E "9p|net/9p" | sed 's/^/      /'
     else
-      echo "      (modules.builtin not found)"
+      log DEBUG "    (modules.builtin not found)"
     fi
     # Try manual init of 9pnet transports
-    echo "    Attempting to access /sys for 9pnet info..."
+    log DEBUG "  Attempting to access /sys for 9pnet info..."
     find /sys -name "*9p*" 2>/dev/null | head -5 | sed 's/^/      /' || echo "      (no 9p in /sys)"
   fi
   
-  echo "RunCVM-FC init: Mounting 9P volumes via TCP..."
+  log INFO "Mounting 9P volumes via TCP..."
   
   # Config format: port:dst:src (where src is the export path for aname)
   while IFS=: read -r port dst aname_path; do
@@ -570,10 +661,10 @@ mount_9p_volumes() {
     # Use the export path as aname, default to / if not specified
     [ -z "$aname_path" ] && aname_path="/"
     
-    echo "RunCVM-FC init:   Mounting $dst from port $port (aname=$aname_path)..."
+    log INFO "  Mounting $dst from port $port (aname=$aname_path)..."
     mkdir -p "$dst"
     
-    echo "RunCVM-FC init:   uid=$(id -u)"
+    log INFO "  uid=$(id -u)"
     
     mount_success=0
     
@@ -585,29 +676,29 @@ mount_9p_volumes() {
     # - access=0: root access
     mount_opts="version=9p2000.L,trans=tcp,aname=$aname_path,uname=root,access=0,port=$port"
     
-    echo "RunCVM-FC init:   Mounting 9P: $host_ip → $dst"
-    echo "RunCVM-FC init:   Options: $mount_opts"
+    log INFO "  Mounting 9P: $host_ip → $dst"
+    log INFO "  Options: $mount_opts"
     
     mount_result=$(mount -t 9p -n -o "$mount_opts" "$host_ip" "$dst" 2>&1)
     mount_rc=$?
     
     if [ $mount_rc -eq 0 ]; then
-      echo "RunCVM-FC init:   ✓ Successfully mounted $dst"
+      log INFO "  ✓ Successfully mounted $dst"
       mount_success=1
     else
-      echo "RunCVM-FC init:   Mount failed (rc=$mount_rc): $mount_result"
+      log INFO "  Mount failed (rc=$mount_rc): $mount_result"
       
       # Try fallback with access=client
-      echo "RunCVM-FC init:   Trying fallback with access=client..."
+      log INFO "  Trying fallback with access=client..."
       mount_opts="version=9p2000.L,trans=tcp,aname=$aname_path,uname=root,access=client,port=$port"
       mount_result=$(mount -t 9p -n -o "$mount_opts" "$host_ip" "$dst" 2>&1)
       mount_rc=$?
       
       if [ $mount_rc -eq 0 ]; then
-        echo "RunCVM-FC init:   ✓ Successfully mounted $dst (with access=client)"
+        log INFO "  ✓ Successfully mounted $dst (with access=client)"
         mount_success=1
       else
-        echo "RunCVM-FC init:   ✗ Failed to mount $dst: $mount_result"
+        log INFO "  ✗ Failed to mount $dst: $mount_result"
         # Show debug info
         dmesg 2>/dev/null | grep -i 9p | tail -5 | sed 's/^/    /'
       fi
@@ -615,18 +706,18 @@ mount_9p_volumes() {
   done < "$mount_config"
 }
 
-echo "RunCVM-FC init: ========== 9P VOLUME MOUNT =========="
+log INFO "========== 9P VOLUME MOUNT =========="
 # Load 9P modules if they exist (TCP transport uses 9pnet_fd)
-echo "RunCVM-FC init: Loading 9P kernel modules..."
-modprobe 9pnet 2>/dev/null && echo "  ✓ Loaded 9pnet" || echo "  (9pnet built-in or unavailable)"
-modprobe 9pnet_fd 2>/dev/null && echo "  ✓ Loaded 9pnet_fd" || echo "  (9pnet_fd built-in or unavailable)"
-modprobe 9p 2>/dev/null && echo "  ✓ Loaded 9p" || echo "  (9p built-in or unavailable)"
+log INFO "Loading 9P kernel modules..."
+modprobe 9pnet 2>/dev/null && log DEBUG "✓ Loaded 9pnet" || log DEBUG "(9pnet built-in or unavailable)"
+modprobe 9pnet_fd 2>/dev/null && log DEBUG "✓ Loaded 9pnet_fd" || log DEBUG "(9pnet_fd built-in or unavailable)"
+modprobe 9p 2>/dev/null && log DEBUG "✓ Loaded 9p" || log DEBUG "(9p built-in or unavailable)"
 mount_9p_volumes
-echo "RunCVM-FC init: ========== 9P VOLUME MOUNT END =========="
+log INFO "========== 9P VOLUME MOUNT END =========="
 
 # ========== DROPBEAR SSH SERVER FOR DOCKER EXEC ==========
 # docker exec uses SSH to connect to the VM, so we need dropbear running
-echo "RunCVM-FC init: ========== DROPBEAR SSH SETUP =========="
+log INFO "========== DROPBEAR SSH SETUP =========="
 
 SSHD_PORT=22222
 DROPBEAR_DIR="/.runcvm/dropbear"
@@ -636,7 +727,7 @@ if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
   
   # Check if we need to generate keys
   if [ ! -f "$DROPBEAR_DIR/key" ]; then
-    echo "RunCVM-FC init: Generating dropbear SSH keys..."
+    log INFO "Generating dropbear SSH keys..."
     # Generate ed25519 key
     "$RUNCVM_LD" "$RUNCVM_GUEST/usr/bin/dropbearkey" -t ed25519 -f "$DROPBEAR_DIR/key" >/dev/null 2>&1
     
@@ -648,13 +739,13 @@ if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
 [{"user":"root","keytype":"ssh-ed25519","key":"$KEY_PUBLIC","options":"no-X11-forwarding","comments":""}]
 EPKAEOF
     chmod 400 "$DROPBEAR_DIR/epka.json" "$DROPBEAR_DIR/key"
-    echo "RunCVM-FC init: SSH keys generated"
+    log INFO "SSH keys generated"
   else
-    echo "RunCVM-FC init: Using pre-generated SSH keys"
+    log INFO "Using pre-generated SSH keys"
   fi
   
   # Start dropbear SSH server
-  echo "RunCVM-FC init: Starting dropbear on port $SSHD_PORT..."
+  log INFO "Starting dropbear on port $SSHD_PORT..."
   EPKA_LIB="$RUNCVM_GUEST/tmp/dropbear/libepka_file.so"
   
   if [ -f "$EPKA_LIB" ]; then
@@ -663,20 +754,20 @@ EPKAEOF
       -P "$DROPBEAR_DIR/dropbear.pid" 2>/dev/null &
     sleep 0.5
     if [ -f "$DROPBEAR_DIR/dropbear.pid" ]; then
-      echo "RunCVM-FC init: Dropbear started (PID: $(cat $DROPBEAR_DIR/dropbear.pid))"
+      log INFO "Dropbear started (PID: $(cat $DROPBEAR_DIR/dropbear.pid))"
     else
-      echo "RunCVM-FC init: Warning - Dropbear may not have started correctly"
+      log INFO "Warning - Dropbear may not have started correctly"
     fi
   else
-    echo "RunCVM-FC init: Warning - EPKA library not found at $EPKA_LIB"
-    echo "RunCVM-FC init: docker exec may not work"
+    log INFO "Warning - EPKA library not found at $EPKA_LIB"
+    log INFO "docker exec may not work"
   fi
 else
-  echo "RunCVM-FC init: RunCVM tools not available, skipping dropbear"
-  echo "RunCVM-FC init: docker exec will not work"
+  log INFO "RunCVM tools not available, skipping dropbear"
+  log INFO "docker exec will not work"
 fi
 
-echo "RunCVM-FC init: ========== DROPBEAR SETUP END =========="
+log INFO "========== DROPBEAR SETUP END =========="
 
 # Determine what to run
 # Priority:
@@ -692,11 +783,11 @@ if [ -f /.runcvm-entrypoint ] && [ -s /.runcvm-entrypoint ]; then
     set -- "$@" "$line"
   done < /.runcvm-entrypoint
   
-  echo "RunCVM-FC init: Running saved entrypoint: $@"
+  log INFO "Running saved entrypoint: $@"
   exec "$@"
   
 elif [ -x /docker-entrypoint.sh ]; then
-  echo "RunCVM-FC init: Running /docker-entrypoint.sh"
+  log INFO "Running /docker-entrypoint.sh"
   # For nginx, docker-entrypoint.sh expects "nginx" "-g" "daemon off;" as args
   if [ -f /etc/nginx/nginx.conf ]; then
     exec /docker-entrypoint.sh nginx -g "daemon off;"
@@ -705,11 +796,11 @@ elif [ -x /docker-entrypoint.sh ]; then
   fi
   
 elif [ -f /etc/nginx/nginx.conf ] && command -v nginx >/dev/null 2>&1; then
-  echo "RunCVM-FC init: Running nginx directly"
+  log INFO "Running nginx directly"
   exec nginx -g "daemon off;"
   
 else
-  echo "RunCVM-FC init: No entrypoint found, starting shell"
+  log INFO "No entrypoint found, starting shell"
   exec /bin/sh
 fi
 INITEOF
@@ -797,13 +888,14 @@ INITEOF
     log "    Copied /.runcvm/config"
   fi
   # Copy 9p-mounts file - CRITICAL for volume mounting in VM
-  log "DEBUG: Checking MOUNT_CONFIG at $MOUNT_CONFIG"
+  log_debug "Checking MOUNT_CONFIG at $MOUNT_CONFIG"
   if [ -f "$MOUNT_CONFIG" ]; then
-    log "DEBUG: File exists, size=$(busybox stat -c%s "$MOUNT_CONFIG" 2>/dev/null || echo unknown)"
+    log_debug "MOUNT_CONFIG exists, copying to staging..."
     if [ -s "$MOUNT_CONFIG" ]; then
       busybox cp "$MOUNT_CONFIG" "${staging_dir}/.runcvm/9p-mounts"
-      log "    Copied 9p-mounts file to staging"
-      log "DEBUG: Verify copy: $(busybox ls -la "${staging_dir}/.runcvm/9p-mounts" 2>&1)"
+      log_debug "Copied to ${staging_dir}/.runcvm/9p-mounts"
+      log_debug "Contents:"
+      busybox cat "${staging_dir}/.runcvm/9p-mounts" 2>&1 | while read line; do log_debug "  $line"; done
     else
       log "WARNING: MOUNT_CONFIG exists but is empty"
     fi

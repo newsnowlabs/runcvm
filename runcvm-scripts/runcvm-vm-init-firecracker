@@ -9,8 +9,66 @@ set -e
 RUNCVM_GUEST="${RUNCVM_GUEST:-/.runcvm/guest}"
 SSHD_PORT="${SSHD_PORT:-22222}"
 
+# ============================================================
+# LOGGING SYSTEM
+# Severity levels: DEBUG, INFO, ERROR, OFF
+# Control via: RUNCVM_LOG_LEVEL environment variable
+# ============================================================
+
+# Default log level (can be overridden by environment)
+RUNCVM_LOG_LEVEL="${RUNCVM_LOG_LEVEL:-OFF}"
+
+# Core logging function (simplified for sh compatibility)
+_log() {
+  local severity="$1"
+  shift
+  local message="$*"
+  
+  # Simple numeric comparison for sh compatibility
+  case "$RUNCVM_LOG_LEVEL" in
+    DEBUG)
+      # Show all messages
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC-Init] [$severity] $message"
+      ;;
+    INFO|LOG)
+      # Show INFO and ERROR
+      case "$severity" in
+        INFO|ERROR) echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC-Init] [$severity] $message" ;;
+      esac
+      ;;
+    ERROR)
+      # Show only ERROR
+      case "$severity" in
+        ERROR) echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC-Init] [$severity] $message" ;;
+      esac
+      ;;
+    OFF)
+      # Show nothing
+      ;;
+  esac
+}
+
+# Convenience functions for different severity levels
+log_debug() {
+  _log DEBUG "$@"
+}
+
+log_info() {
+  _log INFO "$@"
+}
+
 log() {
-  echo "RunCVM-FC-Init: $1"
+  # Default log function - maps to INFO for backward compatibility
+  _log INFO "$@"
+}
+
+log_error() {
+  _log ERROR "$@"
+}
+
+error() {
+  log_error "$@"
+  exit 1
 }
 
 mount_9p_volumes() {

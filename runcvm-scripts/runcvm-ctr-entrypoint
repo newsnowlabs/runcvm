@@ -1,5 +1,62 @@
 #!/.runcvm/guest/bin/bash -e
 
+# ============================================================
+# LOGGING SYSTEM
+# Severity levels: DEBUG, INFO, ERROR, OFF
+# Control via: RUNCVM_LOG_LEVEL environment variable
+# ============================================================
+
+# Default log level (can be overridden by environment)
+RUNCVM_LOG_LEVEL="${RUNCVM_LOG_LEVEL:-OFF}"
+
+# Log severity levels (numeric for comparison)
+declare -A LOG_LEVELS=(
+  [DEBUG]=0
+  [INFO]=1
+  [LOG]=1      # Alias for INFO
+  [ERROR]=2
+  [OFF]=999
+)
+
+# Get numeric level for current log level (default to OFF=999)
+CURRENT_LOG_LEVEL="${LOG_LEVELS[$RUNCVM_LOG_LEVEL]:-999}"
+
+# Core logging function
+_log() {
+  local severity="$1"
+  shift
+  local message="$*"
+  local severity_level="${LOG_LEVELS[$severity]:-1}"
+  
+  # Only log if severity meets threshold
+  if [ "$severity_level" -ge "$CURRENT_LOG_LEVEL" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-Entrypoint] [$severity] $message" >&2
+  fi
+}
+
+# Convenience functions for different severity levels
+log_debug() {
+  _log DEBUG "$@"
+}
+
+log_info() {
+  _log INFO "$@"
+}
+
+log() {
+  # Default log function - maps to INFO for backward compatibility
+  _log INFO "$@"
+}
+
+log_error() {
+  _log ERROR "$@"
+}
+
+error() {
+  log_error "$@"
+  exit 1
+}
+
 # DEBUG
 if [[ "$RUNCVM_BREAK" =~ (prenet|postnet) ]]; then set -x; fi
 
@@ -111,7 +168,7 @@ is_kubernetes_environment() {
 # The network is already configured by the pause container/CNI
 # ============================================================
 setup_kubernetes_networking() {
-  echo "RunCVM: Kubernetes environment detected - using passthrough networking" >&2
+  log_info "Kubernetes environment detected - using passthrough networking"
   
   mkdir -p /.runcvm/network/devices
   
@@ -280,32 +337,32 @@ else
 fi
 
 # LAUNCH VIRTIOFSD
-echo "RunCVM: Starting virtiofsd..." >&2
-echo "RunCVM: RUNCVM_VM_MOUNTPOINT=$RUNCVM_VM_MOUNTPOINT" >&2
-echo "RunCVM: QEMU_VIRTIOFSD_SOCKET=${QEMU_VIRTIOFSD_SOCKET:-/run/.virtiofs.sock}" >&2
+log_info "Starting virtiofsd..."
+log_debug "RUNCVM_VM_MOUNTPOINT=$RUNCVM_VM_MOUNTPOINT"
+log_debug "QEMU_VIRTIOFSD_SOCKET=${QEMU_VIRTIOFSD_SOCKET:-/run/.virtiofs.sock}"
 
 # Check if the source directory exists
 if [ ! -d "$RUNCVM_VM_MOUNTPOINT" ]; then
-  echo "RunCVM: ERROR - VM mountpoint $RUNCVM_VM_MOUNTPOINT does not exist!" >&2
+  log_error "VM mountpoint $RUNCVM_VM_MOUNTPOINT does not exist!"
   ls -la / >&2
 fi
 
 # Launch virtiofsd
 $RUNCVM_GUEST/scripts/runcvm-ctr-virtiofsd &
 VIRTIOFSD_PID=$!
-echo "RunCVM: virtiofsd started with PID $VIRTIOFSD_PID" >&2
+log_debug "virtiofsd started with PID $VIRTIOFSD_PID"
 
 # Wait for virtiofsd socket to be created (max 10 seconds)
 SOCKET_PATH="${QEMU_VIRTIOFSD_SOCKET:-/run/.virtiofs.sock}"
-echo "RunCVM: Waiting for virtiofsd socket at $SOCKET_PATH..." >&2
+log_debug "Waiting for virtiofsd socket at $SOCKET_PATH..."
 for i in $(seq 1 100); do
   if [ -S "$SOCKET_PATH" ]; then
-    echo "RunCVM: virtiofsd socket ready after ${i}0ms" >&2
+    log_debug "virtiofsd socket ready after ${i}0ms"
     break
   fi
   # Check if virtiofsd is still running
   if ! kill -0 $VIRTIOFSD_PID 2>/dev/null; then
-    echo "RunCVM: ERROR - virtiofsd (PID $VIRTIOFSD_PID) died!" >&2
+    log_error "virtiofsd (PID $VIRTIOFSD_PID) died!"
     echo "RunCVM: virtiofsd log:" >&2
     cat /run/.virtiofsd.log 2>&1 >&2 || true
     # Don't exit - let QEMU fail with a clear error
@@ -315,7 +372,7 @@ for i in $(seq 1 100); do
 done
 
 if [ ! -S "$SOCKET_PATH" ]; then
-  echo "RunCVM: WARNING - virtiofsd socket not found after 10s" >&2
+  log_error "virtiofsd socket not found after 10s"
   echo "RunCVM: Contents of /run:" >&2
   ls -la /run/ >&2 || true
 fi
@@ -342,7 +399,7 @@ fi
 
 case "${RUNCVM_HYPERVISOR:-qemu}" in
   firecracker|fc)
-    echo "RunCVM: Launching Firecracker microVM..." >&2
+    log_info "Launching Firecracker microVM..."
     
     # Copy runtime state to VM mountpoint (will be embedded in rootfs image)
     mkdir -p "$RUNCVM_VM_MOUNTPOINT/.runcvm/network"
@@ -358,7 +415,7 @@ case "${RUNCVM_HYPERVISOR:-qemu}" in
     ;;
     
   qemu|*)
-    echo "RunCVM: Launching QEMU VM..." >&2
+    log_info "Launching QEMU VM..."
     exec $RUNCVM_GUEST/sbin/runcvm-init -c $RUNCVM_GUEST/scripts/runcvm-ctr-qemu
     ;;
 esac

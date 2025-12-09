@@ -32,26 +32,73 @@ RUNCVM_GUEST_KERNELS=$RUNCVM_GUEST/kernels
 RUNCVM_KERNEL_DEFAULT=firecracker
 RUNCVM_MEM_SIZE_DEFAULT="768" # Default VM memory size (Mb) if not specified in container config
 RUNCVM_CONTAINER_MEM_OVERHEAD="256" # Memory (Mb) overhead to allow for QEMU, virtiofsd, dnsmasq and other container memory footprint: 768Mb minimum, 1024Mb recommended
-RUNCVM_DEBUG=""
 
-debug() {
-  [ -n "$RUNCVM_DEBUG" ] && true || false
+# ============================================================
+# LOGGING SYSTEM
+# Severity levels: DEBUG, INFO, ERROR, OFF
+# Control via: RUNCVM_LOG_LEVEL environment variable
+# ============================================================
+
+# Default log level (can be overridden by environment)
+RUNCVM_LOG_LEVEL="${RUNCVM_LOG_LEVEL:-OFF}"
+
+# Log severity levels (numeric for comparison)
+declare -A LOG_LEVELS=(
+  [DEBUG]=0
+  [INFO]=1
+  [LOG]=1      # Alias for INFO
+  [ERROR]=2
+  [OFF]=999
+)
+
+# Get numeric level for current log level (default to OFF=999)
+CURRENT_LOG_LEVEL="${LOG_LEVELS[$RUNCVM_LOG_LEVEL]:-999}"
+
+# Core logging function
+_log() {
+  local severity="$1"
+  shift
+  local message="$*"
+  local severity_level="${LOG_LEVELS[$severity]:-1}"
+  
+  # Only log if severity meets threshold
+  if [ "$severity_level" -ge "$CURRENT_LOG_LEVEL" ]; then
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S.%6N')
+    echo "[$timestamp] [RunCVM-Runtime] [$$] [$severity] $message" >> /tmp/runcvm-$$.log
+    # Also output ERROR to stderr
+    if [ "$severity" = "ERROR" ]; then
+      echo "[$timestamp] [RunCVM-Runtime] [$severity] $message" >&2
+    fi
+  fi
+}
+
+# Convenience functions for different severity levels
+log_debug() {
+  _log DEBUG "$@"
+}
+
+log_info() {
+  _log INFO "$@"
 }
 
 log() {
-  debug && echo "$(date '+%Y-%m-%d %H:%M:%S.%6N'): $$: $@" >>/tmp/runcvm-$$.log
+  # Default log function - maps to INFO for backward compatibility
+  _log INFO "$@"
+}
+
+log_error() {
+  _log ERROR "$@"
 }
 
 error() {
-
   # Skip past any docker error ending in CR
   (echo; echo) >&2
-
+  
   # Dump message to stderr
   echo "RunCVM: Error: $1" >&2
-
-  # Dump error also to the logfile
-  log "RunCVM: Error: $1"
+  
+  # Log error with severity
+  log_error "$1"
   exit -1
 }
 
@@ -200,9 +247,7 @@ is_sandbox_container() {
 
 COMMAND_LINE=("$@")
 
-if debug; then
-  log "Command line: $0 ${COMMAND_LINE[@]@Q}"
-fi
+log_debug "Command line: $0 ${COMMAND_LINE[@]@Q}"
 
 while true
 do
@@ -219,7 +264,7 @@ shift
 
 if [ "$COMMAND" = "create" ]; then
 
-  debug && log "Command: create"
+  log_debug "Command: create"
   
   # USAGE:
   #    runc create [command options] <container-id>
@@ -248,17 +293,15 @@ if [ "$COMMAND" = "create" ]; then
 
   # Allow user to enable debug logging
   if [ "$(get_config_env RUNCVM_RUNTIME_DEBUG)" = "1" ]; then
-    RUNCVM_DEBUG="1"
+    RUNCVM_LOG_LEVEL="DEBUG"
+    CURRENT_LOG_LEVEL="${LOG_LEVELS[DEBUG]}"
   fi
 
-  if debug; then
-    log "Command line: $0 ${COMMAND_LINE[@]@Q}"
-    log "Command: create bundle=$BUNDLE id=$ID root=$ROOT"
-    
-    # Save formatted config.json
-    jq -r . <$CFG >/tmp/config.json-$$-1
-    
-  fi
+  log_debug "Command line: $0 ${COMMAND_LINE[@]@Q}"
+  log_debug "Command: create bundle=$BUNDLE id=$ID root=$ROOT"
+  
+  # Save formatted config.json
+  jq -r . <$CFG >/tmp/config.json-$$-1
 
   # ============================================================
   # SANDBOX CONTAINER DETECTION
@@ -592,11 +635,12 @@ if [ "$COMMAND" = "create" ]; then
     jq_set "$CFG" '.process.capabilities.bounding += ["CAP_SYS_ADMIN"] | .process.capabilities.effective += ["CAP_SYS_ADMIN"] | .process.capabilities.permitted += ["CAP_SYS_ADMIN"]'
   fi
 
-  debug && cp -a $CFG /tmp/config.json-$$-2
+  # Save formatted config.json for debugging
+  jq -r . <$CFG >/tmp/config.json-$$-2 2>/dev/null || true
   
 elif [ "$COMMAND" = "exec" ]; then
 
-  debug && log "Command: exec"
+  log_debug "Command: exec"
 
   # USAGE:
   #   runc exec [command options] <container-id> <command> [command options]  || -p process.json <container-id>
@@ -630,16 +674,15 @@ elif [ "$COMMAND" = "exec" ]; then
 
   # Allow user to enable debug logging
   if [ "$(get_process_env "$PROCESS" 'RUNCVM_RUNTIME_DEBUG' '0')" = "1" ]; then
-    RUNCVM_DEBUG="1"
+    RUNCVM_LOG_LEVEL="DEBUG"
+    CURRENT_LOG_LEVEL="${LOG_LEVELS[DEBUG]}"
   fi
 
-  if debug; then
-    log "Command line: $0 ${COMMAND_LINE[@]@Q}"
-    log "Command: exec process=$PROCESS"
-    
-    # Save formatted process.json
-    jq -r . <$PROCESS >/tmp/process.json-$$-1
-  fi
+  log_debug "Command line: $0 ${COMMAND_LINE[@]@Q}"
+  log_debug "Command: exec process=$PROCESS"
+  
+  # Save formatted process.json
+  jq -r . <$PROCESS >/tmp/process.json-$$-1
 
   ARG1=$(jq_get "$PROCESS" '.args[0]')
   if [ "$ARG1" = "---" ]; then
@@ -663,9 +706,10 @@ elif [ "$COMMAND" = "exec" ]; then
     jq_set "$PROCESS" '.user = {"uid":0, "gid":0} | .cwd="/"'
   fi
   
-  debug && cp -a $PROCESS /tmp/process.json-$$-2
+  # Save formatted process.json for debugging
+  jq -r . <$PROCESS >/tmp/process.json-$$-2 2>/dev/null || true
 fi
 
-debug && log "--- LOG ENDS ---"
+log_debug "--- LOG ENDS ---"
 
 exec /usr/bin/runc "${COMMAND_LINE[@]}"
