@@ -211,10 +211,20 @@ create_rootfs_from_dir() {
   fi
   
   # Create ext4 filesystem populated with source directory contents
-  if ! mke2fs -F -t ext4 -E root_owner=0:0 -d "$source_dir" "$image_path" 2>&1; then
-    log "mke2fs failed"
-    busybox rm -f "$image_path"
-    return 1
+  if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
+    # Show mke2fs output in debug mode
+    if ! mke2fs -F -t ext4 -E root_owner=0:0 -d "$source_dir" "$image_path" 2>&1; then
+      log "mke2fs failed"
+      busybox rm -f "$image_path"
+      return 1
+    fi
+  else
+    # Silent mode - redirect to /dev/null
+    if ! mke2fs -F -t ext4 -E root_owner=0:0 -d "$source_dir" "$image_path" >/dev/null 2>&1; then
+      log_error "mke2fs failed"
+      busybox rm -f "$image_path"
+      return 1
+    fi
   fi
   log "Rootfs created successfully"
   return 0
@@ -371,6 +381,22 @@ log() {
   esac
 }
 
+# Helper function to redirect output based on log level
+# Usage: some_command $(output_redirect)
+# This will redirect to /dev/null unless RUNCVM_LOG_LEVEL=DEBUG
+output_redirect() {
+  if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
+    echo ""  # No redirection - show output
+  else
+    echo ">/dev/null 2>&1"  # Redirect to /dev/null
+  fi
+}
+
+# Simpler helper - returns 0 if DEBUG, 1 otherwise
+is_debug() {
+  [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]
+}
+
 log INFO "Starting..."
 
 # Mount essential filesystems
@@ -452,22 +478,28 @@ fi
 
 # First, check what kernel modules are loaded for networking
 log INFO "Checking for virtio_net module..."
-if [ -f /proc/modules ]; then
+if is_debug && [ -f /proc/modules ]; then
   grep -i virtio /proc/modules 2>/dev/null || echo "  No virtio modules loaded"
 fi
 
 # Check /sys/class/net to see what the kernel sees
 log INFO "Kernel network interfaces in /sys/class/net:"
-ls -la /sys/class/net/ 2>/dev/null || echo "  Cannot list /sys/class/net"
+if is_debug; then
+  ls -la /sys/class/net/ 2>/dev/null || echo "  Cannot list /sys/class/net"
+fi
 
 # Check dmesg for network-related messages
 log INFO "Recent dmesg network messages:"
-dmesg 2>/dev/null | grep -iE "(eth|net|virtio)" | tail -10 || echo "  Cannot read dmesg"
+if is_debug; then
+  dmesg 2>/dev/null | grep -iE "(eth|net|virtio)" | tail -10 || echo "  Cannot read dmesg"
+fi
 
 # Configure eth0 with static IP from saved network config
 if [ -f /.runcvm-network ]; then
   log INFO "Loading network config from /.runcvm-network"
-  cat /.runcvm-network
+  if is_debug; then
+    cat /.runcvm-network
+  fi
   . /.runcvm-network
   
   # Check if eth0 exists at all
@@ -502,10 +534,12 @@ if [ -f /.runcvm-network ]; then
     else
       log ERROR "No network configuration tools available!"
       log DEBUG "Checking PATH: $PATH"
-      log DEBUG "RUNCVM_GUEST dir contents:"
-      ls -la "$RUNCVM_GUEST" 2>/dev/null || echo "    not found"
-      log DEBUG "RUNCVM_GUEST/bin dir contents:"
-      ls -la "$RUNCVM_GUEST/bin" 2>/dev/null || echo "    not found"
+      if is_debug; then
+        log DEBUG "RUNCVM_GUEST dir contents:"
+        ls -la "$RUNCVM_GUEST" 2>/dev/null || echo "    not found"
+        log DEBUG "RUNCVM_GUEST/bin dir contents:"
+        ls -la "$RUNCVM_GUEST/bin" 2>/dev/null || echo "    not found"
+      fi
       IP_CMD=""
     fi
     
@@ -541,12 +575,14 @@ if [ -f /.runcvm-network ]; then
       fi
       
       # Show network config for debugging
-      log INFO "Final eth0 configuration:"
-      $IP_CMD addr show eth0
-      log INFO "Final routing table:"
-      $IP_CMD route show
-      log INFO "Link state:"
-      $IP_CMD link show eth0
+      if is_debug; then
+        log INFO "Final eth0 configuration:"
+        $IP_CMD addr show eth0
+        log INFO "Final routing table:"
+        $IP_CMD route show
+        log INFO "Link state:"
+        $IP_CMD link show eth0
+      fi
       
     elif [ "$USE_IFCONFIG" = "1" ]; then
       log INFO "Using ifconfig"
@@ -564,17 +600,28 @@ if [ -f /.runcvm-network ]; then
         route add default gw "$FC_GW" 2>/dev/null || true
       fi
       
-      ifconfig eth0
-      route -n
+      if is_debug; then
+        ifconfig eth0
+        route -n
+      fi
     fi
     
     # Test connectivity (optional, non-blocking)
     if [ -n "$FC_GW" ] && [ "$FC_GW" != "-" ]; then
       log INFO "Testing connectivity to gateway $FC_GW..."
-      if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
-        runcvm_busybox ping -c 1 -W 1 "$FC_GW" 2>&1 && echo "  Gateway reachable!" || echo "  Gateway not reachable (this may be normal)"
-      elif command -v ping >/dev/null 2>&1; then
-        ping -c 1 -W 1 "$FC_GW" 2>&1 && echo "  Gateway reachable!" || echo "  Gateway not reachable (this may be normal)"
+      if is_debug; then
+        if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
+          runcvm_busybox ping -c 1 -W 1 "$FC_GW" 2>&1 && echo "  Gateway reachable!" || echo "  Gateway not reachable (this may be normal)"
+        elif command -v ping >/dev/null 2>&1; then
+          ping -c 1 -W 1 "$FC_GW" 2>&1 && echo "  Gateway reachable!" || echo "  Gateway not reachable (this may be normal)"
+        fi
+      else
+        # Silent ping test - just for connectivity check
+        if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
+          runcvm_busybox ping -c 1 -W 1 "$FC_GW" >/dev/null 2>&1 && log DEBUG "Gateway reachable" || log DEBUG "Gateway not reachable"
+        elif command -v ping >/dev/null 2>&1; then
+          ping -c 1 -W 1 "$FC_GW" >/dev/null 2>&1 && log DEBUG "Gateway reachable" || log DEBUG "Gateway not reachable"
+        fi
       fi
     fi
   elif [ ! -d /sys/class/net/eth0 ]; then
@@ -630,26 +677,32 @@ mount_9p_volumes() {
   log INFO "Checking 9P transport registration..."
   if [ -d /proc/net/9p ]; then
     log DEBUG "  /proc/net/9p exists"
-    ls -la /proc/net/9p/ 2>&1 | sed 's/^/    /'
+    if is_debug; then
+      ls -la /proc/net/9p/ 2>&1 | sed 's/^/    /'
+    fi
     if [ -f /proc/net/9p/transports ]; then
       log DEBUG "  Registered transports:"
-      cat /proc/net/9p/transports 2>&1 | sed 's/^/      /'
+      if is_debug; then
+        cat /proc/net/9p/transports 2>&1 | sed 's/^/      /'
+      fi
     else
       log DEBUG "  WARNING: /proc/net/9p/transports not found!"
     fi
   else
     log DEBUG "  ERROR: /proc/net/9p directory does not exist!"
-    log DEBUG "  Contents of /proc/net:"
-    ls /proc/net/ 2>&1 | head -20 | sed 's/^/      /'
-    log DEBUG "  Checking kernel's built-in 9P modules..."
-    if [ -f /lib/modules/*/modules.builtin ]; then
-      cat /lib/modules/*/modules.builtin 2>/dev/null | grep -E "9p|net/9p" | sed 's/^/      /'
-    else
-      log DEBUG "    (modules.builtin not found)"
+    if is_debug; then
+      log DEBUG "  Contents of /proc/net:"
+      ls /proc/net/ 2>&1 | head -20 | sed 's/^/      /'
+      log DEBUG "  Checking kernel's built-in 9P modules..."
+      if [ -f /lib/modules/*/modules.builtin ]; then
+        cat /lib/modules/*/modules.builtin 2>/dev/null | grep -E "9p|net/9p" | sed 's/^/      /'
+      else
+        log DEBUG "    (modules.builtin not found)"
+      fi
+      # Try manual init of 9pnet transports
+      log DEBUG "  Attempting to access /sys for 9pnet info..."
+      find /sys -name "*9p*" 2>/dev/null | head -5 | sed 's/^/      /' || echo "      (no 9p in /sys)"
     fi
-    # Try manual init of 9pnet transports
-    log DEBUG "  Attempting to access /sys for 9pnet info..."
-    find /sys -name "*9p*" 2>/dev/null | head -5 | sed 's/^/      /' || echo "      (no 9p in /sys)"
   fi
   
   log INFO "Mounting 9P volumes via TCP..."
@@ -1132,10 +1185,12 @@ NETEOF
     ip link set dev "$tap_name" up mtu "${DOCKER_IF_MTU:-1500}"
     
     # Debug: show bridge and tap status
-    log "  Bridge status:"
-    ip link show "$bridge_name" 2>&1 | busybox sed 's/^/    /'
-    log "  TAP status:"
-    ip link show "$tap_name" 2>&1 | busybox sed 's/^/    /'
+    if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
+      log "  Bridge status:"
+      ip link show "$bridge_name" 2>&1 | busybox sed 's/^/    /'
+      log "  TAP status:"
+      ip link show "$tap_name" 2>&1 | busybox sed 's/^/    /'
+    fi
     
 
     # Add MASQUERADE rule for outbound traffic from the VM
