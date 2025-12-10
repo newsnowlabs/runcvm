@@ -315,27 +315,20 @@ RUN ls -alh /opt/runcvm/kernels/firecracker/vmlinux && \
 # This downloads and extracts the Firecracker binary for ARM64
 
 # -- BUILD STAGE ---
-# Add DIOD bundled
-FROM alpine:3.19 as diod-builder
+# Build Unison for bidirectional sync
+FROM alpine:3.19 as unison-builder
 
-# Install ALL required build dependencies
+# Install OCaml and build dependencies
 RUN apk add --no-cache \
-    build-base autoconf automake libtool git \
-    linux-headers libcap-dev libcap-static musl-dev \
-    lua5.3-dev ncurses-dev ncurses-static
+    build-base ocaml curl
 
-# Clone and build diod
-RUN git clone https://github.com/chaos/diod.git -b v1.1.0 && \
-    cd diod && \
-    ./autogen.sh && \
-    LDFLAGS="-static" ./configure --prefix=/usr \
-    --disable-diodmount \
-    --disable-auth \
-    --disable-config \
-    CFLAGS="-static" \
-    LDFLAGS="-static" && \
-    make CFLAGS="-static" LDFLAGS="-static" && \
-    make DESTDIR=/diod-install install
+# Download and build Unison statically
+RUN curl -L -o unison.tar.gz https://github.com/bcpierce00/unison/archive/refs/tags/v2.53.8.tar.gz && \
+    tar xzf unison.tar.gz && \
+    cd unison-2.53.8 && \
+    make UISTYLE=text STATIC=true && \
+    mkdir -p /unison-install/usr/bin && \
+    cp src/unison src/unison-fsmonitor /unison-install/usr/bin/
 
 # --- BUILD STAGE ---
 # Download Firecracker binary
@@ -388,7 +381,9 @@ COPY --from=firecracker-kernel-build /opt/runcvm/kernels/firecracker/ /opt/runcv
 COPY --from=firecracker-kernel-build /opt/runcvm/kernels/firecracker/config /opt/runcvm/kernels/firecracker/.config
 COPY --from=firecracker-kernel-build /build/linux/.config.bak /opt/runcvm/kernels/firecracker/.config.bak
 
-COPY --from=diod-builder /diod-install/usr/sbin/diod /opt/runcvm/bin/diod
+# Copy Unison binaries for bidirectional sync
+COPY --from=unison-builder /unison-install/usr/bin/unison /opt/runcvm/bin/unison
+COPY --from=unison-builder /unison-install/usr/bin/unison-fsmonitor /opt/runcvm/bin/unison-fsmonitor
 
 RUN apk update && apk add --no-cache rsync
 

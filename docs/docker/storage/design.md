@@ -7,11 +7,14 @@ This document outlines the storage architecture design for RunCVM's Firecracker 
 > [!NOTE]
 > **December 2025 Update**: Successfully implemented 9P over TCP for live filesystem sharing! After debugging kernel issues, we now have working bidirectional volume mounts.
 
+> [!IMPORTANT]
+> **Migration Planned (December 2025)**: We are migrating from 9P/diod to **Unison** for bidirectional file synchronization. Unison provides true bidirectional sync with better concurrent container access support.
+
 **Current Status**: 
 - ✅ **Working**: Live 9P mounts over TCP with bidirectional sync
+- 🔄 **Migrating To**: Unison bidirectional sync (hybrid: inotify + 3s periodic)
 - ✅ **Working**: Multiple bind mounts with live filesystem access
-- ✅ **Working**: Read-write operations sync back to host in real-time
-- 🎯 **Achieved**: Full Docker volume compatibility with Firecracker
+- 🎯 **Goal**: Full Docker volume compatibility with concurrent access support
 
 ---
 
@@ -413,10 +416,53 @@ Build a custom FUSE filesystem that tunnels over vsock.
 | Periodic Sync | 5-60s | Medium | ✅ Implementable | ⚠️ |
 | Inotify | <1s | Low | ✅ Implementable | ✅ |
 | **9P over vsock** | — | — | ❌ **NOT FEASIBLE** | — |
-| **9P over TCP** | ~1-10ms | None | ✅ **PRODUCTION** | ✅ |
+| **9P over TCP** | ~1-10ms | None | ⚠️ **DEPRECATED** | ✅ |
 | NFS over TCP | ~1-10ms | None | 🔧 **Not needed** | ✅ |
+| **Unison (Hybrid)** | ~1-3s | Low | 🔄 **PLANNED** | ✅ |
 
-### Current Implementation: 9P over TCP (Production)
+---
+
+#### Option 7: Unison Bidirectional Sync 🔄 PLANNED
+
+Unison provides true bidirectional file synchronization between VM and host.
+
+```
+HOST (Container)
+  unison server
+  Listens: 0.0.0.0:5640
+  Bridge IP: 169.254.1.1
+               ▲ TCP
+               │
+GUEST VM       │
+  unison client ─┘
+  Syncs: /data ↔ host:/data
+  Mode: Hybrid (inotify + 3s periodic)
+```
+
+| Attribute | Value |
+|-----------|-------|
+| Latency | ~1-3 seconds |
+| Data Loss Risk | Low (last-writer-wins) |
+| CPU Overhead | Medium |
+| Complexity | Medium |
+| Concurrent Access | ✅ **Supported** |
+| Status | 🔄 **PLANNED** |
+
+**Why Unison over 9P**:
+- True bidirectional sync (not just filesystem exposure)
+- Better concurrent container access with file-level locking
+- Conflict resolution (last-writer-wins)
+- More robust for network interruptions
+- Simpler kernel requirements (no 9P modules needed in guest)
+
+**Key Design Decisions**:
+- **Build**: Static build in Dockerfile (ensures version matching)
+- **Sync Mode**: Hybrid (inotify + 3s periodic)
+- **Conflicts**: Last-writer-wins
+
+---
+
+### Current Implementation: 9P over TCP ⚠️ DEPRECATED
 
 **Current Status (December 2025)**:
 1. ✅ Live 9P mounts over TCP are **fully working**
@@ -571,37 +617,45 @@ STEP 3: VM boots and runs command
 
 ## Future Work
 
-### Priority 1: Fix 9pnet_fd Initialization (Required for TCP transport)
+### Priority 1: Migrate to Unison (In Progress)
 
-1. Debug kernel build to verify 9pnet_fd is being compiled
-2. Check modules.builtin includes 9pnet_fd.ko  
-3. Test building as module (=m) instead of built-in
-4. Compare ARM64 build with x86_64
+1. Remove diod-builder stage from Dockerfile
+2. Add unison-builder stage (static build)
+3. Replace 9P setup in `runcvm-ctr-firecracker` with Unison server
+4. Replace 9P mount in `runcvm-vm-init-firecracker` with Unison client
+5. Update kernel config (9P modules optional)
 
-### Priority 2: Alternative Sync Strategies (if 9P TCP fails)
+**Files to Modify**:
+- `Dockerfile` - Remove diod, add unison
+- `runcvm-scripts/runcvm-ctr-firecracker` - Replace 9P with unison
+- `runcvm-scripts/runcvm-vm-init-firecracker` - Replace 9P mount with unison
 
-| Alternative | Effort | Notes |
-|-------------|--------|-------|
-| NFS over TCP | Medium | Requires nfs-utils, more config |
-| Periodic rsync over vsock | Low | High latency, data loss risk |
-| Custom sync daemon | Medium | Build vsock-based file sync |
+### Priority 2: Clean Up Legacy 9P Code
 
-### Target Architecture (Once 9P TCP Works)
+| Task | File | Status |
+|------|------|--------|
+| Remove diod binary | Dockerfile | 🔄 Planned |
+| Remove setup_9p_volumes() | runcvm-ctr-firecracker | 🔄 Planned |
+| Remove mount_9p_volumes() | runcvm-vm-init-firecracker | 🔄 Planned |
+| Update test scripts | tests/04-docker/* | 🔄 Planned |
+
+### Target Architecture (With Unison)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  LAYER 3: 9P over TCP (via bridge network)                             │
-│  - Live filesystem access                                               │
-│  - diod server on host (0.0.0.0:5640)                                  │
-│  - 9p mount in guest (trans=tcp to 169.254.1.1)                        │
+│  LAYER 3: Unison Bidirectional Sync                                     │
+│  - Hybrid sync: inotify + 3s periodic                                   │
+│  - Unison server on host (0.0.0.0:5640)                                 │
+│  - Unison client in guest (connects to 169.254.1.1)                     │
+│  - Conflict resolution: last-writer-wins                                │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  LAYER 2: Single Block Device for rootfs only                          │
 │  - Rootfs as ext4 image (container files only)                         │
-│  - Volumes mounted live via 9P                                          │
+│  - Volumes synced live via Unison                                        │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  LAYER 1: virtio-blk + virtio-net                                      │
 │  - Rootfs via virtio-blk                                                │
-│  - 9P over TCP via TAP/bridge network                                   │
+│  - Unison over TCP via TAP/bridge network                               │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 

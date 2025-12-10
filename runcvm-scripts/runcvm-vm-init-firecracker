@@ -71,36 +71,60 @@ error() {
   exit 1
 }
 
-mount_9p_volumes() {
-  local mount_config="/.runcvm/9p-mounts"
+sync_unison_volumes() {
+  local unison_config="/.runcvm/unison-volumes"
   
-  [ -f "$mount_config" ] || return 0
+  [ -f "$unison_config" ] || return 0
   
-  # Connect to container's bridge IP for diod server
-  # The bridge IP 169.254.1.1 is set in runcvm-ctr-entrypoint
-  # This is reachable from the VM since it's on the same bridge network
+  # Connect to container's bridge IP for Unison server
   local host_ip="169.254.1.1"
   
-  log "Mounting 9P volumes via TCP (host: $host_ip)..."
+  log "Syncing volumes via Unison (host: $host_ip)..."
+  log "  Mode: hybrid (inotify + 3s periodic)"
+  log "  Conflict resolution: last-writer-wins"
   
-  while IFS=: read -r port dst; do
+  while IFS=: read -r port dst src_path; do
     [ -z "$port" ] && continue
+    [ -z "$src_path" ] && src_path="/"
     
-    log "  Mounting $dst from $host_ip:$port"
+    log "  Syncing $dst from $host_ip:$port"
     
     mkdir -p "$dst"
     
-    # Use TCP transport to connect to diod server on host
-    mount -t 9p \
-      -o trans=tcp,dfltuid=0,dfltgid=0,version=9p2000.L,port=$port,msize=65536,cache=loose \
-      "$host_ip" "$dst"
-    
-    if [ $? -eq 0 ]; then
-      log "  ✓ Mounted $dst successfully"
+    # Sync using Unison
+    # - batch: non-interactive mode
+    # - auto: accept non-conflicting changes
+    # - prefer newer: last-writer-wins
+    # - times: preserve modification times
+    if command -v unison >/dev/null 2>&1; then
+      unison "$dst" "socket://$host_ip:$port/$src_path" \
+        -batch -auto -prefer newer -times 2>&1 | while read line; do log "    $line"; done
+      sync_rc=$?
     else
-      log "  ✗ Failed to mount $dst"
+      log "  ERROR: unison command not found"
+      sync_rc=1
     fi
-  done < "$mount_config"
+    
+    if [ $sync_rc -eq 0 ]; then
+      log "  ✓ Synced $dst successfully"
+    else
+      log "  ✗ Failed to sync $dst"
+    fi
+  done < "$unison_config"
+  
+  # Start background sync daemon
+  log "Starting background sync daemon (3s intervals)..."
+  (
+    while true; do
+      sleep 3
+      while IFS=: read -r port dst src_path; do
+        [ -z "$port" ] && continue
+        [ -z "$src_path" ] && src_path="/"
+        unison "$dst" "socket://$host_ip:$port/$src_path" \
+          -batch -auto -prefer newer -times >/dev/null 2>&1 || true
+      done < "$unison_config"
+    done
+  ) &
 }
 
 log "Starting Firecracker VM initialization..."
@@ -217,7 +241,7 @@ if [ -f /.runcvm/pwd ]; then
 fi
 
 # ============================================================
-# KERNEL AND 9P DEBUG INFORMATION
+# KERNEL DEBUG INFORMATION
 # ============================================================
 
 log "========== KERNEL DEBUG INFO =========="
@@ -226,68 +250,15 @@ log "========== KERNEL DEBUG INFO =========="
 log "Kernel version: $(uname -r)"
 log "Kernel build: $(uname -v)"
 
-# Check if 9P is built into the kernel or available as modules
-log "9P Filesystem Support:"
-if grep -q "^nodev.*9p$" /proc/filesystems 2>/dev/null; then
-  log "  ✓ 9P filesystem: BUILT-IN (in /proc/filesystems)"
-else
-  log "  ✗ 9P filesystem: NOT in /proc/filesystems (may need module load)"
-fi
-
-# Check for 9P transports
-if [ -f /proc/net/9p/transports ]; then
-  log "  ✓ /proc/net/9p/transports exists"
-  log "  Available transports: $(cat /proc/net/9p/transports 2>/dev/null || echo 'ERROR reading file')"
-else
-  log "  ✗ /proc/net/9p/transports NOT FOUND (9P networking not initialized)"
-fi
-
-# Check if vsock is available
-if [ -c /dev/vsock ]; then
-  log "  ✓ /dev/vsock device exists"
-else
-  log "  ✗ /dev/vsock device NOT FOUND"
-fi
-
-# Check loaded modules related to 9P
-log "Loaded 9P/vsock modules:"
-if [ -f /proc/modules ]; then
-  grep -E "9p|vsock" /proc/modules 2>/dev/null | while read mod rest; do
-    log "  - $mod"
-  done || log "  (no 9P/vsock modules loaded)"
-else
-  log "  /proc/modules not available"
-fi
-
 log "======================================="
 
 # ============================================================
-# LAUNCH ENTRYPOINT
+# VOLUME SYNC
 # ============================================================
 
-# Load 9P modules directly with insmod (bypass version check)
-# We use TCP transport, so we need 9pnet_fd (not 9pnet_vsock)
-log "Loading 9P kernel modules..."
-MOD_DIR="/lib/modules"
-if [ -d "$MOD_DIR" ]; then
-  # Find the module directory
-  KVER=$(ls "$MOD_DIR" | head -1)
-  if [ -n "$KVER" ] && [ -d "$MOD_DIR/$KVER/kernel/net" ]; then
-    log "  Found modules for $KVER"
-    
-    # Load in dependency order for TCP transport
-    insmod "$MOD_DIR/$KVER/kernel/net/9p/9pnet.ko" 2>/dev/null && log "  ✓ Loaded 9pnet" || log "  (9pnet built-in or unavailable)"
-    insmod "$MOD_DIR/$KVER/kernel/net/9p/9pnet_fd.ko" 2>/dev/null && log "  ✓ Loaded 9pnet_fd" || log "  (9pnet_fd built-in or unavailable)"
-    insmod "$MOD_DIR/$KVER/kernel/fs/9p/9p.ko" 2>/dev/null && log "  ✓ Loaded 9p" || log "  (9p built-in or unavailable)"
-  else
-    log "  WARNING: Module directory not found in $MOD_DIR"
-  fi
-else
-  log "  (No external modules needed - 9P FD transport built into kernel)"
-fi
-
-log "mount 9p volumes"
-mount_9p_volumes
+log "========== UNISON VOLUME SYNC =========="
+sync_unison_volumes
+log "========== UNISON VOLUME SYNC END =========="
 
 log "Preparing to launch entrypoint..."
 
