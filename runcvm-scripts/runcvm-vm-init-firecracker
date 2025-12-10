@@ -73,8 +73,15 @@ error() {
 
 sync_unison_volumes() {
   local unison_config="/.runcvm/unison-volumes"
+  local unison_bin="/.runcvm/guest/bin/unison"
   
   [ -f "$unison_config" ] || return 0
+  
+  # Check if unison binary exists
+  if [ ! -x "$unison_bin" ]; then
+    log "ERROR: unison binary not found at $unison_bin"
+    return 1
+  fi
   
   # Connect to container's bridge IP for Unison server
   local host_ip="169.254.1.1"
@@ -82,6 +89,7 @@ sync_unison_volumes() {
   log "Syncing volumes via Unison (host: $host_ip)..."
   log "  Mode: hybrid (inotify + 3s periodic)"
   log "  Conflict resolution: last-writer-wins"
+  log "  Binary: $unison_bin"
   
   while IFS=: read -r port dst src_path; do
     [ -z "$port" ] && continue
@@ -91,24 +99,19 @@ sync_unison_volumes() {
     
     mkdir -p "$dst"
     
-    # Sync using Unison
+    # Sync using Unison with full path
     # - batch: non-interactive mode
     # - auto: accept non-conflicting changes
     # - prefer newer: last-writer-wins
     # - times: preserve modification times
-    if command -v unison >/dev/null 2>&1; then
-      unison "$dst" "socket://$host_ip:$port/$src_path" \
-        -batch -auto -prefer newer -times 2>&1 | while read line; do log "    $line"; done
-      sync_rc=$?
-    else
-      log "  ERROR: unison command not found"
-      sync_rc=1
-    fi
+    "$unison_bin" "$dst" "socket://$host_ip:$port/$src_path" \
+      -batch -auto -prefer newer -times 2>&1 | while read line; do log "    $line"; done
+    sync_rc=$?
     
     if [ $sync_rc -eq 0 ]; then
       log "  ✓ Synced $dst successfully"
     else
-      log "  ✗ Failed to sync $dst"
+      log "  ✗ Failed to sync $dst (rc=$sync_rc)"
     fi
   done < "$unison_config"
   
@@ -120,11 +123,12 @@ sync_unison_volumes() {
       while IFS=: read -r port dst src_path; do
         [ -z "$port" ] && continue
         [ -z "$src_path" ] && src_path="/"
-        unison "$dst" "socket://$host_ip:$port/$src_path" \
+        "$unison_bin" "$dst" "socket://$host_ip:$port/$src_path" \
           -batch -auto -prefer newer -times >/dev/null 2>&1 || true
       done < "$unison_config"
     done
   ) &
+  log "  Background sync daemon started (PID: $!)"
 }
 
 log "Starting Firecracker VM initialization..."

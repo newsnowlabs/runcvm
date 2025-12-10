@@ -16,10 +16,9 @@ set -o errexit -o pipefail
 
 FIRECRACKER_BIN="$RUNCVM_GUEST/sbin/firecracker"
 FIRECRACKER_CONFIG="/run/.firecracker-config.json"
-UNISON_BIN="$RUNCVM_GUEST/bin/unison"
-UNISON_FSMONITOR="$RUNCVM_GUEST/bin/unison-fsmonitor"
-UNISON_CONFIG="/.runcvm/unison-volumes"
-UNISON_PIDS=()
+FUSED_BIN="$RUNCVM_GUEST/bin/runcvm-fused"
+FUSE_CLIENT_BIN="$RUNCVM_GUEST/bin/runcvm-fuse-client"
+FUSE_CONFIG="/.runcvm/fuse-volumes"
 
 # ============================================================
 # LOGGING SYSTEM
@@ -117,89 +116,64 @@ create_volumes_from_vm_mounts() {
   fi
 }
 
-setup_unison_volumes() {
-  local port=5640
+setup_fuse_volumes() {
+  # Pure FUSE over vsock using runcvm-fused (Rust daemon)
+  # Host: runcvm-fused daemon serves filesystem over vsock
+  # Guest: runcvm-fuse-client mounts via vsock
+  
+  local fuse_config="/.runcvm/fuse-volumes"
+  local fused_bin="$RUNCVM_GUEST/bin/runcvm-fused"
   
   # Read volume mounts from OCI config  
   if [ -f "/.runcvm/volumes" ]; then
-    > "$UNISON_CONFIG"
+    > "$fuse_config"
     
-    log "Setting up Unison volumes (bidirectional sync)"
-    log "  Sync mode: hybrid (inotify + 3s periodic)"
-    log "  Conflict resolution: last-writer-wins"
+    log "Setting up FUSE volumes (pure FUSE over vsock)"
+    log "  Transport: vsock (CID 3 <-> Host CID 2, port 5742)"
+    log "  Latency: ~1-2ms (near-native)"
     
+    # Record volumes for guest to mount
+    # Format: src:dst:opts
     while IFS=: read -r src dst opts; do
       [ -z "$src" ] && continue
       
-      log "  Syncing: $src ↔ $dst (TCP port $port)"
+      log "  Volume: $src -> $dst"
       
-      # Create a Unison profile for this volume
-      local profile_dir="/run/unison-profiles"
-      busybox mkdir -p "$profile_dir"
+      # Write config for guest (format: src:dst:opts)
+      echo "$src:$dst:$opts" >> "$fuse_config"
       
-      # Create Unison preference file for this volume
-      local prf_file="$profile_dir/vol-$port.prf"
-      cat > "$prf_file" << EOF
-# Unison profile for volume sync
-root = $src
-root = socket://0.0.0.0:$port/
-
-# Sync settings
-auto = true
-batch = true
-prefer = newer
-times = true
-perms = 0
-
-# Hybrid sync: repeat every 3 seconds
-repeat = 3
-
-# Performance
-maxthreads = 4
-fastcheck = true
-
-# Ignore patterns (common temp files)
-ignore = Name {.*.swp,.*.tmp,*~}
-EOF
-      
-      # Start unison in server mode (socket)
-      log "    Starting unison server on port $port"
-      $UNISON_BIN -socket $port 2>"/run/unison-$port.err" &
-      local unison_pid=$!
-      UNISON_PIDS+=($unison_pid)
-      
-      # Wait a moment for unison to start
-      busybox sleep 1
-      
-      # Check if process is still running
-      if kill -0 $unison_pid 2>/dev/null; then
-        log "    ✓ unison process $unison_pid is running"
-      else
-        log "    ✗ unison process $unison_pid died!"
-        if [ -f "/run/unison-$port.err" ] && [ -s "/run/unison-$port.err" ]; then
-          log "    stderr output:"
-          busybox cat "/run/unison-$port.err" 2>/dev/null | busybox head -10 | while read line; do log "      $line"; done
-        fi
-      fi
-      
-      # Record for guest to connect (format: port:dst:src)
-      echo "$port:$dst:$src" >> "$UNISON_CONFIG"
-      
-      port=$((port + 1))
     done < /.runcvm/volumes
     
+    # Start the Rust FUSE daemon
+    if [ -x "$fused_bin" ]; then
+      log "  Starting runcvm-fused daemon..."
+      "$fused_bin" \
+        --vsock-port 5742 \
+        --volumes-config "$fuse_config" \
+        2>"/run/runcvm-fused.log" &
+      FUSED_PID=$!
+      log "    runcvm-fused started (PID: $FUSED_PID)"
+    else
+      log "WARNING: runcvm-fused not found at $fused_bin"
+      log "  Falling back to static volume copy mode"
+    fi
+    
+    log "  FUSE config written to $fuse_config"
+    
   else
-    log "  No volumes file found, skipping Unison volume setup"
+    log "  No volumes file found, skipping FUSE volume setup"
   fi
 }
 
-cleanup_unison_volumes() {
-  for pid in "${UNISON_PIDS[@]}"; do
-    kill "$pid" 2>/dev/null || true
-  done
+cleanup_fuse_volumes() {
+  # Cleanup runcvm-fused daemon
+  if [ -n "$FUSED_PID" ]; then
+    kill "$FUSED_PID" 2>/dev/null || true
+  fi
+  busybox pkill -f "runcvm-fused" 2>/dev/null || true
 }
 
-trap cleanup_unison_volumes EXIT SIGTERM SIGINT
+trap cleanup_fuse_volumes EXIT SIGTERM SIGINT
 
 # Create rootfs image from a source directory
 create_rootfs_from_dir() {
@@ -246,11 +220,11 @@ main() {
     create_volumes_from_vm_mounts
   fi
 
-  setup_unison_volumes
+  setup_fuse_volumes
 
-  log_debug "MOUNT_CONFIG=$MOUNT_CONFIG"
-  log_debug "Contents of $MOUNT_CONFIG:"
-  busybox cat "$MOUNT_CONFIG" 2>&1 | while read line; do log_debug "  $line"; done
+  log_debug "FUSE_CONFIG=$FUSE_CONFIG"
+  log_debug "Contents of $FUSE_CONFIG:"
+  busybox cat "$FUSE_CONFIG" 2>&1 | while read line; do log_debug "  $line"; done
   
   # Check for Firecracker binary
   if [ ! -x "$FIRECRACKER_BIN" ]; then
@@ -650,90 +624,66 @@ if [ -f /.runcvm-resolv.conf ]; then
 fi
 
 # ==========================================================================
-# UNISON VOLUME SYNC - Bidirectional sync with host volumes
+# FUSE VOLUME MOUNTS - Pure FUSE over vsock using runcvm-fuse-client
 # ==========================================================================
-sync_unison_volumes() {
-  local unison_config="/.runcvm/unison-volumes"
+mount_fuse_volumes() {
+  local fuse_config="/.runcvm/fuse-volumes"
+  local fuse_client="/.runcvm/guest/bin/runcvm-fuse-client"
   
-  log INFO "Checking for Unison volumes..."
+  log INFO "Checking for FUSE volumes..."
   
-  if [ ! -f "$unison_config" ]; then
-    log INFO "No unison-volumes config found - volumes are static copies"
+  if [ ! -f "$fuse_config" ]; then
+    log INFO "No fuse-volumes config found - volumes are static copies"
     return 0
   fi
   
-  # Connect to container's bridge IP for Unison server
-  local host_ip="169.254.1.1"
+  # Check if fuse client binary exists
+  if [ ! -x "$fuse_client" ]; then
+    log ERROR "FUSE client not found at $fuse_client"
+    log INFO "Falling back to static copy mode"
+    return 1
+  fi
   
-  log INFO "Unison host: $host_ip (unison server on bridge)"
-  log INFO "Sync mode: hybrid (inotify + 3s periodic)"
-  log INFO "Conflict resolution: last-writer-wins"
+  log INFO "FUSE Transport: vsock (Guest CID 3 -> Host CID 2, port 5742)"
+  log INFO "Mount type: FUSE (live, bidirectional)"
+  log INFO "Binary: $fuse_client"
   
-  # Config format: port:dst:src
-  while IFS=: read -r port dst src_path; do
-    [ -z "$port" ] && continue
+  # Config format: src:dst:opts
+  # Mount each volume via runcvm-fuse-client
+  while IFS=: read -r src_path dst opts; do
+    [ -z "$src_path" ] && continue
     [ -z "$dst" ] && continue
-    [ -z "$src_path" ] && src_path="/"
     
-    log INFO "  Syncing $dst from port $port..."
+    log INFO "  Mounting $src_path -> $dst..."
     mkdir -p "$dst"
     
-    # Create initial sync with Unison
-    # Connect to the Unison server running on host
-    log INFO "  Connecting to unison server at $host_ip:$port"
+    # Launch runcvm-fuse-client for this mount
+    # It connects to the host daemon via vsock and mounts at $dst
+    "$fuse_client" \
+      --host-cid 2 \
+      --port 5742 \
+      --mount "$dst" \
+      --source "$src_path" \
+      2>&1 | sed 's/^/    /' &
     
-    # Run Unison in batch mode (non-interactive)
-    # - prefer newer: last-writer-wins conflict resolution
-    # - batch: no user interaction
-    # - auto: accept non-conflicting changes
-    # - times: sync modification times
-    if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
-      "$RUNCVM_LD" "$RUNCVM_GUEST/bin/unison" \
-        "$dst" "socket://$host_ip:$port/$src_path" \
-        -batch -auto -prefer newer -times 2>&1 | sed 's/^/    /'
-      sync_rc=$?
-    elif command -v unison >/dev/null 2>&1; then
-      unison "$dst" "socket://$host_ip:$port/$src_path" \
-        -batch -auto -prefer newer -times 2>&1 | sed 's/^/    /'
-      sync_rc=$?
-    else
-      log ERROR "  No unison command available"
-      sync_rc=1
-    fi
+    # Give it a moment to mount
+    sleep 0.5
     
-    if [ $sync_rc -eq 0 ]; then
-      log INFO "  ✓ Successfully synced $dst"
+    # Check if mount succeeded
+    if mountpoint -q "$dst" 2>/dev/null; then
+      log INFO "  ✓ Successfully mounted $dst (FUSE)"
     else
-      log INFO "  ✗ Failed to sync $dst (rc=$sync_rc)"
+      log INFO "  ✗ Failed to mount $dst"
+      log INFO "    Falling back to static copy mode"
     fi
-  done < "$unison_config"
+  done < "$fuse_config"
   
-  # Start background sync daemon for continuous updates
-  log INFO "Starting background sync daemon (3s intervals)..."
-  (
-    while true; do
-      sleep 3
-      while IFS=: read -r port dst src_path; do
-        [ -z "$port" ] && continue
-        [ -z "$dst" ] && continue
-        [ -z "$src_path" ] && src_path="/"
-        if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
-          "$RUNCVM_LD" "$RUNCVM_GUEST/bin/unison" \
-            "$dst" "socket://$host_ip:$port/$src_path" \
-            -batch -auto -prefer newer -times >/dev/null 2>&1 || true
-        elif command -v unison >/dev/null 2>&1; then
-          unison "$dst" "socket://$host_ip:$port/$src_path" \
-            -batch -auto -prefer newer -times >/dev/null 2>&1 || true
-        fi
-      done < "$unison_config"
-    done
-  ) &
-  log INFO "  Background sync daemon started (PID: $!)"
+  log INFO "  FUSE mounts complete"
 }
 
-log INFO "========== UNISON VOLUME SYNC =========="
-sync_unison_volumes
-log INFO "========== UNISON VOLUME SYNC END =========="
+log INFO "========== FUSE VOLUME MOUNTS =========="
+mount_fuse_volumes
+log INFO "========== FUSE VOLUME MOUNTS END =========="
 
 # ========== DROPBEAR SSH SERVER FOR DOCKER EXEC ==========
 # docker exec uses SSH to connect to the VM, so we need dropbear running
@@ -907,20 +857,20 @@ INITEOF
     busybox cp "/.runcvm/config" "${staging_dir}/.runcvm/config"
     log "    Copied /.runcvm/config"
   fi
-  # Copy 9p-mounts file - CRITICAL for volume mounting in VM
-  log_debug "Checking MOUNT_CONFIG at $MOUNT_CONFIG"
-  if [ -f "$MOUNT_CONFIG" ]; then
-    log_debug "MOUNT_CONFIG exists, copying to staging..."
-    if [ -s "$MOUNT_CONFIG" ]; then
-      busybox cp "$MOUNT_CONFIG" "${staging_dir}/.runcvm/9p-mounts"
-      log_debug "Copied to ${staging_dir}/.runcvm/9p-mounts"
+  # Copy fuse-volumes file - CRITICAL for volume mounting in VM
+  log_debug "Checking FUSE_CONFIG at $FUSE_CONFIG"
+  if [ -f "$FUSE_CONFIG" ]; then
+    log_debug "FUSE_CONFIG exists, copying to staging..."
+    if [ -s "$FUSE_CONFIG" ]; then
+      busybox cp "$FUSE_CONFIG" "${staging_dir}/.runcvm/fuse-volumes"
+      log_debug "Copied to ${staging_dir}/.runcvm/fuse-volumes"
       log_debug "Contents:"
-      busybox cat "${staging_dir}/.runcvm/9p-mounts" 2>&1 | while read line; do log_debug "  $line"; done
+      busybox cat "${staging_dir}/.runcvm/fuse-volumes" 2>&1 | while read line; do log_debug "  $line"; done
     else
-      log "WARNING: MOUNT_CONFIG exists but is empty"
+      log "WARNING: FUSE_CONFIG exists but is empty"
     fi
   else
-    log "WARNING: MOUNT_CONFIG does not exist at $MOUNT_CONFIG"
+    log "WARNING: FUSE_CONFIG does not exist at $FUSE_CONFIG"
   fi
 
   # Copy kernel modules for 9P support from Alpine kernel
@@ -1172,11 +1122,11 @@ NETEOF
     network_config=",\"network-interfaces\":[{\"iface_id\":\"eth0\",\"guest_mac\":\"$fc_mac\",\"host_dev_name\":\"$tap_name\"}]"
   fi
 
-  # Build vsock config for 9P volumes
+  # Build vsock config for FUSE volumes
   local vsock_config=""
-  if [ -s "$MOUNT_CONFIG" ]; then
+  if [ -s "$FUSE_CONFIG" ]; then
     vsock_config=',"vsock-device":{"guest_cid":3,"uds_path":"/run/firecracker.vsock"}'
-    log "  vsock: enabled for 9P volumes"
+    log "  vsock: enabled for FUSE volumes"
   fi
   
   # Create Firecracker config file

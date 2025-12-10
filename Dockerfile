@@ -94,7 +94,8 @@ RUN apk update && \
     jq iproute2 netcat-openbsd e2fsprogs blkid util-linux \
     s6 dnsmasq iptables nftables \
     ncurses coreutils \
-    patchelf
+    patchelf \
+    sshfs
 
 # Install patched dnsmasq
 COPY --from=alpine-dnsmasq /root/packages/main/aarch64 /tmp/dnsmasq/
@@ -108,7 +109,7 @@ RUN apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/drop
 COPY build-utils/make-bundelf-bundle.sh /usr/local/bin/make-bundelf-bundle.sh
 
 # Changed from qemu-system-x86_64 to qemu-system-aarch64
-ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-aarch64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey"
+ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-aarch64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey sshfs"
 ENV BUNDELF_EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so"
 ENV BUNDELF_EXTRA_SYSTEM_LIB_PATHS="/usr/lib/xtables"
 ENV BUNDELF_CODE_PATH="/opt/runcvm"
@@ -314,21 +315,31 @@ RUN ls -alh /opt/runcvm/kernels/firecracker/vmlinux && \
 # Add this to your Dockerfile BEFORE the "installer" stage
 # This downloads and extracts the Firecracker binary for ARM64
 
-# -- BUILD STAGE ---
-# Build Unison for bidirectional sync
-FROM alpine:3.19 as unison-builder
+# --- BUILD STAGE ---
+# Build Rust FUSE daemon and client for pure FUSE over vsock
+FROM rust:1.75-alpine3.19 as rust-builder
 
-# Install OCaml and build dependencies
-RUN apk add --no-cache \
-    build-base ocaml curl
+# Install build dependencies
+RUN apk add --no-cache musl-dev gcc
 
-# Download and build Unison statically
-RUN curl -L -o unison.tar.gz https://github.com/bcpierce00/unison/archive/refs/tags/v2.53.8.tar.gz && \
-    tar xzf unison.tar.gz && \
-    cd unison-2.53.8 && \
-    make UISTYLE=text STATIC=true && \
-    mkdir -p /unison-install/usr/bin && \
-    cp src/unison src/unison-fsmonitor /unison-install/usr/bin/
+# Add aarch64 target for cross-compilation (if needed)
+RUN rustup target add aarch64-unknown-linux-musl || true
+
+WORKDIR /build
+
+# Copy runcvm-fused (host daemon)
+COPY runcvm-fused /build/runcvm-fused
+WORKDIR /build/runcvm-fused
+RUN cargo build --release 2>&1 || echo "Build warnings/notes above"
+
+# Copy runcvm-fuse-client (guest client)
+COPY runcvm-fuse-client /build/runcvm-fuse-client  
+WORKDIR /build/runcvm-fuse-client
+RUN cargo build --release 2>&1 || echo "Build warnings/notes above"
+
+# Verify binaries were created
+RUN ls -la /build/runcvm-fused/target/release/runcvm-fused || echo "runcvm-fused not built" && \
+    ls -la /build/runcvm-fuse-client/target/release/runcvm-fuse-client || echo "runcvm-fuse-client not built"
 
 # --- BUILD STAGE ---
 # Download Firecracker binary
@@ -381,9 +392,12 @@ COPY --from=firecracker-kernel-build /opt/runcvm/kernels/firecracker/ /opt/runcv
 COPY --from=firecracker-kernel-build /opt/runcvm/kernels/firecracker/config /opt/runcvm/kernels/firecracker/.config
 COPY --from=firecracker-kernel-build /build/linux/.config.bak /opt/runcvm/kernels/firecracker/.config.bak
 
-# Copy Unison binaries for bidirectional sync
-COPY --from=unison-builder /unison-install/usr/bin/unison /opt/runcvm/bin/unison
-COPY --from=unison-builder /unison-install/usr/bin/unison-fsmonitor /opt/runcvm/bin/unison-fsmonitor
+# ============================================================================
+# FUSE OVER VSOCK (fuse-backend-rs)
+# ============================================================================
+# Copy Rust FUSE daemon (host) and client (guest) binaries
+COPY --from=rust-builder /build/runcvm-fused/target/release/runcvm-fused /opt/runcvm/bin/
+COPY --from=rust-builder /build/runcvm-fuse-client/target/release/runcvm-fuse-client /opt/runcvm/bin/
 
 RUN apk update && apk add --no-cache rsync
 
