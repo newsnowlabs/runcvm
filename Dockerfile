@@ -323,6 +323,9 @@ FROM rust:1.75-alpine3.19 as rust-builder
 # Install build dependencies
 RUN apk add --no-cache musl-dev gcc
 
+# Create output directory
+RUN mkdir -p /output
+
 WORKDIR /build
 
 # Copy and build runcvm-fused (host daemon)
@@ -330,18 +333,17 @@ COPY runcvm-fused /build/runcvm-fused
 WORKDIR /build/runcvm-fused
 RUN cargo build --release && \
     ls -la target/release/runcvm-fused && \
-    cp target/release/runcvm-fused /build/
+    mv target/release/runcvm-fused /output/
 
 # Copy and build runcvm-fuse-client (guest client)
 COPY runcvm-fuse-client /build/runcvm-fuse-client  
 WORKDIR /build/runcvm-fuse-client
 RUN cargo build --release && \
     ls -la target/release/runcvm-fuse-client && \
-    cp target/release/runcvm-fuse-client /build/
+    mv target/release/runcvm-fuse-client /output/
 
 # Verify binaries
-WORKDIR /build
-RUN ls -la /build/runcvm-fused /build/runcvm-fuse-client
+RUN ls -la /output/runcvm-fused /output/runcvm-fuse-client
 
 # --- BUILD STAGE ---
 # Download Firecracker binary
@@ -398,8 +400,8 @@ COPY --from=firecracker-kernel-build /build/linux/.config.bak /opt/runcvm/kernel
 # FUSE OVER VSOCK (Rust binaries)
 # ============================================================================
 # Copy Rust FUSE daemon (host) and client (guest) binaries
-COPY --from=rust-builder /build/runcvm-fused /opt/runcvm/bin/
-COPY --from=rust-builder /build/runcvm-fuse-client /opt/runcvm/bin/
+COPY --from=rust-builder /output/runcvm-fused /opt/runcvm/bin/
+COPY --from=rust-builder /output/runcvm-fuse-client /opt/runcvm/bin/
 
 RUN apk update && apk add --no-cache rsync
 
