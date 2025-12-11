@@ -94,6 +94,7 @@ RUN apk update && \
     jq iproute2 netcat-openbsd e2fsprogs blkid util-linux \
     s6 dnsmasq iptables nftables \
     ncurses coreutils \
+    procps \
     patchelf
 # Note: sshfs removed - using Rust FUSE binaries instead
 
@@ -110,7 +111,8 @@ COPY build-utils/make-bundelf-bundle.sh /usr/local/bin/make-bundelf-bundle.sh
 
 # Changed from qemu-system-x86_64 to qemu-system-aarch64
 # Note: sshfs removed from binaries - using Rust FUSE binaries instead
-ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-aarch64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey"
+# Note: watch from procps is included for proper Ctrl-C handling (busybox watch doesn't handle it)
+ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-aarch64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey watch"
 ENV BUNDELF_EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so"
 ENV BUNDELF_EXTRA_SYSTEM_LIB_PATHS="/usr/lib/xtables"
 ENV BUNDELF_CODE_PATH="/opt/runcvm"
@@ -154,6 +156,9 @@ RUN apk update && \
 
 ADD qemu-exit /root/qemu-exit
 RUN cd /root/qemu-exit && cc -o /root/qemu-exit/qemu-exit -std=gnu99 -static -s -Wall -Werror -O3 qemu-exit.c
+
+# Note: procps watch is bundled via BUNDELF_BINARIES in the binaries stage above
+# This provides proper Ctrl-C handling unlike busybox watch
 
 # --- BUILD STAGE ---
 # Build alpine kernel and initramfs with virtiofs module for ARM64
@@ -385,6 +390,7 @@ COPY --from=binaries /opt/runcvm /opt/runcvm
 COPY --from=runcvm-init /root/runcvm-init/runcvm-init /opt/runcvm/sbin/
 COPY --from=qemu-exit /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
 COPY --from=firecracker-bin /usr/local/bin/firecracker /opt/runcvm/sbin/
+# Note: procps watch is included in BUNDELF_BINARIES (binaries stage) with its libraries
 # ============================================================================
 # FIRECRACKER KERNEL SETUP
 # ============================================================================

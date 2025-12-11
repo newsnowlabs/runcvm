@@ -822,6 +822,118 @@ fi
 
 log INFO "========== DROPBEAR SETUP END =========="
 
+# Note: Static watch binary (from procps) is copied to /usr/bin/watch during rootfs staging
+# This provides proper Ctrl-C handling unlike busybox watch
+
+# ========== TTY AND SIGNAL SETUP ==========
+# This is critical for proper signal handling (Ctrl-C, Ctrl-Z, etc.)
+# Without this, interactive commands like 'watch' won't respond to signals.
+#
+# IMPORTANT: We cannot use setsid with exec because:
+# - setsid forks, parent exits immediately -> kernel panic (PID 1 cannot exit)
+#
+# Instead, we:
+# 1. Redirect I/O to serial console for proper terminal
+# 2. Run entrypoint as a child process (not exec)
+# 3. Set up trap to forward signals to child
+# 4. Wait for child to finish
+# 5. Trigger proper shutdown (reboot -f) - PID 1 must never exit normally
+
+log INFO "========== TTY SESSION SETUP =========="
+
+# Ensure /dev/ttyS0 exists
+if [ ! -c /dev/ttyS0 ]; then
+  log INFO "Creating /dev/ttyS0..."
+  mknod -m 666 /dev/ttyS0 c 4 64 2>/dev/null || true
+fi
+
+# Redirect I/O to serial console for interactive use
+exec < /dev/ttyS0 > /dev/ttyS0 2>&1
+
+# Variable to track child PID for signal forwarding
+ENTRYPOINT_PID=""
+
+# Signal handler - forward signals to the entrypoint process
+forward_signal() {
+  local sig="$1"
+  if [ -n "$ENTRYPOINT_PID" ]; then
+    log INFO "Forwarding signal $sig to entrypoint (PID $ENTRYPOINT_PID)"
+    kill -"$sig" "$ENTRYPOINT_PID" 2>/dev/null || true
+  fi
+}
+
+# Set up signal forwarding for interactive signals
+trap 'forward_signal INT' INT
+trap 'forward_signal TERM' TERM
+trap 'forward_signal HUP' HUP
+trap 'forward_signal QUIT' QUIT
+trap 'forward_signal TSTP' TSTP
+trap 'forward_signal CONT' CONT
+
+# Function to run entrypoint and handle exit
+run_and_shutdown() {
+  local exit_code=0
+  
+  # Run the entrypoint in a SUBSHELL with setsid
+  # This creates a new session with controlling terminal
+  # The subshell is NOT PID 1, so setsid works (doesn't cause kernel panic)
+  # 
+  # CRITICAL: To make Ctrl-C work, /dev/ttyS0 must become the CONTROLLING TERMINAL
+  # of the new session. This happens when a session leader opens a terminal device.
+  # 
+  # We use "sh -c" to open /dev/ttyS0 AFTER setsid runs:
+  # 1. ( ... ) & creates a subshell (new process, not PID 1)
+  # 2. setsid creates new session (makes child the session leader)
+  # 3. sh -c runs in new session and opens /dev/ttyS0 (this sets controlling terminal!)
+  # 4. sh -c execs the entrypoint
+  # 5. Entrypoint has controlling terminal, Ctrl-C sends SIGINT to foreground process group
+  (
+    # Inside subshell - not PID 1, can use setsid safely
+    exec setsid sh -c '
+      # Open /dev/ttyS0 as controlling terminal (session leader opening terminal = ctty)
+      exec < /dev/ttyS0 > /dev/ttyS0 2>&1
+      
+      # Configure terminal
+      stty sane 2>/dev/null || true
+      
+      # Now exec the actual entrypoint
+      exec "$@"
+    ' -- "$@"
+  ) &
+  ENTRYPOINT_PID=$!
+  
+  log INFO "Entrypoint started with PID $ENTRYPOINT_PID (in session)"
+  
+  # Wait for entrypoint to finish
+  wait $ENTRYPOINT_PID 2>/dev/null || true
+  exit_code=$?
+  
+  log INFO "Entrypoint exited with code $exit_code"
+  
+  # Save exit code for potential retrieval
+  echo "$exit_code" > /.runcvm/exitcode 2>/dev/null || true
+  
+  # Trigger clean shutdown - PID 1 must never exit normally!
+  # Firecracker catches the reboot syscall and exits cleanly
+  log INFO "Shutting down VM..."
+  
+  sync
+  
+  # Method 1: Use /proc/sysrq-trigger (most reliable)
+  if [ -w /proc/sysrq-trigger ]; then
+    echo s > /proc/sysrq-trigger 2>/dev/null  # sync
+    echo o > /proc/sysrq-trigger 2>/dev/null  # poweroff
+  fi
+  
+  # Method 2: reboot/poweroff command
+  reboot -f 2>/dev/null || /sbin/reboot -f 2>/dev/null || true
+  poweroff -f 2>/dev/null || /sbin/poweroff -f 2>/dev/null || true
+  
+  # If we get here, sleep forever - kernel panic is last resort
+  # (This should never happen if reboot/poweroff work)
+  while true; do sleep 3600; done
+}
+
 # Determine what to run
 # Priority:
 # 1. /.runcvm-entrypoint (saved by RunCVM)
@@ -837,24 +949,24 @@ if [ -f /.runcvm-entrypoint ] && [ -s /.runcvm-entrypoint ]; then
   done < /.runcvm-entrypoint
   
   log INFO "Running saved entrypoint: $@"
-  exec "$@"
+  run_and_shutdown "$@"
   
 elif [ -x /docker-entrypoint.sh ]; then
   log INFO "Running /docker-entrypoint.sh"
-  # For nginx, docker-entrypoint.sh expects "nginx" "-g" "daemon off;" as args
   if [ -f /etc/nginx/nginx.conf ]; then
-    exec /docker-entrypoint.sh nginx -g "daemon off;"
+    run_and_shutdown /docker-entrypoint.sh nginx -g "daemon off;"
   else
-    exec /docker-entrypoint.sh
+    run_and_shutdown /docker-entrypoint.sh
   fi
   
 elif [ -f /etc/nginx/nginx.conf ] && command -v nginx >/dev/null 2>&1; then
   log INFO "Running nginx directly"
-  exec nginx -g "daemon off;"
+  run_and_shutdown nginx -g "daemon off;"
   
 else
   log INFO "No entrypoint found, starting shell"
-  exec /bin/sh
+  # For interactive shell, run it in foreground
+  run_and_shutdown /bin/sh -l
 fi
 INITEOF
   busybox chmod +x "$init_script"
@@ -912,6 +1024,13 @@ INITEOF
       log "    Copied usr/sbin/"
     fi
     
+    # Copy usr/share (contains terminfo for ncurses programs like watch)
+    if [ -d "$RUNCVM_GUEST/usr/share" ]; then
+      busybox mkdir -p "${staging_dir}/.runcvm/guest/usr"
+      busybox cp -a "$RUNCVM_GUEST/usr/share" "${staging_dir}/.runcvm/guest/usr/"
+      log "    Copied usr/share/ (terminfo)"
+    fi
+    
     # Copy tmp/dropbear (contains EPKA library for SSH authentication)
     if [ -d "$RUNCVM_GUEST/tmp/dropbear" ]; then
       busybox mkdir -p "${staging_dir}/.runcvm/guest/tmp"
@@ -926,6 +1045,39 @@ INITEOF
     fi
   else
     log "  WARNING: RUNCVM_GUEST not found, network tools may not work"
+  fi
+  
+  # Install procps watch wrapper (overrides busybox watch)
+  # This provides proper Ctrl-C handling
+  # The bundled watch uses BUNDELF and needs the dynamic linker at /.runcvm/guest/lib/ld
+  log "  Checking for static watch binary..."
+  
+  WATCH_BIN=""
+  for path in "/.runcvm/guest/bin/watch" "/.runcvm/bin/watch" "/opt/runcvm/bin/watch"; do
+    if [ -f "$path" ]; then
+      WATCH_BIN="$path"
+      break
+    fi
+  done
+  
+  if [ -n "$WATCH_BIN" ]; then
+    # Remove busybox symlink first (it's at /bin/watch)
+    busybox rm -f "${staging_dir}/bin/watch" 2>/dev/null || true
+    busybox rm -f "${staging_dir}/usr/bin/watch" 2>/dev/null || true
+    
+    # Create wrapper script that uses BUNDELF dynamic linker and terminfo
+    busybox mkdir -p "${staging_dir}/bin"
+    busybox cat > "${staging_dir}/bin/watch" << 'WATCHEOF'
+#!/bin/sh
+# Wrapper for procps watch (uses BUNDELF dynamic linker)
+# Provides proper Ctrl-C handling unlike busybox watch
+export TERMINFO=/.runcvm/guest/usr/share/terminfo
+exec /.runcvm/guest/lib/ld /.runcvm/guest/bin/watch "$@"
+WATCHEOF
+    busybox chmod +x "${staging_dir}/bin/watch"
+    log "    ✓ Installed procps watch wrapper to /bin/watch"
+  else
+    log "    ✗ Bundled watch not found"
   fi
   
   # Copy pre-generated dropbear keys from container (generated by runcvm-ctr-entrypoint)
@@ -1246,10 +1398,41 @@ CFGEOF
     log "✗ vsock-device is MISSING from Firecracker config!"
   fi
 
+  # ============================================================
+  # HOST TERMINAL CONFIGURATION
+  # ============================================================
+  # Put host terminal in RAW mode so characters pass through to guest.
+  # This allows Ctrl-C to reach guest processes that properly handle it.
+  #
+  # KNOWN ISSUE: Alpine's busybox 'watch' command doesn't respond to Ctrl-C
+  # because it puts the terminal in raw mode and doesn't handle ^C character.
+  # WORKAROUND: Install procps package - its watch properly handles Ctrl-C:
+  #   apk add procps
+  #
+  # To stop the container, use: docker stop <container>
+  # ============================================================
+  
+  log "Configuring host terminal for raw pass-through..."
+  local saved_tty_settings=""
+  if [ -t 0 ]; then
+    # Save current terminal settings
+    saved_tty_settings=$(stty -g 2>/dev/null || true)
+    # Put terminal in raw mode with CR->NL translation for Enter key
+    stty raw -echo icrnl 2>/dev/null || true
+    log "  Host terminal: raw mode enabled"
+  fi
+
   # Run Firecracker
   "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"
   
   local exit_code=$?
+  
+  # Restore terminal settings
+  if [ -n "$saved_tty_settings" ]; then
+    stty "$saved_tty_settings" 2>/dev/null || true
+    log "Host terminal settings restored"
+  fi
+  
   log "Firecracker exited with code $exit_code"
   
   # Cleanup
