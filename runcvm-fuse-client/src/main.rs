@@ -1,19 +1,34 @@
 //! runcvm-fuse-client: File access client for RunCVM guest VM
 //!
-//! This client runs inside the guest VM and provides access to host files
+//! This client runs inside the Firecracker guest VM and provides access to host files
 //! via vsock connection to runcvm-fused daemon.
+//!
+//! Uses raw libc sockets for vsock to work with Firecracker's virtio-vsock device.
 
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::io::{FromRawFd, RawFd};
 use std::path::PathBuf;
-use std::os::unix::fs::symlink;
+use std::net::Shutdown;
 
 use anyhow::{Context, Result, bail};
 use log::{debug, error, info, warn};
-use vsock::{VsockAddr, VsockStream};
 
-/// Default host CID (hypervisor/host)
-const DEFAULT_HOST_CID: u32 = 2;
+/// AF_VSOCK address family
+const AF_VSOCK: libc::c_int = 40;
+/// VMADDR_CID_HOST (CID 2 = hypervisor/host)
+const VMADDR_CID_HOST: u32 = 2;
+
+/// sockaddr_vm structure for vsock
+#[repr(C)]
+struct SockaddrVm {
+    svm_family: libc::sa_family_t,
+    svm_reserved1: u16,
+    svm_port: u32,
+    svm_cid: u32,
+    svm_zero: [u8; 4],
+}
+
 /// Default port
 const DEFAULT_PORT: u32 = 5742;
 
@@ -25,7 +40,7 @@ fn main() -> Result<()> {
     
     let args: Vec<String> = std::env::args().collect();
     
-    let mut host_cid = DEFAULT_HOST_CID;
+    let mut host_cid = VMADDR_CID_HOST;
     let mut port = DEFAULT_PORT;
     let mut mount_point: Option<PathBuf> = None;
     let mut source_path: Option<String> = None;
@@ -36,7 +51,7 @@ fn main() -> Result<()> {
             "--host-cid" => {
                 i += 1;
                 if let Some(s) = args.get(i) {
-                    host_cid = s.parse().unwrap_or(DEFAULT_HOST_CID);
+                    host_cid = s.parse().unwrap_or(VMADDR_CID_HOST);
                 }
             }
             "--port" => {
@@ -86,14 +101,14 @@ fn main() -> Result<()> {
     // Create mount point
     fs::create_dir_all(&mount)?;
     
-    // Connect to host daemon
-    let addr = VsockAddr::new(host_cid, port);
-    info!("Connecting to host at {:?}", addr);
+    // Connect to host daemon using raw vsock socket
+    info!("Connecting to host via vsock (CID {} port {})...", host_cid, port);
     
-    let mut stream = VsockStream::connect(&addr)
-        .with_context(|| format!("Failed to connect to host CID {} port {}", host_cid, port))?;
+    let fd = vsock_connect(host_cid, port)?;
+    info!("Connected to host daemon!");
     
-    info!("Connected to host daemon");
+    // Wrap in a File for easier I/O
+    let mut stream = unsafe { std::fs::File::from_raw_fd(fd) };
     
     // Do initial sync: list remote directory and create local structure
     info!("Syncing directory structure...");
@@ -102,14 +117,45 @@ fn main() -> Result<()> {
     info!("Initial sync complete. Mount accessible at {:?}", mount);
     
     // Keep running to handle file requests
-    // In a real implementation, this would set up inotify watches
-    // For now, just sleep
     loop {
         std::thread::sleep(std::time::Duration::from_secs(60));
     }
 }
 
-fn sync_directory(stream: &mut VsockStream, remote_path: &str, local_path: &PathBuf) -> Result<()> {
+/// Connect to a vsock address using raw libc sockets
+fn vsock_connect(cid: u32, port: u32) -> Result<RawFd> {
+    unsafe {
+        // Create vsock socket
+        let fd = libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            bail!("Failed to create vsock socket: {}", std::io::Error::last_os_error());
+        }
+        
+        // Build sockaddr_vm
+        let addr = SockaddrVm {
+            svm_family: AF_VSOCK as libc::sa_family_t,
+            svm_reserved1: 0,
+            svm_port: port,
+            svm_cid: cid,
+            svm_zero: [0; 4],
+        };
+        
+        // Connect
+        let addr_ptr = &addr as *const SockaddrVm as *const libc::sockaddr;
+        let addr_len = std::mem::size_of::<SockaddrVm>() as libc::socklen_t;
+        
+        let ret = libc::connect(fd, addr_ptr, addr_len);
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            libc::close(fd);
+            bail!("Failed to connect to vsock CID {} port {}: {}", cid, port, err);
+        }
+        
+        Ok(fd)
+    }
+}
+
+fn sync_directory<S: Read + Write>(stream: &mut S, remote_path: &str, local_path: &PathBuf) -> Result<()> {
     // Send list dir request
     let mut request = vec![3u8]; // MsgType::ListDir
     let path_bytes = remote_path.as_bytes();
