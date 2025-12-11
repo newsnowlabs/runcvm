@@ -659,15 +659,72 @@ mount_fuse_volumes() {
   modprobe vmw_vsock_virtio_transport 2>/dev/null || true
   modprobe virtio_vsock 2>/dev/null || true
   
-  # Check if vsock is available
-  if [ ! -e /dev/vsock ]; then
-    log WARN "vsock device not available (/dev/vsock missing)"
-    log INFO "  This may be because vsock modules are built-in or not available"
+  # Detailed vsock diagnostics
+  log INFO "=== VSOCK DIAGNOSTICS ==="
+  
+  # Check vsock device
+  if [ -e /dev/vsock ]; then
+    log INFO "  /dev/vsock: exists"
+    ls -la /dev/vsock 2>&1 | busybox head -1 | busybox sed 's/^/    /'
+  else
+    log WARN "  /dev/vsock: MISSING"
+  fi
+  
+  # Check virtio devices
+  log INFO "  Virtio devices:"
+  ls -la /sys/bus/virtio/devices/ 2>/dev/null | busybox sed 's/^/    /' || log INFO "    No virtio devices found"
+  
+  # Check for vsock-related drivers
+  log INFO "  Loaded vsock modules:"
+  lsmod 2>/dev/null | grep -i vsock | busybox sed 's/^/    /' || log INFO "    (none or built-in)"
+  
+  # Check vsock transport registration
+  if [ -d /sys/class/vsock ]; then
+    log INFO "  /sys/class/vsock: exists"
+    ls -la /sys/class/vsock/ 2>/dev/null | busybox sed 's/^/    /'
+  else
+    log WARN "  /sys/class/vsock: MISSING (no transport registered)"
+  fi
+  
+  # Check if virtio_vsock driver is bound
+  for dev in /sys/bus/virtio/devices/*; do
+    if [ -d "$dev" ]; then
+      local dev_name=$(basename "$dev")
+      local driver=$(cat "$dev/modalias" 2>/dev/null || echo "unknown")
+      log INFO "    $dev_name: $driver"
+      if [ -e "$dev/driver" ]; then
+        local bound_driver=$(basename "$(readlink "$dev/driver")")
+        log INFO "      Bound driver: $bound_driver"
+      else
+        log WARN "      No driver bound!"
+      fi
+    fi
+  done
+  
+  log INFO "=== END VSOCK DIAGNOSTICS ==="
+  
+  # Check if vsock is usable by verifying:
+  # 1. /dev/vsock exists
+  # 2. A vsock virtio device is bound to the driver
+  local vsock_device_found=0
+  for dev in /sys/bus/virtio/devices/*; do
+    if [ -d "$dev" ] && [ -e "$dev/driver" ]; then
+      local modalias=$(cat "$dev/modalias" 2>/dev/null || echo "")
+      if echo "$modalias" | grep -q "d00000013"; then
+        vsock_device_found=1
+        log INFO "vsock device found and driver bound"
+        break
+      fi
+    fi
+  done
+  
+  if [ "$vsock_device_found" -ne 1 ] || [ ! -e /dev/vsock ]; then
+    log WARN "vsock not available"
+    log INFO "  /dev/vsock exists: $([ -e /dev/vsock ] && echo 'yes' || echo 'no')"
+    log INFO "  vsock device found: $([ $vsock_device_found -eq 1 ] && echo 'yes' || echo 'no')"
     log INFO "Falling back to static copy mode"
     return 1
   fi
-  
-  log INFO "vsock device: available"
   log INFO "FUSE Transport: vsock (Guest -> Host CID 2, port 5742)"
   log INFO "Mount type: FUSE (live, bidirectional)"
   log INFO "Binary: $fuse_client"
@@ -690,14 +747,16 @@ mount_fuse_volumes() {
       --source "$src_path" \
       2>&1 | sed 's/^/    /' &
     
-    # Give it a moment to mount
+    # Give it a moment to sync
     sleep 1
     
-    # Check if mount succeeded
-    if mountpoint -q "$dst" 2>/dev/null; then
-      log INFO "  ✓ Successfully mounted $dst (FUSE)"
+    # Check if sync succeeded by verifying files exist in destination
+    # Our simple client syncs files rather than mounting a full FUSE filesystem
+    local file_count=$(ls -1 "$dst" 2>/dev/null | wc -l)
+    if [ "$file_count" -gt 0 ]; then
+      log INFO "  ✓ Successfully synced $file_count files to $dst (vsock)"
     else
-      log INFO "  ✗ Failed to mount $dst"
+      log INFO "  ✗ Failed to sync $dst"
       log INFO "    Falling back to static copy mode"
     fi
   done < "$fuse_config"
@@ -1147,11 +1206,11 @@ NETEOF
   fi
 
   # Build vsock config for FUSE volumes
-  local vsock_config=""
-  if [ -s "$FUSE_CONFIG" ]; then
-    vsock_config=',"vsock-device":{"guest_cid":3,"uds_path":"/run/firecracker.vsock"}'
-    log "  vsock: enabled for FUSE volumes"
-  fi
+  # FORCE ENABLE vsock for debugging - always add the vsock device
+  local vsock_config=',"vsock":{"guest_cid":3,"uds_path":"/run/firecracker.vsock"}'
+  log "  vsock: FORCE ENABLED (debugging)"
+  log "    guest_cid: 3"
+  log "    uds_path: /run/firecracker.vsock"
   
   # Create Firecracker config file
   cat > "$FIRECRACKER_CONFIG" << CFGEOF
@@ -1175,8 +1234,17 @@ NETEOF
 }
 CFGEOF
 
-  log "DEBUG: Firecracker config:"
+  # ALWAYS show Firecracker config for debugging vsock issue
+  log "=== FIRECRACKER CONFIG (checking vsock) ==="
   busybox cat "$FIRECRACKER_CONFIG" | while read line; do log "  $line"; done
+  log "=== END FIRECRACKER CONFIG ==="
+  
+  # Verify vsock is in config
+  if busybox grep -q "vsock-device" "$FIRECRACKER_CONFIG"; then
+    log "✓ vsock-device is PRESENT in Firecracker config"
+  else
+    log "✗ vsock-device is MISSING from Firecracker config!"
+  fi
 
   # Run Firecracker
   "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"
