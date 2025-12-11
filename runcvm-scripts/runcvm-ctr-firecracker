@@ -118,18 +118,24 @@ create_volumes_from_vm_mounts() {
 
 setup_fuse_volumes() {
   # Pure FUSE over vsock using runcvm-fused (Rust daemon)
-  # Host: runcvm-fused daemon serves filesystem over vsock
-  # Guest: runcvm-fuse-client mounts via vsock
+  # Host: runcvm-fused daemon listens on Unix socket (Firecracker vsock bridge)
+  # Guest: runcvm-fuse-client connects via vsock
+  #
+  # Firecracker vsock architecture:
+  #   Guest (vsock CID 2, port 5742) -> Firecracker -> UDS /run/firecracker.vsock_5742 -> Host daemon
   
   local fuse_config="/.runcvm/fuse-volumes"
   local fused_bin="$RUNCVM_GUEST/bin/runcvm-fused"
+  local vsock_port="5742"
+  local vsock_uds="/run/firecracker.vsock"
   
   # Read volume mounts from OCI config  
   if [ -f "/.runcvm/volumes" ]; then
     > "$fuse_config"
     
     log "Setting up FUSE volumes (pure FUSE over vsock)"
-    log "  Transport: vsock (CID 3 <-> Host CID 2, port 5742)"
+    log "  Transport: vsock (Guest -> Host CID 2, port $vsock_port)"
+    log "  Host UDS: ${vsock_uds}_${vsock_port}"
     log "  Latency: ~1-2ms (near-native)"
     
     # Record volumes for guest to mount
@@ -145,14 +151,17 @@ setup_fuse_volumes() {
     done < /.runcvm/volumes
     
     # Start the Rust FUSE daemon
+    # Note: Daemon must start BEFORE Firecracker so it's ready when guest connects
     if [ -x "$fused_bin" ]; then
       log "  Starting runcvm-fused daemon..."
       "$fused_bin" \
-        --vsock-port 5742 \
+        --vsock-port "$vsock_port" \
+        --vsock-uds "$vsock_uds" \
         --volumes-config "$fuse_config" \
-        2>"/run/runcvm-fused.log" &
+        >"/run/runcvm-fused.log" 2>&1 &
       FUSED_PID=$!
       log "    runcvm-fused started (PID: $FUSED_PID)"
+      log "    Listening on: ${vsock_uds}_${vsock_port}"
     else
       log "WARNING: runcvm-fused not found at $fused_bin"
       log "  Falling back to static volume copy mode"
@@ -644,7 +653,22 @@ mount_fuse_volumes() {
     return 1
   fi
   
-  log INFO "FUSE Transport: vsock (Guest CID 3 -> Host CID 2, port 5742)"
+  # Load vsock kernel modules (required for guest-to-host communication)
+  log INFO "Loading vsock kernel modules..."
+  modprobe vsock 2>/dev/null || true
+  modprobe vmw_vsock_virtio_transport 2>/dev/null || true
+  modprobe virtio_vsock 2>/dev/null || true
+  
+  # Check if vsock is available
+  if [ ! -e /dev/vsock ]; then
+    log WARN "vsock device not available (/dev/vsock missing)"
+    log INFO "  This may be because vsock modules are built-in or not available"
+    log INFO "Falling back to static copy mode"
+    return 1
+  fi
+  
+  log INFO "vsock device: available"
+  log INFO "FUSE Transport: vsock (Guest -> Host CID 2, port 5742)"
   log INFO "Mount type: FUSE (live, bidirectional)"
   log INFO "Binary: $fuse_client"
   
@@ -667,7 +691,7 @@ mount_fuse_volumes() {
       2>&1 | sed 's/^/    /' &
     
     # Give it a moment to mount
-    sleep 0.5
+    sleep 1
     
     # Check if mount succeeded
     if mountpoint -q "$dst" 2>/dev/null; then
