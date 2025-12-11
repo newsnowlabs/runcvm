@@ -94,8 +94,8 @@ RUN apk update && \
     jq iproute2 netcat-openbsd e2fsprogs blkid util-linux \
     s6 dnsmasq iptables nftables \
     ncurses coreutils \
-    patchelf \
-    sshfs
+    patchelf
+# Note: sshfs removed - using Rust FUSE binaries instead
 
 # Install patched dnsmasq
 COPY --from=alpine-dnsmasq /root/packages/main/aarch64 /tmp/dnsmasq/
@@ -109,7 +109,8 @@ RUN apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/drop
 COPY build-utils/make-bundelf-bundle.sh /usr/local/bin/make-bundelf-bundle.sh
 
 # Changed from qemu-system-x86_64 to qemu-system-aarch64
-ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-aarch64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey sshfs"
+# Note: sshfs removed from binaries - using Rust FUSE binaries instead
+ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-aarch64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey"
 ENV BUNDELF_EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so"
 ENV BUNDELF_EXTRA_SYSTEM_LIB_PATHS="/usr/lib/xtables"
 ENV BUNDELF_CODE_PATH="/opt/runcvm"
@@ -322,24 +323,25 @@ FROM rust:1.75-alpine3.19 as rust-builder
 # Install build dependencies
 RUN apk add --no-cache musl-dev gcc
 
-# Add aarch64 target for cross-compilation (if needed)
-RUN rustup target add aarch64-unknown-linux-musl || true
-
 WORKDIR /build
 
-# Copy runcvm-fused (host daemon)
+# Copy and build runcvm-fused (host daemon)
 COPY runcvm-fused /build/runcvm-fused
 WORKDIR /build/runcvm-fused
-RUN cargo build --release 2>&1 || echo "Build warnings/notes above"
+RUN cargo build --release && \
+    ls -la target/release/runcvm-fused && \
+    cp target/release/runcvm-fused /build/
 
-# Copy runcvm-fuse-client (guest client)
+# Copy and build runcvm-fuse-client (guest client)
 COPY runcvm-fuse-client /build/runcvm-fuse-client  
 WORKDIR /build/runcvm-fuse-client
-RUN cargo build --release 2>&1 || echo "Build warnings/notes above"
+RUN cargo build --release && \
+    ls -la target/release/runcvm-fuse-client && \
+    cp target/release/runcvm-fuse-client /build/
 
-# Verify binaries were created
-RUN ls -la /build/runcvm-fused/target/release/runcvm-fused || echo "runcvm-fused not built" && \
-    ls -la /build/runcvm-fuse-client/target/release/runcvm-fuse-client || echo "runcvm-fuse-client not built"
+# Verify binaries
+WORKDIR /build
+RUN ls -la /build/runcvm-fused /build/runcvm-fuse-client
 
 # --- BUILD STAGE ---
 # Download Firecracker binary
@@ -393,11 +395,11 @@ COPY --from=firecracker-kernel-build /opt/runcvm/kernels/firecracker/config /opt
 COPY --from=firecracker-kernel-build /build/linux/.config.bak /opt/runcvm/kernels/firecracker/.config.bak
 
 # ============================================================================
-# FUSE OVER VSOCK (fuse-backend-rs)
+# FUSE OVER VSOCK (Rust binaries)
 # ============================================================================
 # Copy Rust FUSE daemon (host) and client (guest) binaries
-COPY --from=rust-builder /build/runcvm-fused/target/release/runcvm-fused /opt/runcvm/bin/
-COPY --from=rust-builder /build/runcvm-fuse-client/target/release/runcvm-fuse-client /opt/runcvm/bin/
+COPY --from=rust-builder /build/runcvm-fused /opt/runcvm/bin/
+COPY --from=rust-builder /build/runcvm-fuse-client /opt/runcvm/bin/
 
 RUN apk update && apk add --no-cache rsync
 

@@ -3,13 +3,9 @@ name = "runcvm-fused"
 version = "0.1.0"
 edition = "2021"
 description = "FUSE passthrough daemon for RunCVM over vsock"
-authors = ["RunCVM Team"]
 
 [dependencies]
-# FUSE backend
-fuse-backend-rs = "0.12"
-
-# vsock for VM communication
+# vsock for VM communication  
 vsock = "0.4"
 
 # Logging
@@ -17,17 +13,10 @@ log = "0.4"
 env_logger = "0.11"
 
 # System calls
-nix = { version = "0.28", features = ["fs", "mount", "socket"] }
-
-# Serialization for config
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+nix = { version = "0.28", features = ["fs"] }
 
 # Error handling
 anyhow = "1"
-
-# Async runtime (optional, for future improvements)
-# tokio = { version = "1", features = ["rt", "net", "io-util", "sync"] }
 
 [profile.release]
 lto = true
@@ -35,6 +24,3 @@ strip = true
 opt-level = "z"
 codegen-units = 1
 panic = "abort"
-
-[profile.dev]
-opt-level = 1

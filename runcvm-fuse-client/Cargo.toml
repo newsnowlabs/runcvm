@@ -3,12 +3,8 @@ name = "runcvm-fuse-client"
 version = "0.1.0"
 edition = "2021"
 description = "FUSE client for RunCVM guest VM over vsock"
-authors = ["RunCVM Team"]
 
 [dependencies]
-# FUSE backend  
-fuse-backend-rs = "0.12"
-
 # vsock for VM communication
 vsock = "0.4"
 
@@ -17,13 +13,10 @@ log = "0.4"
 env_logger = "0.11"
 
 # System calls
-nix = { version = "0.28", features = ["fs", "mount", "ioctl"] }
+nix = { version = "0.28", features = ["fs", "mount"] }
 
 # Error handling
 anyhow = "1"
-
-# Command line parsing
-clap = { version = "4", features = ["derive"] }
 
 [profile.release]
 lto = true
