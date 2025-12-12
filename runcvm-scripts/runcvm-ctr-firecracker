@@ -163,15 +163,46 @@ setup_nfs_volumes() {
     
     # Start rpcbind (required by unfsd)
     log "  Starting rpcbind..."
-    rpcbind 2>/dev/null || busybox rpcbind 2>/dev/null || true
-    sleep 1
+    local rpcbind_bin="$RUNCVM_GUEST/sbin/rpcbind"
+    if [ -x "$rpcbind_bin" ]; then
+      "$rpcbind_bin" 2>/dev/null &
+      log "    rpcbind started from $rpcbind_bin"
+    else
+      log "  WARNING: rpcbind not found at $rpcbind_bin"
+    fi
+    busybox sleep 1
+    
+    # Log exports file content
+    log "  Exports file content:"
+    busybox cat "$exports_file" 2>&1 | while read line; do log "    $line"; done
+    
+    # Check if unfsd binary exists - prefer system unfsd (has proper deps)
+    local unfsd_bin="/usr/sbin/unfsd"
+    if [ -x "$unfsd_bin" ]; then
+      log "  Using system unfsd at $unfsd_bin"
+    elif [ -x "$RUNCVM_GUEST/sbin/unfsd" ]; then
+      unfsd_bin="$RUNCVM_GUEST/sbin/unfsd"
+      log "  Using bundled unfsd at $unfsd_bin"
+    else
+      log "ERROR: unfsd not found!"
+    fi
     
     # Start unfsd
     log "  Starting unfsd daemon..."
-    unfsd -d -e "$exports_file" -n "$nfs_port" -m "$mount_port" \
+    log "    Command: $unfsd_bin -d -e $exports_file -n $nfs_port -m $mount_port"
+    "$unfsd_bin" -d -e "$exports_file" -n "$nfs_port" -m "$mount_port" \
       >"/run/unfsd.log" 2>&1 &
     NFSD_PID=$!
-    log "    unfsd started (PID: $NFSD_PID)"
+    
+    # Wait a moment and verify unfsd is running
+    busybox sleep 2
+    if kill -0 "$NFSD_PID" 2>/dev/null; then
+      log "    unfsd started successfully (PID: $NFSD_PID)"
+    else
+      log "ERROR: unfsd failed to start!"
+      log "  unfsd log:"
+      busybox cat /run/unfsd.log 2>&1 | while read line; do log "    $line"; done
+    fi
     
     log "  NFS config written to $nfs_config"
     
@@ -1008,20 +1039,20 @@ WATCHEOF
     busybox cp "/.runcvm/config" "${staging_dir}/.runcvm/config"
     log "    Copied /.runcvm/config"
   fi
-  # Copy fuse-volumes file - CRITICAL for volume mounting in VM
-  log_debug "Checking FUSE_CONFIG at $FUSE_CONFIG"
-  if [ -f "$FUSE_CONFIG" ]; then
-    log_debug "FUSE_CONFIG exists, copying to staging..."
-    if [ -s "$FUSE_CONFIG" ]; then
-      busybox cp "$FUSE_CONFIG" "${staging_dir}/.runcvm/fuse-volumes"
-      log_debug "Copied to ${staging_dir}/.runcvm/fuse-volumes"
+  # Copy nfs-mounts file - CRITICAL for NFS volume mounting in VM
+  log_debug "Checking NFS_CONFIG at $NFS_CONFIG"
+  if [ -f "$NFS_CONFIG" ]; then
+    log_debug "NFS_CONFIG exists, copying to staging..."
+    if [ -s "$NFS_CONFIG" ]; then
+      busybox cp "$NFS_CONFIG" "${staging_dir}/.runcvm/nfs-mounts"
+      log_debug "Copied to ${staging_dir}/.runcvm/nfs-mounts"
       log_debug "Contents:"
-      busybox cat "${staging_dir}/.runcvm/fuse-volumes" 2>&1 | while read line; do log_debug "  $line"; done
+      busybox cat "${staging_dir}/.runcvm/nfs-mounts" 2>&1 | while read line; do log_debug "  $line"; done
     else
-      log "WARNING: FUSE_CONFIG exists but is empty"
+      log "WARNING: NFS_CONFIG exists but is empty"
     fi
   else
-    log "WARNING: FUSE_CONFIG does not exist at $FUSE_CONFIG"
+    log "WARNING: NFS_CONFIG does not exist at $NFS_CONFIG"
   fi
 
   # Copy kernel modules for 9P support from Alpine kernel

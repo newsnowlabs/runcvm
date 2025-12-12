@@ -113,8 +113,8 @@ COPY build-utils/make-bundelf-bundle.sh /usr/local/bin/make-bundelf-bundle.sh
 # Changed from qemu-system-x86_64 to qemu-system-aarch64
 # Note: sshfs removed from binaries - using Rust FUSE binaries instead
 # Note: watch from procps is included for proper Ctrl-C handling (busybox watch doesn't handle it)
-ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-aarch64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey watch unfsd rpcbind"
-ENV BUNDELF_EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so"
+ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-aarch64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey watch /usr/sbin/unfsd /sbin/rpcbind"
+ENV BUNDELF_EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so /usr/lib/libtirpc*"
 ENV BUNDELF_EXTRA_SYSTEM_LIB_PATHS="/usr/lib/xtables"
 ENV BUNDELF_CODE_PATH="/opt/runcvm"
 ENV BUNDELF_EXEC_PATH="/.runcvm/guest"
@@ -134,6 +134,23 @@ RUN /usr/local/bin/make-bundelf-bundle.sh --bundle && \
     # Copy AAVMF UEFI firmware for ARM64
     mkdir -p $BUNDELF_CODE_PATH/usr/share/AAVMF && \
     cp -a /usr/share/AAVMF/* $BUNDELF_CODE_PATH/usr/share/AAVMF/ && \
+    # Copy unfs3 (unfsd) binary and ALL its dependencies for NFS volume sync
+    mkdir -p $BUNDELF_CODE_PATH/sbin && \
+    cp /usr/sbin/unfsd $BUNDELF_CODE_PATH/sbin/unfsd && \
+    chmod +x $BUNDELF_CODE_PATH/sbin/unfsd && \
+    # Copy all unfsd library dependencies using ldd
+    for lib in $(ldd /usr/sbin/unfsd 2>/dev/null | grep "=>" | awk '{print $3}' | grep -v "^$"); do \
+    cp -n "$lib" $BUNDELF_CODE_PATH/lib/ 2>/dev/null || true; \
+    done && \
+    # Also copy transitive dependencies for the libs we just copied
+    for lib in $BUNDELF_CODE_PATH/lib/libtirpc*; do \
+    for dep in $(ldd "$lib" 2>/dev/null | grep "=>" | awk '{print $3}' | grep -v "^$"); do \
+    cp -n "$dep" $BUNDELF_CODE_PATH/lib/ 2>/dev/null || true; \
+    done; \
+    done && \
+    # Copy netconfig for RPC (required by libtirpc)
+    mkdir -p $BUNDELF_CODE_PATH/etc && \
+    cp /etc/netconfig $BUNDELF_CODE_PATH/etc/netconfig && \
     # Remove setuid/setgid bits from any/all binaries
     chmod -R -s $BUNDELF_CODE_PATH/
 
@@ -382,7 +399,7 @@ COPY --from=firecracker-kernel-build /build/linux/.config.bak /opt/runcvm/kernel
 # Note: unfs3 and rpcbind will be installed at runtime in the container
 # They are not bundled here as they need to run in container context
 
-RUN apk update && apk add --no-cache rsync
+RUN apk update && apk add --no-cache rsync unfs3
 
 ADD runcvm-scripts /opt/runcvm/scripts/
 
