@@ -158,7 +158,7 @@ setup_nfs_volumes() {
       # Start NFS daemon on HOST via nsenter
       # This escapes the container namespace to run on host
       log "  Starting unfsd on HOST for $src..."
-      if nsenter -t 1 -m -u -i -n /opt/runcvm/scripts/runcvm-nfsd start \
+      if "$RUNCVM_GUEST/usr/bin/nsenter" -t 1 -m -n /opt/runcvm/scripts/runcvm-nfsd start \
         "$container_id" "$src" "$dst" "$nfs_port" "$docker_uid" "$docker_gid" 2>&1; then
         log "    HOST unfsd started successfully"
         NFSD_STARTED=1
@@ -182,7 +182,7 @@ cleanup_nfs_volumes() {
   local container_id=$(busybox hostname)
   if [ -n "$NFSD_STARTED" ]; then
     log "Stopping HOST unfsd for $container_id..."
-    nsenter -t 1 -m -u -i -n /opt/runcvm/scripts/runcvm-nfsd stop "$container_id" 2>&1 || true
+    "$RUNCVM_GUEST/usr/bin/nsenter" -t 1 -m -n /opt/runcvm/scripts/runcvm-nfsd stop "$container_id" 2>&1 || true
   fi
 }
 
