@@ -1,0 +1,151 @@
+#!/bin/bash
+# runcvm-nfsd - Host-side NFS daemon manager for RunCVM
+#
+# This script runs on the HOST machine (not in container) and manages
+# unfsd instances for each RunCVM container. Each container gets its
+# own unfsd instance on a unique port.
+#
+# Usage:
+#   runcvm-nfsd start <container-id> <volume-path> <mount-path> <port> [uid] [gid]
+#   runcvm-nfsd stop <container-id>
+#   runcvm-nfsd status <container-id>
+#
+# Requirements:
+#   - unfs3 installed on host (apt install unfs3 / apk add unfs3)
+#   - rpcbind running (usually auto-started with unfs3)
+
+set -e
+
+RUNCVM_NFS_DIR="${RUNCVM_NFS_DIR:-/run/runcvm-nfs}"
+LOG_DIR="${RUNCVM_NFS_DIR}/logs"
+
+# Ensure directories exist
+mkdir -p "$RUNCVM_NFS_DIR" "$LOG_DIR"
+
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [runcvm-nfsd] $*"
+}
+
+start_nfsd() {
+  local container_id="$1"
+  local volume_path="$2"
+  local mount_path="$3"
+  local port="$4"
+  local uid="${5:-0}"
+  local gid="${6:-0}"
+  
+  local pid_file="$RUNCVM_NFS_DIR/$container_id.pid"
+  local exports_file="$RUNCVM_NFS_DIR/$container_id.exports"
+  local log_file="$LOG_DIR/$container_id.log"
+  
+  # Check if already running
+  if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+    log "unfsd for $container_id already running (PID: $(cat "$pid_file"))"
+    return 0
+  fi
+  
+  # Validate volume path exists
+  if [ ! -d "$volume_path" ]; then
+    log "ERROR: Volume path does not exist: $volume_path"
+    return 1
+  fi
+  
+  # Create exports file
+  # Format: /path (options)
+  # all_squash maps all UIDs to the specified anonuid/anongid
+  cat > "$exports_file" << EOF
+$volume_path (rw,all_squash,anonuid=$uid,anongid=$gid)
+EOF
+  
+  log "Starting unfsd for container $container_id"
+  log "  Volume: $volume_path -> $mount_path"
+  log "  Port: $port (mount: $((port+1)))"
+  log "  UID mapping: all -> $uid:$gid"
+  
+  # Start unfsd
+  # -d = debug mode (stay in foreground, but we background it)
+  # -e = exports file
+  # -n = NFS port
+  # -m = mount port
+  unfsd -d -e "$exports_file" -n "$port" -m "$((port+1))" \
+    > "$log_file" 2>&1 &
+  
+  local pid=$!
+  echo "$pid" > "$pid_file"
+  
+  # Wait a moment and verify it started
+  sleep 1
+  if kill -0 "$pid" 2>/dev/null; then
+    log "  unfsd started successfully (PID: $pid)"
+    return 0
+  else
+    log "ERROR: unfsd failed to start. Check log: $log_file"
+    cat "$log_file" | head -20
+    return 1
+  fi
+}
+
+stop_nfsd() {
+  local container_id="$1"
+  local pid_file="$RUNCVM_NFS_DIR/$container_id.pid"
+  local exports_file="$RUNCVM_NFS_DIR/$container_id.exports"
+  
+  if [ -f "$pid_file" ]; then
+    local pid=$(cat "$pid_file")
+    if kill -0 "$pid" 2>/dev/null; then
+      log "Stopping unfsd for $container_id (PID: $pid)"
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      # Force kill if still running
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pid_file"
+  fi
+  
+  rm -f "$exports_file"
+  log "Cleaned up NFS for container $container_id"
+}
+
+status_nfsd() {
+  local container_id="$1"
+  local pid_file="$RUNCVM_NFS_DIR/$container_id.pid"
+  
+  if [ -f "$pid_file" ]; then
+    local pid=$(cat "$pid_file")
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "running:$pid"
+      return 0
+    fi
+  fi
+  echo "stopped"
+  return 1
+}
+
+# Main
+case "$1" in
+  start)
+    if [ $# -lt 5 ]; then
+      echo "Usage: $0 start <container-id> <volume-path> <mount-path> <port> [uid] [gid]"
+      exit 1
+    fi
+    start_nfsd "$2" "$3" "$4" "$5" "${6:-0}" "${7:-0}"
+    ;;
+  stop)
+    if [ $# -lt 2 ]; then
+      echo "Usage: $0 stop <container-id>"
+      exit 1
+    fi
+    stop_nfsd "$2"
+    ;;
+  status)
+    if [ $# -lt 2 ]; then
+      echo "Usage: $0 status <container-id>"
+      exit 1
+    fi
+    status_nfsd "$2"
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|status} ..."
+    exit 1
+    ;;
+esac

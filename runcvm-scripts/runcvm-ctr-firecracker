@@ -117,13 +117,13 @@ create_volumes_from_vm_mounts() {
 }
 
 setup_nfs_volumes() {
-  # NFS volume sync using unfs3 + rpcbind
-  # Host: unfsd daemon serves volumes over TCP
-  # Guest: mounts via NFS client (kernel built-in)
-  #
+  # NFS volume sync using HOST-SIDE unfsd
   # Architecture:
-  #   Host: unfsd on 169.254.1.1:$NFS_PORT
-  #   Guest: mount -t nfs 169.254.1.1:/path /mount
+  #   Host: runcvm-nfsd starts unfsd daemon per container
+  #   Container: writes config for guest VM
+  #   Guest: mounts via NFS client (kernel built-in)
+  #
+  # The container calls the host script via nsenter to host namespace
   
   local nfs_config="$NFS_CONFIG"
   
@@ -135,17 +135,16 @@ setup_nfs_volumes() {
     local docker_uid=$(busybox id -u)
     local docker_gid=$(busybox id -g)
     
+    # Get container ID (from hostname or cgroup)
+    local container_id=$(busybox hostname)
+    
     # Pick random port in range
     local nfs_port=$((NFS_PORT_MIN + RANDOM % (NFS_PORT_MAX - NFS_PORT_MIN + 1)))
-    local mount_port=$((nfs_port + 1))
     
-    log "Setting up NFS volumes (unfsd over TCP)"
-    log "  Port: $nfs_port (mount: $mount_port)"
+    log "Setting up NFS volumes (HOST-SIDE unfsd)"
+    log "  Container ID: $container_id"
+    log "  Port: $nfs_port"
     log "  UID mapping: all_squash -> $docker_uid:$docker_gid"
-    
-    # Create exports file
-    local exports_file="/run/nfs-exports"
-    > "$exports_file"
     
     # Record volumes for guest to mount
     while IFS=: read -r src dst opts; do
@@ -153,58 +152,23 @@ setup_nfs_volumes() {
       
       log "  Volume: $src -> $dst"
       
-      # Add to exports (unfs3 format - no hostname prefix)
-      echo "$src (rw,all_squash,anonuid=$docker_uid,anongid=$docker_gid)" >> "$exports_file"
-      
       # Write config for guest (format: src:dst:port)
       echo "$src:$dst:$nfs_port" >> "$nfs_config"
       
+      # Start NFS daemon on HOST via nsenter
+      # This escapes the container namespace to run on host
+      log "  Starting unfsd on HOST for $src..."
+      if nsenter -t 1 -m -u -i -n /opt/runcvm/scripts/runcvm-nfsd start \
+        "$container_id" "$src" "$dst" "$nfs_port" "$docker_uid" "$docker_gid" 2>&1; then
+        log "    HOST unfsd started successfully"
+        NFSD_STARTED=1
+      else
+        log "ERROR: Failed to start HOST unfsd"
+        log "  Is runcvm-nfsd installed on host at /opt/runcvm/scripts/runcvm-nfsd?"
+        log "  Is unfs3 installed on host? (apt install unfs3)"
+      fi
+      
     done < /.runcvm/volumes
-    
-    # Start rpcbind (required by unfsd)
-    log "  Starting rpcbind..."
-    local rpcbind_bin="$RUNCVM_GUEST/sbin/rpcbind"
-    if [ -x "$rpcbind_bin" ]; then
-      "$rpcbind_bin" 2>/dev/null &
-      log "    rpcbind started from $rpcbind_bin"
-    else
-      log "  WARNING: rpcbind not found at $rpcbind_bin"
-    fi
-    busybox sleep 1
-    
-    # Log exports file content
-    log "  Exports file content:"
-    busybox cat "$exports_file" 2>&1 | while read line; do log "    $line"; done
-    
-    # Use bundled unfsd with bundelf dynamic linker
-    local unfsd_bin="$RUNCVM_GUEST/sbin/unfsd"
-    local ld_bin="$RUNCVM_GUEST/lib/ld"
-    local lib_path="$RUNCVM_GUEST/lib"
-    
-    if [ ! -x "$unfsd_bin" ]; then
-      log "ERROR: unfsd not found at $unfsd_bin!"
-    elif [ ! -x "$ld_bin" ]; then
-      log "ERROR: bundelf linker not found at $ld_bin!"
-    else
-      log "  Using unfsd at $unfsd_bin via bundelf linker"
-    fi
-    
-    # Start unfsd using bundelf dynamic linker with explicit library path
-    log "  Starting unfsd daemon..."
-    log "    Command: $ld_bin --library-path $lib_path $unfsd_bin -d -e $exports_file -n $nfs_port -m $mount_port"
-    "$ld_bin" --library-path "$lib_path" "$unfsd_bin" -d -e "$exports_file" -n "$nfs_port" -m "$mount_port" \
-      >"/run/unfsd.log" 2>&1 &
-    NFSD_PID=$!
-    
-    # Wait a moment and verify unfsd is running
-    busybox sleep 2
-    if kill -0 "$NFSD_PID" 2>/dev/null; then
-      log "    unfsd started successfully (PID: $NFSD_PID)"
-    else
-      log "ERROR: unfsd failed to start!"
-      log "  unfsd log:"
-      busybox cat /run/unfsd.log 2>&1 | while read line; do log "    $line"; done
-    fi
     
     log "  NFS config written to $nfs_config"
     
@@ -214,12 +178,12 @@ setup_nfs_volumes() {
 }
 
 cleanup_nfs_volumes() {
-  # Cleanup unfsd daemon
-  if [ -n "$NFSD_PID" ]; then
-    kill "$NFSD_PID" 2>/dev/null || true
+  # Stop HOST-SIDE unfsd daemon
+  local container_id=$(busybox hostname)
+  if [ -n "$NFSD_STARTED" ]; then
+    log "Stopping HOST unfsd for $container_id..."
+    nsenter -t 1 -m -u -i -n /opt/runcvm/scripts/runcvm-nfsd stop "$container_id" 2>&1 || true
   fi
-  busybox pkill -f "unfsd" 2>/dev/null || true
-  busybox pkill -f "rpcbind" 2>/dev/null || true
 }
 
 trap cleanup_nfs_volumes EXIT SIGTERM SIGINT
