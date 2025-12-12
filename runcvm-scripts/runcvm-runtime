@@ -397,6 +397,9 @@ if [ "$COMMAND" = "create" ]; then
     > "$VOLUMES_FILE"
     
     log "FIRECRACKER: Creating volumes file for NFS..."
+    echo "[DEBUG] FIRECRACKER: Creating volumes file for NFS..." >&2
+    echo "[DEBUG] ROOT=$ROOT" >&2
+    echo "[DEBUG] VOLUMES_FILE=$VOLUMES_FILE" >&2
     
     # Pick random port in range 1000-1050
     NFS_PORT=$((1000 + RANDOM % 51))
@@ -405,12 +408,11 @@ if [ "$COMMAND" = "create" ]; then
     CONTAINER_UID=$(jq_get "$CFG" '.process.user.uid // 0')
     CONTAINER_GID=$(jq_get "$CFG" '.process.user.gid // 0')
     
-    jq -r --arg vm "$RUNCVM_VM_MOUNTPOINT" '
-      .mounts[] | 
-      select(.type == "bind") | 
-      select(.destination | startswith($vm + "/")) |
-      "\(.source):\(.destination | ltrimstr($vm))"
-    ' "$CFG" 2>/dev/null | while IFS=: read -r src dst; do
+    # Build NFS volumes string for environment variable
+    NFS_VOLUMES=""
+    
+    # Use process substitution to avoid subshell (so NFS_PORT persists)
+    while IFS=: read -r src dst; do
       [ -z "$src" ] && continue
       [ -z "$dst" ] && continue
       case "$dst" in
@@ -421,23 +423,47 @@ if [ "$COMMAND" = "create" ]; then
       esac
       if [ -e "$src" ]; then
         log "FIRECRACKER:   Volume: $src -> $dst"
+        echo "[DEBUG] FIRECRACKER: Volume: $src -> $dst (port $NFS_PORT)" >&2
         echo "${src}:${dst}:rw:${NFS_PORT}" >> "$VOLUMES_FILE"
+        
+        # Build env var (pipe-separated for multiple volumes)
+        if [ -n "$NFS_VOLUMES" ]; then
+          NFS_VOLUMES="${NFS_VOLUMES}|${src}:${dst}:${NFS_PORT}"
+        else
+          NFS_VOLUMES="${src}:${dst}:${NFS_PORT}"
+        fi
         
         # Start NFS daemon on HOST for this volume
         if [ -x /opt/runcvm/scripts/runcvm-nfsd ]; then
           log "FIRECRACKER: Starting HOST unfsd for $src (port $NFS_PORT)..."
-          /opt/runcvm/scripts/runcvm-nfsd start "$ID" "$src" "$dst" "$NFS_PORT" "$CONTAINER_UID" "$CONTAINER_GID" 2>&1 | while read line; do log "  $line"; done
+          echo "[DEBUG] Starting unfsd: $src port=$NFS_PORT uid=$CONTAINER_UID" >&2
+          /opt/runcvm/scripts/runcvm-nfsd start "$ID" "$src" "$dst" "$NFS_PORT" "$CONTAINER_UID" "$CONTAINER_GID" 2>&1
           NFS_PORT=$((NFS_PORT + 2))
         else
           log "WARNING: runcvm-nfsd not found at /opt/runcvm/scripts/runcvm-nfsd"
+          echo "[DEBUG] ERROR: runcvm-nfsd not found!" >&2
         fi
       fi
-    done
+    done < <(jq -r --arg vm "$RUNCVM_VM_MOUNTPOINT" '
+      .mounts[] | 
+      select(.type == "bind") | 
+      select(.destination | startswith($vm + "/")) |
+      "\(.source):\(.destination | ltrimstr($vm))"
+    ' "$CFG" 2>/dev/null)
+    
+    # Pass NFS volumes via environment variable (bypasses file path issues)
+    if [ -n "$NFS_VOLUMES" ]; then
+      log "FIRECRACKER: Setting RUNCVM_NFS_VOLUMES=$NFS_VOLUMES"
+      echo "[DEBUG] FIRECRACKER: Setting RUNCVM_NFS_VOLUMES=$NFS_VOLUMES" >&2
+      set_config_env "RUNCVM_NFS_VOLUMES" "$NFS_VOLUMES"
+    fi
     
     if [ -s "$VOLUMES_FILE" ]; then
       log "FIRECRACKER: Created volumes file with $(wc -l < "$VOLUMES_FILE") entries"
+      echo "[DEBUG] FIRECRACKER: Volumes file created: $(cat "$VOLUMES_FILE")" >&2
     else
       log "FIRECRACKER: No user volumes found"
+      echo "[DEBUG] FIRECRACKER: No user volumes found" >&2
       rm -f "$VOLUMES_FILE"
     fi
   fi
@@ -724,6 +750,39 @@ elif [ "$COMMAND" = "exec" ]; then
   
   # Save formatted process.json for debugging
   jq -r . <$PROCESS >/tmp/process.json-$$-2 2>/dev/null || true
+
+elif [ "$COMMAND" = "delete" ]; then
+
+  log_debug "Command: delete"
+  
+  # USAGE:
+  #   runc delete [command options] <container-id>
+  #
+  # PARSE 'delete' COMMAND OPTIONS
+  # --force, -f  forcibly deletes the container if it is still running (uses SIGKILL)
+  
+  while true
+  do
+    case "$1" in
+      --force|-f) shift; continue; ;;
+      *) break; ;;
+    esac
+  done
+  
+  ID="$1"
+  
+  if [ -n "$ID" ]; then
+    log "FIRECRACKER: Cleaning up NFS for container $ID"
+    echo "[DEBUG] FIRECRACKER: Calling runcvm-nfsd stop for $ID" >&2
+    
+    # Stop unfsd daemon for this container
+    if [ -x /opt/runcvm/scripts/runcvm-nfsd ]; then
+      /opt/runcvm/scripts/runcvm-nfsd stop "$ID" 2>&1 || true
+      log "FIRECRACKER: NFS cleanup complete for $ID"
+    else
+      log "WARNING: runcvm-nfsd not found at /opt/runcvm/scripts/runcvm-nfsd"
+    fi
+  fi
 fi
 
 log_debug "--- LOG ENDS ---"

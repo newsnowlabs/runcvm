@@ -119,35 +119,41 @@ create_volumes_from_vm_mounts() {
 setup_nfs_volumes() {
   # NFS volume sync using HOST-SIDE unfsd
   # Architecture:
-  #   Host: runcvm-runtime starts unfsd daemon BEFORE container starts
-  #   Container: reads volumes file and writes NFS config for guest VM
+  #   Host: runcvm-runtime starts unfsd daemon and sets RUNCVM_NFS_VOLUMES env var
+  #   Container: reads env var and writes NFS config for guest VM
   #   Guest: mounts via NFS client (kernel built-in)
+  #
+  # RUNCVM_NFS_VOLUMES format: src:dst:port|src2:dst2:port2|...
   
   local nfs_config="$NFS_CONFIG"
   
-  # Read volume mounts from file created by runcvm-runtime
-  # Format: src:dst:opts:port
-  if [ -f "/.runcvm/volumes" ]; then
+  # DEBUG: Show what we have
+  echo "[DEBUG] setup_nfs_volumes checking env var" >&2
+  echo "[DEBUG] RUNCVM_NFS_VOLUMES=${RUNCVM_NFS_VOLUMES:-<not set>}" >&2
+  
+  # Read from environment variable (set by runcvm-runtime)
+  if [ -n "$RUNCVM_NFS_VOLUMES" ]; then
     > "$nfs_config"
     
-    log "Setting up NFS volumes (unfsd already running on HOST)"
+    log "Setting up NFS volumes from RUNCVM_NFS_VOLUMES env"
     
-    # Read volumes and extract NFS port
-    while IFS=: read -r src dst opts port; do
+    # Parse pipe-separated entries
+    echo "$RUNCVM_NFS_VOLUMES" | busybox tr '|' '\n' | while IFS=: read -r src dst port; do
       [ -z "$src" ] && continue
       [ -z "$port" ] && port="2049"  # fallback
       
       log "  Volume: $src -> $dst (port $port)"
+      echo "[DEBUG] NFS config line: $src:$dst:$port" >&2
       
       # Write config for guest (format: src:dst:port)
       echo "$src:$dst:$port" >> "$nfs_config"
-      
-    done < /.runcvm/volumes
+    done
     
     log "  NFS config written to $nfs_config"
+    echo "[DEBUG] Final nfs_config: $(busybox cat $nfs_config)" >&2
     
   else
-    log "  No volumes file found, skipping NFS volume setup"
+    log "  RUNCVM_NFS_VOLUMES not set, skipping NFS volume setup"
   fi
 }
 
@@ -199,8 +205,10 @@ main() {
   # STEP 0: Extract volumes and start 9P servers BEFORE creating rootfs
   # ==========================================================================
   
-  # Create volumes file if it doesn't exist
-  if [ ! -f "/.runcvm/volumes" ]; then
+  # Create volumes file if runtime didn't create it
+  # NOTE: Runtime creates at $ROOT/.runcvm/volumes which is accessible via /vm/.runcvm/volumes
+  # because /.runcvm is a tmpfs that hides $ROOT/.runcvm
+  if [ ! -f "/vm/.runcvm/volumes" ]; then
     create_volumes_from_vm_mounts
   fi
 
@@ -612,16 +620,28 @@ fi
 # ==========================================================================
 mount_nfs_volumes() {
   local nfs_config="/.runcvm/nfs-mounts"
-  local host_ip="169.254.1.1"
+  
+  # Get gateway IP from network config (this is the HOST from VM's perspective)
+  local host_ip=""
+  if [ -f "/.runcvm-network" ]; then
+    # Format: eth0 MAC MTU IP PREFIX GATEWAY
+    read -r _ _ _ _ _ host_ip < /.runcvm-network
+  fi
+  
+  # Fallback to default Docker gateway
+  if [ -z "$host_ip" ] || [ "$host_ip" = "-" ]; then
+    host_ip="172.17.0.1"
+  fi
   
   log INFO "Checking for NFS volumes..."
+  log INFO "  Host IP (for NFS): $host_ip"
   
   if [ ! -f "$nfs_config" ]; then
     log INFO "No nfs-mounts config found - volumes are static copies"
     return 0
   fi
   
-  log INFO "NFS Transport: TCP over 169.254.1.1"
+  log INFO "NFS Transport: TCP over $host_ip"
   log INFO "Mount type: NFS (live, bidirectional)"
   
   # Config format: src:dst:port
