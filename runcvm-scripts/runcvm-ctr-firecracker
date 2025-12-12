@@ -176,21 +176,23 @@ setup_nfs_volumes() {
     log "  Exports file content:"
     busybox cat "$exports_file" 2>&1 | while read line; do log "    $line"; done
     
-    # Check if unfsd binary exists - prefer system unfsd (has proper deps)
-    local unfsd_bin="/usr/sbin/unfsd"
-    if [ -x "$unfsd_bin" ]; then
-      log "  Using system unfsd at $unfsd_bin"
-    elif [ -x "$RUNCVM_GUEST/sbin/unfsd" ]; then
-      unfsd_bin="$RUNCVM_GUEST/sbin/unfsd"
-      log "  Using bundled unfsd at $unfsd_bin"
+    # Use bundled unfsd with bundelf dynamic linker
+    local unfsd_bin="$RUNCVM_GUEST/sbin/unfsd"
+    local ld_bin="$RUNCVM_GUEST/lib/ld"
+    local lib_path="$RUNCVM_GUEST/lib"
+    
+    if [ ! -x "$unfsd_bin" ]; then
+      log "ERROR: unfsd not found at $unfsd_bin!"
+    elif [ ! -x "$ld_bin" ]; then
+      log "ERROR: bundelf linker not found at $ld_bin!"
     else
-      log "ERROR: unfsd not found!"
+      log "  Using unfsd at $unfsd_bin via bundelf linker"
     fi
     
-    # Start unfsd
+    # Start unfsd using bundelf dynamic linker with explicit library path
     log "  Starting unfsd daemon..."
-    log "    Command: $unfsd_bin -d -e $exports_file -n $nfs_port -m $mount_port"
-    "$unfsd_bin" -d -e "$exports_file" -n "$nfs_port" -m "$mount_port" \
+    log "    Command: $ld_bin --library-path $lib_path $unfsd_bin -d -e $exports_file -n $nfs_port -m $mount_port"
+    "$ld_bin" --library-path "$lib_path" "$unfsd_bin" -d -e "$exports_file" -n "$nfs_port" -m "$mount_port" \
       >"/run/unfsd.log" 2>&1 &
     NFSD_PID=$!
     
