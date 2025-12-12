@@ -119,54 +119,28 @@ create_volumes_from_vm_mounts() {
 setup_nfs_volumes() {
   # NFS volume sync using HOST-SIDE unfsd
   # Architecture:
-  #   Host: runcvm-nfsd starts unfsd daemon per container
-  #   Container: writes config for guest VM
+  #   Host: runcvm-runtime starts unfsd daemon BEFORE container starts
+  #   Container: reads volumes file and writes NFS config for guest VM
   #   Guest: mounts via NFS client (kernel built-in)
-  #
-  # The container calls the host script via nsenter to host namespace
   
   local nfs_config="$NFS_CONFIG"
   
-  # Read volume mounts from OCI config  
+  # Read volume mounts from file created by runcvm-runtime
+  # Format: src:dst:opts:port
   if [ -f "/.runcvm/volumes" ]; then
     > "$nfs_config"
     
-    # Get Docker USER's UID/GID for file permissions
-    local docker_uid=$(busybox id -u)
-    local docker_gid=$(busybox id -g)
+    log "Setting up NFS volumes (unfsd already running on HOST)"
     
-    # Get container ID (from hostname or cgroup)
-    local container_id=$(busybox hostname)
-    
-    # Pick random port in range
-    local nfs_port=$((NFS_PORT_MIN + RANDOM % (NFS_PORT_MAX - NFS_PORT_MIN + 1)))
-    
-    log "Setting up NFS volumes (HOST-SIDE unfsd)"
-    log "  Container ID: $container_id"
-    log "  Port: $nfs_port"
-    log "  UID mapping: all_squash -> $docker_uid:$docker_gid"
-    
-    # Record volumes for guest to mount
-    while IFS=: read -r src dst opts; do
+    # Read volumes and extract NFS port
+    while IFS=: read -r src dst opts port; do
       [ -z "$src" ] && continue
+      [ -z "$port" ] && port="2049"  # fallback
       
-      log "  Volume: $src -> $dst"
+      log "  Volume: $src -> $dst (port $port)"
       
       # Write config for guest (format: src:dst:port)
-      echo "$src:$dst:$nfs_port" >> "$nfs_config"
-      
-      # Start NFS daemon on HOST via nsenter
-      # This escapes the container namespace to run on host
-      log "  Starting unfsd on HOST for $src..."
-      if "$RUNCVM_GUEST/usr/bin/nsenter" -t 1 -m -n /opt/runcvm/scripts/runcvm-nfsd start \
-        "$container_id" "$src" "$dst" "$nfs_port" "$docker_uid" "$docker_gid" 2>&1; then
-        log "    HOST unfsd started successfully"
-        NFSD_STARTED=1
-      else
-        log "ERROR: Failed to start HOST unfsd"
-        log "  Is runcvm-nfsd installed on host at /opt/runcvm/scripts/runcvm-nfsd?"
-        log "  Is unfs3 installed on host? (apt install unfs3)"
-      fi
+      echo "$src:$dst:$port" >> "$nfs_config"
       
     done < /.runcvm/volumes
     
@@ -178,12 +152,9 @@ setup_nfs_volumes() {
 }
 
 cleanup_nfs_volumes() {
-  # Stop HOST-SIDE unfsd daemon
-  local container_id=$(busybox hostname)
-  if [ -n "$NFSD_STARTED" ]; then
-    log "Stopping HOST unfsd for $container_id..."
-    "$RUNCVM_GUEST/usr/bin/nsenter" -t 1 -m -n /opt/runcvm/scripts/runcvm-nfsd stop "$container_id" 2>&1 || true
-  fi
+  # NFS cleanup is handled by runcvm-runtime on container stop
+  # Nothing to do here
+  :
 }
 
 trap cleanup_nfs_volumes EXIT SIGTERM SIGINT

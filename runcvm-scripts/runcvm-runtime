@@ -396,7 +396,14 @@ if [ "$COMMAND" = "create" ]; then
     mkdir -p "$ROOT/.runcvm"
     > "$VOLUMES_FILE"
     
-    log "FIRECRACKER: Creating volumes file for 9P..."
+    log "FIRECRACKER: Creating volumes file for NFS..."
+    
+    # Pick random port in range 1000-1050
+    NFS_PORT=$((1000 + RANDOM % 51))
+    
+    # Get UID/GID from container config (defaults to 0:0)
+    CONTAINER_UID=$(jq_get "$CFG" '.process.user.uid // 0')
+    CONTAINER_GID=$(jq_get "$CFG" '.process.user.gid // 0')
     
     jq -r --arg vm "$RUNCVM_VM_MOUNTPOINT" '
       .mounts[] | 
@@ -414,7 +421,16 @@ if [ "$COMMAND" = "create" ]; then
       esac
       if [ -e "$src" ]; then
         log "FIRECRACKER:   Volume: $src -> $dst"
-        echo "${src}:${dst}:rw" >> "$VOLUMES_FILE"
+        echo "${src}:${dst}:rw:${NFS_PORT}" >> "$VOLUMES_FILE"
+        
+        # Start NFS daemon on HOST for this volume
+        if [ -x /opt/runcvm/scripts/runcvm-nfsd ]; then
+          log "FIRECRACKER: Starting HOST unfsd for $src (port $NFS_PORT)..."
+          /opt/runcvm/scripts/runcvm-nfsd start "$ID" "$src" "$dst" "$NFS_PORT" "$CONTAINER_UID" "$CONTAINER_GID" 2>&1 | while read line; do log "  $line"; done
+          NFS_PORT=$((NFS_PORT + 2))
+        else
+          log "WARNING: runcvm-nfsd not found at /opt/runcvm/scripts/runcvm-nfsd"
+        fi
       fi
     done
     
