@@ -67,7 +67,7 @@ EOF
   # -e = exports file
   # -n = NFS port
   # -m = mount port
-  unfsd -d -e "$exports_file" -n "$port" -m "$((port+1))" \
+  /usr/local/sbin/unfsd -d -e "$exports_file" -n "$port" -m "$((port+1))" \
     > "$log_file" 2>&1 &
   
   local pid=$!
