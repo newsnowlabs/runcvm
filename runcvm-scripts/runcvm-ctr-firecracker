@@ -16,9 +16,9 @@ set -o errexit -o pipefail
 
 FIRECRACKER_BIN="$RUNCVM_GUEST/sbin/firecracker"
 FIRECRACKER_CONFIG="/run/.firecracker-config.json"
-FUSED_BIN="$RUNCVM_GUEST/bin/runcvm-fused"
-FUSE_CLIENT_BIN="$RUNCVM_GUEST/bin/runcvm-fuse-client"
-FUSE_CONFIG="/.runcvm/fuse-volumes"
+NFS_CONFIG="/.runcvm/nfs-mounts"
+NFS_PORT_MIN=1000
+NFS_PORT_MAX=1050
 
 # ============================================================
 # LOGGING SYSTEM
@@ -116,73 +116,80 @@ create_volumes_from_vm_mounts() {
   fi
 }
 
-setup_fuse_volumes() {
-  # Pure FUSE over vsock using runcvm-fused (Rust daemon)
-  # Host: runcvm-fused daemon listens on Unix socket (Firecracker vsock bridge)
-  # Guest: runcvm-fuse-client connects via vsock
+setup_nfs_volumes() {
+  # NFS volume sync using unfs3 + rpcbind
+  # Host: unfsd daemon serves volumes over TCP
+  # Guest: mounts via NFS client (kernel built-in)
   #
-  # Firecracker vsock architecture:
-  #   Guest (vsock CID 2, port 5742) -> Firecracker -> UDS /run/firecracker.vsock_5742 -> Host daemon
+  # Architecture:
+  #   Host: unfsd on 169.254.1.1:$NFS_PORT
+  #   Guest: mount -t nfs 169.254.1.1:/path /mount
   
-  local fuse_config="/.runcvm/fuse-volumes"
-  local fused_bin="$RUNCVM_GUEST/bin/runcvm-fused"
-  local vsock_port="5742"
-  local vsock_uds="/run/firecracker.vsock"
+  local nfs_config="$NFS_CONFIG"
   
   # Read volume mounts from OCI config  
   if [ -f "/.runcvm/volumes" ]; then
-    > "$fuse_config"
+    > "$nfs_config"
     
-    log "Setting up FUSE volumes (pure FUSE over vsock)"
-    log "  Transport: vsock (Guest -> Host CID 2, port $vsock_port)"
-    log "  Host UDS: ${vsock_uds}_${vsock_port}"
-    log "  Latency: ~1-2ms (near-native)"
+    # Get Docker USER's UID/GID for file permissions
+    local docker_uid=$(busybox id -u)
+    local docker_gid=$(busybox id -g)
+    
+    # Pick random port in range
+    local nfs_port=$((NFS_PORT_MIN + RANDOM % (NFS_PORT_MAX - NFS_PORT_MIN + 1)))
+    local mount_port=$((nfs_port + 1))
+    
+    log "Setting up NFS volumes (unfsd over TCP)"
+    log "  Port: $nfs_port (mount: $mount_port)"
+    log "  UID mapping: all_squash -> $docker_uid:$docker_gid"
+    
+    # Create exports file
+    local exports_file="/run/nfs-exports"
+    > "$exports_file"
     
     # Record volumes for guest to mount
-    # Format: src:dst:opts
     while IFS=: read -r src dst opts; do
       [ -z "$src" ] && continue
       
       log "  Volume: $src -> $dst"
       
-      # Write config for guest (format: src:dst:opts)
-      echo "$src:$dst:$opts" >> "$fuse_config"
+      # Add to exports (unfs3 format - no hostname prefix)
+      echo "$src (rw,all_squash,anonuid=$docker_uid,anongid=$docker_gid)" >> "$exports_file"
+      
+      # Write config for guest (format: src:dst:port)
+      echo "$src:$dst:$nfs_port" >> "$nfs_config"
       
     done < /.runcvm/volumes
     
-    # Start the Rust FUSE daemon
-    # Note: Daemon must start BEFORE Firecracker so it's ready when guest connects
-    if [ -x "$fused_bin" ]; then
-      log "  Starting runcvm-fused daemon..."
-      "$fused_bin" \
-        --vsock-port "$vsock_port" \
-        --vsock-uds "$vsock_uds" \
-        --volumes-config "$fuse_config" \
-        >"/run/runcvm-fused.log" 2>&1 &
-      FUSED_PID=$!
-      log "    runcvm-fused started (PID: $FUSED_PID)"
-      log "    Listening on: ${vsock_uds}_${vsock_port}"
-    else
-      log "WARNING: runcvm-fused not found at $fused_bin"
-      log "  Falling back to static volume copy mode"
-    fi
+    # Start rpcbind (required by unfsd)
+    log "  Starting rpcbind..."
+    rpcbind 2>/dev/null || busybox rpcbind 2>/dev/null || true
+    sleep 1
     
-    log "  FUSE config written to $fuse_config"
+    # Start unfsd
+    log "  Starting unfsd daemon..."
+    unfsd -d -e "$exports_file" -n "$nfs_port" -m "$mount_port" \
+      >"/run/unfsd.log" 2>&1 &
+    NFSD_PID=$!
+    log "    unfsd started (PID: $NFSD_PID)"
+    
+    log "  NFS config written to $nfs_config"
     
   else
-    log "  No volumes file found, skipping FUSE volume setup"
+    log "  No volumes file found, skipping NFS volume setup"
   fi
 }
 
-cleanup_fuse_volumes() {
-  # Cleanup runcvm-fused daemon
-  if [ -n "$FUSED_PID" ]; then
-    kill "$FUSED_PID" 2>/dev/null || true
+cleanup_nfs_volumes() {
+  # Cleanup unfsd daemon
+  if [ -n "$NFSD_PID" ]; then
+    kill "$NFSD_PID" 2>/dev/null || true
   fi
-  busybox pkill -f "runcvm-fused" 2>/dev/null || true
+  busybox pkill -f "unfsd" 2>/dev/null || true
+  busybox pkill -f "rpcbind" 2>/dev/null || true
 }
 
-trap cleanup_fuse_volumes EXIT SIGTERM SIGINT
+trap cleanup_nfs_volumes EXIT SIGTERM SIGINT
 
 # Create rootfs image from a source directory
 create_rootfs_from_dir() {
@@ -229,11 +236,11 @@ main() {
     create_volumes_from_vm_mounts
   fi
 
-  setup_fuse_volumes
+  setup_nfs_volumes
 
-  log_debug "FUSE_CONFIG=$FUSE_CONFIG"
-  log_debug "Contents of $FUSE_CONFIG:"
-  busybox cat "$FUSE_CONFIG" 2>&1 | while read line; do log_debug "  $line"; done
+  log_debug "NFS_CONFIG=$NFS_CONFIG"
+  log_debug "Contents of $NFS_CONFIG:"
+  busybox cat "$NFS_CONFIG" 2>&1 | while read line; do log_debug "  $line"; done
   
   # Check for Firecracker binary
   if [ ! -x "$FIRECRACKER_BIN" ]; then
@@ -633,140 +640,49 @@ if [ -f /.runcvm-resolv.conf ]; then
 fi
 
 # ==========================================================================
-# FUSE VOLUME MOUNTS - Pure FUSE over vsock using runcvm-fuse-client
+# NFS VOLUME MOUNTS - Mount NFS shares from host unfsd
 # ==========================================================================
-mount_fuse_volumes() {
-  local fuse_config="/.runcvm/fuse-volumes"
-  local fuse_client="/.runcvm/guest/bin/runcvm-fuse-client"
+mount_nfs_volumes() {
+  local nfs_config="/.runcvm/nfs-mounts"
+  local host_ip="169.254.1.1"
   
-  log INFO "Checking for FUSE volumes..."
+  log INFO "Checking for NFS volumes..."
   
-  if [ ! -f "$fuse_config" ]; then
-    log INFO "No fuse-volumes config found - volumes are static copies"
+  if [ ! -f "$nfs_config" ]; then
+    log INFO "No nfs-mounts config found - volumes are static copies"
     return 0
   fi
   
-  # Check if fuse client binary exists
-  if [ ! -x "$fuse_client" ]; then
-    log ERROR "FUSE client not found at $fuse_client"
-    log INFO "Falling back to static copy mode"
-    return 1
-  fi
+  log INFO "NFS Transport: TCP over 169.254.1.1"
+  log INFO "Mount type: NFS (live, bidirectional)"
   
-  # Load vsock kernel modules (required for guest-to-host communication)
-  log INFO "Loading vsock kernel modules..."
-  modprobe vsock 2>/dev/null || true
-  modprobe vmw_vsock_virtio_transport 2>/dev/null || true
-  modprobe virtio_vsock 2>/dev/null || true
-  
-  # Detailed vsock diagnostics
-  log INFO "=== VSOCK DIAGNOSTICS ==="
-  
-  # Check vsock device
-  if [ -e /dev/vsock ]; then
-    log INFO "  /dev/vsock: exists"
-    ls -la /dev/vsock 2>&1 | busybox head -1 | busybox sed 's/^/    /'
-  else
-    log WARN "  /dev/vsock: MISSING"
-  fi
-  
-  # Check virtio devices
-  log INFO "  Virtio devices:"
-  ls -la /sys/bus/virtio/devices/ 2>/dev/null | busybox sed 's/^/    /' || log INFO "    No virtio devices found"
-  
-  # Check for vsock-related drivers
-  log INFO "  Loaded vsock modules:"
-  lsmod 2>/dev/null | grep -i vsock | busybox sed 's/^/    /' || log INFO "    (none or built-in)"
-  
-  # Check vsock transport registration
-  if [ -d /sys/class/vsock ]; then
-    log INFO "  /sys/class/vsock: exists"
-    ls -la /sys/class/vsock/ 2>/dev/null | busybox sed 's/^/    /'
-  else
-    log WARN "  /sys/class/vsock: MISSING (no transport registered)"
-  fi
-  
-  # Check if virtio_vsock driver is bound
-  for dev in /sys/bus/virtio/devices/*; do
-    if [ -d "$dev" ]; then
-      local dev_name=$(basename "$dev")
-      local driver=$(cat "$dev/modalias" 2>/dev/null || echo "unknown")
-      log INFO "    $dev_name: $driver"
-      if [ -e "$dev/driver" ]; then
-        local bound_driver=$(basename "$(readlink "$dev/driver")")
-        log INFO "      Bound driver: $bound_driver"
-      else
-        log WARN "      No driver bound!"
-      fi
-    fi
-  done
-  
-  log INFO "=== END VSOCK DIAGNOSTICS ==="
-  
-  # Check if vsock is usable by verifying:
-  # 1. /dev/vsock exists
-  # 2. A vsock virtio device is bound to the driver
-  local vsock_device_found=0
-  for dev in /sys/bus/virtio/devices/*; do
-    if [ -d "$dev" ] && [ -e "$dev/driver" ]; then
-      local modalias=$(cat "$dev/modalias" 2>/dev/null || echo "")
-      if echo "$modalias" | grep -q "d00000013"; then
-        vsock_device_found=1
-        log INFO "vsock device found and driver bound"
-        break
-      fi
-    fi
-  done
-  
-  if [ "$vsock_device_found" -ne 1 ] || [ ! -e /dev/vsock ]; then
-    log WARN "vsock not available"
-    log INFO "  /dev/vsock exists: $([ -e /dev/vsock ] && echo 'yes' || echo 'no')"
-    log INFO "  vsock device found: $([ $vsock_device_found -eq 1 ] && echo 'yes' || echo 'no')"
-    log INFO "Falling back to static copy mode"
-    return 1
-  fi
-  log INFO "FUSE Transport: vsock (Guest -> Host CID 2, port 5742)"
-  log INFO "Mount type: FUSE (live, bidirectional)"
-  log INFO "Binary: $fuse_client"
-  
-  # Config format: src:dst:opts
-  # Mount each volume via runcvm-fuse-client
-  while IFS=: read -r src_path dst opts; do
+  # Config format: src:dst:port
+  # Mount each volume via NFS
+  while IFS=: read -r src_path dst nfs_port; do
     [ -z "$src_path" ] && continue
     [ -z "$dst" ] && continue
     
-    log INFO "  Mounting $src_path -> $dst..."
+    log INFO "  Mounting $src_path -> $dst (port $nfs_port)..."
     mkdir -p "$dst"
     
-    # Launch runcvm-fuse-client for this mount
-    # It connects to the host daemon via vsock and mounts at $dst
-    "$fuse_client" \
-      --host-cid 2 \
-      --port 5742 \
-      --mount "$dst" \
-      --source "$src_path" \
-      2>&1 | sed 's/^/    /' &
+    # Mount via NFS v3 with nolock (no separate lockd needed)
+    mount -t nfs -o vers=3,nolock,tcp,port="$nfs_port",mountport="$((nfs_port + 1))" \
+      "$host_ip:$src_path" "$dst" 2>&1 | sed 's/^/    /'
     
-    # Give it a moment to sync
-    sleep 1
-    
-    # Check if sync succeeded by verifying files exist in destination
-    # Our simple client syncs files rather than mounting a full FUSE filesystem
-    local file_count=$(ls -1 "$dst" 2>/dev/null | wc -l)
-    if [ "$file_count" -gt 0 ]; then
-      log INFO "  ✓ Successfully synced $file_count files to $dst (vsock)"
+    if mount | grep -q "$dst"; then
+      log INFO "  ✓ Successfully mounted $dst (NFS)"
     else
-      log INFO "  ✗ Failed to sync $dst"
+      log ERROR "  ✗ Failed to mount $dst via NFS"
       log INFO "    Falling back to static copy mode"
     fi
-  done < "$fuse_config"
+  done < "$nfs_config"
   
-  log INFO "  FUSE mounts complete"
+  log INFO "  NFS mounts complete"
 }
 
-log INFO "========== FUSE VOLUME MOUNTS =========="
-mount_fuse_volumes
-log INFO "========== FUSE VOLUME MOUNTS END =========="
+log INFO "========== NFS VOLUME MOUNTS =========="
+mount_nfs_volumes
+log INFO "========== NFS VOLUME MOUNTS END =========="
 
 # ========== DROPBEAR SSH SERVER FOR DOCKER EXEC ==========
 # docker exec uses SSH to connect to the VM, so we need dropbear running

@@ -95,8 +95,9 @@ RUN apk update && \
     s6 dnsmasq iptables nftables \
     ncurses coreutils \
     procps \
-    patchelf
-# Note: sshfs removed - using Rust FUSE binaries instead
+    patchelf \
+    unfs3
+# Note: unfs3+rpcbind added for NFS volume sync
 
 # Install patched dnsmasq
 COPY --from=alpine-dnsmasq /root/packages/main/aarch64 /tmp/dnsmasq/
@@ -112,7 +113,7 @@ COPY build-utils/make-bundelf-bundle.sh /usr/local/bin/make-bundelf-bundle.sh
 # Changed from qemu-system-x86_64 to qemu-system-aarch64
 # Note: sshfs removed from binaries - using Rust FUSE binaries instead
 # Note: watch from procps is included for proper Ctrl-C handling (busybox watch doesn't handle it)
-ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-aarch64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey watch"
+ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-aarch64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey watch unfsd rpcbind"
 ENV BUNDELF_EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so"
 ENV BUNDELF_EXTRA_SYSTEM_LIB_PATHS="/usr/lib/xtables"
 ENV BUNDELF_CODE_PATH="/opt/runcvm"
@@ -321,34 +322,7 @@ RUN ls -alh /opt/runcvm/kernels/firecracker/vmlinux && \
 # Add this to your Dockerfile BEFORE the "installer" stage
 # This downloads and extracts the Firecracker binary for ARM64
 
-# --- BUILD STAGE ---
-# Build Rust FUSE daemon and client for pure FUSE over vsock
-FROM rust:1.75-alpine3.19 as rust-builder
-
-# Install build dependencies
-RUN apk add --no-cache musl-dev gcc
-
-# Create output directory
-RUN mkdir -p /output
-
-WORKDIR /build
-
-# Copy and build runcvm-fused (host daemon)
-COPY runcvm-fused /build/runcvm-fused
-WORKDIR /build/runcvm-fused
-RUN cargo build --release && \
-    ls -la target/release/runcvm-fused && \
-    mv target/release/runcvm-fused /output/
-
-# Copy and build runcvm-fuse-client (guest client)
-COPY runcvm-fuse-client /build/runcvm-fuse-client  
-WORKDIR /build/runcvm-fuse-client
-RUN cargo build --release && \
-    ls -la target/release/runcvm-fuse-client && \
-    mv target/release/runcvm-fuse-client /output/
-
-# Verify binaries
-RUN ls -la /output/runcvm-fused /output/runcvm-fuse-client
+# Note: Rust FUSE stage removed - using NFS for volume sync
 
 # --- BUILD STAGE ---
 # Download Firecracker binary
@@ -403,11 +377,10 @@ COPY --from=firecracker-kernel-build /opt/runcvm/kernels/firecracker/config /opt
 COPY --from=firecracker-kernel-build /build/linux/.config.bak /opt/runcvm/kernels/firecracker/.config.bak
 
 # ============================================================================
-# FUSE OVER VSOCK (Rust binaries)
+# NFS VOLUME SYNC (unfs3 + rpcbind)
 # ============================================================================
-# Copy Rust FUSE daemon (host) and client (guest) binaries
-COPY --from=rust-builder /output/runcvm-fused /opt/runcvm/bin/
-COPY --from=rust-builder /output/runcvm-fuse-client /opt/runcvm/bin/
+# Note: unfs3 and rpcbind will be installed at runtime in the container
+# They are not bundled here as they need to run in container context
 
 RUN apk update && apk add --no-cache rsync
 
