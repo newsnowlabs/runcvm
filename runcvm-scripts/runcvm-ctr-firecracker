@@ -754,6 +754,25 @@ fi
 # Redirect I/O to serial console for interactive use
 exec < /dev/ttyS0 > /dev/ttyS0 2>&1
 
+# ============================================================
+# TERMINAL INITIALIZATION
+# Configure terminal settings IMMEDIATELY after connecting to ttyS0
+# to prevent escape sequence leaks (e.g. ^[[27;5R cursor position reports)
+# ============================================================
+
+# Set specific terminal options (avoid stty sane which triggers DSR queries)
+# - icrnl: translate CR to NL on input (Enter key)
+# - echo: echo typed characters
+# - icanon: canonical (line) mode
+# - -echoctl: dont show control chars as ^X
+# - -ixon: disable XON/XOFF flow control
+stty icrnl echo icanon -echoctl -ixon 2>/dev/null || true
+
+# Set TERM if not set
+[ -z "$TERM" ] && export TERM=linux
+
+# No input drain needed (we didnt trigger DSR)
+
 # Variable to track child PID for signal forwarding
 ENTRYPOINT_PID=""
 
@@ -797,8 +816,16 @@ run_and_shutdown() {
       # Open /dev/ttyS0 as controlling terminal (session leader opening terminal = ctty)
       exec < /dev/ttyS0 > /dev/ttyS0 2>&1
       
-      # Configure terminal
-      stty sane 2>/dev/null || true
+      # Configure terminal with specific options to avoid DSR queries
+      # - icrnl: translate CR to NL on input (Enter key)
+      # - echo: echo typed characters  
+      # - icanon: canonical (line) mode
+      # - -echoctl: prevent echoing control characters as ^X
+      # - -ixon: disable XON/XOFF flow control (prevents Ctrl-S hang)
+      stty icrnl echo icanon -echoctl -ixon 2>/dev/null || true
+      
+      # Set TERM to a reasonable value if not set
+      [ -z "$TERM" ] && export TERM=linux
       
       # Now exec the actual entrypoint
       exec "$@"
@@ -868,9 +895,15 @@ elif [ -f /etc/nginx/nginx.conf ] && command -v nginx >/dev/null 2>&1; then
   run_and_shutdown nginx -g "daemon off;"
   
 else
-  log INFO "No entrypoint found, starting shell"
-  # For interactive shell, run it in foreground
-  run_and_shutdown /bin/sh -l
+  log INFO "No entrypoint found, starting interactive shell"
+  # For interactive shell, use simpler approach that works (matches test script)
+  # Set specific terminal options without stty sane (which triggers DSR queries)
+  # - icrnl: translate CR to NL on input (so Enter key works)
+  # - echo: echo input characters
+  # - icanon: enable canonical (line) input mode
+  stty icrnl echo icanon 2>/dev/null || true
+  # Use busybox setsid and sh explicitly (like working test script)
+  exec /bin/busybox setsid /bin/busybox sh -l </dev/ttyS0 >/dev/ttyS0 2>&1
 fi
 INITEOF
   busybox chmod +x "$init_script"
@@ -1324,6 +1357,10 @@ CFGEOF
     # Put terminal in raw mode with CR->NL translation for Enter key
     stty raw -echo icrnl 2>/dev/null || true
     log "  Host terminal: raw mode enabled"
+    
+    # Drain any pending input on host side (e.g. DSR cursor position responses)
+    # This prevents ^[[27;5R from leaking to guest
+    while read -t 0.1 -r _drain 2>/dev/null; do :; done
   fi
 
   # Run Firecracker

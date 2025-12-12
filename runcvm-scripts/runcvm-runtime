@@ -99,8 +99,26 @@ error() {
   
   # Log error with severity
   log_error "$1"
-  exit -1
+  exit 1
 }
+
+# ============================================================
+# CLEANUP HANDLER
+# Ensures unfsd is stopped when runtime is terminated
+# ============================================================
+
+# Store container ID globally for cleanup
+CLEANUP_CONTAINER_ID=""
+
+cleanup_on_exit() {
+  if [ -n "$CLEANUP_CONTAINER_ID" ] && [ -x /opt/runcvm/scripts/runcvm-nfsd ]; then
+    echo "[CLEANUP] Stopping unfsd for container $CLEANUP_CONTAINER_ID" >&2
+    /opt/runcvm/scripts/runcvm-nfsd stop "$CLEANUP_CONTAINER_ID" 2>&1 || true
+  fi
+}
+
+# Register cleanup handlers for signals
+trap cleanup_on_exit EXIT SIGTERM SIGINT
 
 load_env_from_file() {
   local file="$1"
@@ -287,6 +305,9 @@ if [ "$COMMAND" = "create" ]; then
   done
 
   ID="$1"
+  
+  # Store ID for cleanup handler (in case of SIGTERM/SIGINT)
+  CLEANUP_CONTAINER_ID="$ID"
 
   CFG="$BUNDLE/config.json"
   ROOT=$(jq -r .root.path $CFG)
