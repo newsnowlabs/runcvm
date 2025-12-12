@@ -113,7 +113,7 @@ COPY build-utils/make-bundelf-bundle.sh /usr/local/bin/make-bundelf-bundle.sh
 # Changed from qemu-system-x86_64 to qemu-system-aarch64
 # Note: sshfs removed from binaries - using Rust FUSE binaries instead
 # Note: watch from procps is included for proper Ctrl-C handling (busybox watch doesn't handle it)
-ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-aarch64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey watch /usr/sbin/unfsd /sbin/rpcbind"
+ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-aarch64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey watch nsenter /usr/sbin/unfsd /sbin/rpcbind"
 ENV BUNDELF_EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so /usr/lib/libtirpc*"
 ENV BUNDELF_EXTRA_SYSTEM_LIB_PATHS="/usr/lib/xtables"
 ENV BUNDELF_CODE_PATH="/opt/runcvm"
