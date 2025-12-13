@@ -397,7 +397,7 @@ fi
 # HYPERVISOR SELECTION
 # ============================================================
 
-case "${RUNCVM_HYPERVISOR:-qemu}" in
+case "${RUNCVM_HYPERVISOR:-firecracker}" in
   firecracker|fc)
     log_info "Launching Firecracker microVM..."
     

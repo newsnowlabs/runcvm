@@ -11,7 +11,7 @@
 if [[ "$RUNCVM_BREAK" =~ (prenet|postnet) ]]; then set -x; fi
 
 # Determine hypervisor
-RUNCVM_HYPERVISOR="${RUNCVM_HYPERVISOR:-qemu}"
+RUNCVM_HYPERVISOR="${RUNCVM_HYPERVISOR:-firecracker}"
 
 log() {
   echo "RunCVM-Entrypoint: $1" >&2
