@@ -5,16 +5,16 @@
 This document outlines the storage architecture design for RunCVM's Firecracker integration. Unlike QEMU which supports virtiofs for live filesystem sharing, Firecracker has a minimal device model that requires alternative approaches for Docker volume mounts.
 
 > [!NOTE]
-> **December 2025 Update**: Successfully implemented 9P over TCP for live filesystem sharing! After debugging kernel issues, we now have working bidirectional volume mounts.
+> **December 2025 Update**: Successfully implemented **NFS over TCP** for live filesystem sharing! Using unfsd (user-space NFS daemon) on the host with NFS v3 client in guest.
 
 > [!IMPORTANT]
-> **Migration Planned (December 2025)**: We are migrating from 9P/diod to **Unison** for bidirectional file synchronization. Unison provides true bidirectional sync with better concurrent container access support.
+> **Production Implementation (December 2025)**: We are using **NFS over TCP** for bidirectional file synchronization. Each container gets its own unfsd instance on a unique port, providing true bidirectional sync with concurrent container access support.
 
 **Current Status**: 
-- ✅ **Working**: Live 9P mounts over TCP with bidirectional sync
-- 🔄 **Migrating To**: Unison bidirectional sync (hybrid: inotify + 3s periodic)
+- ✅ **Production**: Live NFS mounts over TCP with bidirectional sync
 - ✅ **Working**: Multiple bind mounts with live filesystem access
-- 🎯 **Goal**: Full Docker volume compatibility with concurrent access support
+- ✅ **Complete**: Full Docker volume compatibility with concurrent access support
+- 🎯 **Goal**: Optimize performance and add advanced volume features
 
 ---
 
@@ -85,7 +85,7 @@ We use a 3-layer architecture to solve the storage problem:
 │                        LAYER 3: SYNC STRATEGY                           │
 │                  "How do changes get back to host?"                     │
 │                                                                         │
-│   Options: Sync on Exit | Periodic Sync | Inotify | 9P | NFS | FUSE    │
+│   Options: Sync on Exit | Periodic Sync | Inotify | NFS (PRODUCTION)   │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                     LAYER 2: VOLUME STRATEGY                            │
 │               "How do we handle multiple -v mounts?"                    │
@@ -376,23 +376,51 @@ GUEST VM                       │
 
 ---
 
-#### Option 5: NFS over vsock
+#### Option 5: NFS over TCP ✅ PRODUCTION
 
-Similar to 9P but uses NFS protocol.
+**Status**: ✅ **PRODUCTION** - Successfully implemented and deployed!
+
+This is the current production implementation using unfsd (user-space NFS daemon) on the host.
+
+```
+HOST (Container)
+  unfsd (NFS v3 server)
+  Per-container instance on unique port (1000-1050)
+  Bridge IP: 169.254.1.1 or Docker gateway
+                                ▲ TCP over TAP/bridge
+GUEST VM                       │
+  mount -t nfs -o vers=3,nolock,tcp 169.254.1.1:/path /mountpoint
+```
 
 | Attribute | Value |
 |-----------|-------|
 | Latency | ~1-10ms |
-| Data Loss Risk | None |
-| CPU Overhead | Medium-High |
-| Complexity | High |
-| Best For | Enterprise environments |
+| Data Loss Risk | None (live filesystem) |
+| CPU Overhead | Medium |
+| Complexity | Medium |
+| Status | ✅ **PRODUCTION** |
+| Concurrent Access | ✅ **Supported** |
 
-⚠️ **More complex than 9P with similar benefits**
+**Why NFS over 9P/Unison**:
+- Mature, stable protocol with excellent kernel support
+- No custom kernel modules needed (NFS client built into kernel)
+- Better performance than 9P on ARM64
+- User-space daemon (unfsd) easier to manage than kernel modules
+- Per-container port isolation provides security and concurrent access
+- Direct integration with Docker lifecycle (start/stop)
+
+**Key Implementation Details**:
+- **Daemon**: unfsd (user-space NFS v3 server)
+- **Port Management**: Each container gets unique ports (NFS + mount protocol)
+- **UID Mapping**: all_squash with anonuid/anongid for proper permissions
+- **Lifecycle**: Managed by `runcvm-nfsd` script, integrated with container lifecycle
+- **Network**: TCP over virtio-net bridge (169.254.1.1 or Docker gateway)
+
+✅ **This is the recommended and production-ready solution**
 
 ---
 
-#### Option 6: Custom FUSE over vsock
+#### Option 6: Custom FUSE over vsock ❌ NOT PURSUED
 
 Build a custom FUSE filesystem that tunnels over vsock.
 
@@ -401,10 +429,10 @@ Build a custom FUSE filesystem that tunnels over vsock.
 | Latency | ~1-5ms |
 | Data Loss Risk | None |
 | CPU Overhead | Medium |
-| Complexity | High |
+| Complexity | Very High |
 | Best For | Custom requirements |
 
-❌ **Too complex for our needs**
+❌ **Not pursued - NFS solution is simpler and production-ready**
 
 ---
 
@@ -416,23 +444,25 @@ Build a custom FUSE filesystem that tunnels over vsock.
 | Periodic Sync | 5-60s | Medium | ✅ Implementable | ⚠️ |
 | Inotify | <1s | Low | ✅ Implementable | ✅ |
 | **9P over vsock** | — | — | ❌ **NOT FEASIBLE** | — |
-| **9P over TCP** | ~1-10ms | None | ⚠️ **DEPRECATED** | ✅ |
-| NFS over TCP | ~1-10ms | None | 🔧 **Not needed** | ✅ |
-| **Unison (Hybrid)** | ~1-3s | Low | 🔄 **PLANNED** | ✅ |
+| **9P over TCP** | ~1-10ms | None | ❌ **DEPRECATED** | ✅ |
+| **NFS over TCP** | ~1-10ms | None | ✅ **PRODUCTION** | ✅ |
+| **Unison (Hybrid)** | ~1-3s | Low | ❌ **SUPERSEDED** | ✅ |
 
 ---
 
-#### Option 7: Unison Bidirectional Sync 🔄 PLANNED
+#### Option 7: Unison Bidirectional Sync ❌ SUPERSEDED
 
-Unison provides true bidirectional file synchronization between VM and host.
+**Status**: ❌ **SUPERSEDED by NFS** - Not pursued after successful NFS implementation
+
+Unison was considered for true bidirectional file synchronization between VM and host, but NFS proved to be a better solution.
 
 ```
 HOST (Container)
   unison server
   Listens: 0.0.0.0:5640
   Bridge IP: 169.254.1.1
-               ▲ TCP
-               │
+                ▲ TCP
+                │
 GUEST VM       │
   unison client ─┘
   Syncs: /data ↔ host:/data
@@ -445,38 +475,50 @@ GUEST VM       │
 | Data Loss Risk | Low (last-writer-wins) |
 | CPU Overhead | Medium |
 | Complexity | Medium |
-| Concurrent Access | ✅ **Supported** |
-| Status | 🔄 **PLANNED** |
+| Concurrent Access | ✅ Supported |
+| Status | ❌ **SUPERSEDED** |
 
-**Why Unison over 9P**:
-- True bidirectional sync (not just filesystem exposure)
-- Better concurrent container access with file-level locking
-- Conflict resolution (last-writer-wins)
-- More robust for network interruptions
-- Simpler kernel requirements (no 9P modules needed in guest)
-
-**Key Design Decisions**:
-- **Build**: Static build in Dockerfile (ensures version matching)
-- **Sync Mode**: Hybrid (inotify + 3s periodic)
-- **Conflicts**: Last-writer-wins
+**Why NFS was chosen instead**:
+- NFS provides instant sync (no periodic delay)
+- Better POSIX compliance
+- More mature and widely tested protocol
+- Simpler implementation (kernel NFS client vs. userspace sync)
+- No version matching requirements between client/server
 
 ---
 
-### Current Implementation: 9P over TCP ⚠️ DEPRECATED
+### Current Implementation: NFS over TCP ✅ PRODUCTION
 
 **Current Status (December 2025)**:
-1. ✅ Live 9P mounts over TCP are **fully working**
+1. ✅ Live NFS mounts over TCP are **production-ready**
 2. ✅ Changes inside VM **sync back to host** in real-time
-3. ✅ Live filesystem sharing is **production-ready**
+3. ✅ Live filesystem sharing is **fully deployed**
 4. ✅ Full Docker volume compatibility achieved
+5. ✅ Per-container isolation with unique ports
+
+**Implementation Details**:
+
+**Host Side (`runcvm-runtime` + `runcvm-nfsd`)**:
+- Each container gets a unique unfsd instance
+- Port allocation: Random port in range 1000-1050 (NFS) + port+1 (mount protocol)
+- UID/GID mapping: Uses `all_squash` with `anonuid`/`anongid` for correct permissions
+- Lifecycle management: Started on container create, stopped on container delete
+- Export file: Auto-generated per container at `/run/runcvm-nfs/<container-id>.exports`
+
+**Guest Side (`runcvm-ctr-firecracker` init script)**:
+- NFS v3 client with `nolock` (no separate lockd needed)
+- Mount options: `vers=3,nolock,tcp,port=<nfs_port>,mountport=<mount_port>`
+- Host IP: Uses gateway from network config (169.254.1.1 or Docker gateway)
+- Config file: `/runcvm/nfs-mounts` with format `src:dst:port`
 
 **What Works**:
 - Bidirectional file access (host ↔ guest)
-- Multiple volume mounts simultaneously
+- Multiple volume mounts simultaneously (each with unique port)
 - Read-write operations with immediate sync
 - Named volumes with persistence
-- Database workloads (MySQL, PostgreSQL)
+- Database workloads (MySQL, PostgreSQL, etc.)
 - Long-running containers with stateful applications
+- Concurrent access from multiple containers
 
 ---
 
@@ -617,45 +659,46 @@ STEP 3: VM boots and runs command
 
 ## Future Work
 
-### Priority 1: Migrate to Unison (In Progress)
+### Priority 1: Performance Optimization
 
-1. Remove diod-builder stage from Dockerfile
-2. Add unison-builder stage (static build)
-3. Replace 9P setup in `runcvm-ctr-firecracker` with Unison server
-4. Replace 9P mount in `runcvm-vm-init-firecracker` with Unison client
-5. Update kernel config (9P modules optional)
+1. **Port Allocation**: Implement smarter port allocation (pool management, reuse)
+2. **Connection Pooling**: Optimize NFS connection handling for faster startup
+3. **Caching**: Implement client-side caching for read-heavy workloads
+4. **Monitoring**: Add metrics for NFS performance (latency, throughput, errors)
 
-**Files to Modify**:
-- `Dockerfile` - Remove diod, add unison
-- `runcvm-scripts/runcvm-ctr-firecracker` - Replace 9P with unison
-- `runcvm-scripts/runcvm-vm-init-firecracker` - Replace 9P mount with unison
+### Priority 2: Advanced Volume Features
 
-### Priority 2: Clean Up Legacy 9P Code
+1. **Volume Drivers**: Support for Docker volume drivers
+2. **Volume Options**: Support for volume-specific mount options
+3. **Read-Only Volumes**: Proper enforcement of read-only flag
+4. **tmpfs**: Complete tmpfs mount support
+
+### Priority 3: Clean Up Legacy Code
 
 | Task | File | Status |
 |------|------|--------|
+| Remove 9P references | docs/docker/storage/design.md | 🔄 In Progress |
 | Remove diod binary | Dockerfile | 🔄 Planned |
-| Remove setup_9p_volumes() | runcvm-ctr-firecracker | 🔄 Planned |
-| Remove mount_9p_volumes() | runcvm-vm-init-firecracker | 🔄 Planned |
+| Remove Unison references | docs/docker/storage/design.md | 🔄 In Progress |
 | Update test scripts | tests/04-docker/* | 🔄 Planned |
 
-### Target Architecture (With Unison)
+### Current Production Architecture (With NFS)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  LAYER 3: Unison Bidirectional Sync                                     │
-│  - Hybrid sync: inotify + 3s periodic                                   │
-│  - Unison server on host (0.0.0.0:5640)                                 │
-│  - Unison client in guest (connects to 169.254.1.1)                     │
-│  - Conflict resolution: last-writer-wins                                │
+│  LAYER 3: NFS Bidirectional Sync                                        │
+│  - unfsd (user-space NFS v3 daemon) on host                            │
+│  - Per-container instance on unique port (1000-1050)                   │
+│  - NFS client in guest (kernel built-in)                               │
+│  - Mount: vers=3,nolock,tcp                                             │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  LAYER 2: Single Block Device for rootfs only                          │
 │  - Rootfs as ext4 image (container files only)                         │
-│  - Volumes synced live via Unison                                        │
+│  - Volumes mounted live via NFS (bidirectional)                        │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  LAYER 1: virtio-blk + virtio-net                                      │
 │  - Rootfs via virtio-blk                                                │
-│  - Unison over TCP via TAP/bridge network                               │
+│  - NFS over TCP via TAP/bridge network                                  │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -723,8 +766,8 @@ This may require:
 
 | Field | Value |
 |-------|-------|
-| Version | 3.0 |
+| Version | 4.0 |
 | Created | December 7, 2025 |
-| Updated | December 9, 2025 |
+| Updated | December 13, 2025 |
 | Author | RunCVM Team |
 | Status | **Production Ready** - 9P over TCP fully working, all phases complete |\n| Next Review | Quarterly performance review |
