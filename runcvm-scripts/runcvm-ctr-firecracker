@@ -1251,7 +1251,15 @@ CFGEOF
     "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"
   else
     # Allow stderr to pass through so errors are visible (and console output if it goes there)
-    "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"
+    # Filter out Firecracker's "Running Firecracker" banner and "anonymous-instance" logs
+    # Use while read loop to avoid buffering issues with pipes/sed
+    "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG" 2>&1 | \
+      while IFS= read -r line; do
+        case "$line" in 
+          *'[anonymous-instance'*|*'Running Firecracker'*|*'reboot: Restarting system'*) ;;
+          *) echo "$line" ;;
+        esac
+      done
   fi
   
   local exit_code=$?
