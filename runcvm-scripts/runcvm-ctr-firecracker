@@ -73,7 +73,8 @@ log_error() {
 }
 
 error() {
-  log_error "$@"
+  # ALWAYS log errors to stderr, regardless of log level
+  echo "[$(busybox date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC] [ERROR] $@" >&2
   exit 1
 }
 
@@ -141,18 +142,22 @@ setup_nfs_volumes() {
     
     # Parse pipe-separated entries
     echo "$RUNCVM_NFS_VOLUMES" | busybox tr '|' '\n' | while IFS=: read -r src dst port; do
-      [ -z "$src" ] && continue
-      [ -z "$port" ] && port="2049"  # fallback
+      if [ -z "$src" ]; then continue; fi
+      if [ -z "$port" ]; then port="2049"; fi
       
       log INFO "  Volume: $src -> $dst (port $port)"
-      [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ] && echo "[DEBUG] NFS config line: $src:$dst:$port" >&2
+      if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
+         echo "[DEBUG] NFS config line: $src:$dst:$port" >&2
+      fi
       
       # Write config for guest (format: src:dst:port)
       echo "$src:$dst:$port" >> "$nfs_config"
     done
     
     log INFO "  NFS config written to $nfs_config"
-    [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ] && echo "[DEBUG] Final nfs_config: $(busybox cat $nfs_config)" >&2
+    if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
+      echo "[DEBUG] Final nfs_config: $(busybox cat $nfs_config)" >&2
+    fi
     
   else
     log INFO "RUNCVM_NFS_VOLUMES not set, skipping NFS volume setup"
@@ -330,50 +335,42 @@ fi
 RUNCVM_LOG_LEVEL="${RUNCVM_LOG_LEVEL:-OFF}"
 
 # Logging function (simplified for sh)
+# Logging function (simplified for sh)
 log() {
   local severity="$1"
   shift
   local message="$*"
   
-  # Check log level and output accordingly
+  # Always show ERRORs, otherwise check log level
+  if [ "$severity" = "ERROR" ] || [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC-Init] [$severity] $message"
+    return
+  fi
+
   case "$RUNCVM_LOG_LEVEL" in
-    DEBUG)
-      # Show all messages
-      echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC-Init] [$severity] $message"
-      ;;
     INFO|LOG)
-      # Show INFO and ERROR
       case "$severity" in
-        INFO|ERROR) echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC-Init] [$severity] $message" ;;
+        INFO) echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC-Init] [$severity] $message" ;;
       esac
-      ;;
-    ERROR)
-      # Show only ERROR
-      case "$severity" in
-        ERROR) echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC-Init] [$severity] $message" ;;
-      esac
-      ;;
-    OFF|*)
-      # Show nothing
       ;;
   esac
 }
 
 # Helper function to redirect output based on log level
 # Usage: some_command $(output_redirect)
-# This will redirect to /dev/null unless RUNCVM_LOG_LEVEL=DEBUG
 output_redirect() {
   if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
-    echo ""  # No redirection - show output
+    echo ""  # No redirection
   else
-    echo ">/dev/null 2>&1"  # Redirect to /dev/null
+    echo ">/dev/null 2>&1"
   fi
 }
 
-# Simpler helper - returns 0 if DEBUG, 1 otherwise
+# Simpler helper - returns 0 if debug
 is_debug() {
   [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]
 }
+
 
 log INFO "Starting..."
 
@@ -404,10 +401,14 @@ mount -t tmpfs tmpfs /run 2>/dev/null || true
 mount -t tmpfs tmpfs /tmp 2>/dev/null || true
 
 # Create symlinks
+# Create symlinks
 ln -sf /proc/self/fd /dev/fd 2>/dev/null || true
 ln -sf /proc/self/fd/0 /dev/stdin 2>/dev/null || true
 ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null || true
 ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null || true
+
+# Force all output to console (now that devices exist)
+exec >/dev/console 2>&1
 
 # Setup hostname
 [ -f /etc/hostname ] && hostname -F /etc/hostname 2>/dev/null || true
@@ -766,23 +767,36 @@ if [ -f /.runcvm-entrypoint ] && [ -s /.runcvm-entrypoint ]; then
   done < /.runcvm-entrypoint
   
   echo "RunCVM-FC init: Running saved entrypoint: $@"
-  exec "$@"
+  echo "RunCVM-FC init: Running saved entrypoint: $@"
+  "$@"
+  RET=$?
+  echo "RunCVM-FC init: Entrypoint exited with code $RET"
+  
+  # Clean shutdown to avoid panic
+  busybox reboot -f
   
 elif [ -x /docker-entrypoint.sh ]; then
   echo "RunCVM-FC init: Running /docker-entrypoint.sh"
   if [ -f /etc/nginx/nginx.conf ]; then
-    exec /docker-entrypoint.sh nginx -g "daemon off;"
+    /docker-entrypoint.sh nginx -g "daemon off;"
   else
-    exec /docker-entrypoint.sh
+    /docker-entrypoint.sh
   fi
+  RET=$?
+  echo "RunCVM-FC init: Entrypoint exited with code $RET"
+  busybox reboot -f
   
 elif [ -f /etc/nginx/nginx.conf ] && command -v nginx >/dev/null 2>&1; then
   echo "RunCVM-FC init: Running nginx directly"
-  exec nginx -g "daemon off;"
+  echo "RunCVM-FC init: Running nginx directly"
+  nginx -g "daemon off;"
+  busybox reboot -f
   
 else
   echo "RunCVM-FC init: No entrypoint found, starting shell"
-  exec /bin/sh
+  echo "RunCVM-FC init: No entrypoint found, starting shell"
+  /bin/sh
+  busybox reboot -f
 fi
 INITEOF
   busybox chmod +x "$init_script"
@@ -1192,6 +1206,12 @@ NETEOF
     "kernel_image_path": "$kernel_path",
     "boot_args": "$boot_args"
   },
+  "logger": {
+    "log_path": "/dev/null",
+    "level": "Error",
+    "show_level": false,
+    "show_log_origin": false
+  },
   "drives": [
     {
       "drive_id": "rootfs",
@@ -1233,8 +1253,9 @@ CFGEOF
   if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
     "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"
   else
-    # Redirect Firecracker's stderr to /dev/null for silent operation
-    "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG" 2>/dev/null
+    # Allow stderr to pass through so errors are visible (and console output if it goes there)
+    # NOTE: Firecracker might log some things to stderr, but we need to see errors.
+    "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"
   fi
   
   local exit_code=$?

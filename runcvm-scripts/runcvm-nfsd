@@ -22,8 +22,13 @@ LOG_DIR="${RUNCVM_NFS_DIR}/logs"
 # Ensure directories exist
 mkdir -p "$RUNCVM_NFS_DIR" "$LOG_DIR"
 
+# RUNCVM_LOG_LEVEL check
+RUNCVM_LOG_LEVEL="${RUNCVM_LOG_LEVEL:-OFF}"
+
 log() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [runcvm-nfsd] $*"
+  if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [runcvm-nfsd] $*"
+  fi
 }
 
 start_nfsd() {
