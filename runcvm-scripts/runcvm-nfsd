@@ -39,13 +39,14 @@ start_nfsd() {
   local uid="${5:-0}"
   local gid="${6:-0}"
   
-  local pid_file="$RUNCVM_NFS_DIR/$container_id.pid"
-  local exports_file="$RUNCVM_NFS_DIR/$container_id.exports"
-  local log_file="$LOG_DIR/$container_id.log"
+  # Use port-based naming to allow multiple instances per container
+  local pid_file="$RUNCVM_NFS_DIR/$container_id-$port.pid"
+  local exports_file="$RUNCVM_NFS_DIR/$container_id-$port.exports"
+  local log_file="$LOG_DIR/$container_id-$port.log"
   
   # Check if already running
   if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
-    log "unfsd for $container_id already running (PID: $(cat "$pid_file"))"
+    log "unfsd for $container_id on port $port already running (PID: $(cat "$pid_file"))"
     return 0
   fi
   
@@ -92,23 +93,65 @@ EOF
 
 stop_nfsd() {
   local container_id="$1"
-  local pid_file="$RUNCVM_NFS_DIR/$container_id.pid"
-  local exports_file="$RUNCVM_NFS_DIR/$container_id.exports"
+  local port="$2"
   
-  if [ -f "$pid_file" ]; then
-    local pid=$(cat "$pid_file")
-    if kill -0 "$pid" 2>/dev/null; then
-      log "Stopping unfsd for $container_id (PID: $pid)"
+  if [ -n "$port" ]; then
+    # Stop specific port instance
+    local pid_file="$RUNCVM_NFS_DIR/$container_id-$port.pid"
+    local exports_file="$RUNCVM_NFS_DIR/$container_id-$port.exports"
+    
+    if [ -f "$pid_file" ]; then
+      local pid=$(cat "$pid_file")
+      if kill -0 "$pid" 2>/dev/null; then
+        log "Stopping unfsd for $container_id port $port (PID: $pid)"
+        kill "$pid" 2>/dev/null || true
+        sleep 0.5
+        # Force kill if still running
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+      rm -f "$pid_file"
+    fi
+    
+    rm -f "$exports_file"
+    log "Cleaned up NFS for container $container_id port $port"
+  else
+    # Stop all instances for this container (legacy behavior)
+    stop_all_nfsd "$container_id"
+  fi
+}
+
+stop_all_nfsd() {
+  local container_id="$1"
+  local stopped=0
+  
+  # Find all PID files for this container
+  for pid_file in "$RUNCVM_NFS_DIR/$container_id"-*.pid; do
+    [ -f "$pid_file" ] || continue
+    
+    local pid=$(cat "$pid_file" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      log "Stopping unfsd (PID: $pid)"
       kill "$pid" 2>/dev/null || true
-      sleep 1
-      # Force kill if still running
-      kill -9 "$pid" 2>/dev/null || true
+      stopped=$((stopped + 1))
     fi
     rm -f "$pid_file"
+  done
+  
+  # Clean up exports files
+  rm -f "$RUNCVM_NFS_DIR/$container_id"-*.exports
+  
+  if [ $stopped -gt 0 ]; then
+    sleep 1
+    # Force kill any remaining
+    for pid_file in "$RUNCVM_NFS_DIR/$container_id"-*.pid; do
+      [ -f "$pid_file" ] || continue
+      local pid=$(cat "$pid_file" 2>/dev/null)
+      [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
+      rm -f "$pid_file"
+    done
   fi
   
-  rm -f "$exports_file"
-  log "Cleaned up NFS for container $container_id"
+  log "Cleaned up all NFS instances for container $container_id ($stopped stopped)"
 }
 
 status_nfsd() {
@@ -137,10 +180,17 @@ case "$1" in
     ;;
   stop)
     if [ $# -lt 2 ]; then
-      echo "Usage: $0 stop <container-id>"
+      echo "Usage: $0 stop <container-id> [port]"
       exit 1
     fi
-    stop_nfsd "$2"
+    stop_nfsd "$2" "${3:-}"
+    ;;
+  stop-all)
+    if [ $# -lt 2 ]; then
+      echo "Usage: $0 stop-all <container-id>"
+      exit 1
+    fi
+    stop_all_nfsd "$2"
     ;;
   status)
     if [ $# -lt 2 ]; then
@@ -150,7 +200,7 @@ case "$1" in
     status_nfsd "$2"
     ;;
   *)
-    echo "Usage: $0 {start|stop|status} ..."
+    echo "Usage: $0 {start|stop|stop-all|status} ..."
     exit 1
     ;;
 esac

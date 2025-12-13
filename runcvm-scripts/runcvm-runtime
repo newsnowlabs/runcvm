@@ -112,8 +112,8 @@ CLEANUP_CONTAINER_ID=""
 
 cleanup_on_exit() {
   if [ -n "$CLEANUP_CONTAINER_ID" ] && [ -x /opt/runcvm/scripts/runcvm-nfsd ]; then
-    echo "[CLEANUP] Stopping unfsd for container $CLEANUP_CONTAINER_ID" >&2
-    /opt/runcvm/scripts/runcvm-nfsd stop "$CLEANUP_CONTAINER_ID" 2>&1 || true
+    echo "[CLEANUP] Stopping all unfsd instances for container $CLEANUP_CONTAINER_ID" >&2
+    /opt/runcvm/scripts/runcvm-nfsd stop-all "$CLEANUP_CONTAINER_ID" 2>&1 || true
   fi
 }
 
@@ -797,11 +797,11 @@ elif [ "$COMMAND" = "delete" ]; then
   
   if [ -n "$ID" ]; then
     log "FIRECRACKER: Cleaning up NFS for container $ID"
-    echo "[DEBUG] FIRECRACKER: Calling runcvm-nfsd stop for $ID" >&2
+    echo "[DEBUG] FIRECRACKER: Calling runcvm-nfsd stop-all for $ID" >&2
     
     # Stop unfsd daemon for this container
     if [ -x /opt/runcvm/scripts/runcvm-nfsd ]; then
-      /opt/runcvm/scripts/runcvm-nfsd stop "$ID" 2>&1 || true
+      /opt/runcvm/scripts/runcvm-nfsd stop-all "$ID" 2>&1 || true
       log "FIRECRACKER: NFS cleanup complete for $ID"
     else
       log "WARNING: runcvm-nfsd not found at /opt/runcvm/scripts/runcvm-nfsd"
