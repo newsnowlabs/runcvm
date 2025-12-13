@@ -121,7 +121,8 @@ do_disks() {
   done
 }
 
-do_networks() {
+# Original Docker networking - uses tap devices attached to bridges
+do_networks_docker() {
   local id=0 ifpath if mac vhost
   local DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW
 
@@ -148,6 +149,126 @@ do_networks() {
 
     id=$((id+1))
   done
+}
+
+# Kubernetes networking - uses SLIRP (user-mode) networking
+# The pod already has network configured by CNI, we use user-mode networking
+# to give the VM access through the existing network namespace
+do_networks_kubernetes() {
+  local id=0 ifpath if mac
+  local DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW
+  local net_opts dns_servers
+
+  echo "RunCVM: Using SLIRP networking for Kubernetes mode" >&2
+
+  # Get DNS servers from resolv.conf
+  dns_servers=""
+  if [ -f /etc/resolv.conf ]; then
+    while read -r line; do
+      case "$line" in
+        nameserver*)
+          ns=$(echo "$line" | busybox awk '{print $2}')
+          if [ -n "$ns" ] && [ "$ns" != "127.0.0.11" ]; then
+            if [ -z "$dns_servers" ]; then
+              dns_servers="$ns"
+            else
+              dns_servers="$dns_servers,$ns"
+            fi
+          fi
+          ;;
+      esac
+    done < /etc/resolv.conf
+  fi
+
+  # Default to cluster DNS if nothing found
+  if [ -z "$dns_servers" ]; then
+    dns_servers="10.43.0.10"  # Default k3s/k8s CoreDNS
+  fi
+
+  for ifpath in /.runcvm/network/devices/*
+  do
+    if=$(busybox basename "$ifpath")
+
+    [ "$if" = "default" ] && continue
+
+    load_network "$if"
+
+    mac=$(busybox sed -r 's/^..:..:../52:54:00/' <<<$DOCKER_IF_MAC)
+
+    # Build SLIRP network options
+    # - Use the pod's IP as the guest IP (so services can reach it)
+    # - Forward DNS to cluster DNS
+    # - Restrict to local network access
+    
+    # For the first (default) interface, set up full networking
+    if [ "$if" = "$(busybox basename $(busybox readlink -f /.runcvm/network/devices/default 2>/dev/null || echo eth0))" ]; then
+      # Calculate network and host portion for SLIRP
+      # SLIRP will NAT the VM's traffic through the container's network namespace
+      
+      net_opts="user,id=qemu$id"
+      net_opts="$net_opts,net=10.0.2.0/24"           # SLIRP internal network
+      net_opts="$net_opts,host=10.0.2.2"             # Gateway (host from VM's perspective)
+      net_opts="$net_opts,dns=10.0.2.3"              # DNS server in SLIRP network
+      net_opts="$net_opts,dhcpstart=10.0.2.15"       # DHCP range start
+      net_opts="$net_opts,hostname=$(busybox hostname)"
+      
+      # Port forwarding: hostfwd=tcp:[hostaddr]:hostport-[guestaddr]:guestport
+      # Forward from container port (host) to VM port (guest)
+      # SSHD_PORT (22222) is used by dropbear inside the VM
+      net_opts="$net_opts,hostfwd=tcp:0.0.0.0:22222-:22222"  # SSH for exec (container:22222 -> VM:22222)
+      net_opts="$net_opts,hostfwd=tcp:0.0.0.0:80-:80"        # HTTP
+      net_opts="$net_opts,hostfwd=tcp:0.0.0.0:443-:443"      # HTTPS
+      net_opts="$net_opts,hostfwd=tcp:0.0.0.0:8080-:8080"    # Alt HTTP
+      net_opts="$net_opts,hostfwd=tcp:0.0.0.0:3000-:3000"    # Dev server
+      net_opts="$net_opts,hostfwd=tcp:0.0.0.0:5000-:5000"    # Flask/registry
+      net_opts="$net_opts,hostfwd=tcp:0.0.0.0:8000-:8000"    # Django/alt
+      
+      # Add DNS forwarding - SLIRP will forward DNS queries to these servers
+      # The VM will use 10.0.2.3, which SLIRP forwards to the real DNS
+      
+      IFACES+=(
+        -netdev "$net_opts"
+        -device virtio-net-pci,netdev=qemu$id,mac=$mac,rombar=$id
+      )
+    else
+      # Additional interfaces - simpler setup
+      net_opts="user,id=qemu$id,net=10.0.$((id+3)).0/24"
+      
+      IFACES+=(
+        -netdev "$net_opts"
+        -device virtio-net-pci,netdev=qemu$id,mac=$mac,rombar=$id
+      )
+    fi
+
+    id=$((id+1))
+  done
+
+  # If no interfaces were configured, create a default one
+  if [ $id -eq 0 ]; then
+    echo "RunCVM: No network interfaces found, creating default SLIRP interface" >&2
+    
+    net_opts="user,id=qemu0"
+    net_opts="$net_opts,net=10.0.2.0/24"
+    net_opts="$net_opts,host=10.0.2.2"
+    net_opts="$net_opts,dns=10.0.2.3"
+    net_opts="$net_opts,dhcpstart=10.0.2.15"
+    net_opts="$net_opts,hostfwd=tcp::2222-:22"
+    net_opts="$net_opts,hostname=$(busybox hostname)"
+    
+    IFACES+=(
+      -netdev "$net_opts"
+      -device virtio-net-pci,netdev=qemu0,mac=52:54:00:12:34:56,rombar=0
+    )
+  fi
+}
+
+# Choose networking mode based on environment
+do_networks() {
+  if [ -f "/.runcvm/network/kubernetes_mode" ] || [ "$RUNCVM_KUBERNETES_MODE" = "1" ]; then
+    do_networks_kubernetes
+  else
+    do_networks_docker
+  fi
 }
 
 DISKS=()
@@ -181,7 +302,8 @@ fi
 if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
   CMD="$(which qemu-system-aarch64)"
   MACHINE+=(-cpu max -machine virt,gic-version=max,usb=off)
-  MACHINE+=(-rtc base=utc,driftfix=slew)
+  # Note: driftfix=slew is not supported on ARM virt machine, removed
+  MACHINE+=(-rtc base=utc,clock=host)
 else
   CMD="$(which qemu-system-aarch64)"
   MACHINE+=(-enable-kvm)
@@ -306,7 +428,7 @@ if [ "$RUNCVM_QEMU_ARCH" != "arm64" ] && [ "$RUNCVM_BIOS_DEBUG" != "1" ]; then
   OPTS+=(-fw_cfg opt/org.seabios/etc/sercon-port,string=0)
 fi
 
-if [ "$RUNCVM_BIOS" = "EFI" ] || [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
+if [ "$RUNCVM_BIOS" = "EFI" ]; then
   # UEFI firmware - use AAVMF for ARM64, OVMF for x86
   if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
     OPTS+=(-bios $RUNCVM_GUEST/usr/share/AAVMF/QEMU_EFI.fd)
@@ -317,9 +439,17 @@ fi
 
 MEM_BACKEND=(-numa node,memdev=mem)
 if [ "$RUNCVM_HUGETLB" != "1" ]; then
-  # Tests suggests prealloc=on slows down mem-path=/dev/shm
-  MEM_PATH="/dev/shm" 
-  MEM_BACKEND+=(-object memory-backend-file,id=mem,size=$RUNCVM_MEM_SIZE,mem-path=$MEM_PATH,share=on,prealloc=${RUNCVM_QEMU_MEM_PREALLOC:-off})
+  # Check if /dev/shm exists and is usable
+  if [ -d "/dev/shm" ] && touch /dev/shm/.runcvm_test 2>/dev/null; then
+    rm -f /dev/shm/.runcvm_test
+    # Tests suggests prealloc=on slows down mem-path=/dev/shm
+    MEM_PATH="/dev/shm" 
+    MEM_BACKEND+=(-object memory-backend-file,id=mem,size=$RUNCVM_MEM_SIZE,mem-path=$MEM_PATH,share=on,prealloc=${RUNCVM_QEMU_MEM_PREALLOC:-off})
+  else
+    # Kubernetes mode or /dev/shm not available - use memfd (anonymous shared memory)
+    echo "RunCVM: /dev/shm not available, using memfd backend" >&2
+    MEM_BACKEND+=(-object memory-backend-memfd,id=mem,size=$RUNCVM_MEM_SIZE,share=on,prealloc=${RUNCVM_QEMU_MEM_PREALLOC:-off})
+  fi
 else
   # Fastest performance: +15% CPU/net intensive; 3.5x disk intensive.
   MEM_BACKEND+=(-object memory-backend-memfd,id=mem,size=$RUNCVM_MEM_SIZE,share=on,prealloc=${RUNCVM_QEMU_MEM_PREALLOC:-off},hugetlb=on)
@@ -407,6 +537,16 @@ ARGS=(
 )
 
 if [[ "$RUNCVM_BREAK" =~ preqemu ]]; then echo "Preparing to run: '$CMD' ${ARGS[@]@Q}"; bash; fi
+
+# Always show what we're about to run
+echo "Preparing to run: '$CMD' ${ARGS[@]@Q}" >&2
+
+# Debug: Check critical paths
+echo "RunCVM: Checking critical paths before QEMU..." >&2
+echo "RunCVM: /dev/shm: $(ls -la /dev/shm 2>&1 | head -3)" >&2
+echo "RunCVM: virtiofs socket: $(ls -la /run/.virtiofs.sock 2>&1)" >&2
+echo "RunCVM: VM mountpoint: $(ls -la /vm 2>&1 | head -3)" >&2
+echo "RunCVM: Memory available: $(free -m 2>&1 | head -2)" >&2
 
 if [ "$RUNCVM_QEMU_DEBUG" = "1" ]; then
   "$CMD" "${ARGS[@]}" || echo "QEMU exited with code: $?" >&2

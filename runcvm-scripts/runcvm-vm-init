@@ -1,18 +1,35 @@
 #!/.runcvm/guest/bin/bash -e
 
+# DEBUG TIMING
+debug_time() {
+  echo "TIMING: $1 at $(cat /proc/uptime | cut -d' ' -f1)s" >> /.runcvm/boot-timing.log
+}
+debug_time "vm-init started"
+
+# Boot timing profiler
+_T() { 
+  local t=$(cat /proc/uptime | cut -d' ' -f1)
+  echo "$t $1" >> /.runcvm/timing.log
+}
+_T "vm-init-start"
+
 # Load original environment
 . /.runcvm/config
+_T "config-loaded"
 
 # Load defaults and aliases
 . $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
+_T "defaults-loaded"
 
 # Alpine initrd doesn't honour command-line rw flag
 mount -o remount,rw /
+_T "mount remount"
 
 # FIXME: Something is making /.runcvm ro, so remount it rw
 # until such time as exit code handling and dropbear key creation
 # obviate the need for this.
 mount -o remount,rw /.runcvm
+_T "mount runc-vm"
 
 # Alpine initrd doesn't configure /dev device permissions and ownership
 # to support non-root users.
@@ -26,6 +43,7 @@ if [ "$(findmnt -rnu -o FSTYPE /dev)" = "devtmpfs" ]; then
   chmod 620 /dev/tty[0-9]*
   chgrp tty /dev/tty*
 fi
+_T "after /dev"
 
 # Unmount /run if it is a tmpfs (not a virtiofs) mounted by the initramfs
 # /run may be populated in the underlying image, and may also be a volume or be bind-mounted,
@@ -33,6 +51,7 @@ fi
 if [ "$(findmnt -rnu -o FSTYPE /run)" = "tmpfs" ]; then
   busybox umount -fl /run
 fi
+_T "after tmpfs"
 
 # FIXME: virtiofs mounts aren't always made rw. Remount them all rw (if allowed)
 # $RUNCVM_GUEST/bin/mount -t virtiofs | awk '{print $3}' | xargs -n 1 mount -o remount,rw
@@ -41,6 +60,7 @@ fi
 if ! [ -h /dev/fd ]; then
   ln -s /proc/self/fd /dev/fd
 fi
+_T "after /dev/fd"
 
 # FIXME: This must be run early enough, otherwise other interfaces like docker0 might have started
 IF=$(ls /sys/class/net/ | grep -vE '^(lo|docker)' | head -n 1)
@@ -51,9 +71,11 @@ do
   # /sbin/sysctl -q -w -e net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0 net.ipv6.conf.$i.accept_ra=0
   sysctl -q -w -e net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0 || true
 done
+_T "after network setup"
 
 # Bring up local interface
 ip link set lo up
+_T "after network up"
 
 # Identify each interface by MAC address, then give each a temporary name
 # (as we might ultimately need to rename e.g. eth0->eth1 and eth1->eth0).
@@ -71,6 +93,7 @@ do
 
   ip link set $device name $DOCKER_IF-tmp
 done
+_T "after network ip link"
 
 # Configure, rename and bring up all interfaces.
 for ifpath in /.runcvm/network/devices/*
@@ -88,6 +111,7 @@ do
   # If this is the default gateway interface, establish the default gateway
   [ -n "$DOCKER_IF_IP_GW" ] && ip route add default via $DOCKER_IF_IP_GW
 done
+_T "after network devices"
 
 # Read and install any supplementary routes.
 while read -r DOCKER_RT_NET DOCKER_RT_GW DOCKER_RT_DEV DOCKER_RT_PREFSRC
@@ -95,12 +119,14 @@ do
   [ -n "$DOCKER_RT_NET" ] && [ -n "$DOCKER_RT_GW" ] && [ -n "$DOCKER_RT_DEV" ] && \
     ip route add "$DOCKER_RT_NET" via "$DOCKER_RT_GW" dev "$DOCKER_RT_DEV" || true
 done </.runcvm/network/routes
+_T "after network routes"
 
 # TODO
 # - bind-mount or overwrite /etc/resolv.conf, /etc/hosts and /etc/hostname?
 
 # Setup hostname
 hostname -F /etc/hostname
+_T "after hostname"
 
 # Mount filesystems defined in /etc/fstab OR as defined in RUNCVM_DISKS
 if [ -f /.runcvm/fstab ]; then
@@ -110,6 +136,7 @@ if [ -f /.runcvm/fstab ]; then
   # Now mount our fstab over /etc/fstab
   mount --bind /.runcvm/fstab /etc/fstab
 fi
+_T "after disk fstabb"
 
 # Load cgroupfs (if needed/requested):
 # - If entrypoint is systemd-like () then call cgroupfs_mount "${RUNCVM_CGROUPFS:-none}"
@@ -117,9 +144,11 @@ fi
 
 # Load cgroupfs functions first.
 . $RUNCVM_GUEST/scripts/functions/cgroupfs
+_T "after cgrop"
 
 # Load original entrypoint
 mapfile -t ARGS </.runcvm/entrypoint
+_T "after entrypoint"
 
 ARGS_INIT="${ARGS[0]}"
 
@@ -133,33 +162,40 @@ if [[ "$ARGS_INIT" =~ /systemd$ ]]; then
 else
   cgroupfs_mount "${RUNCVM_CGROUPFS:-hybrid}"
 fi
+_T "after systemd"
 
 # Make directory for dropbear host keys and public/private keypair
 mkdir -p /.runcvm/dropbear
 
-# Create dropbear RSA public/private key pair
-KEY_PUBLIC=$(dropbearkey -t rsa -s 2048 -f /.runcvm/dropbear/key 2>/dev/null | grep ^ssh | cut -d' ' -f2)
+# Only generate if not pre-generated
+if [ ! -f /.runcvm/dropbear/key ]; then
+  # Create dropbear RSA public/private key pair
+  KEY_PUBLIC=$(dropbearkey -t ed25519 -f /.runcvm/dropbear/key 2>/dev/null | grep ^ssh | cut -d' ' -f2)
 
-# Create json for dropbear EPKA module
-cat <<_EOE_ >/.runcvm/dropbear/epka.json && chmod 400 /.runcvm/dropbear/epka.json
+  # Create json for dropbear EPKA module
+  cat <<_EOE_ >/.runcvm/dropbear/epka.json && chmod 400 /.runcvm/dropbear/epka.json
 [
     {
         "user": "root",
-        "keytype": "ssh-rsa",
+        "keytype": "ssh-ed25519",
         "key": "$KEY_PUBLIC",
         "options":"no-X11-forwarding",
         "comments": ""
     }
 ]
 _EOE_
+fi
+_T "after key ssh"
 
 # Load choice of console device
 read -r CONSOLE_DEVICE </.runcvm/console
+_T "after console"
 
 # Rename /.dockerenv, because presence of this file leads to systemd-detect-virt detecting presence of a container,
 # which in-turn prevents loading certain units (like systemd-modules-load.service), that
 # specify 'ConditionVirtualization=!container'
 [ -f "/.dockerenv" ] && mv /.dockerenv /.dockerenv.runcvm
+_T "after docker env"
 
 if [ "$RUNCVM_INIT" = "1" ]; then
   # If launched with '--init' (or --env=RUNCVM_INIT=1) then run our own init in place of Docker's/Podman's.
@@ -198,3 +234,4 @@ else
   # then exec runcvm-vm-start
   exec -c $RUNCVM_GUEST/sbin/runcvm-init --no-fork $RUNCVM_GUEST/scripts/runcvm-vm-start
 fi
+_T "after init"

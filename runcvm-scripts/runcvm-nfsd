@@ -1,0 +1,206 @@
+#!/bin/bash
+# runcvm-nfsd - Host-side NFS daemon manager for RunCVM
+#
+# This script runs on the HOST machine (not in container) and manages
+# unfsd instances for each RunCVM container. Each container gets its
+# own unfsd instance on a unique port.
+#
+# Usage:
+#   runcvm-nfsd start <container-id> <volume-path> <mount-path> <port> [uid] [gid]
+#   runcvm-nfsd stop <container-id>
+#   runcvm-nfsd status <container-id>
+#
+# Requirements:
+#   - unfs3 installed on host (apt install unfs3 / apk add unfs3)
+#   - rpcbind running (usually auto-started with unfs3)
+
+set -e
+
+RUNCVM_NFS_DIR="${RUNCVM_NFS_DIR:-/run/runcvm-nfs}"
+LOG_DIR="${RUNCVM_NFS_DIR}/logs"
+
+# Ensure directories exist
+mkdir -p "$RUNCVM_NFS_DIR" "$LOG_DIR"
+
+# RUNCVM_LOG_LEVEL check
+RUNCVM_LOG_LEVEL="${RUNCVM_LOG_LEVEL:-OFF}"
+
+log() {
+  if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [runcvm-nfsd] $*"
+  fi
+}
+
+start_nfsd() {
+  local container_id="$1"
+  local volume_path="$2"
+  local mount_path="$3"
+  local port="$4"
+  local uid="${5:-0}"
+  local gid="${6:-0}"
+  
+  # Use port-based naming to allow multiple instances per container
+  local pid_file="$RUNCVM_NFS_DIR/$container_id-$port.pid"
+  local exports_file="$RUNCVM_NFS_DIR/$container_id-$port.exports"
+  local log_file="$LOG_DIR/$container_id-$port.log"
+  
+  # Check if already running
+  if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+    log "unfsd for $container_id on port $port already running (PID: $(cat "$pid_file"))"
+    return 0
+  fi
+  
+  # Validate volume path exists
+  if [ ! -d "$volume_path" ]; then
+    log "ERROR: Volume path does not exist: $volume_path"
+    return 1
+  fi
+  
+  # Create exports file
+  # Format: /path (options)
+  # all_squash maps all UIDs to the specified anonuid/anongid
+  cat > "$exports_file" << EOF
+$volume_path (rw,all_squash,anonuid=$uid,anongid=$gid)
+EOF
+  
+  log "Starting unfsd for container $container_id"
+  log "  Volume: $volume_path -> $mount_path"
+  log "  Port: $port (mount: $((port+1)))"
+  log "  UID mapping: all -> $uid:$gid"
+  
+  # Start unfsd
+  # -d = debug mode (stay in foreground, but we background it)
+  # -e = exports file
+  # -n = NFS port
+  # -m = mount port
+  /usr/local/sbin/unfsd -d -e "$exports_file" -n "$port" -m "$((port+1))" \
+    > "$log_file" 2>&1 &
+  
+  local pid=$!
+  echo "$pid" > "$pid_file"
+  
+  # Wait a moment and verify it started
+  sleep 1
+  if kill -0 "$pid" 2>/dev/null; then
+    log "  unfsd started successfully (PID: $pid)"
+    return 0
+  else
+    log "ERROR: unfsd failed to start. Check log: $log_file"
+    cat "$log_file" | head -20
+    return 1
+  fi
+}
+
+stop_nfsd() {
+  local container_id="$1"
+  local port="$2"
+  
+  if [ -n "$port" ]; then
+    # Stop specific port instance
+    local pid_file="$RUNCVM_NFS_DIR/$container_id-$port.pid"
+    local exports_file="$RUNCVM_NFS_DIR/$container_id-$port.exports"
+    
+    if [ -f "$pid_file" ]; then
+      local pid=$(cat "$pid_file")
+      if kill -0 "$pid" 2>/dev/null; then
+        log "Stopping unfsd for $container_id port $port (PID: $pid)"
+        kill "$pid" 2>/dev/null || true
+        sleep 0.5
+        # Force kill if still running
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+      rm -f "$pid_file"
+    fi
+    
+    rm -f "$exports_file"
+    log "Cleaned up NFS for container $container_id port $port"
+  else
+    # Stop all instances for this container (legacy behavior)
+    stop_all_nfsd "$container_id"
+  fi
+}
+
+stop_all_nfsd() {
+  local container_id="$1"
+  local stopped=0
+  
+  # Find all PID files for this container
+  for pid_file in "$RUNCVM_NFS_DIR/$container_id"-*.pid; do
+    [ -f "$pid_file" ] || continue
+    
+    local pid=$(cat "$pid_file" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      log "Stopping unfsd (PID: $pid)"
+      kill "$pid" 2>/dev/null || true
+      stopped=$((stopped + 1))
+    fi
+    rm -f "$pid_file"
+  done
+  
+  # Clean up exports files
+  rm -f "$RUNCVM_NFS_DIR/$container_id"-*.exports
+  
+  if [ $stopped -gt 0 ]; then
+    sleep 1
+    # Force kill any remaining
+    for pid_file in "$RUNCVM_NFS_DIR/$container_id"-*.pid; do
+      [ -f "$pid_file" ] || continue
+      local pid=$(cat "$pid_file" 2>/dev/null)
+      [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
+      rm -f "$pid_file"
+    done
+  fi
+  
+  log "Cleaned up all NFS instances for container $container_id ($stopped stopped)"
+}
+
+status_nfsd() {
+  local container_id="$1"
+  local pid_file="$RUNCVM_NFS_DIR/$container_id.pid"
+  
+  if [ -f "$pid_file" ]; then
+    local pid=$(cat "$pid_file")
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "running:$pid"
+      return 0
+    fi
+  fi
+  echo "stopped"
+  return 1
+}
+
+# Main
+case "$1" in
+  start)
+    if [ $# -lt 5 ]; then
+      echo "Usage: $0 start <container-id> <volume-path> <mount-path> <port> [uid] [gid]"
+      exit 1
+    fi
+    start_nfsd "$2" "$3" "$4" "$5" "${6:-0}" "${7:-0}"
+    ;;
+  stop)
+    if [ $# -lt 2 ]; then
+      echo "Usage: $0 stop <container-id> [port]"
+      exit 1
+    fi
+    stop_nfsd "$2" "${3:-}"
+    ;;
+  stop-all)
+    if [ $# -lt 2 ]; then
+      echo "Usage: $0 stop-all <container-id>"
+      exit 1
+    fi
+    stop_all_nfsd "$2"
+    ;;
+  status)
+    if [ $# -lt 2 ]; then
+      echo "Usage: $0 status <container-id>"
+      exit 1
+    fi
+    status_nfsd "$2"
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|stop-all|status} ..."
+    exit 1
+    ;;
+esac

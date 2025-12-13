@@ -1,27 +1,40 @@
-# RunCVM Container Runtime
+# RunCVM (Firecracker Edition)
 
 ## Introduction
 
-RunCVM (Run Container Virtual Machine) is an experimental open-source Docker container runtime for Linux, created by Struan Bartlett at NewsNow Labs, that makes launching standard containerised workloads and system workloads (e.g. Systemd, Docker, even OpenWrt) in VMs as easy as launching a container.
+RunCVM (Run Container Virtual Machine) is an open-source Docker container runtime for Linux, created by Struan Bartlett at NewsNow Labs.
+This **Firecracker Edition** is optimized for **ARM64 (including Apple Silicon)** using **Amazon Firecracker** microVMs for lightning-fast startups and strong isolation.
 
-<p align="center">
-<a title="Click to view on Asciinema" href="https://asciinema.org/a/630469" target="_blank"><img src="https://github.com/newsnowlabs/runcvm/assets/354555/7b1a7c87-5444-4a7e-bac6-75607382571e" alt="Install RunCVM and then launch an Alpine Container/VM" width="900"></a>
-<br clear="all" />
-<a title="Click to view on Asciinema" href="https://asciinema.org/a/630469" target="_blank">View on Asciinema</a>
-</p>
+Key Features:
+- **Firecracker Hypervisor**: Boots in <500ms using lightweight microVMs.
+- **ARM64 Optimized**: Native support for Apple Silicon (M1/M2/M3/M4) and ARM64 servers.
+- **Docker Integration**: Seamless `docker run` experience with volume and network support.
+- **Legacy Support**: Optional QEMU backward compatibility for x86_64.
 
 ## Quick start
 
-Install:
+### Install
 
 ```sh
 curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
 ```
 
-Now launch an nginx VM listening on port 8080:
+### Launch with Firecracker (Default)
+
+Launch an nginx VM listening on port 8080. By default, this now uses **Firecracker** on ARM64:
 
 ```console
-docker run --runtime=runcvm --name nginx1 --rm -p 8080:80 nginx
+docker run --runtime=runcvm --name nginx-fc --rm -p 8080:80 nginx
+```
+
+> **Note**: This will launch a Firecracker microVM with a ~200ms boot time.
+
+### Legacy QEMU Mode (Optional)
+
+If you need full QEMU features (like complex device emulation), explicitly request it:
+
+```console
+docker run --runtime=runcvm --env=RUNCVM_HYPERVISOR=qemu --name nginx-qemu --rm -p 8080:80 nginx
 ```
 
 Launch a MariaDB VM, with 2 cpus and 2G memory, listening on port 3306:
@@ -247,9 +260,9 @@ RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. 
 
 ## Project ambitions
 
-- Support for booting VM with a file-backed disk root fs generated from the container image, instead of only virtiofs root
-- Support running foreign-architecture VMs by using QEMU dynamic CPU emulation for the entire VM (instead of the approach used by [https://github.com/multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static) which uses dynamic CPU emulation for each individual binary)
-- Support for QEMU [microvm](https://qemu.readthedocs.io/en/latest/system/i386/microvm.html) or potentially Amazon Firecracker
+- **Firecracker by Default**: Integrated Amazon Firecracker as the primary hypervisor for ARM64.
+- Support for booting VM with a file-backed disk root fs generated from the container image (Standard in Firecracker mode).
+- Support for QEMU [microvm](https://qemu.readthedocs.io/en/latest/system/i386/microvm.html) (via Legacy QEMU mode).
 - More natural console support with independent stdout and stderr channels for `docker run -it`
 - Improve VM boot time and other behaviours using custom kernel
 - Support for specific hardware e.g. graphics display served via VNC
@@ -501,6 +514,35 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
   - [+] x86_64 (amd64) - full support
   - [+] ARM64 (aarch64) - full support including Apple Silicon
 
+## Firecracker Support (Primary)
+
+RunCVM (Firecracker Edition) uses Amazon Firecracker as the default hypervisor.
+
+### Firecracker Features
+- **Fast Boot**: Boots in <500ms (goal: <200ms) compared to QEMU's ~3-5s.
+- **MicroVMs**: Uses KVM-based isolation with a minimal attack surface.
+- **Storage**:
+  - Uses ext4 root filesystem images created on-the-fly from container contents.
+  - **NFSv3-over-TCP**: Robust volume management using a host-side user-space NFS server (`unfsd`).
+  - **Dynamic Volume Support**: Supports multiple Docker volumes (`-v`) and bind mounts with automatic port allocation.
+  - **Persistence**: Full data persistence across VM restarts for named volumes.
+- **Networking**: Full bridge networking support with unique IPs per container.
+- **Output Suppression**: Logistics optimized for minimal noise; Virtual Terminal (VT) disabled in kernel for faster boot.
+- **Output Suppression**: Supports `RUNCVM_LOG_LEVEL` to control verbosity (OFF, ERROR, INFO, DEBUG).
+
+For a detailed integration guide, see [INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md).
+For known issues, see [docs/docker/firecracker-known-issues.md](docs/docker/firecracker-known-issues.md).
+
+### Legacy QEMU Support
+
+To use the legacy QEMU hypervisor (e.g. for x86_64 or features not yet in Firecracker mode):
+
+```console
+docker run --runtime=runcvm -e RUNCVM_HYPERVISOR=qemu ...
+```
+
+
+
 ## RunCVM vs Kata comparison
 
 This table provides a high-level comparison of RunCVM and Kata across various features like kernels, networking/DNS, memory allocation, namespace handling, method of operation, and performance characteristics:
@@ -740,6 +782,20 @@ Debug logs are written to files in `/tmp`.
 
 Enable logging the exit code from QEMU and OOM statistics.
 
+### `--env=RUNCVM_HYPERVISOR=<firecracker|qemu>`
+
+Select the hypervisor to use. Default is `firecracker`.
+- `firecracker`: The lightweight, fast-booting microVM hypervisor (Default).
+- `qemu`: The legacy, fully-featured hypervisor (uses virtiofs, slower boot).
+
+### `--env=RUNCVM_LOG_LEVEL=<OFF|ERROR|INFO|DEBUG>`
+
+Control the verbosity of RunCVM logs (especially for Firecracker).
+- `OFF`: Silent (default).
+- `ERROR`: Only show critical errors.
+- `INFO`: Show startup progress and network config.
+- `DEBUG`: Verbose output for debugging.
+
 ### `--env=RUNCVM_BREAK=<values>`
 
 Enable breakpoints (falling to bash shell) during the RunCVM Container/VM boot process.
@@ -950,6 +1006,24 @@ docker buildx build --platform linux/arm64 -t runcvm:arm64 -f Dockerfile.arm64 .
 Now follow the main [installation instructions](#installation) to install your built RunCVM from the Docker image.
 
 ## Testing
+
+A comprehensive automated test suite is now available for verifying RunCVM functionality, particularly for storage and Firecracker integration.
+
+### Automated Test Suite
+
+Located in `tests/04-docker/`, the suite covers:
+- **Basic Storage**: `test-storage.sh` (Volume mounting, permissions)
+- **Persistence**: `test-persistence.sh` (Data survival across restarts)
+- **Caching**: `test-caching.sh` (Rootfs caching mechanics)
+- **Tmpfs**: `test-tmpfs.sh` (In-memory storage)
+
+To run all storage tests:
+```bash
+cd tests/04-docker
+./run-all-storage-tests.sh
+```
+
+### Manual Verification (Nested RunCVM)
 
 Test RunCVM using nested RunCVM. You can do this using a Docker image capable of installing RunCVM, or an image built with a version of RunCVM preinstalled.
 

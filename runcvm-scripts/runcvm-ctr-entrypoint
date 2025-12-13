@@ -1,5 +1,62 @@
 #!/.runcvm/guest/bin/bash -e
 
+# ============================================================
+# LOGGING SYSTEM
+# Severity levels: DEBUG, INFO, ERROR, OFF
+# Control via: RUNCVM_LOG_LEVEL environment variable
+# ============================================================
+
+# Default log level (can be overridden by environment)
+RUNCVM_LOG_LEVEL="${RUNCVM_LOG_LEVEL:-OFF}"
+
+# Log severity levels (numeric for comparison)
+declare -A LOG_LEVELS=(
+  [DEBUG]=0
+  [INFO]=1
+  [LOG]=1      # Alias for INFO
+  [ERROR]=2
+  [OFF]=999
+)
+
+# Get numeric level for current log level (default to OFF=999)
+CURRENT_LOG_LEVEL="${LOG_LEVELS[$RUNCVM_LOG_LEVEL]:-999}"
+
+# Core logging function
+_log() {
+  local severity="$1"
+  shift
+  local message="$*"
+  local severity_level="${LOG_LEVELS[$severity]:-1}"
+  
+  # Only log if severity meets threshold
+  if [ "$severity_level" -ge "$CURRENT_LOG_LEVEL" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-Entrypoint] [$severity] $message" >&2
+  fi
+}
+
+# Convenience functions for different severity levels
+log_debug() {
+  _log DEBUG "$@"
+}
+
+log_info() {
+  _log INFO "$@"
+}
+
+log() {
+  # Default log function - maps to INFO for backward compatibility
+  _log INFO "$@"
+}
+
+log_error() {
+  _log ERROR "$@"
+}
+
+error() {
+  log_error "$@"
+  exit 1
+}
+
 # DEBUG
 if [[ "$RUNCVM_BREAK" =~ (prenet|postnet) ]]; then set -x; fi
 
@@ -79,110 +136,286 @@ busybox pwd >/.runcvm/pwd
 # DEBUG
 if [[ "$RUNCVM_BREAK" =~ prenet ]]; then bash; fi
 
-# SAVE NETWORKING CONFIG AND CONFIGURE BRIDGES
-
-# Identify default gateway device and IP address
-read -r DOCKER_GW_IF DOCKER_GW_IF_IP < \
-  <(ip -json route show | jq -r '.[] | (select(.dst == "default") | [.dev, .gateway]) | @tsv')
-# e.g. eth0 172.25.10.1
-
-QEMU_BRIDGE_IP=169.254.1.1
-RUNCVM_DNS_IP=169.254.169.254
-
-mkdir -p /.runcvm/network/devices
-
-# Save non-link-scope non-default routes for later restoration in the running VM.
-ip -json route show | jq -r '.[] | select(.scope != "link" and .dst != "default") | "\(.dst) \(.gateway) \(.dev) \(.prefsrc)"' >/.runcvm/network/routes
-
-for if in $(ip -json link show | jq -r '.[] | .ifname')
-do
-
-  [ "$if" = "lo" ] && continue
-
-  read -r DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_MAC DOCKER_IF_MTU < \
-    <(ip -json addr show "$if" | jq -r '.[0] | [.addr_info[0].local, .addr_info[0].prefixlen, .address, .mtu] | @tsv')
-  # e.g. 172.25.10.2 24 52:54:00:b7:0b:b6 1500
-
-  # Save container network parameters
-  if [ "$if" = "$DOCKER_GW_IF" ]; then
-    printf "%s %s %s %s %s %s\n" \
-      "$if" "$DOCKER_IF_MAC" "$DOCKER_IF_MTU" "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX" "$DOCKER_GW_IF_IP" \
-      >/.runcvm/network/devices/$if
-    ln -s "$if" /.runcvm/network/devices/default
-  else
-    printf "%s %s %s %s %s %s\n" \
-      "$if" "$DOCKER_IF_MAC" "$DOCKER_IF_MTU" "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX" "-" \
-      >/.runcvm/network/devices/$if
+# ============================================================
+# KUBERNETES DETECTION
+# Detect if running in Kubernetes by checking for CRI annotations
+# or Kubernetes-specific environment/files
+# ============================================================
+is_kubernetes_environment() {
+  # Check for Kubernetes service account mount INSIDE THE VM's filesystem
+  # This is the most reliable check - only exists in actual k8s pods
+  if [ -d "$RUNCVM_VM_MOUNTPOINT/var/run/secrets/kubernetes.io" ] || \
+     [ -d "/vm/var/run/secrets/kubernetes.io" ]; then
+    return 0
   fi
+  
+  # Check for KUBERNETES_SERVICE_HOST env var (set by k8s for pods)
+  if [ -n "$KUBERNETES_SERVICE_HOST" ]; then
+    return 0
+  fi
+  
+  # Check for kubernetes.io annotations in the saved config
+  # This is set by containerd CRI but not by Docker
+  if [ -f "/.runcvm/config" ] && grep -q "KUBERNETES_SERVICE" "/.runcvm/config" 2>/dev/null; then
+    return 0
+  fi
+  
+  return 1
+}
 
-  # RECONFIGURE CONTAINER NETWORK
-  ip addr flush dev "$if"
+# ============================================================
+# KUBERNETES MODE: Use passthrough networking
+# The network is already configured by the pause container/CNI
+# ============================================================
+setup_kubernetes_networking() {
+  log_info "Kubernetes environment detected - using passthrough networking"
+  
+  mkdir -p /.runcvm/network/devices
+  
+  # Mark that we're in Kubernetes mode
+  touch /.runcvm/network/kubernetes_mode
+  
+  # In Kubernetes/SLIRP mode, we need to configure the VM with SLIRP's network
+  # SLIRP uses: 10.0.2.0/24 network, 10.0.2.2 gateway, 10.0.2.15 for VM
+  # The VM will get its IP via SLIRP's DHCP, but we need to provide the config
+  # for the VM init script to work
+  
+  # Get the MAC address from the first non-lo interface (we'll use it for the VM)
+  DOCKER_GW_IF=$(ip -json link show | jq -r '.[] | select(.ifname != "lo") | .ifname' | head -1)
+  
+  if [ -n "$DOCKER_GW_IF" ]; then
+    read -r DOCKER_IF_MAC DOCKER_IF_MTU < \
+      <(ip -json addr show "$DOCKER_GW_IF" | jq -r '.[0] | [.address, .mtu] | @tsv') || true
+  fi
+  
+  # Use SLIRP network configuration for the VM
+  # Format: ifname mac mtu ip prefix gateway
+  SLIRP_VM_IP="10.0.2.15"
+  SLIRP_VM_PREFIX="24"
+  SLIRP_VM_GW="10.0.2.2"
+  SLIRP_VM_MTU="${DOCKER_IF_MTU:-1500}"
+  
+  # Write SLIRP network config for the VM
+  printf "%s %s %s %s %s %s\n" \
+    "eth0" "${DOCKER_IF_MAC:-52:54:00:12:34:56}" "$SLIRP_VM_MTU" "$SLIRP_VM_IP" "$SLIRP_VM_PREFIX" "$SLIRP_VM_GW" \
+    >/.runcvm/network/devices/eth0
+  ln -sf "eth0" /.runcvm/network/devices/default
+  
+  # No additional routes needed for SLIRP - default gateway handles everything
+  echo "" >/.runcvm/network/routes
+  
+  # Set up DNS - SLIRP provides DNS at 10.0.2.3
+  # Point VM's resolv.conf to SLIRP's DNS server
+  if [ -f /vm/etc/resolv.conf ]; then
+    echo "nameserver 10.0.2.3" >/vm/etc/resolv.conf
+  fi
+  
+  # Launch dnsmasq for local DNS forwarding (for container-side lookups)
+  dnsmasq -u root --no-hosts 2>/dev/null || true
+  
+  # For Kubernetes mode, we need to tell QEMU to use user-mode networking
+  export RUNCVM_KUBERNETES_MODE=1
+}
 
-  QEMU_BRIDGE="br-$if"
-
-  # Create the container bridge
-  # See https://bugs.launchpad.net/neutron/+bug/1738659
-  ip link add "$QEMU_BRIDGE" type bridge forward_delay 0 ageing 0
-
-  # Add the original container interface to the bridge and bring it up.
-  ip link set dev "$if" master "$QEMU_BRIDGE"
-  ip link set dev "$if" up
-
-  # Bring the bridge up.
-  ip link set dev "$QEMU_BRIDGE" up
-
-  # Restore network route via this bridge
-  DOCKER_NET=$(ip_prefix_to_network "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX")/"$DOCKER_IF_IP_NETPREFIX"
-  ip route add "$DOCKER_NET" dev "$QEMU_BRIDGE"
-
-  # If this interface is the default gateway interface, perform additional special steps.
-  if [ "$if" = "$DOCKER_GW_IF" ]; then
-
-    # Add a private IP to this bridge.
-    # We need it so the bridge can receive traffic, but the IP won't ever see the light of day.
-    ip addr add "$QEMU_BRIDGE_IP" dev "$QEMU_BRIDGE"
-
-    # Restore default gateway route via this bridge.
-    ip route add default via "$DOCKER_GW_IF_IP" dev "$QEMU_BRIDGE"
-
-    # Accept DNS requests for $RUNCVM_DNS_IP; these will be passed to dnsmasq
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -d "$RUNCVM_DNS_IP/32" -p udp -m udp --dport 53 -j REDIRECT
-
-    # Accept VNC requests on published port (5900 + display number)
-    if [[ "$RUNCVM_DISPLAY_MODE" = "vnc" ]] || is_natural_int "$RUNCVM_QEMU_VNC_DISPLAY"; then
-      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -p tcp -m tcp --dport $((RUNCVM_QEMU_VNC_DISPLAY+5900)) -j REDIRECT
+# ============================================================
+# DOCKER MODE: Original bridge-based networking
+# ============================================================
+setup_docker_networking() {
+  # SAVE NETWORKING CONFIG AND CONFIGURE BRIDGES
+  
+  # Identify default gateway device and IP address
+  read -r DOCKER_GW_IF DOCKER_GW_IF_IP < \
+    <(ip -json route show | jq -r '.[] | (select(.dst == "default") | [.dev, .gateway]) | @tsv')
+  # e.g. eth0 172.25.10.1
+  
+  QEMU_BRIDGE_IP=169.254.1.1
+  RUNCVM_DNS_IP=169.254.169.254
+  
+  mkdir -p /.runcvm/network/devices
+  
+  # Save non-link-scope non-default routes for later restoration in the running VM.
+  ip -json route show | jq -r '.[] | select(.scope != "link" and .dst != "default") | "\(.dst) \(.gateway) \(.dev) \(.prefsrc)"' >/.runcvm/network/routes
+  
+  for if in $(ip -json link show | jq -r '.[] | .ifname')
+  do
+  
+    [ "$if" = "lo" ] && continue
+  
+    read -r DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_MAC DOCKER_IF_MTU < \
+      <(ip -json addr show "$if" | jq -r '.[0] | [.addr_info[0].local, .addr_info[0].prefixlen, .address, .mtu] | @tsv')
+    # e.g. 172.25.10.2 24 52:54:00:b7:0b:b6 1500
+  
+    # Save container network parameters
+    if [ "$if" = "$DOCKER_GW_IF" ]; then
+      printf "%s %s %s %s %s %s\n" \
+        "$if" "$DOCKER_IF_MAC" "$DOCKER_IF_MTU" "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX" "$DOCKER_GW_IF_IP" \
+        >/.runcvm/network/devices/$if
+      ln -s "$if" /.runcvm/network/devices/default
+    else
+      printf "%s %s %s %s %s %s\n" \
+        "$if" "$DOCKER_IF_MAC" "$DOCKER_IF_MTU" "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX" "-" \
+        >/.runcvm/network/devices/$if
     fi
+  
+    # RECONFIGURE CONTAINER NETWORK
+    ip addr flush dev "$if"
+  
+    QEMU_BRIDGE="br-$if"
+  
+    # Create the container bridge
+    # See https://bugs.launchpad.net/neutron/+bug/1738659
+    ip link add "$QEMU_BRIDGE" type bridge forward_delay 0 ageing 0
+  
+    # Add the original container interface to the bridge and bring it up.
+    ip link set dev "$if" master "$QEMU_BRIDGE"
+    ip link set dev "$if" up
+  
+    # Bring the bridge up.
+    ip link set dev "$QEMU_BRIDGE" up
+  
+    # Restore network route via this bridge
+    DOCKER_NET=$(ip_prefix_to_network "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX")/"$DOCKER_IF_IP_NETPREFIX"
+    ip route add "$DOCKER_NET" dev "$QEMU_BRIDGE"
+  
+    # If this interface is the default gateway interface, perform additional special steps.
+    if [ "$if" = "$DOCKER_GW_IF" ]; then
+  
+      # Add a private IP to this bridge.
+      # We need it so the bridge can receive traffic, but the IP won't ever see the light of day.
+      ip addr add "$QEMU_BRIDGE_IP" dev "$QEMU_BRIDGE"
+  
+      # Restore default gateway route via this bridge.
+      ip route add default via "$DOCKER_GW_IF_IP" dev "$QEMU_BRIDGE"
+  
+      # Accept DNS requests for $RUNCVM_DNS_IP; these will be passed to dnsmasq
+      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -d "$RUNCVM_DNS_IP/32" -p udp -m udp --dport 53 -j REDIRECT
+  
+      # Accept VNC requests on published port (5900 + display number)
+      if [[ "$RUNCVM_DISPLAY_MODE" = "vnc" ]] || is_natural_int "$RUNCVM_QEMU_VNC_DISPLAY"; then
+        XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -p tcp -m tcp --dport $((RUNCVM_QEMU_VNC_DISPLAY+5900)) -j REDIRECT
+      fi
+  
+      # Match UDP port 53 traffic, outgoing via the QEMU bridge, from the bridge's own IP:
+      # -> Masquerade as if from the VM's IP.
+      #    This allows outgoing DNS requests from the VM to be received by dnsmasq running in the container.
+      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s "$QEMU_BRIDGE_IP/32" -p udp -m udp --sport 53 -j SNAT --to-source "$DOCKER_IF_IP"
+      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s "$QEMU_BRIDGE_IP/32" -p udp -m udp --dport 53 -j SNAT --to-source "$DOCKER_IF_IP"
+  
+      # Match traffic on TCP port $SSHD_PORT, outgoing via the QEMU bridge, from the bridge's own IP:
+      # -> Masquerade it as if from the DNS_IP.
+      #    This is necessary to allow SSH from within the container to the VM.
+      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s "$QEMU_BRIDGE_IP/32" -p tcp -m tcp --dport "$SSHD_PORT" -j SNAT --to-source "$RUNCVM_DNS_IP"
+    fi
+  
+  done
+  
+  # FIXME: Bind-mount /etc/resolv.conf as well as /vm/etc/resolv.conf to prevent them showing in 'docker diff'
+  cat /vm/etc/resolv.conf >/etc/resolv.conf
+  RESOLV_CONF_NEW=$(busybox sed -r "s/127.0.0.11/$RUNCVM_DNS_IP/" /vm/etc/resolv.conf)
+  echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
+  
+  # LAUNCH DNSMASQ
+  # It will receive local DNS requests (within the container, on 127.0.0.1)
+  # and requests redirected locally (via the iptables PREROUTING REDIRECT rule) for $RUNCVM_DNS_IP.
+  dnsmasq -u root --no-hosts
+}
 
-    # Match UDP port 53 traffic, outgoing via the QEMU bridge, from the bridge's own IP:
-    # -> Masquerade as if from the VM's IP.
-    #    This allows outgoing DNS requests from the VM to be received by dnsmasq running in the container.
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s "$QEMU_BRIDGE_IP/32" -p udp -m udp --sport 53 -j SNAT --to-source "$DOCKER_IF_IP"
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s "$QEMU_BRIDGE_IP/32" -p udp -m udp --dport 53 -j SNAT --to-source "$DOCKER_IF_IP"
+# ============================================================
+# MAIN NETWORKING SETUP
+# Choose between Kubernetes and Docker modes
+# ============================================================
 
-    # Match traffic on TCP port $SSHD_PORT, outgoing via the QEMU bridge, from the bridge's own IP:
-    # -> Masquerade it as if from the DNS_IP.
-    #    This is necessary to allow SSH from within the container to the VM.
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s "$QEMU_BRIDGE_IP/32" -p tcp -m tcp --dport "$SSHD_PORT" -j SNAT --to-source "$RUNCVM_DNS_IP"
-  fi
-
-done
-
-# FIXME: Bind-mount /etc/resolv.conf as well as /vm/etc/resolv.conf to prevent them showing in 'docker diff'
-cat /vm/etc/resolv.conf >/etc/resolv.conf
-RESOLV_CONF_NEW=$(busybox sed -r "s/127.0.0.11/$RUNCVM_DNS_IP/" /vm/etc/resolv.conf)
-echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
-
-# LAUNCH DNSMASQ
-# It will receive local DNS requests (within the container, on 127.0.0.1)
-# and requests redirected locally (via the iptables PREROUTING REDIRECT rule) for $RUNCVM_DNS_IP.
-dnsmasq -u root --no-hosts
+# Allow forcing a specific mode via environment variable
+if [ "$RUNCVM_NETWORK_MODE" = "kubernetes" ]; then
+  setup_kubernetes_networking
+elif [ "$RUNCVM_NETWORK_MODE" = "docker" ]; then
+  setup_docker_networking
+elif is_kubernetes_environment; then
+  setup_kubernetes_networking
+else
+  setup_docker_networking
+fi
 
 # LAUNCH VIRTIOFSD
+log_info "Starting virtiofsd..."
+log_debug "RUNCVM_VM_MOUNTPOINT=$RUNCVM_VM_MOUNTPOINT"
+log_debug "QEMU_VIRTIOFSD_SOCKET=${QEMU_VIRTIOFSD_SOCKET:-/run/.virtiofs.sock}"
+
+# Check if the source directory exists
+if [ ! -d "$RUNCVM_VM_MOUNTPOINT" ]; then
+  log_error "VM mountpoint $RUNCVM_VM_MOUNTPOINT does not exist!"
+  ls -la / >&2
+fi
+
+# Launch virtiofsd
 $RUNCVM_GUEST/scripts/runcvm-ctr-virtiofsd &
+VIRTIOFSD_PID=$!
+log_debug "virtiofsd started with PID $VIRTIOFSD_PID"
+
+# Wait for virtiofsd socket to be created (max 10 seconds)
+SOCKET_PATH="${QEMU_VIRTIOFSD_SOCKET:-/run/.virtiofs.sock}"
+log_debug "Waiting for virtiofsd socket at $SOCKET_PATH..."
+for i in $(seq 1 100); do
+  if [ -S "$SOCKET_PATH" ]; then
+    log_debug "virtiofsd socket ready after ${i}0ms"
+    break
+  fi
+  # Check if virtiofsd is still running
+  if ! kill -0 $VIRTIOFSD_PID 2>/dev/null; then
+    log_error "virtiofsd (PID $VIRTIOFSD_PID) died!"
+    echo "RunCVM: virtiofsd log:" >&2
+    cat /run/.virtiofsd.log 2>&1 >&2 || true
+    # Don't exit - let QEMU fail with a clear error
+    break
+  fi
+  sleep 0.1
+done
+
+if [ ! -S "$SOCKET_PATH" ]; then
+  log_error "virtiofsd socket not found after 10s"
+  echo "RunCVM: Contents of /run:" >&2
+  ls -la /run/ >&2 || true
+fi
 
 # DEBUG
 if [[ "$RUNCVM_BREAK" =~ postnet ]]; then bash; fi
 
+# Pre-generate SSH keys (saves ~1-2s during VM boot)
+mkdir -p /.runcvm/dropbear
+if [ ! -f /.runcvm/dropbear/key ]; then
+  $RUNCVM_GUEST/usr/bin/dropbearkey -t ed25519 -f /.runcvm/dropbear/key >/dev/null 2>&1
+  KEY_PUBLIC=$($RUNCVM_GUEST/usr/bin/dropbearkey -y -f /.runcvm/dropbear/key 2>/dev/null | grep ^ssh | cut -d' ' -f2)
+  cat <<_EOE_ >/.runcvm/dropbear/epka.json
+[{"user":"root","keytype":"ssh-ed25519","key":"$KEY_PUBLIC","options":"no-X11-forwarding","comments":""}]
+_EOE_
+  chmod 400 /.runcvm/dropbear/epka.json /.runcvm/dropbear/key
+fi
+
 # LAUNCH INIT SUPERVISING QEMU
 # FIXME: Add -v to debug
-exec $RUNCVM_GUEST/sbin/runcvm-init -c $RUNCVM_GUEST/scripts/runcvm-ctr-qemu
+# ============================================================
+# HYPERVISOR SELECTION
+# ============================================================
+
+case "${RUNCVM_HYPERVISOR:-firecracker}" in
+  firecracker|fc)
+    log_info "Launching Firecracker microVM..."
+    
+    # Copy runtime state to VM mountpoint (will be embedded in rootfs image)
+    mkdir -p "$RUNCVM_VM_MOUNTPOINT/.runcvm/network"
+    mkdir -p "$RUNCVM_VM_MOUNTPOINT/.runcvm/dropbear"
+    cp -a /.runcvm/network/. "$RUNCVM_VM_MOUNTPOINT/.runcvm/network/" 2>/dev/null || true
+    cp -a /.runcvm/config "$RUNCVM_VM_MOUNTPOINT/.runcvm/" 2>/dev/null || true
+    cp -a /.runcvm/entrypoint "$RUNCVM_VM_MOUNTPOINT/.runcvm/" 2>/dev/null || true
+    cp -a /.runcvm/pwd "$RUNCVM_VM_MOUNTPOINT/.runcvm/" 2>/dev/null || true
+    cp -a /.runcvm/dropbear/. "$RUNCVM_VM_MOUNTPOINT/.runcvm/dropbear/" 2>/dev/null || true
+    [ -f /.runcvm/fstab ] && cp -a /.runcvm/fstab "$RUNCVM_VM_MOUNTPOINT/.runcvm/"
+    
+    exec $RUNCVM_GUEST/sbin/runcvm-init -c $RUNCVM_GUEST/scripts/runcvm-ctr-firecracker
+    ;;
+    
+  qemu|*)
+    log_info "Launching QEMU VM..."
+    exec $RUNCVM_GUEST/sbin/runcvm-init -c $RUNCVM_GUEST/scripts/runcvm-ctr-qemu
+    ;;
+esac

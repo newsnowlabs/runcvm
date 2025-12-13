@@ -1,0 +1,100 @@
+# RunCVM Firecracker Build Additions
+# Add these stages to your existing Dockerfile
+
+# ============================================================
+# FIRECRACKER BINARY STAGE
+# ============================================================
+
+FROM alpine:$ALPINE_VERSION as firecracker-binary
+
+ARG TARGETARCH
+ARG FIRECRACKER_VERSION=1.13.1
+
+RUN apk add --no-cache curl
+
+# Download Firecracker binary for the target architecture
+RUN case "$TARGETARCH" in \
+      amd64|x86_64) FC_ARCH="x86_64" ;; \
+      arm64|aarch64) FC_ARCH="aarch64" ;; \
+      *) echo "Unsupported architecture: $TARGETARCH" && exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/v${FIRECRACKER_VERSION}/firecracker-v${FIRECRACKER_VERSION}-${FC_ARCH}.tgz" \
+      -o /tmp/firecracker.tgz && \
+    tar -xzf /tmp/firecracker.tgz -C /tmp && \
+    mv /tmp/release-v${FIRECRACKER_VERSION}-${FC_ARCH}/firecracker-v${FIRECRACKER_VERSION}-${FC_ARCH} /opt/firecracker && \
+    mv /tmp/release-v${FIRECRACKER_VERSION}-${FC_ARCH}/jailer-v${FIRECRACKER_VERSION}-${FC_ARCH} /opt/jailer && \
+    chmod +x /opt/firecracker /opt/jailer
+
+# ============================================================
+# FIRECRACKER KERNEL STAGE (x86_64)
+# ============================================================
+
+FROM alpine:$ALPINE_VERSION as firecracker-kernel-x86
+
+ARG FIRECRACKER_KERNEL_VERSION=5.10.204
+
+RUN apk add --no-cache \
+    build-base bc flex bison perl linux-headers elfutils-dev \
+    openssl-dev ncurses-dev xz curl
+
+# Download and build kernel
+WORKDIR /kernel
+RUN curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${FIRECRACKER_KERNEL_VERSION}.tar.xz" \
+      -o linux.tar.xz && \
+    tar -xJf linux.tar.xz && \
+    cd linux-${FIRECRACKER_KERNEL_VERSION}
+
+# Copy Firecracker kernel config
+COPY kernels/firecracker/config-firecracker-x86_64 /kernel/linux-${FIRECRACKER_KERNEL_VERSION}/.config
+
+RUN cd /kernel/linux-${FIRECRACKER_KERNEL_VERSION} && \
+    make olddefconfig && \
+    make -j$(nproc) vmlinux && \
+    mkdir -p /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION} && \
+    cp vmlinux /opt/runcvm/kernels/firecracker/${FIRECRACKER_KERNEL_VERSION}/ && \
+    ln -sf ${FIRECRACKER_KERNEL_VERSION} /opt/runcvm/kernels/firecracker/latest
+
+# ============================================================
+# ALTERNATIVE: Download pre-built Firecracker kernel
+# ============================================================
+
+FROM alpine:$ALPINE_VERSION as firecracker-kernel-prebuilt
+
+ARG TARGETARCH
+ARG FIRECRACKER_VERSION=1.6.0
+
+RUN apk add --no-cache curl
+
+RUN case "$TARGETARCH" in \
+      amd64|x86_64) FC_ARCH="x86_64" ;; \
+      arm64|aarch64) FC_ARCH="aarch64" ;; \
+      *) echo "Unsupported architecture: $TARGETARCH" && exit 1 ;; \
+    esac && \
+    mkdir -p /opt/runcvm/kernels/firecracker/latest && \
+    # Download kernel from Firecracker CI artifacts or use Amazon's kernels
+    curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v${FIRECRACKER_VERSION}/${FC_ARCH}/vmlinux-5.10.bin" \
+      -o /opt/runcvm/kernels/firecracker/latest/vmlinux || \
+    # Fallback: try GitHub releases
+    echo "Warning: Could not download pre-built kernel"
+
+# ============================================================
+# MODIFICATIONS TO INSTALLER STAGE
+# ============================================================
+
+# Add these COPY commands to your existing 'installer' stage:
+
+# Copy Firecracker binaries
+# COPY --from=firecracker-binary /opt/firecracker /opt/runcvm/bin/firecracker
+# COPY --from=firecracker-binary /opt/jailer /opt/runcvm/bin/jailer
+
+# Copy Firecracker kernel (choose one: built or prebuilt)
+# COPY --from=firecracker-kernel-x86 /opt/runcvm/kernels/firecracker /opt/runcvm/kernels/firecracker
+# OR
+# COPY --from=firecracker-kernel-prebuilt /opt/runcvm/kernels/firecracker /opt/runcvm/kernels/firecracker
+
+# ============================================================
+# MODIFICATIONS TO BINARIES STAGE
+# ============================================================
+
+# In your 'binaries' stage, add curl to the bundled binaries:
+# ENV BUNDELF_BINARIES="... curl ..."

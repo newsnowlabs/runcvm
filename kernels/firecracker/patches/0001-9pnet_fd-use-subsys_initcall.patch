@@ -1,0 +1,18 @@
+--- a/net/9p/trans_fd.c
++++ b/net/9p/trans_fd.c
+@@ -1083,7 +1083,14 @@ static void __exit p9_trans_fd_exit(void)
+ 	v9fs_unregister_trans(&p9_fd_trans);
+ }
+ 
+-module_init(p9_trans_fd_init);
++/*
++ * Use subsys_initcall instead of module_init to ensure the FD transport
++ * (tcp, unix, fd) is registered BEFORE anything tries to use it.
++ * 
++ * This fixes the issue on ARM64 where the transport wasn't registering
++ * early enough, causing 9P mounts over TCP to fail with "permission denied".
++ */
++subsys_initcall(p9_trans_fd_init);
+ module_exit(p9_trans_fd_exit);
+ 
+ MODULE_AUTHOR("Eric Van Hensbergen <ericvh@gmail.com>");

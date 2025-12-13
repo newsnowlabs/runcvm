@@ -1,0 +1,206 @@
+#!/bin/bash
+
+# RunCVM Rootfs Creator for Firecracker
+# Creates an ext4 rootfs image from a directory (container filesystem)
+#
+# Usage: runcvm-create-rootfs <source_dir> <output_image> [size_mb]
+#
+# This script:
+# 1. Creates a sparse ext4 image file
+# 2. Populates it with the contents of source_dir
+# 3. Injects necessary init scripts for Firecracker boot
+
+set -e
+
+SCRIPT_DIR="$(dirname "$0")"
+
+usage() {
+  cat <<EOF
+Usage: $0 <source_dir> <output_image> [size_mb]
+
+Arguments:
+  source_dir    Directory containing the root filesystem to package
+  output_image  Path to the output ext4 image file
+  size_mb       Size of the image in MB (default: auto-calculated)
+
+Examples:
+  $0 /var/lib/docker/overlay2/.../merged rootfs.ext4
+  $0 /tmp/alpine-root rootfs.ext4 512
+  $0 \$RUNCVM_VM_MOUNTPOINT /.runcvm/rootfs.ext4
+
+Environment variables:
+  RUNCVM_GUEST         Path to RunCVM guest binaries (default: /.runcvm/guest)
+  RUNCVM_ROOTFS_EXTRA  Extra space in MB to add to calculated size (default: 256)
+EOF
+  exit 1
+}
+
+log() {
+  echo "[runcvm-create-rootfs] $1" >&2
+}
+
+error() {
+  echo "[runcvm-create-rootfs] ERROR: $1" >&2
+  exit 1
+}
+
+# ============================================================
+# ARGUMENT PARSING
+# ============================================================
+
+SOURCE_DIR="$1"
+OUTPUT_IMAGE="$2"
+SIZE_MB="$3"
+
+[ -z "$SOURCE_DIR" ] && usage
+[ -z "$OUTPUT_IMAGE" ] && usage
+
+# Validate source directory
+[ -d "$SOURCE_DIR" ] || error "Source directory does not exist: $SOURCE_DIR"
+
+# ============================================================
+# SIZE CALCULATION
+# ============================================================
+
+RUNCVM_ROOTFS_EXTRA="${RUNCVM_ROOTFS_EXTRA:-256}"
+
+if [ -z "$SIZE_MB" ]; then
+  # Calculate size based on directory usage
+  log "Calculating required size..."
+  
+  USED_MB=$(du -sm "$SOURCE_DIR" 2>/dev/null | cut -f1)
+  
+  if [ -z "$USED_MB" ] || [ "$USED_MB" -eq 0 ]; then
+    USED_MB=100
+  fi
+  
+  # Add extra space for runtime modifications
+  SIZE_MB=$((USED_MB + RUNCVM_ROOTFS_EXTRA))
+  
+  # Minimum size
+  [ "$SIZE_MB" -lt 256 ] && SIZE_MB=256
+  
+  log "Source directory uses ${USED_MB}MB, creating ${SIZE_MB}MB image"
+fi
+
+# ============================================================
+# IMAGE CREATION
+# ============================================================
+
+log "Creating sparse image file: $OUTPUT_IMAGE (${SIZE_MB}MB)"
+
+# Create parent directory if needed
+mkdir -p "$(dirname "$OUTPUT_IMAGE")"
+
+# Remove existing image
+rm -f "$OUTPUT_IMAGE"
+
+# Create sparse file
+truncate -s "${SIZE_MB}M" "$OUTPUT_IMAGE" || {
+  # Fallback for systems without truncate
+  dd if=/dev/zero of="$OUTPUT_IMAGE" bs=1M count=0 seek="$SIZE_MB" 2>/dev/null
+}
+
+# ============================================================
+# FILESYSTEM CREATION
+# ============================================================
+
+log "Creating ext4 filesystem..."
+
+# Check if mke2fs supports -d (populate from directory)
+if mke2fs -h 2>&1 | grep -q -- '-d '; then
+  # Modern mke2fs with -d support
+  mke2fs -q -F -t ext4 \
+    -L "runcvm-rootfs" \
+    -d "$SOURCE_DIR" \
+    "$OUTPUT_IMAGE"
+else
+  # Fallback: create empty filesystem and copy files
+  mke2fs -q -F -t ext4 -L "runcvm-rootfs" "$OUTPUT_IMAGE"
+  
+  log "Populating filesystem (fallback method)..."
+  
+  # Mount and copy
+  MOUNT_POINT=$(mktemp -d)
+  mount -o loop "$OUTPUT_IMAGE" "$MOUNT_POINT"
+  
+  # Copy with proper permissions
+  cp -a "$SOURCE_DIR/." "$MOUNT_POINT/" 2>/dev/null || {
+    # Handle permission errors
+    rsync -a --no-owner --no-group "$SOURCE_DIR/" "$MOUNT_POINT/" 2>/dev/null || true
+  }
+  
+  umount "$MOUNT_POINT"
+  rmdir "$MOUNT_POINT"
+fi
+
+log "Filesystem created successfully"
+
+# ============================================================
+# INJECT INIT CONFIGURATION
+# ============================================================
+
+# If this is for Firecracker, inject necessary modifications
+if [ -n "$RUNCVM_FIRECRACKER" ] || [ "$INJECT_INIT" = "1" ]; then
+  log "Injecting Firecracker init configuration..."
+  
+  MOUNT_POINT=$(mktemp -d)
+  mount -o loop "$OUTPUT_IMAGE" "$MOUNT_POINT"
+  
+  # Ensure /dev exists
+  mkdir -p "$MOUNT_POINT/dev"
+  
+  # Ensure init script is present and executable
+  if [ -f "$MOUNT_POINT/.runcvm/guest/scripts/runcvm-vm-init-firecracker" ]; then
+    chmod +x "$MOUNT_POINT/.runcvm/guest/scripts/runcvm-vm-init-firecracker"
+  fi
+  
+  # Create /etc/hostname if not present
+  if [ ! -f "$MOUNT_POINT/etc/hostname" ]; then
+    echo "firecracker-vm" > "$MOUNT_POINT/etc/hostname"
+  fi
+  
+  # Create minimal /etc/passwd if not present
+  if [ ! -f "$MOUNT_POINT/etc/passwd" ]; then
+    cat > "$MOUNT_POINT/etc/passwd" <<EOF
+root:x:0:0:root:/root:/bin/sh
+nobody:x:65534:65534:Nobody:/:/sbin/nologin
+EOF
+  fi
+  
+  # Create minimal /etc/group if not present
+  if [ ! -f "$MOUNT_POINT/etc/group" ]; then
+    cat > "$MOUNT_POINT/etc/group" <<EOF
+root:x:0:
+tty:x:5:
+nobody:x:65534:
+EOF
+  fi
+  
+  umount "$MOUNT_POINT"
+  rmdir "$MOUNT_POINT"
+  
+  log "Init configuration injected"
+fi
+
+# ============================================================
+# VERIFICATION
+# ============================================================
+
+log "Verifying image..."
+
+# Check filesystem
+e2fsck -n -f "$OUTPUT_IMAGE" >/dev/null 2>&1 || {
+  log "Warning: Filesystem check reported issues (may be normal)"
+}
+
+# Report final size
+ACTUAL_SIZE=$(ls -lh "$OUTPUT_IMAGE" | awk '{print $5}')
+SPARSE_SIZE=$(du -h "$OUTPUT_IMAGE" | cut -f1)
+
+log "Image created successfully:"
+log "  Path: $OUTPUT_IMAGE"
+log "  Apparent size: $ACTUAL_SIZE"
+log "  Actual disk usage: $SPARSE_SIZE (sparse file)"
+
+exit 0

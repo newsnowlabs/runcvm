@@ -13,3 +13,8 @@ perllocal.pod
 .Trash-1000
 .vscode
 depot.json
+output/
+config-6.6.50
+vmlinux
+build.log
+docs/docker/storage/test-report.md

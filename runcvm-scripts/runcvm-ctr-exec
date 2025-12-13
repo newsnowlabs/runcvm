@@ -92,4 +92,13 @@ if [ "$delay" -ne 0 ]; then
   sleep 2
 fi
 
-exec $RUNCVM_GUEST/usr/bin/dbclient "${opts[@]}" -p $SSHD_PORT -y -y -i /.runcvm/dropbear/key root@$DOCKER_IF_IP "$command '$uidgid' '$(echo -n $cwd | to_bin)' '$args_bin' '$env_bin'"
+# Determine the SSH target IP
+# In Kubernetes/SLIRP mode, we need to connect to 127.0.0.1 because
+# SLIRP port forwarding binds to localhost, not the VM's internal IP
+if [ -f /.runcvm/network/kubernetes_mode ]; then
+  SSH_TARGET_IP="127.0.0.1"
+else
+  SSH_TARGET_IP="$DOCKER_IF_IP"
+fi
+
+exec $RUNCVM_GUEST/usr/bin/dbclient "${opts[@]}" -p $SSHD_PORT -y -y -i /.runcvm/dropbear/key root@$SSH_TARGET_IP "$command '$uidgid' '$(echo -n $cwd | to_bin)' '$args_bin' '$env_bin'"

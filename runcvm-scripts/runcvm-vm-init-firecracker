@@ -1,0 +1,323 @@
+#!/bin/sh
+# RunCVM VM Init for Firecracker
+# 
+# This script runs inside the Firecracker VM where the rootfs is from the container image.
+# We use /bin/sh (busybox from Alpine) instead of bundled bash.
+
+set -e
+
+RUNCVM_GUEST="${RUNCVM_GUEST:-/.runcvm/guest}"
+SSHD_PORT="${SSHD_PORT:-22222}"
+
+# ============================================================
+# LOGGING SYSTEM
+# Severity levels: DEBUG, INFO, ERROR, OFF
+# Control via: RUNCVM_LOG_LEVEL environment variable
+# ============================================================
+
+# Default log level (can be overridden by environment)
+RUNCVM_LOG_LEVEL="${RUNCVM_LOG_LEVEL:-OFF}"
+
+# Core logging function (simplified for sh compatibility)
+_log() {
+  local severity="$1"
+  shift
+  local message="$*"
+  
+  # Simple numeric comparison for sh compatibility
+  case "$RUNCVM_LOG_LEVEL" in
+    DEBUG)
+      # Show all messages
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC-Init] [$severity] $message"
+      ;;
+    INFO|LOG)
+      # Show INFO and ERROR
+      case "$severity" in
+        INFO|ERROR) echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC-Init] [$severity] $message" ;;
+      esac
+      ;;
+    ERROR)
+      # Show only ERROR
+      case "$severity" in
+        ERROR) echo "[$(date '+%Y-%m-%d %H:%M:%S')] [RunCVM-FC-Init] [$severity] $message" ;;
+      esac
+      ;;
+    OFF)
+      # Show nothing
+      ;;
+  esac
+}
+
+# Convenience functions for different severity levels
+log_debug() {
+  _log DEBUG "$@"
+}
+
+log_info() {
+  _log INFO "$@"
+}
+
+log() {
+  # Default log function - maps to INFO for backward compatibility
+  _log INFO "$@"
+}
+
+log_error() {
+  _log ERROR "$@"
+}
+
+error() {
+  log_error "$@"
+  exit 1
+}
+
+sync_unison_volumes() {
+  local unison_config="/.runcvm/unison-volumes"
+  local unison_bin="/.runcvm/guest/bin/unison"
+  
+  [ -f "$unison_config" ] || return 0
+  
+  # Check if unison binary exists
+  if [ ! -x "$unison_bin" ]; then
+    log "ERROR: unison binary not found at $unison_bin"
+    return 1
+  fi
+  
+  # Connect to container's bridge IP for Unison server
+  local host_ip="169.254.1.1"
+  
+  log "Syncing volumes via Unison (host: $host_ip)..."
+  log "  Mode: hybrid (inotify + 3s periodic)"
+  log "  Conflict resolution: last-writer-wins"
+  log "  Binary: $unison_bin"
+  
+  while IFS=: read -r port dst src_path; do
+    [ -z "$port" ] && continue
+    [ -z "$src_path" ] && src_path="/"
+    
+    log "  Syncing $dst from $host_ip:$port"
+    
+    mkdir -p "$dst"
+    
+    # Sync using Unison with full path
+    # - batch: non-interactive mode
+    # - auto: accept non-conflicting changes
+    # - prefer newer: last-writer-wins
+    # - times: preserve modification times
+    "$unison_bin" "$dst" "socket://$host_ip:$port/$src_path" \
+      -batch -auto -prefer newer -times 2>&1 | while read line; do log "    $line"; done
+    sync_rc=$?
+    
+    if [ $sync_rc -eq 0 ]; then
+      log "  ✓ Synced $dst successfully"
+    else
+      log "  ✗ Failed to sync $dst (rc=$sync_rc)"
+    fi
+  done < "$unison_config"
+  
+  # Start background sync daemon
+  log "Starting background sync daemon (3s intervals)..."
+  (
+    while true; do
+      sleep 3
+      while IFS=: read -r port dst src_path; do
+        [ -z "$port" ] && continue
+        [ -z "$src_path" ] && src_path="/"
+        "$unison_bin" "$dst" "socket://$host_ip:$port/$src_path" \
+          -batch -auto -prefer newer -times >/dev/null 2>&1 || true
+      done < "$unison_config"
+    done
+  ) &
+  log "  Background sync daemon started (PID: $!)"
+}
+
+log "Starting Firecracker VM initialization..."
+
+# ============================================================
+# MOUNT ESSENTIAL FILESYSTEMS
+# ============================================================
+
+# Root should already be mounted by kernel, remount rw if needed
+mount -o remount,rw / 2>/dev/null || true
+
+# Mount proc if not mounted
+if ! mountpoint -q /proc 2>/dev/null; then
+  mkdir -p /proc
+  mount -t proc proc /proc
+fi
+
+# Mount sysfs if not mounted
+if ! mountpoint -q /sys 2>/dev/null; then
+  mkdir -p /sys
+  mount -t sysfs sysfs /sys
+fi
+
+# Mount devtmpfs if not mounted  
+if ! mountpoint -q /dev 2>/dev/null; then
+  mkdir -p /dev
+  mount -t devtmpfs devtmpfs /dev
+fi
+
+# Create pts and shm
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
+
+# Mount devtmpfs if not already mounted
+if ! mountpoint -q /dev; then
+    mount -t devtmpfs devtmpfs /dev
+fi
+
+# Create /dev/fd symlinks
+[ -e /dev/fd ] || ln -sf /proc/self/fd /dev/fd
+[ -e /dev/stdin ] || ln -sf /proc/self/fd/0 /dev/stdin
+[ -e /dev/stdout ] || ln -sf /proc/self/fd/1 /dev/stdout
+[ -e /dev/stderr ] || ln -sf /proc/self/fd/2 /dev/stderr
+
+log "Filesystems mounted"
+
+# ============================================================
+# LOAD CONFIGURATION
+# The config file may contain bash 'declare -x' syntax
+# We need to convert it to sh-compatible format
+# ============================================================
+
+if [ -f /.runcvm/config ]; then
+  # Convert 'declare -x VAR="value"' to 'export VAR="value"'
+  # and source it
+  sed 's/^declare -x /export /' /.runcvm/config > /tmp/config.sh 2>/dev/null || true
+  . /tmp/config.sh 2>/dev/null || true
+  rm -f /tmp/config.sh
+fi
+
+# ============================================================
+# NETWORK CONFIGURATION
+# ============================================================
+
+log "Configuring network..."
+
+# Bring up loopback
+ip link set lo up 2>/dev/null || true
+
+# Configure eth0 if network config exists
+if [ -f "/.runcvm/network/devices/eth0" ]; then
+  read DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW < /.runcvm/network/devices/eth0
+  
+  if [ -n "$DOCKER_IF_IP" ] && [ -n "$DOCKER_IF_IP_NETPREFIX" ]; then
+    ip addr add "$DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX" broadcast + dev eth0 2>/dev/null || true
+    ip link set eth0 up mtu "${DOCKER_IF_MTU:-1500}" 2>/dev/null || true
+    
+    if [ -n "$DOCKER_IF_IP_GW" ] && [ "$DOCKER_IF_IP_GW" != "-" ]; then
+      ip route add default via "$DOCKER_IF_IP_GW" dev eth0 2>/dev/null || true
+    fi
+    
+    log "Network configured: $DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX gw $DOCKER_IF_IP_GW"
+  fi
+else
+  # Try to bring up eth0 anyway
+  ip link set eth0 up 2>/dev/null || true
+  log "Network: eth0 up (no config file)"
+fi
+
+# Install supplementary routes
+if [ -f "/.runcvm/network/routes" ]; then
+  while read rt_net rt_gw rt_dev rt_prefsrc; do
+    [ -n "$rt_net" ] && [ -n "$rt_gw" ] && [ -n "$rt_dev" ] && \
+      ip route add "$rt_net" via "$rt_gw" dev "$rt_dev" 2>/dev/null || true
+  done < /.runcvm/network/routes
+fi
+
+# ============================================================
+# HOSTNAME
+# ============================================================
+
+if [ -f /etc/hostname ]; then
+  hostname -F /etc/hostname
+  log "Hostname: $(hostname)"
+fi
+
+# ============================================================
+# WORKING DIRECTORY
+# ============================================================
+
+if [ -f /.runcvm/pwd ]; then
+  cd "$(cat /.runcvm/pwd)" 2>/dev/null || cd /
+fi
+
+# ============================================================
+# KERNEL DEBUG INFORMATION
+# ============================================================
+
+log "========== KERNEL DEBUG INFO =========="
+
+# Show kernel version and build date
+log "Kernel version: $(uname -r)"
+log "Kernel build: $(uname -v)"
+
+log "======================================="
+
+# ============================================================
+# VOLUME SYNC
+# ============================================================
+
+log "========== UNISON VOLUME SYNC =========="
+sync_unison_volumes
+log "========== UNISON VOLUME SYNC END =========="
+
+log "Preparing to launch entrypoint..."
+
+# Read and execute entrypoint
+if [ -f /.runcvm/entrypoint ]; then
+  # Build command from entrypoint file (one arg per line)
+  CMD=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ -z "$CMD" ]; then
+      CMD="$line"
+    else  
+      # Quote arguments that contain spaces
+      case "$line" in
+        *\ *) CMD="$CMD \"$line\"" ;;
+        *) CMD="$CMD $line" ;;
+      esac
+    fi
+  done < /.runcvm/entrypoint
+  
+  log "Executing: $CMD"
+  
+  # Run the command (not exec - we need to capture exit and shutdown)
+  eval $CMD
+  EXIT_CODE=$?
+  
+  log "Command exited with code: $EXIT_CODE"
+  
+  # Save exit code for potential retrieval
+  echo "$EXIT_CODE" > /.runcvm/exitcode 2>/dev/null || true
+  
+  # Trigger clean shutdown
+  # Firecracker catches the reboot syscall and exits cleanly
+  log "Shutting down VM..."
+  
+  # Sync filesystems first
+  sync
+  
+  # Try multiple methods to trigger reboot/shutdown
+  # Method 1: Use /proc/sysrq-trigger (most reliable)
+  if [ -w /proc/sysrq-trigger ]; then
+    echo s > /proc/sysrq-trigger 2>/dev/null  # sync
+    echo o > /proc/sysrq-trigger 2>/dev/null  # poweroff
+  fi
+  
+  # Method 2: reboot syscall via busybox or coreutils
+  reboot -f 2>/dev/null || /sbin/reboot -f 2>/dev/null || true
+  
+  # Method 3: Direct poweroff
+  poweroff -f 2>/dev/null || /sbin/poweroff -f 2>/dev/null || true
+  
+  # If we get here, sleep briefly and let kernel handle it
+  # The kernel panic on init exit is actually fine - Firecracker sees it as clean exit
+  sleep 1
+  exit $EXIT_CODE
+else
+  log "No entrypoint found, starting shell"
+  exec /bin/sh -l
+fi
