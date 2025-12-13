@@ -1244,25 +1244,30 @@ CFGEOF
   # Let's try the same approach here.
   # ============================================================
   
-  log "Starting Firecracker (no host terminal modification)..."
+  log "Starting Firecracker..."
+  local fc_error_log=""
 
-  # Run Firecracker - suppress Firecracker's own logging when not in DEBUG mode
   if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
+    # In DEBUG mode, show everything directly
     "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"
   else
-    # Allow stderr to pass through so errors are visible (and console output if it goes there)
-    # Filter out Firecracker's "Running Firecracker" banner and "anonymous-instance" logs
-    # Use while read loop to avoid buffering issues with pipes/sed
-    "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG" 2>&1 | \
-      while IFS= read -r line; do
-        case "$line" in 
-          *'[anonymous-instance'*|*'Running Firecracker'*|*'reboot: Restarting system'*) ;;
-          *) echo "$line" ;;
-        esac
-      done
+    # In non-DEBUG mode, suppress stderr (logs, banner) by redirecting to a temp file
+    # This preserves stdout (console) interactivity while hiding the banner
+    fc_error_log="/tmp/firecracker-error-$$.log"
+    
+    # Run Firecracker: stdout -> terminal (interactive), stderr -> log file
+    "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG" 2> "$fc_error_log"
   fi
   
   local exit_code=$?
+
+  # If failed and we have a log, show it
+  if [ "$exit_code" -ne 0 ] && [ -n "$fc_error_log" ] && [ -f "$fc_error_log" ]; then
+    cat "$fc_error_log" >&2
+  fi
+  
+  # Cleanup temp log
+  [ -n "$fc_error_log" ] && rm -f "$fc_error_log"
   
   log "Firecracker exited with code $exit_code"
   
