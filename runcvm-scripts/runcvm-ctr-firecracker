@@ -767,7 +767,6 @@ if [ -f /.runcvm-entrypoint ] && [ -s /.runcvm-entrypoint ]; then
   done < /.runcvm-entrypoint
   
   echo "RunCVM-FC init: Running saved entrypoint: $@"
-  echo "RunCVM-FC init: Running saved entrypoint: $@"
   "$@"
   RET=$?
   echo "RunCVM-FC init: Entrypoint exited with code $RET"
@@ -788,12 +787,10 @@ elif [ -x /docker-entrypoint.sh ]; then
   
 elif [ -f /etc/nginx/nginx.conf ] && command -v nginx >/dev/null 2>&1; then
   echo "RunCVM-FC init: Running nginx directly"
-  echo "RunCVM-FC init: Running nginx directly"
   nginx -g "daemon off;"
   busybox reboot -f
   
 else
-  echo "RunCVM-FC init: No entrypoint found, starting shell"
   echo "RunCVM-FC init: No entrypoint found, starting shell"
   /bin/sh
   busybox reboot -f
@@ -1254,7 +1251,6 @@ CFGEOF
     "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"
   else
     # Allow stderr to pass through so errors are visible (and console output if it goes there)
-    # NOTE: Firecracker might log some things to stderr, but we need to see errors.
     "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"
   fi
   
