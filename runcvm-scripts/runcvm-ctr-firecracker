@@ -1118,6 +1118,11 @@ NETEOF
   # Note: 9p.debug=0xff enables verbose 9P logging to debug transport issues
   local boot_args="init=/init console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw 9p.debug=0xff"
   
+  # Add 'quiet' to suppress kernel boot messages when not in DEBUG mode
+  if [ "$RUNCVM_LOG_LEVEL" != "DEBUG" ]; then
+    boot_args="init=/init console=ttyS0 quiet reboot=k panic=1 pci=off root=/dev/vda rw"
+  fi
+  
   # Parse memory size (remove 'M' suffix if present)
   local mem_mb="${RUNCVM_MEM_SIZE%M}"
   [ -z "$mem_mb" ] && mem_mb=768
@@ -1224,8 +1229,13 @@ CFGEOF
   
   log "Starting Firecracker (no host terminal modification)..."
 
-  # Run Firecracker
-  "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"
+  # Run Firecracker - suppress Firecracker's own logging when not in DEBUG mode
+  if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
+    "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG"
+  else
+    # Redirect Firecracker's stderr to /dev/null for silent operation
+    "$FIRECRACKER_BIN" --no-api --config-file "$FIRECRACKER_CONFIG" 2>/dev/null
+  fi
   
   local exit_code=$?
   
