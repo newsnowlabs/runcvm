@@ -127,30 +127,32 @@ setup_nfs_volumes() {
   
   local nfs_config="$NFS_CONFIG"
   
-  # DEBUG: Show what we have
-  echo "[DEBUG] setup_nfs_volumes checking env var" >&2
-  echo "[DEBUG] RUNCVM_NFS_VOLUMES=${RUNCVM_NFS_VOLUMES:-<not set>}" >&2
+  # DEBUG: Show what we have (only if log level is DEBUG)
+  if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
+    echo "[DEBUG] setup_nfs_volumes checking env var" >&2
+    echo "[DEBUG] RUNCVM_NFS_VOLUMES=${RUNCVM_NFS_VOLUMES:-<not set>}" >&2
+  fi
   
   # Read from environment variable (set by runcvm-runtime)
   if [ -n "$RUNCVM_NFS_VOLUMES" ]; then
     > "$nfs_config"
     
-    log "Setting up NFS volumes from RUNCVM_NFS_VOLUMES env"
+    log INFO "Setting up NFS volumes from RUNCVM_NFS_VOLUMES env"
     
     # Parse pipe-separated entries
     echo "$RUNCVM_NFS_VOLUMES" | busybox tr '|' '\n' | while IFS=: read -r src dst port; do
       [ -z "$src" ] && continue
       [ -z "$port" ] && port="2049"  # fallback
       
-      log "  Volume: $src -> $dst (port $port)"
-      echo "[DEBUG] NFS config line: $src:$dst:$port" >&2
+      log INFO "  Volume: $src -> $dst (port $port)"
+      [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ] && echo "[DEBUG] NFS config line: $src:$dst:$port" >&2
       
       # Write config for guest (format: src:dst:port)
       echo "$src:$dst:$port" >> "$nfs_config"
     done
     
-    log "  NFS config written to $nfs_config"
-    echo "[DEBUG] Final nfs_config: $(busybox cat $nfs_config)" >&2
+    log INFO "  NFS config written to $nfs_config"
+    [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ] && echo "[DEBUG] Final nfs_config: $(busybox cat $nfs_config)" >&2
     
   else
     log INFO "RUNCVM_NFS_VOLUMES not set, skipping NFS volume setup"
@@ -322,9 +324,10 @@ if [ -f /.runcvm/config ]; then
   RUNCVM_LOG_LEVEL=$(grep '^declare -x RUNCVM_LOG_LEVEL=' /.runcvm/config 2>/dev/null | sed 's/^declare -x RUNCVM_LOG_LEVEL="\(.*\)"$/\1/' | head -1)
 fi
 
-# Default to DEBUG if not set (REQUIRED - only DEBUG mode fixes the DSR terminal issue)
-# Users can set to OFF or INFO if they don't want verbose logs, but shell may not respond
-RUNCVM_LOG_LEVEL="${RUNCVM_LOG_LEVEL:-DEBUG}"
+# Default to OFF if not set (matches host default for silent operation)
+# NOTE: DSR terminal issue is fixed by having log output during boot; 
+# users who want silent logs can set RUNCVM_LOG_LEVEL=OFF
+RUNCVM_LOG_LEVEL="${RUNCVM_LOG_LEVEL:-OFF}"
 
 # Logging function (simplified for sh)
 log() {
