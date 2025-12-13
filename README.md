@@ -523,9 +523,15 @@ RunCVM (Firecracker Edition) uses Amazon Firecracker as the default hypervisor.
 - **MicroVMs**: Uses KVM-based isolation with a minimal attack surface.
 - **Storage**:
   - Uses ext4 root filesystem images created on-the-fly from container contents.
-  - Supports Docker volumes (`-v`) and named volumes via a custom NFSv3-over-TCP implementation, ensuring persistence and bidirectional sync.
+  - **NFSv3-over-TCP**: Robust volume management using a host-side user-space NFS server (`unfsd`).
+  - **Dynamic Volume Support**: Supports multiple Docker volumes (`-v`) and bind mounts with automatic port allocation.
+  - **Persistence**: Full data persistence across VM restarts for named volumes.
 - **Networking**: Full bridge networking support with unique IPs per container.
+- **Output Suppression**: Logistics optimized for minimal noise; Virtual Terminal (VT) disabled in kernel for faster boot.
 - **Output Suppression**: Supports `RUNCVM_LOG_LEVEL` to control verbosity (OFF, ERROR, INFO, DEBUG).
+
+For a detailed integration guide, see [INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md).
+For known issues, see [docs/docker/firecracker-known-issues.md](docs/docker/firecracker-known-issues.md).
 
 ### Legacy QEMU Support
 
@@ -1000,6 +1006,24 @@ docker buildx build --platform linux/arm64 -t runcvm:arm64 -f Dockerfile.arm64 .
 Now follow the main [installation instructions](#installation) to install your built RunCVM from the Docker image.
 
 ## Testing
+
+A comprehensive automated test suite is now available for verifying RunCVM functionality, particularly for storage and Firecracker integration.
+
+### Automated Test Suite
+
+Located in `tests/04-docker/`, the suite covers:
+- **Basic Storage**: `test-storage.sh` (Volume mounting, permissions)
+- **Persistence**: `test-persistence.sh` (Data survival across restarts)
+- **Caching**: `test-caching.sh` (Rootfs caching mechanics)
+- **Tmpfs**: `test-tmpfs.sh` (In-memory storage)
+
+To run all storage tests:
+```bash
+cd tests/04-docker
+./run-all-storage-tests.sh
+```
+
+### Manual Verification (Nested RunCVM)
 
 Test RunCVM using nested RunCVM. You can do this using a Docker image capable of installing RunCVM, or an image built with a version of RunCVM preinstalled.
 
