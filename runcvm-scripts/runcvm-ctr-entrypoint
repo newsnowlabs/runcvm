@@ -299,6 +299,7 @@ setup_host_networking() {
   echo "$HOST_GW_IF" > /.runcvm/network/host_if
   
   log_info "Host networking (NAT) configured."
+}
 
 # ============================================================
 # DOCKER MODE: Original bridge-based networking

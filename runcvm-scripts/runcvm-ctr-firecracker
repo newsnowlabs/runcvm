@@ -473,148 +473,98 @@ if is_debug; then
   dmesg 2>/dev/null | grep -iE "(eth|net|virtio)" | tail -10 || echo "  Cannot read dmesg"
 fi
 
-# Configure eth0 with static IP from saved network config
-if [ -f /.runcvm-network ]; then
-  log INFO "Loading network config from /.runcvm-network"
-  if is_debug; then
-    cat /.runcvm-network
-  fi
-  . /.runcvm-network
+# Configure all network interfaces from config files or DHCP
+log INFO "Configuring network..."
+
+# We need to find all eth* interfaces
+# Since we might not have 'ls' or 'find' behaving standardly, we look at sysfs
+if is_debug; then
+  ls -la /sys/class/net/
+fi
+
+# Iterate over eth interfaces found in sysfs
+found_ifaces=0
+for iface_path in /sys/class/net/eth*; do
+  # Check if glob expansion failed
+  [ -e "$iface_path" ] || continue
   
-  # Check if eth0 exists at all
-  if [ -d /sys/class/net/eth0 ]; then
-    log INFO "eth0 exists in /sys/class/net"
-    log DEBUG "Address: $(cat /sys/class/net/eth0/address 2>/dev/null || echo 'unknown')"
-    log DEBUG "Operstate: $(cat /sys/class/net/eth0/operstate 2>/dev/null || echo 'unknown')"
-    log DEBUG "Carrier: $(cat /sys/class/net/eth0/carrier 2>/dev/null || echo 'unknown')"
-  else
-    log ERROR "eth0 does NOT exist!"
-    log INFO "Available interfaces:"
-    for iface in /sys/class/net/*; do
-      name=$(basename "$iface")
-      log DEBUG "$name: $(cat $iface/address 2>/dev/null || echo 'no-mac')"
-    done
+  IFACE=$(basename "$iface_path")
+  found_ifaces=1
+  log INFO "Configuring interface $IFACE..."
+
+  # Look for config file
+  CONFIG_FILE="/.runcvm-network-${IFACE}"
+  
+  # Backward compat: check legacy file for eth0 if new one missing
+  if [ "$IFACE" = "eth0" ] && [ ! -f "$CONFIG_FILE" ] && [ -f "/.runcvm-network" ]; then
+     CONFIG_FILE="/.runcvm-network"
   fi
   
-  if [ -n "$FC_IP" ] && [ -n "$FC_PREFIX" ] && [ -d /sys/class/net/eth0 ]; then
-    log INFO "Configuring eth0 with $FC_IP/$FC_PREFIX (MTU: ${FC_MTU:-1500})"
+  if [ -f "$CONFIG_FILE" ]; then
+    log INFO "  Loading config from $CONFIG_FILE"
+    if is_debug; then cat "$CONFIG_FILE"; fi
     
-    # Determine which ip command to use
-    if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
-      log INFO "Using RunCVM tools (via dynamic linker)"
-      IP_CMD="runcvm_ip"
-    elif command -v ip >/dev/null 2>&1; then
-      log INFO "Using system ip command"
-      IP_CMD="ip"
-    elif command -v ifconfig >/dev/null 2>&1; then
-      log INFO "Using ifconfig (fallback)"
-      IP_CMD=""
-      USE_IFCONFIG=1
+    # unset previous vars to be safe
+    unset FC_IP FC_PREFIX FC_GW FC_MTU FC_MAC
+    . "$CONFIG_FILE"
+    
+    if [ -n "$FC_IP" ] && [ -n "$FC_PREFIX" ]; then
+       log INFO "  Setting IP $FC_IP/$FC_PREFIX (MTU: ${FC_MTU:-1500})"
+       
+       # Determine tool to use
+       if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
+         IP_CMD="runcvm_ip"
+       elif command -v ip >/dev/null 2>&1; then
+         IP_CMD="ip"
+       elif command -v ifconfig >/dev/null 2>&1; then
+         IP_CMD=""
+         USE_IFCONFIG=1
+       else
+         IP_CMD=""
+       fi
+       
+       if [ -n "$IP_CMD" ]; then
+          $IP_CMD link set "$IFACE" up 2>/dev/null || true
+          [ -n "$FC_MTU" ] && $IP_CMD link set "$IFACE" mtu "$FC_MTU" 2>/dev/null || true
+          $IP_CMD addr add "$FC_IP/$FC_PREFIX" dev "$IFACE"
+          
+          if [ -n "$FC_GW" ] && [ "$FC_GW" != "-" ]; then
+             log INFO "  Adding default gateway $FC_GW"
+             $IP_CMD route add default via "$FC_GW" dev "$IFACE"
+             
+             # If this is the default GW interface, add the bridge route for 9P too
+             # (This is mostly relevant for the primary interface)
+             $IP_CMD route add 169.254.1.1/32 dev "$IFACE" 2>/dev/null || true
+          fi
+          
+       elif [ "$USE_IFCONFIG" = "1" ]; then
+          # Basic ifconfig support
+          case "$FC_PREFIX" in
+            8)  FC_NETMASK="255.0.0.0" ;;
+            16) FC_NETMASK="255.255.0.0" ;;
+            24) FC_NETMASK="255.255.255.0" ;;
+            *)  FC_NETMASK="255.255.255.0" ;;
+          esac
+          ifconfig "$IFACE" "$FC_IP" netmask "$FC_NETMASK" up
+          if [ -n "$FC_GW" ] && [ "$FC_GW" != "-" ]; then
+             route add default gw "$FC_GW" 2>/dev/null || true
+          fi
+       fi
     else
-      log ERROR "No network configuration tools available!"
-      log DEBUG "Checking PATH: $PATH"
-      if is_debug; then
-        log DEBUG "RUNCVM_GUEST dir contents:"
-        ls -la "$RUNCVM_GUEST" 2>/dev/null || echo "    not found"
-        log DEBUG "RUNCVM_GUEST/bin dir contents:"
-        ls -la "$RUNCVM_GUEST/bin" 2>/dev/null || echo "    not found"
-      fi
-      IP_CMD=""
+       log ERROR "  Config file found but missing IP/Prefix!"
     fi
-    
-    if [ -n "$IP_CMD" ]; then
-      # Bring interface up first
-      log INFO "Bringing eth0 up..."
-      $IP_CMD link set eth0 up
-      RET=$?
-      log DEBUG "ip link set eth0 up returned: $RET"
-      sleep 0.5
-      
-      # Set MTU if specified
-      if [ -n "$FC_MTU" ]; then
-        $IP_CMD link set eth0 mtu "$FC_MTU" 2>/dev/null || true
-      fi
-      
-      # Add IP address
-      log INFO "Adding IP $FC_IP/$FC_PREFIX to eth0..."
-      $IP_CMD addr add "$FC_IP/$FC_PREFIX" dev eth0
-      RET=$?
-      log DEBUG "ip addr add returned: $RET"
-      
-      if [ -n "$FC_GW" ] && [ "$FC_GW" != "-" ]; then
-        log INFO "Setting default gateway to $FC_GW..."
-        $IP_CMD route add default via "$FC_GW" dev eth0
-        RET=$?
-        log DEBUG "ip route add returned: $RET"
-        
-        # Add route to container bridge IP (169.254.1.1) for 9P diod server
-        # The bridge IP is directly reachable via same network segment
-        log INFO "Adding route to container bridge 169.254.1.1..."
-        $IP_CMD route add 169.254.1.1/32 dev eth0 2>/dev/null || true
-      fi
-      
-      # Show network config for debugging
-      if is_debug; then
-        log INFO "Final eth0 configuration:"
-        $IP_CMD addr show eth0
-        log INFO "Final routing table:"
-        $IP_CMD route show
-        log INFO "Link state:"
-        $IP_CMD link show eth0
-      fi
-      
-    elif [ "$USE_IFCONFIG" = "1" ]; then
-      log INFO "Using ifconfig"
-      # Convert prefix to netmask (simplified for common cases)
-      case "$FC_PREFIX" in
-        8)  FC_NETMASK="255.0.0.0" ;;
-        16) FC_NETMASK="255.255.0.0" ;;
-        24) FC_NETMASK="255.255.255.0" ;;
-        *)  FC_NETMASK="255.255.255.0" ;;
-      esac
-      
-      ifconfig eth0 "$FC_IP" netmask "$FC_NETMASK" up
-      
-      if [ -n "$FC_GW" ] && [ "$FC_GW" != "-" ]; then
-        route add default gw "$FC_GW" 2>/dev/null || true
-      fi
-      
-      if is_debug; then
-        ifconfig eth0
-        route -n
-      fi
+  else
+    # Fallback to DHCP if no config
+    log INFO "  No config file, trying DHCP..."
+    ip link set "$IFACE" up 2>/dev/null || ifconfig "$IFACE" up 2>/dev/null || true
+    if command -v udhcpc >/dev/null 2>&1; then
+      udhcpc -i "$IFACE" -n -q 2>/dev/null || true
     fi
-    
-    # Test connectivity (optional, non-blocking)
-    if [ -n "$FC_GW" ] && [ "$FC_GW" != "-" ]; then
-      log INFO "Testing connectivity to gateway $FC_GW..."
-      if is_debug; then
-        if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
-          runcvm_busybox ping -c 1 -W 1 "$FC_GW" 2>&1 && echo "  Gateway reachable!" || echo "  Gateway not reachable (this may be normal)"
-        elif command -v ping >/dev/null 2>&1; then
-          ping -c 1 -W 1 "$FC_GW" 2>&1 && echo "  Gateway reachable!" || echo "  Gateway not reachable (this may be normal)"
-        fi
-      else
-        # Silent ping test - just for connectivity check
-        if [ "$HAVE_RUNCVM_TOOLS" = "1" ]; then
-          runcvm_busybox ping -c 1 -W 1 "$FC_GW" >/dev/null 2>&1 && log DEBUG "Gateway reachable" || log DEBUG "Gateway not reachable"
-        elif command -v ping >/dev/null 2>&1; then
-          ping -c 1 -W 1 "$FC_GW" >/dev/null 2>&1 && log DEBUG "Gateway reachable" || log DEBUG "Gateway not reachable"
-        fi
-      fi
-    fi
-  elif [ ! -d /sys/class/net/eth0 ]; then
-    log INFO "SKIPPING network config - eth0 not found"
   fi
-elif [ -d /sys/class/net/eth0 ]; then
-  # Fallback: Try DHCP
-  log INFO "No network config file, trying DHCP..."
-  ip link set eth0 up 2>/dev/null || ifconfig eth0 up 2>/dev/null || true
-  if command -v udhcpc >/dev/null 2>&1; then
-    udhcpc -i eth0 -n -q 2>/dev/null || true
-  fi
-else
-  log INFO "No network config and no eth0 interface!"
+done
+
+if [ "$found_ifaces" = "0" ]; then
+  log INFO "No ethernet interfaces found!"
 fi
 
 log INFO "========== NETWORK SETUP END =========="
@@ -1046,18 +996,27 @@ VMEXECEOF
   log "    Created simplified runcvm-vm-exec"
   
   # Save network configuration for the VM
-  if [ -f "/.runcvm/network/devices/eth0" ]; then
-    read DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW < /.runcvm/network/devices/eth0
-    # Firecracker uses a different MAC (AA:FC:00:xx:xx:xx)
-    local fc_mac=$(echo "$DOCKER_IF_MAC" | busybox sed 's/^..:..:../AA:FC:00/')
-    log "  Saving network config: IP=$DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX GW=$DOCKER_IF_IP_GW MAC=$fc_mac"
-    cat > "${staging_dir}/.runcvm-network" << NETEOF
+  # Save network configuration for all VMs
+  if [ -d "/.runcvm/network/devices" ]; then
+    for net_dev_file in $(busybox ls /.runcvm/network/devices/* | busybox sort); do
+      local ifname=$(busybox basename "$net_dev_file")
+      [ "$ifname" = "default" ] && continue
+      
+      read DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW < "$net_dev_file"
+      
+      # Firecracker MAC
+      local fc_mac=$(echo "$DOCKER_IF_MAC" | busybox sed 's/^..:..:../AA:FC:00/')
+      
+      log "  Saving network config for $ifname: IP=$DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX GW=$DOCKER_IF_IP_GW"
+      
+      cat > "${staging_dir}/.runcvm-network-${ifname}" << NETEOF
 FC_IP="$DOCKER_IF_IP"
 FC_PREFIX="$DOCKER_IF_IP_NETPREFIX"
 FC_GW="$DOCKER_IF_IP_GW"
 FC_MTU="$DOCKER_IF_MTU"
 FC_MAC="$fc_mac"
 NETEOF
+    done
   fi
   
   # Save resolv.conf
@@ -1147,7 +1106,6 @@ NETEOF
   log "  Config: $vcpu_count vCPUs, ${mem_mb}MB RAM"
   
   # Build network config if available
-  # Build network config if available
   local network_interfaces_json=""
   local is_host_mode=0
   [ -f "/.runcvm/network/host_mode" ] && is_host_mode=1
@@ -1155,9 +1113,9 @@ NETEOF
   # Iterate over all defined network devices
   # We use a sorted list to ensure eth0 comes first (important for default gateway)
   if [ -d "/.runcvm/network/devices" ]; then
-    for device_file in $(ls /.runcvm/network/devices/* | sort); do
+    for device_file in $(busybox ls /.runcvm/network/devices/* | busybox sort); do
       # Skip the 'default' symlink to avoid duplicates
-      if [ "$(basename "$device_file")" = "default" ]; then
+      if [ "$(busybox basename "$device_file")" = "default" ]; then
         continue
       fi
       
