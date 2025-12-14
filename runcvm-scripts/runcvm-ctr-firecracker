@@ -581,14 +581,35 @@ mount_nfs_volumes() {
   local nfs_config="/.runcvm/nfs-mounts"
   
   # Get gateway IP from network config (this is the HOST from VM's perspective)
+  # Get gateway IP from network config (this is the HOST from VM's perspective)
   local host_ip=""
-  if [ -f "/.runcvm-network" ]; then
-    # Format: eth0 MAC MTU IP PREFIX GATEWAY
-    read -r _ _ _ _ _ host_ip < /.runcvm-network
+  
+  # Scan all network configs for a gateway
+  # We prioritize eth0 if it exists
+  if [ -f "/.runcvm-network-eth0" ]; then
+     unset FC_GW
+     . "/.runcvm-network-eth0"
+     if [ -n "$FC_GW" ] && [ "$FC_GW" != "-" ]; then
+       host_ip="$FC_GW"
+     fi
   fi
   
-  # Fallback to default Docker gateway
+  # If not found in eth0, try others
+  if [ -z "$host_ip" ]; then
+    for cfg in /.runcvm-network-*; do
+      [ -f "$cfg" ] || continue
+      unset FC_GW
+      . "$cfg"
+      if [ -n "$FC_GW" ] && [ "$FC_GW" != "-" ]; then
+        host_ip="$FC_GW"
+        break
+      fi
+    done
+  fi
+  
+  # Fallback to default Docker gateway if still nothing
   if [ -z "$host_ip" ] || [ "$host_ip" = "-" ]; then
+    log INFO "Warning: No gateway found in network configs, defaulting to 172.17.0.1"
     host_ip="172.17.0.1"
   fi
   
