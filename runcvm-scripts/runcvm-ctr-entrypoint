@@ -218,6 +218,89 @@ setup_kubernetes_networking() {
 }
 
 # ============================================================
+# HOST NETWORK MODE: Use NAT/TAP for --net=host
+# ============================================================
+setup_host_networking() {
+  log_info "Host network mode detected (--net=host or equivalent)"
+  
+  # In host network mode, we cannot share the physical interface directly
+  # without stealing it from the host (which breaks the container).
+  #
+  # Solution: Create a TAP device and use NAT (IP Masquerading) to route
+  # traffic from the VM through the host's network stack.
+  #
+  # This makes the VM "feel" like it's on the host network for outbound
+  # traffic, but it has its own private IP (169.254.x.x) internally.
+  
+  mkdir -p /.runcvm/network/devices
+  mkdir -p /.runcvm/network/host_mode
+  
+  # Identify host's default gateway interface
+  read -r HOST_GW_IF HOST_GW_IF_IP < \
+    <(ip -json route show | jq -r '.[] | (select(.dst == "default") | [.dev, .gateway]) | @tsv')
+    
+  if [ -z "$HOST_GW_IF" ]; then
+    log_warn "No default gateway found, guessing eth0"
+    HOST_GW_IF="eth0"
+  fi
+  
+  log_info "Using host interface $HOST_GW_IF (GW: $HOST_GW_IF_IP) for NAT"
+  
+  # Configuration for the VM's private network
+  # We use a Link-Local address to avoid conflicts
+  VM_TAP="tap0"
+  VM_IP="169.254.100.2"
+  VM_GW="169.254.100.1"
+  VM_PREFIX="24"
+  VM_MTU="1500"
+  
+  # Create TAP device
+  log_info "Creating TAP device $VM_TAP"
+  ip tuntap add dev "$VM_TAP" mode tap
+  ip addr add "$VM_GW/$VM_PREFIX" dev "$VM_TAP"
+  ip link set dev "$VM_TAP" up
+  
+  # Enable IP forwarding
+  echo 1 > /proc/sys/net/ipv4/ip_forward
+  
+  # Set up NAT (Masquerade)
+  # Traffic from VM ($VM_TAP) going out via Host Interface ($HOST_GW_IF) -> Masquerade
+  if [ -x "$RUNCVM_GUEST/usr/lib/xtables/xtables-nft-multi" ]; then
+    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables \
+      -t nat -A POSTROUTING -o "$HOST_GW_IF" -j MASQUERADE
+      
+    # Allow forwarding
+    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables \
+      -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+      
+    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables \
+      -A FORWARD -i "$VM_TAP" -o "$HOST_GW_IF" -j ACCEPT
+  else
+    iptables -t nat -A POSTROUTING -o "$HOST_GW_IF" -j MASQUERADE
+    iptables -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+    iptables -A FORWARD -i "$VM_TAP" -o "$HOST_GW_IF" -j ACCEPT
+  fi
+  
+  # Save network configuration for the VM
+  # Format: ifname mac mtu ip prefix gateway
+  # We use a fake MAC for the VM side
+  VM_MAC="AA:FC:00:00:00:01"
+  
+  printf "%s %s %s %s %s %s\n" \
+    "eth0" "$VM_MAC" "$VM_MTU" "$VM_IP" "$VM_PREFIX" "$VM_GW" \
+    >/.runcvm/network/devices/eth0
+    
+  ln -sf "eth0" /.runcvm/network/devices/default
+  
+  # Flag as host mode for Firecracker script
+  touch /.runcvm/network/host_mode
+  
+  # Save host interface info for reference
+  echo "$HOST_GW_IF" > /.runcvm/network/host_if
+  
+  log_info "Host networking (NAT) configured."
+
+# ============================================================
 # DOCKER MODE: Original bridge-based networking
 # ============================================================
 setup_docker_networking() {
@@ -328,11 +411,23 @@ setup_docker_networking() {
 # Allow forcing a specific mode via environment variable
 if [ "$RUNCVM_NETWORK_MODE" = "kubernetes" ]; then
   setup_kubernetes_networking
+elif [ "$RUNCVM_NETWORK_MODE" = "host" ]; then
+  setup_host_networking
 elif [ "$RUNCVM_NETWORK_MODE" = "docker" ]; then
   setup_docker_networking
 elif is_kubernetes_environment; then
   setup_kubernetes_networking
 else
+  # Default detection logic
+  # If we see --net=host behavior (loopback only or same net namespace as host), treat as host mode
+  # But in a container, --net=host usually means we see the host's interfaces.
+  # If we are in a container and see the host's interfaces, simply bridging them won't work 
+  # because we can't move them to a new namespace without breaking host connectivity.
+  #
+  # Basic heuristic: if we see 'eth0' with a private IP, it's likely a bridge network.
+  # If we see many interfaces matching the host, it's host networking.
+  # For now, we rely on RUNCVM_NETWORK_MODE="host" being passed explicitly or inferred.
+  
   setup_docker_networking
 fi
 

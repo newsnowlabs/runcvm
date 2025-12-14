@@ -442,6 +442,13 @@ if [ "$COMMAND" = "create" ]; then
   HYPERVISOR="$(get_config_env RUNCVM_HYPERVISOR)"
   log "DEBUG: HYPERVISOR=$HYPERVISOR"
   log "DEBUG: ROOT=$ROOT"
+  
+  # Pass RUNCVM_NETWORK_MODE if present
+  RUNCVM_NETWORK_MODE="$(get_config_env RUNCVM_NETWORK_MODE)"
+  if [ -n "$RUNCVM_NETWORK_MODE" ]; then
+    set_config_env "RUNCVM_NETWORK_MODE" "$RUNCVM_NETWORK_MODE"
+  fi
+  
   if [ "$HYPERVISOR" = "firecracker" ]; then
     VOLUMES_FILE="$ROOT/.runcvm/volumes"
     mkdir -p "$ROOT/.runcvm"

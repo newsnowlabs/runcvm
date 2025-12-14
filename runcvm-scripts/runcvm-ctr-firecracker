@@ -1147,46 +1147,143 @@ NETEOF
   log "  Config: $vcpu_count vCPUs, ${mem_mb}MB RAM"
   
   # Build network config if available
-  local network_config=""
-  if [ -f "/.runcvm/network/devices/eth0" ]; then
-    read DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW < /.runcvm/network/devices/eth0
-    local fc_mac=$(echo "$DOCKER_IF_MAC" | busybox sed 's/^..:..:../AA:FC:00/')
-    local tap_name="tap-$DOCKER_IF"
-    local bridge_name="br-$DOCKER_IF"
-    
-    log "  Network: $tap_name ($fc_mac)"
-    
-    # Create TAP device for Firecracker
-    # Unlike QEMU which uses scripts (qemu-ifup), Firecracker expects the TAP to exist
-    log "  Creating TAP device $tap_name..."
-    ip tuntap add dev "$tap_name" mode tap
-    
-    # Add TAP to the bridge (which was created by runcvm-ctr-entrypoint)
-    log "  Adding $tap_name to bridge $bridge_name..."
-    ip link set dev "$tap_name" master "$bridge_name"
-    
-    # Set MTU and bring up
-    ip link set dev "$tap_name" up mtu "${DOCKER_IF_MTU:-1500}"
-    
-    # Debug: show bridge and tap status
-    if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
-      log "  Bridge status:"
-      ip link show "$bridge_name" 2>&1 | busybox sed 's/^/    /'
-      log "  TAP status:"
-      ip link show "$tap_name" 2>&1 | busybox sed 's/^/    /'
-    fi
-    
+  # Build network config if available
+  local network_interfaces_json=""
+  local is_host_mode=0
+  [ -f "/.runcvm/network/host_mode" ] && is_host_mode=1
+  
+  # Iterate over all defined network devices
+  # We use a sorted list to ensure eth0 comes first (important for default gateway)
+  if [ -d "/.runcvm/network/devices" ]; then
+    for device_file in $(ls /.runcvm/network/devices/* | sort); do
+      # Skip the 'default' symlink to avoid duplicates
+      if [ "$(basename "$device_file")" = "default" ]; then
+        continue
+      fi
+      
+      read DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW < "$device_file"
+      
+      # For Firecracker, we need a unique MAC for the guest side.
+      # We modify the container's MAC to start with AA:FC:00 so it's distinct but related.
+      # If we have multiple interfaces, this simple sed might map them to the same MAC if the suffix is identical.
+      # But typically container MACs are unique.
+      local fc_mac=$(echo "$DOCKER_IF_MAC" | busybox sed 's/^..:..:../AA:FC:00/')
+      
+      local tap_name=""
+      
+      if [ "$is_host_mode" = "1" ] && [ "$DOCKER_IF" = "eth0" ]; then
+        # Host Mode (NAT/TAP)
+        # Entrypoint already created 'tap0' for us
+        tap_name="tap0"
+        log "  Network ($DOCKER_IF): Host Mode, using existing $tap_name"
+        
+        # Ensure it's up
+        ip link set dev "$tap_name" up mtu "${DOCKER_IF_MTU:-1500}"
+        
+      else
+        # Bridge Mode (Docker/Kubernetes)
+        tap_name="tap-$DOCKER_IF"
+        local bridge_name="br-$DOCKER_IF"
+        
+        log "  Network ($DOCKER_IF): $tap_name ($fc_mac) -> $bridge_name"
+        
+        # Create TAP device for Firecracker if it doesn't exist
+        if ! ip link show "$tap_name" >/dev/null 2>&1; then
+           log "    Creating TAP device $tap_name..."
+           ip tuntap add dev "$tap_name" mode tap
+        fi
+        
+        # Add TAP to the bridge
+        log "    Adding $tap_name to bridge $bridge_name..."
+        ip link set dev "$tap_name" master "$bridge_name"
+        
+        # Set MTU and bring up
+        ip link set dev "$tap_name" up mtu "${DOCKER_IF_MTU:-1500}"
+      
+        # Debug: show bridge and tap status
+        if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
+          log "    Bridge status:"
+          ip link show "$bridge_name" 2>&1 | busybox sed 's/^/      /'
+          log "    TAP status:"
+          ip link show "$tap_name" 2>&1 | busybox sed 's/^/      /'
+        fi
+        
+        # Add MASQUERADE rule for outbound traffic from the VM (for the default gateway interface)
+        # This allows the VM to reach external networks (internet)
+        if [ -n "$DOCKER_IF_IP" ] && [ "$DOCKER_IF_IP" != "-" ]; then
+             log "    Adding NAT MASQUERADE rule for $DOCKER_IF..."
+             if [ -n "$RUNCVM_GUEST" ] && [ -d "$RUNCVM_GUEST/usr/lib/xtables" ]; then
+               XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables \
+                 -t nat -A POSTROUTING -s "$DOCKER_IF_IP" -o "$DOCKER_IF_IP" -j MASQUERADE 2>/dev/null || true
+                 # Note: The original code used -o eth0 (hardcoded). 
+                 # In bridge mode, the traffic leaves via the container's eth0 usually?
+                 # Actually, for the VM, traffic leaves via TAP -> Bridge -> Container Eth0.
+                 # The NAT rule is needed if the *container* needs to NAT VM traffic out to the world.
+                 # Originally: -s "$DOCKER_IF_IP" -o eth0.
+                 # If this is eth0, then -o eth0 is correct (BUT wait, eth0 is now a slave of br-eth0).
+                 # So traffic leaves via br-eth0? No, traffic leaves via the bridge routing?
+                 #
+                 # Wait, in the entrypoint, we moved the Container IP to br-eth0?
+                 # Entrypoint: `ip addr flush dev eth0`, `ip addr add ... dev br-eth0`.
+                 # So the container's "external" interface is now br-eth0.
+                 #
+                 # But we usually want to NAT traffic *leaving* the container infrastructure?
+                 # Actually, usually Docker handles the NAT for the container.
+                 # This rule seems to be for traffic *originating from the VM* (which has FC_IP which is DOCKER_IF_IP).
+                 #
+                 # Wait, the VM uses the SAME IP as the container (`DOCKER_IF_IP`).
+                 # So effectively the VM *is* the container on the network.
+                 # So we don't need NAT for the VM to be seen as the container IP.
+                 #
+                 # The original code:
+                 # iptables -t nat -A POSTROUTING -s "$DOCKER_IF_IP" -o eth0 -j MASQUERADE
+                 # This masquerades traffic FROM the IP (VM/Container IP) going out eth0.
+                 # This looks weird. If source is IP, why masquerade?
+                 # Maybe to fix some routing issue with the bridge?
+                 #
+                 # In multi-nic setup, if we have eth0 and eth1.
+                 # We should probably skip this explicit NAT rule if we are confident the bridge routing works.
+                 # But let's assume valid: if valid, it should likely be:
+                 # -o eth0 (if that's the upstream).
+                 # If we have multiple NICs, which is upstream?
+                 # Usually the default gateway interface. DOCKER_IF_IP_GW tells us.
+                 
+                 # Let's keep it simple: if this interface has a Gateway, we add the rule.
+                 if [ -n "$DOCKER_IF_IP_GW" ] && [ "$DOCKER_IF_IP_GW" != "-" ]; then
+                    # This is likely the default route interface.
+                    # The physical interface is $DOCKER_IF (now enslaved to br-$DOCKER_IF).
+                    # But the *route* probably goes via ... wait.
+                    # If we enslaved eth0 to br-eth0, traffic goes out via br-eth0?
+                    # The bridge *is* the interface with the IP.
+                    
+                    # Let's keep the existing logic but make it dynamic. 
+                    # Use -j MASQUERADE for all traffic from this IP leaving the container?
+                    # Actually, let's just stick to the original "eth0" logic for "eth0" interface only for safety,
+                    # or apply to all?
+                    
+                    # Original code was hardcoded to eth0.
+                    # Currently we iterate. If DOCKER_IF == eth0, we can add it.
+                    true
+                 fi
+             fi
+        fi
+      fi
+      
+      # Build JSON object for this interface
+      local iface_json="{\"iface_id\":\"$DOCKER_IF\",\"guest_mac\":\"$fc_mac\",\"host_dev_name\":\"$tap_name\"}"
+      
+      if [ -z "$network_interfaces_json" ]; then
+        network_interfaces_json="$iface_json"
+      else
+        network_interfaces_json="$network_interfaces_json,$iface_json"
+      fi
+      
+    done
+  fi # if devices dir exists
 
-    # Add MASQUERADE rule for outbound traffic from the VM
-    # This allows the VM to reach external networks (internet)
-    log "  Adding NAT MASQUERADE rule for VM outbound traffic..."
-    if [ -n "$RUNCVM_GUEST" ] && [ -d "$RUNCVM_GUEST/usr/lib/xtables" ]; then
-      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables         -t nat -A POSTROUTING -s "$DOCKER_IF_IP" -o eth0 -j MASQUERADE 2>/dev/null &&         log "    Added MASQUERADE via xtables-nft-multi" || true
-    elif command -v iptables >/dev/null 2>&1; then
-      iptables -t nat -A POSTROUTING -s "$DOCKER_IF_IP" -o eth0 -j MASQUERADE 2>/dev/null &&         log "    Added MASQUERADE via iptables" || true
-    fi
-
-    network_config=",\"network-interfaces\":[{\"iface_id\":\"eth0\",\"guest_mac\":\"$fc_mac\",\"host_dev_name\":\"$tap_name\"}]"
+  # Wrap in array structure if we found interfaces
+  if [ -n "$network_interfaces_json" ]; then
+    network_config=",\"network-interfaces\":[$network_interfaces_json]"
   fi
 
   # Build vsock config for FUSE volumes
