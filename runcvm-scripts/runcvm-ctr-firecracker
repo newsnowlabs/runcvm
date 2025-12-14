@@ -323,6 +323,8 @@ main() {
 # LOGGING SYSTEM (sh-compatible)
 # ============================================================
 
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 # Try to load RUNCVM_LOG_LEVEL from config if it exists
 if [ -f /.runcvm/config ]; then
   # Extract RUNCVM_LOG_LEVEL from config (format: declare -x RUNCVM_LOG_LEVEL="VALUE")
@@ -373,6 +375,21 @@ is_debug() {
 
 
 log INFO "Starting..."
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# DEBUG: Check environment
+if is_debug; then
+  log INFO "Environment check:"
+  log INFO "  PATH: $PATH"
+  log INFO "  busybox: $(which busybox 2>/dev/null || echo 'not found')"
+  if [ -x /bin/busybox ]; then
+     log INFO "  /bin/busybox exists"
+     log INFO "  cttyhack in busybox: $(/bin/busybox --list | grep cttyhack || echo 'no')"
+  else
+     log INFO "  /bin/busybox missing"
+  fi
+fi
 
 # Mount essential filesystems
 mount -t proc proc /proc 2>/dev/null || true
@@ -730,6 +747,62 @@ log INFO "========== DROPBEAR SETUP END =========="
 # 3. Direct nginx execution
 # 4. /bin/sh fallback
 
+# TTY Handling Strategy:
+# 1. cttyhack (Busybox) - Best, designed for this exactly
+# 2. setsid (util-linux/Busybox) - Good, creates new session. 
+#    Need to explicitly open /dev/console to make it the controlling terminal.
+
+CTTYHACK=""
+if command -v cttyhack >/dev/null 2>&1; then
+  CTTYHACK="cttyhack"
+elif command -v busybox >/dev/null 2>&1 && busybox --list | grep -q cttyhack; then
+  CTTYHACK="busybox cttyhack"
+elif [ -x "/bin/busybox" ] && /bin/busybox --list | grep -q cttyhack; then
+  CTTYHACK="/bin/busybox cttyhack"
+elif [ -x "/.runcvm/guest/bin/busybox" ] && /.runcvm/guest/bin/busybox --list | grep -q cttyhack; then
+  if [ -x "/.runcvm/guest/lib/ld" ]; then
+    CTTYHACK="/.runcvm/guest/lib/ld /.runcvm/guest/bin/busybox cttyhack"
+  else
+    CTTYHACK="/.runcvm/guest/bin/busybox cttyhack"
+  fi
+fi
+
+if [ -n "$CTTYHACK" ]; then
+  # Option 1: cttyhack found
+  if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
+    echo "RunCVM-FC init: TTY enabled ($CTTYHACK)"
+  fi
+  
+  run_with_tty() {
+    # Run as child so we can reboot after
+    $CTTYHACK "$@"
+    return $?
+  }
+elif command -v setsid >/dev/null 2>&1; then
+  # Option 2: setsid found
+  if [ "$RUNCVM_LOG_LEVEL" = "DEBUG" ]; then
+    echo "RunCVM-FC init: TTY enabled (setsid fallback)"
+  fi
+  
+  # Wrapper to run in new session and acquire controlling terminal
+  # We exec a shell that opens console (becoming ctty) and then execs the target
+  # We do NOT exec the setid command itself, so PID 1 stays alive to reboot
+  # Note: setsid -c sets the controlling terminal to stdin (which we redirect/open properly)
+  run_with_tty() {
+    setsid -c sh -c 'exec "$@" <> /dev/ttyS0 >&0 2>&1' -- "$@"
+    return $?
+  }
+else
+  # Option 3: No TTY tools
+  echo "RunCVM-FC init: WARNING - No TTY tools found (cttyhack/setsid)"
+  echo "RunCVM-FC init: Interactive shells may not work correctly"
+  
+  run_with_tty() {
+    "$@"
+    return $?
+  }
+fi
+
 if [ -f /.runcvm-entrypoint ] && [ -s /.runcvm-entrypoint ]; then
   # Read entrypoint line by line into an array-like structure
   set --
@@ -738,34 +811,30 @@ if [ -f /.runcvm-entrypoint ] && [ -s /.runcvm-entrypoint ]; then
   done < /.runcvm-entrypoint
   
   echo "RunCVM-FC init: Running saved entrypoint: $@"
-  "$@"
-  RET=$?
-  echo "RunCVM-FC init: Entrypoint exited with code $RET"
-  
-  # Clean shutdown to avoid panic
-  busybox reboot -f
+  run_with_tty "$@"
   
 elif [ -x /docker-entrypoint.sh ]; then
   echo "RunCVM-FC init: Running /docker-entrypoint.sh"
   if [ -f /etc/nginx/nginx.conf ]; then
-    /docker-entrypoint.sh nginx -g "daemon off;"
+    run_with_tty /docker-entrypoint.sh nginx -g "daemon off;"
   else
-    /docker-entrypoint.sh
+    run_with_tty /docker-entrypoint.sh
   fi
-  RET=$?
-  echo "RunCVM-FC init: Entrypoint exited with code $RET"
-  busybox reboot -f
   
 elif [ -f /etc/nginx/nginx.conf ] && command -v nginx >/dev/null 2>&1; then
   echo "RunCVM-FC init: Running nginx directly"
-  nginx -g "daemon off;"
-  busybox reboot -f
+  run_with_tty nginx -g "daemon off;"
   
 else
   echo "RunCVM-FC init: No entrypoint found, starting shell"
-  /bin/sh
-  busybox reboot -f
+  run_with_tty /bin/sh
 fi
+
+# We should only get here if run_with_tty failed to exec (e.g. command not found)
+# OR if run_with_tty was not an exec (which it is currently)
+RET=$?
+echo "RunCVM-FC init: Entrypoint exited with code $RET"
+busybox reboot -f
 INITEOF
   busybox chmod +x "$init_script"
   
