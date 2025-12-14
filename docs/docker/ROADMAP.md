@@ -76,9 +76,9 @@ This roadmap focuses on **Docker runtime** integration with Firecracker, achievi
 |---------|------|-------------|--------|----------|-----|
 | **Bridge network** | ✅ | ✅ | Complete | - | ✅ Done |
 | **Port mapping (-p)** | ✅ | ✅ | Complete | - | ✅ Done |
-| **Host network** | ✅ | 🟡 | Untested | Medium | Week 5 |
-| **Custom networks** | ✅ | 🟡 | Untested | Medium | Week 6 |
-| **Multiple networks** | ✅ | ❌ | Missing | Low | Phase 4 |
+| **Host network** | ✅ | ✅ | Complete | - | ✅ Done |
+| **Custom networks** | ✅ | ✅ | Complete | - | ✅ Done |
+| **Multiple networks** | ✅ | ✅ | Complete | - | ✅ Done |
 | **Network connect** | ✅ | ❌ | Missing | Low | Phase 4 |
 
 ### Resource Management
@@ -302,15 +302,15 @@ docker run -d --runtime=runcvm -e RUNCVM_HYPERVISOR=firecracker \
 - ✅ tmpfs mounts work correctly
 
 **Tasks**:
-- [ ] **Week 5**: Host networking
-  - [ ] Test `--network=host` mode
-  - [ ] Fix any isolation issues
-  - [ ] Performance comparison with bridge
-  
-- [ ] **Week 6**: Custom networks
-  - [ ] Test custom bridge networks
-  - [ ] Test network aliases
-  - [ ] Validate DNS resolution
+- [x] **Week 5**: Host networking
+  - [x] Test `--network=host` mode
+  - [x] Fix any isolation issues
+  - [x] Performance comparison with bridge
+
+- [x] **Week 6**: Custom networks
+  - [x] Test custom bridge networks
+  - [x] Test network aliases
+  - [x] Validate DNS resolution
 
 **Expected Outcome**:
 - ✅ All Docker network modes work
@@ -629,6 +629,12 @@ cd tests/
 - [ ] **NEW**: Complete tmpfs mount support
 
 ### Recent Accomplishments
+- ✅ **Networking Implementation Complete** (December 14, 2025)
+  - Full support for `--net=host` (via NAT/TAP)
+  - Multiple NIC support for custom networks
+  - Verified `iptables` compatibility on Alpine
+  - Robust Host Mode detection
+
 - ✅ **NFS Implementation Complete** (December 13, 2025)
   - Per-container unfsd instances with unique port allocation
   - Bidirectional sync with <10ms latency
