@@ -20,9 +20,18 @@
 # - https://www.kernel.org/doc/Documentation/filesystems/sharedsubtree.txt
 # - https://www.redhat.com/sysadmin/mount-namespaces
 
-RUNCVM=/opt/runcvm
-RUNCVM_LD=$RUNCVM/lib/ld
-RUNCVM_JQ=$RUNCVM/usr/bin/jq
+RUNCVM=${RUNCVM:-/opt/runcvm}
+if [ -x "$RUNCVM/lib/ld" ]; then
+  RUNCVM_LD=$RUNCVM/lib/ld
+else
+  RUNCVM_LD=""
+fi
+
+if [ -x "$RUNCVM/usr/bin/jq" ]; then
+  RUNCVM_JQ=$RUNCVM/usr/bin/jq
+else
+  RUNCVM_JQ="jq"
+fi
 RUNCVM_VM_MOUNTPOINT="/vm"
 RUNCVM_GUEST=/.runcvm/guest
 RUNCVM_ENTRYPOINT=$RUNCVM_GUEST/scripts/runcvm-ctr-entrypoint
@@ -43,23 +52,28 @@ RUNCVM_CONTAINER_MEM_OVERHEAD="256" # Memory (Mb) overhead to allow for QEMU, vi
 RUNCVM_LOG_LEVEL="${RUNCVM_LOG_LEVEL:-OFF}"
 
 # Log severity levels (numeric for comparison)
-declare -A LOG_LEVELS=(
-  [DEBUG]=0
-  [INFO]=1
-  [LOG]=1      # Alias for INFO
-  [ERROR]=2
-  [OFF]=999
-)
+# Log severity levels (numeric for comparison)
+get_log_level_num() {
+  case "$1" in
+    DEBUG) echo 0 ;;
+    INFO|LOG) echo 1 ;;
+    ERROR) echo 2 ;;
+    OFF) echo 999 ;;
+    *) echo 999 ;;
+  esac
+}
 
 # Get numeric level for current log level (default to OFF=999)
-CURRENT_LOG_LEVEL="${LOG_LEVELS[$RUNCVM_LOG_LEVEL]:-999}"
+CURRENT_LOG_LEVEL=$(get_log_level_num "${RUNCVM_LOG_LEVEL:-OFF}")
 
 # Core logging function
 _log() {
   local severity="$1"
   shift
   local message="$*"
-  local severity_level="${LOG_LEVELS[$severity]:-1}"
+  local severity_level=$(get_log_level_num "$severity")
+  
+  # Only log if severity meets threshold
   
   # Only log if severity meets threshold
   if [ "$severity_level" -ge "$CURRENT_LOG_LEVEL" ]; then
@@ -383,9 +397,25 @@ if [ "$COMMAND" = "create" ]; then
   log "RUNCVM_UIDGID=$RUNCVM_UIDGID"
 
   # CONFIGURE CPUS
-  RUNCVM_CPUS=$(( $(jq_get "$CFG" '.linux.resources.cpu.quota') / 100000))
+  # CONFIGURE CPUS
+  # Calculate CPUs based on quota and period
+  # Default period is 100000 (100ms) if not specified
+  CPU_QUOTA=$(jq_get "$CFG" '.linux.resources.cpu.quota')
+  CPU_PERIOD=$(jq_get "$CFG" '.linux.resources.cpu.period // 100000')
+
+  if [ "$CPU_QUOTA" = "null" ] || [ "$CPU_QUOTA" = "-1" ]; then
+    # Unlimited CPUs
+    RUNCVM_CPUS="0"
+  else
+    # Calculate ceil(quota / period) to ensure fractional CPUs get at least 1 vCPU
+    # and e.g. 1.5 CPUs gets 2 vCPUs
+    RUNCVM_CPUS=$(( ($CPU_QUOTA + $CPU_PERIOD - 1) / $CPU_PERIOD ))
+    # Ensure at least 1 vCPU
+    [ "$RUNCVM_CPUS" -lt 1 ] && RUNCVM_CPUS=1
+  fi
+  
   set_config_env "RUNCVM_CPUS" "$RUNCVM_CPUS"
-  log "RUNCVM_CPUS=$RUNCVM_CPUS"
+  log "CPU Config: Quota=$CPU_QUOTA Period=$CPU_PERIOD -> RUNCVM_CPUS=$RUNCVM_CPUS"
 
   # CONFIGURE MOUNTS
   set_config_env "RUNCVM_VM_MOUNTPOINT" "$RUNCVM_VM_MOUNTPOINT"
