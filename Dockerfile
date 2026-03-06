@@ -93,27 +93,39 @@ EOF
 # --- BUILD STAGE ---
 # Build dist-independent dynamic binaries and libraries
 FROM alpine:$ALPINE_VERSION as binaries
+ARG TARGETARCH
 
 RUN apk update && \
-    apk add --no-cache file bash qemu-system-x86_64 qemu-virtiofsd qemu-ui-curses qemu-guest-agent \
+    QEMU_SYSTEM=$([ "$TARGETARCH" = "arm64" ] && echo qemu-system-aarch64 || echo qemu-system-x86_64) && \
+    UEFI_PKG=$([ "$TARGETARCH" = "arm64" ] && echo aavmf || echo ovmf) && \
+    apk add --no-cache file bash $QEMU_SYSTEM qemu-virtiofsd qemu-ui-curses qemu-guest-agent \
         qemu-hw-display-virtio-vga \
-        ovmf \
+        $UEFI_PKG \
         jq iproute2 netcat-openbsd e2fsprogs blkid util-linux \
         s6 dnsmasq iptables nftables \
         ncurses coreutils \
         patchelf
 
-# Install patched SeaBIOS
-COPY --from=alpine-seabios /root/packages/main/x86_64 /tmp/seabios/
-RUN apk add --allow-untrusted /tmp/seabios/*.apk && cp -a /usr/share/seabios/bios*.bin /usr/share/qemu/
+# Install patched SeaBIOS (x86_64 only — SeaBIOS is x86-specific)
+COPY --from=alpine-seabios /root/packages/main /tmp/seabios-pkgs/
+RUN ALPINE_ARCH=$(uname -m) && \
+    if [ "$ALPINE_ARCH" = "x86_64" ]; then \
+      apk add --allow-untrusted /tmp/seabios-pkgs/$ALPINE_ARCH/*.apk && \
+      cp -a /usr/share/seabios/bios*.bin /usr/share/qemu/; \
+    fi
 
 # Install patched dnsmasq
-COPY --from=alpine-dnsmasq /root/packages/main/x86_64 /tmp/dnsmasq/
-RUN apk add --allow-untrusted /tmp/dnsmasq/dnsmasq-2*.apk /tmp/dnsmasq/dnsmasq-common*.apk
+COPY --from=alpine-dnsmasq /root/packages/main /tmp/dnsmasq-pkgs/
+RUN ALPINE_ARCH=$(uname -m) && \
+    cp -a /tmp/dnsmasq-pkgs/$ALPINE_ARCH/. /tmp/dnsmasq/ && \
+    apk add --allow-untrusted /tmp/dnsmasq/dnsmasq-2*.apk /tmp/dnsmasq/dnsmasq-common*.apk
 
 # Install patched dropbear
-COPY --from=alpine-dropbear /root/packages/main/x86_64 /usr/local/lib/libepka_file.so /tmp/dropbear/
-RUN apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/dropbear-dbclient*.apk /tmp/dropbear/dropbear-2*.apk
+COPY --from=alpine-dropbear /root/packages/main /tmp/dropbear-pkgs/
+COPY --from=alpine-dropbear /usr/local/lib/libepka_file.so /tmp/dropbear/
+RUN ALPINE_ARCH=$(uname -m) && \
+    cp -a /tmp/dropbear-pkgs/$ALPINE_ARCH/. /tmp/dropbear/ && \
+    apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/dropbear-dbclient*.apk /tmp/dropbear/dropbear-2*.apk
 
 # Patch the binaries and set up symlinks
 COPY build-utils/make-bundelf-bundle.sh /usr/local/bin/make-bundelf-bundle.sh
@@ -123,7 +135,9 @@ ENV BUNDELF_EXTRA_SYSTEM_LIB_PATHS="/usr/lib/xtables"
 ENV BUNDELF_CODE_PATH="/opt/runcvm"
 ENV BUNDELF_EXEC_PATH="/.runcvm/guest"
 
-RUN /usr/local/bin/make-bundelf-bundle.sh --bundle && \
+RUN QEMU_BIN=$([ "$TARGETARCH" = "arm64" ] && echo qemu-system-aarch64 || echo qemu-system-x86_64) && \
+    export BUNDELF_BINARIES=$(echo "$BUNDELF_BINARIES" | sed "s/qemu-system-x86_64/$QEMU_BIN/") && \
+    /usr/local/bin/make-bundelf-bundle.sh --bundle && \
     mkdir -p $BUNDELF_CODE_PATH/bin && \
     cd $BUNDELF_CODE_PATH/bin && \
     for cmd in \
@@ -135,7 +149,11 @@ RUN /usr/local/bin/make-bundelf-bundle.sh --bundle && \
     mkdir -p $BUNDELF_CODE_PATH/usr/share && \
     cp -a /usr/share/qemu $BUNDELF_CODE_PATH/usr/share && \
     cp -a /etc/terminfo $BUNDELF_CODE_PATH/usr/share && \
-    cp -a /usr/share/OVMF $BUNDELF_CODE_PATH/usr/share && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+      cp -a /usr/share/AAVMF $BUNDELF_CODE_PATH/usr/share 2>/dev/null || true; \
+    else \
+      cp -a /usr/share/OVMF $BUNDELF_CODE_PATH/usr/share; \
+    fi && \
     # Remove setuid/setgid bits from any/all binaries
     chmod -R -s $BUNDELF_CODE_PATH/
 
@@ -164,8 +182,10 @@ RUN cd /root/qemu-exit && cc -o /root/qemu-exit/qemu-exit -std=gnu99 -static -s 
 FROM alpine:$ALPINE_VERSION as alpine-kernel
 
 # Install patched mkinitfs
-COPY --from=alpine-mkinitfs /root/packages/main/x86_64 /tmp/mkinitfs/
-RUN apk add --allow-untrusted /tmp/mkinitfs/*.apk
+COPY --from=alpine-mkinitfs /root/packages/main /tmp/mkinitfs-pkgs/
+RUN ALPINE_ARCH=$(uname -m) && \
+    cp -a /tmp/mkinitfs-pkgs/$ALPINE_ARCH/. /tmp/mkinitfs/ && \
+    apk add --allow-untrusted /tmp/mkinitfs/*.apk
 RUN apk add --no-cache linux-virt
 RUN echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules && \
     sed -ri 's/\b(ata|nvme|raid|scsi|usb|cdrom|kms|mmc)\b//g; s/[ ]+/ /g' /etc/mkinitfs/mkinitfs.conf && \
@@ -190,10 +210,13 @@ RUN mkdir -p /opt/runcvm/kernels/openwrt/$(basename $(ls -d /lib/modules/*))/mod
 
 # --- BUILD STAGE ---
 # Build Debian bookworm kernel and initramfs with virtiofs module
-FROM amd64/debian:bookworm as debian-kernel
+ARG TARGETPLATFORM
+FROM --platform=$TARGETPLATFORM debian:bookworm as debian-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
-RUN apt update && apt install -y linux-image-amd64:amd64 && \
+RUN apt update && \
+    DEB_ARCH=$(dpkg --print-architecture) && \
+    apt install -y linux-image-${DEB_ARCH}:${DEB_ARCH} && \
     echo 'virtiofs' >>/etc/initramfs-tools/modules && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
@@ -207,11 +230,14 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/debian
 
 # --- BUILD STAGE ---
-# Build Ubuntu bullseye kernel and initramfs with virtiofs module
-FROM amd64/ubuntu:jammy as ubuntu-kernel
+# Build Ubuntu jammy kernel and initramfs with virtiofs module
+ARG TARGETPLATFORM
+FROM --platform=$TARGETPLATFORM ubuntu:jammy as ubuntu-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
-RUN apt update && apt install -y linux-generic:amd64 && \
+RUN apt update && \
+    DEB_ARCH=$(dpkg --print-architecture) && \
+    apt install -y linux-generic:${DEB_ARCH} && \
     echo 'virtiofs' >>/etc/initramfs-tools/modules && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
@@ -226,7 +252,8 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
 
 # --- BUILD STAGE ---
 # Build Oracle Linux kernel and initramfs with virtiofs module
-FROM oraclelinux:9 as oracle-kernel
+ARG TARGETPLATFORM
+FROM --platform=$TARGETPLATFORM oraclelinux:9 as oracle-kernel
 
 RUN dnf install -y kernel
 ADD ./kernels/oraclelinux/addvirtiofs.conf /etc/dracut.conf.d/addvirtiofs.conf
@@ -249,6 +276,12 @@ COPY --from=qemu-exit /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
 RUN apk update && apk add --no-cache rsync
 
 ADD runcvm-scripts /opt/runcvm/scripts/
+
+# Patch runcvm-runtime shebang to use the correct musl dynamic linker for this arch
+# (the script is invoked directly by dockerd/podman as an OCI runtime)
+RUN LD_BIN=$(ls /opt/runcvm/lib/ld-musl-*.so.1 | head -1 | xargs basename) && \
+    sed -i "1s|.*|#!/opt/runcvm/lib/${LD_BIN} /opt/runcvm/bin/bash|" \
+      /opt/runcvm/scripts/runcvm-runtime
 
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]

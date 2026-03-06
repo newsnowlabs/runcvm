@@ -153,20 +153,30 @@ if [ $(id -u) -ne 0 ]; then
   usage
 fi
 
-for app in docker dockerd
-do
-  if [ -z $(which docker) ]; then
-    log "- Error: $0 currently requires the '$app' binary; please install it and try again"
-    usage
-  fi
-done
+# Detect available container runtime: prefer docker, fall back to podman
+if command -v docker >/dev/null 2>&1; then
+  RUNTIME="docker"
+elif command -v podman >/dev/null 2>&1; then
+  RUNTIME="podman"
+else
+  log "- Error: neither 'docker' nor 'podman' found; please install one and try again"
+  usage
+fi
+log "- Detected runtime: $RUNTIME"
 
+# Detect Lima VM environment
+if ls /etc/lima* >/dev/null 2>&1 || [ -n "$LIMA_HOME" ]; then
+  log "- Note: Lima environment detected"
+  log "  - Ensure nested virtualisation is enabled for your VM:"
+  log "    limactl stop <vm> && limactl set --name=<vm> .nestedVirtualization=true && limactl start <vm>"
+  log "  - Verify /dev/kvm is accessible before proceeding"
+fi
 
 if [ "$1" = "--no-dockerd" ]; then
   NO_DOCKERD="1"
-  log "- Skipping dockerd check and docker-based package install due to '--no-dockerd'"
+  log "- Skipping daemon check and container-based package install due to '--no-dockerd'"
   shift
-else
+elif [ "$RUNTIME" = "docker" ]; then
   log "- Checking dockerd ..."
   if docker info >/dev/null 2>&1; then
     log "  - Detected running dockerd"
@@ -179,7 +189,7 @@ fi
 # Install RunCVM package to $MNT
 if [ -z "$NO_DOCKERD" ]; then
   log "- Installing RunCVM package to $MNT ..."
-  if docker run --rm -v /opt/runcvm:$MNT $REPO --quiet; then
+  if $RUNTIME run --rm -v /opt/runcvm:$MNT $REPO --quiet; then
     log "- Installed RunCVM package to /opt/runcvm"
   else
     log "- Failed to install RunCVM package to /opt/runcvm; aborting!"
@@ -187,52 +197,76 @@ if [ -z "$NO_DOCKERD" ]; then
   fi
 fi
 
-if [ -d "/etc/docker" ]; then
+if [ "$RUNTIME" = "docker" ]; then
 
-  log "- Detected /etc/docker"
+  if [ -d "/etc/docker" ]; then
 
-  if ! [ -f "/etc/docker/daemon.json" ]; then
-    log "  - Creating empty daemon.json"
-    echo '{}' >/etc/docker/daemon.json
-  fi
+    log "- Detected /etc/docker"
 
-  if [ $(jq_get "/etc/docker/daemon.json" ".runtimes.runcvm.path") != "/opt/runcvm/scripts/runcvm-runtime" ]; then
-    log "  - Adding runcvm to daemon.json runtimes property ..."
-
-    if jq_set  "/etc/docker/daemon.json" '.runtimes.runcvm.path |= "/opt/runcvm/scripts/runcvm-runtime"'; then
-      log "    - Done"
-    else
-      log "    - Failed: $!"
-      exit 1
+    if ! [ -f "/etc/docker/daemon.json" ]; then
+      log "  - Creating empty daemon.json"
+      echo '{}' >/etc/docker/daemon.json
     fi
 
-    # Attempt restart of dockerd
-    # (if dockerd not found, we'll just continue)
-    docker_restart
+    if [ $(jq_get "/etc/docker/daemon.json" ".runtimes.runcvm.path") != "/opt/runcvm/scripts/runcvm-runtime" ]; then
+      log "  - Adding runcvm to daemon.json runtimes property ..."
+
+      if jq_set  "/etc/docker/daemon.json" '.runtimes.runcvm.path |= "/opt/runcvm/scripts/runcvm-runtime"'; then
+        log "    - Done"
+      else
+        log "    - Failed: $!"
+        exit 1
+      fi
+
+      # Attempt restart of dockerd
+      # (if dockerd not found, we'll just continue)
+      docker_restart
+
+    else
+      log "  - Valid runcvm property already found in daemon.json"
+    fi
+
+    if docker info 2>/dev/null | grep -q runcvm; then
+      log "  - Verification of RunCVM runtime in Docker completed"
+    else
+      log "  - Warning: could not verify RunCVM runtime in Docker; perhaps you need to restart Docker manually"
+    fi
 
   else
-    log "  - Valid runcvm property already found in daemon.json"
+    log "- No /etc/docker detected; your mileage with RunCVM without Docker may vary!"
   fi
 
-  if docker info 2>/dev/null | grep -q runcvm; then
-  # if [ $(docker info --format '{{ json .Runtimes.runcvm }}') = "{"path":"/opt/runcvm/scripts/runcvm-runtime"}" ]; then
-    log "  - Verification of RunCVM runtime in Docker completed"
+elif [ "$RUNTIME" = "podman" ]; then
+
+  log "- Configuring RunCVM for Podman ..."
+
+  CONTAINERS_CONF="/etc/containers/containers.conf"
+
+  # Create containers.conf if it doesn't exist
+  if ! [ -f "$CONTAINERS_CONF" ]; then
+    log "  - Creating $CONTAINERS_CONF"
+    mkdir -p /etc/containers
+    printf '[engine.runtimes]\n' >"$CONTAINERS_CONF"
+  fi
+
+  # Add runcvm to [engine.runtimes] if not already present
+  if grep -q 'runcvm' "$CONTAINERS_CONF"; then
+    log "  - runcvm already present in $CONTAINERS_CONF"
   else
-    log "  - Warning: could not verify RunCVM runtime in Docker; perhaps you need to restart Docker manually"
+    log "  - Adding runcvm to [engine.runtimes] in $CONTAINERS_CONF"
+    # Ensure [engine.runtimes] section exists; append entry
+    if grep -q '^\[engine\.runtimes\]' "$CONTAINERS_CONF"; then
+      sed -i '/^\[engine\.runtimes\]/a runcvm = ["/opt/runcvm/scripts/runcvm-runtime"]' "$CONTAINERS_CONF"
+    else
+      printf '\n[engine.runtimes]\nruncvm = ["/opt/runcvm/scripts/runcvm-runtime"]\n' >>"$CONTAINERS_CONF"
+    fi
+    log "  - Done (Podman is socket-activated; no restart needed)"
   fi
 
-else
-  log "- No /etc/docker detected; your mileage with RunCVM without Docker may vary!"
-fi
+  log "  - Note: if SELinux is enforcing (Fedora CoreOS / Podman Desktop), add"
+  log "    '--security-opt label=disable' to your 'podman run' invocations for RunCVM containers,"
+  log "    or set 'label=false' in $CONTAINERS_CONF under [containers]"
 
-if [ -n "$(which podman)" ]; then
-  log "- Detected podman binary"
-  cat <<_EOE_ >&2
-  - To enable experimental RunCVM support for Podman, add the following
-    to /etc/containers/containers.conf in the [engine.runtimes] section:
-
-    runcvm = [ "/opt/runcvm/scripts/runcvm-runtime" ]
-_EOE_
 fi
 
 # Check, correct and make persistent required rp_filter settings
