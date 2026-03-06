@@ -16,10 +16,10 @@ RUN apk update && apk add --no-cache alpine-sdk coreutils && \
     git sparse-checkout set main/seabios main/
 
 # --- BUILD STAGE ---
-# Build patched SeaBIOS packages
+# Build patched SeaBIOS packages (x86_64 only — SeaBIOS uses ISA bus, not available on ARM64)
 # to allow disabling of BIOS output by QEMU
 # (without triggering QEMU warnings)
-FROM alpine-sdk as alpine-seabios
+FROM alpine-sdk as alpine-seabios-amd64
 
 ADD patches/seabios/qemu-fw-cfg-fix.patch /root/aports/main/seabios/0003-qemu-fw-cfg-fix.patch
 
@@ -30,6 +30,14 @@ echo 'sha512sums="${sha512sums}$(sha512sum 0003-qemu-fw-cfg-fix.patch)"' >>APKBU
 echo 'source="${source}0003-qemu-fw-cfg-fix.patch"' >>APKBUILD
 abuild -rFf
 EOF
+
+# arm64 no-op: empty packages dir so COPY --from=alpine-seabios is always valid
+FROM alpine:$ALPINE_VERSION as alpine-seabios-arm64
+RUN mkdir -p /root/packages/main
+
+# Select the correct SeaBIOS stage for the target platform
+ARG TARGETARCH=amd64
+FROM alpine-seabios-${TARGETARCH} as alpine-seabios
 
 # --- BUILD STAGE ---
 # Build patched dnsmasq
