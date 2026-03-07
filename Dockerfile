@@ -71,6 +71,7 @@ sed -ri '/--disable-pututline/a --enable-plugin \\' APKBUILD
 sed -ri 's/[[:space:]]*\$pkgname-nftrules:[^[:space:]"]*//' APKBUILD
 echo 'sha512sums="${sha512sums}$(sha512sum runcvm.patch)"' >>APKBUILD
 echo 'source="${source}runcvm.patch"' >>APKBUILD
+sed -ri 's/[[:space:]]*\$pkgname-nftrules(:[^[:space:]"]*)?//' APKBUILD
 abuild -rFf
 
 cd /root
