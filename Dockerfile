@@ -13,7 +13,7 @@ RUN apk update && apk add --no-cache alpine-sdk coreutils && \
     cp -a /root/.abuild/*.pub /etc/apk/keys && \
     git clone --depth 1 --single-branch --filter=blob:none --sparse https://gitlab.alpinelinux.org/alpine/aports.git ~/aports && \
     cd ~/aports/ && \
-    git sparse-checkout set main/seabios main/
+    git sparse-checkout set main/seabios main/dnsmasq main/dropbear main/mkinitfs
 
 # --- BUILD STAGE ---
 # Build patched SeaBIOS packages (x86_64 only — SeaBIOS uses ISA bus, not available on ARM64)
