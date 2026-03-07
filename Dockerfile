@@ -66,6 +66,9 @@ RUN <<EOF
 set -e
 cd /root/aports/main/dropbear
 sed -ri '/--disable-pututline/a --enable-plugin \\' APKBUILD
+# Remove dropbear-nftrules subpackage — we only need the binaries and it
+# requires a nftrules() function that may not be defined in this build env
+sed -ri 's/[[:space:]]*\$pkgname-nftrules:[^[:space:]"]*//' APKBUILD
 echo 'sha512sums="${sha512sums}$(sha512sum runcvm.patch)"' >>APKBUILD
 echo 'source="${source}runcvm.patch"' >>APKBUILD
 abuild -rFf
