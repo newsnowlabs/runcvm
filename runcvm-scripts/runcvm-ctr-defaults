@@ -43,6 +43,11 @@ load_network() {
 # i.e. /.runcvm/network/devices6 does not exist.
 load_network6() {
   local if="${1:-default}"
+  # Always reset first: unlike load_network(), this is routinely called for
+  # interfaces that turn out to have no IPv6, and callers rely on
+  # DOCKER_IF6_* being genuinely empty (not left over from a previous
+  # interface) when this returns 1.
+  DOCKER_IF6= DOCKER_IF6_IP= DOCKER_IF6_IP_NETPREFIX= DOCKER_IF6_IP_GW=
   [ -d /.runcvm/network/devices6 ] && [ -s /.runcvm/network/devices6/$if ] || return 1
   read -r DOCKER_IF6 DOCKER_IF6_IP DOCKER_IF6_IP_NETPREFIX DOCKER_IF6_IP_GW </.runcvm/network/devices6/$if
   return 0
