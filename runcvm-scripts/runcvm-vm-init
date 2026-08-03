@@ -86,7 +86,7 @@ do
   ip link set $DOCKER_IF up mtu "${DOCKER_IF_MTU:=1500}"
 
   # If this is the default gateway interface, establish the default gateway
-  [ -n "$DOCKER_IF_IP_GW" ] && ip route add default via $DOCKER_IF_IP_GW
+  [ -n "$DOCKER_IF_IP_GW" ] && [ "$DOCKER_IF_IP_GW" != "-" ] && ip route add default via $DOCKER_IF_IP_GW
 done
 
 # Read and install any supplementary routes.
