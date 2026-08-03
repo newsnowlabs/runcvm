@@ -103,6 +103,10 @@ do
     <(ip -json addr show "$if" | jq -r '.[0] | [.addr_info[0].local, .addr_info[0].prefixlen, .address, .mtu] | @tsv')
   # e.g. 172.25.10.2 24 52:54:00:b7:0b:b6 1500
 
+  # Capture the on-link (connected) route prefix for this interface, before its
+  # address (and the kernel route derived from it) is flushed below.
+  DOCKER_NET=$(ip -json route show dev "$if" scope link | jq -r '.[0].dst')
+
   # Save container network parameters
   if [ "$if" = "$DOCKER_GW_IF" ]; then
     printf "%s %s %s %s %s %s\n" \
@@ -132,7 +136,6 @@ do
   ip link set dev "$QEMU_BRIDGE" up
 
   # Restore network route via this bridge
-  DOCKER_NET=$(ip_prefix_to_network "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX")/"$DOCKER_IF_IP_NETPREFIX"
   ip route add "$DOCKER_NET" dev "$QEMU_BRIDGE"
 
   # If this interface is the default gateway interface, perform additional special steps.
