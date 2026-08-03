@@ -236,6 +236,15 @@ if [ "$RUNTIME" = "docker" ]; then
     log "- No /etc/docker detected; your mileage with RunCVM without Docker may vary!"
   fi
 
+  # Docker took precedence, but podman may also be installed on this host
+  if command -v podman >/dev/null 2>&1; then
+    log "- Also detected podman binary"
+    log "  - To enable experimental RunCVM support for Podman, add the following"
+    log "    to /etc/containers/containers.conf in the [engine.runtimes] section:"
+    log ""
+    log "    runcvm = [ \"/opt/runcvm/scripts/runcvm-runtime\" ]"
+  fi
+
 elif [ "$RUNTIME" = "podman" ]; then
 
   log "- Configuring RunCVM for Podman ..."
@@ -249,8 +258,9 @@ elif [ "$RUNTIME" = "podman" ]; then
     printf '[engine.runtimes]\n' >"$CONTAINERS_CONF"
   fi
 
-  # Add runcvm to [engine.runtimes] if not already present
-  if grep -q 'runcvm' "$CONTAINERS_CONF"; then
+  # Add runcvm to [engine.runtimes] if not already present.
+  # Anchor on the key so comments or unrelated /opt/runcvm paths don't false-match.
+  if grep -qE '^[[:space:]]*runcvm[[:space:]]*=' "$CONTAINERS_CONF"; then
     log "  - runcvm already present in $CONTAINERS_CONF"
   else
     log "  - Adding runcvm to [engine.runtimes] in $CONTAINERS_CONF"

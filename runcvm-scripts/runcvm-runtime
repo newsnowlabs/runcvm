@@ -1,4 +1,4 @@
-#!/opt/runcvm/lib/ld-musl-x86_64.so.1 /opt/runcvm/bin/bash
+#!/opt/runcvm/lib/ld /opt/runcvm/bin/bash
 
 # REFERENCES
 
@@ -448,8 +448,8 @@ if [ "$COMMAND" = "create" ]; then
     jq_set "$CFG" '.linux.devices+=[{"path":"/dev/kvm","type":"c","major":10,"minor":232,"fileMode":8630,"uid":0,"gid":0}]'
   fi
 
-  # /dev/vhost-net — only if explicitly requested AND /dev/kvm is present
-  if [ "$(get_config_env 'RUNCVM_QEMU_NET_VHOST')" = "1" ] && [ -e /dev/kvm ]; then
+  # /dev/vhost-net — only if explicitly requested AND the device exists on the host
+  if [ "$(get_config_env 'RUNCVM_QEMU_NET_VHOST')" = "1" ] && [ -e /dev/vhost-net ]; then
     jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":238,"access":"rwm"}]'
     jq_set "$CFG" '.linux.devices+=[{"path":"/dev/vhost-net","type":"c","major":10,"minor":238,"fileMode":8630,"uid":0,"gid":0}]'
   fi

@@ -3,15 +3,28 @@
 # Alpine version to build with
 ARG ALPINE_VERSION=3.19
 
+# Platform args, declared globally so they are usable in FROM expansions below.
+# BuildKit supplies these automatically; the defaults only matter if it does not.
+ARG TARGETARCH=amd64
+ARG TARGETPLATFORM
+
 # --- BUILD STAGE ---
 # Build base alpine-sdk image for later build stages
 FROM alpine:$ALPINE_VERSION as alpine-sdk
 
+# Redeclare so $ALPINE_VERSION is visible inside this stage's RUN
+ARG ALPINE_VERSION
+
+# Pin aports to the stable branch matching the base image. Cloning master HEAD
+# against an older base pulls in APKBUILDs that depend on newer abuild/toolchain
+# features than the base provides (this is what produced 'nftrules: not found').
 RUN apk update && apk add --no-cache alpine-sdk coreutils && \
     abuild-keygen -an && \
     # Copy the public keys to the system keys
     cp -a /root/.abuild/*.pub /etc/apk/keys && \
-    git clone --depth 1 --single-branch --filter=blob:none --sparse https://gitlab.alpinelinux.org/alpine/aports.git ~/aports && \
+    git clone --depth 1 --single-branch --filter=blob:none --sparse \
+      --branch ${ALPINE_VERSION}-stable \
+      https://gitlab.alpinelinux.org/alpine/aports.git ~/aports && \
     cd ~/aports/ && \
     git sparse-checkout set main/seabios main/dnsmasq main/dropbear main/mkinitfs
 
@@ -36,7 +49,6 @@ FROM alpine:$ALPINE_VERSION as alpine-seabios-arm64
 RUN mkdir -p /root/packages/main
 
 # Select the correct SeaBIOS stage for the target platform
-ARG TARGETARCH=amd64
 FROM alpine-seabios-${TARGETARCH} as alpine-seabios
 
 # --- BUILD STAGE ---
@@ -66,12 +78,8 @@ RUN <<EOF
 set -e
 cd /root/aports/main/dropbear
 sed -ri '/--disable-pututline/a --enable-plugin \\' APKBUILD
-# Remove dropbear-nftrules subpackage — we only need the binaries and it
-# requires a nftrules() function that may not be defined in this build env
-sed -ri 's/[[:space:]]*\$pkgname-nftrules:[^[:space:]"]*//' APKBUILD
 echo 'sha512sums="${sha512sums}$(sha512sum runcvm.patch)"' >>APKBUILD
 echo 'source="${source}runcvm.patch"' >>APKBUILD
-sed -ri 's/[[:space:]]*\$pkgname-nftrules(:[^[:space:]"]*)?//' APKBUILD
 abuild -rFf
 
 cd /root
@@ -129,15 +137,17 @@ RUN ALPINE_ARCH=$(uname -m) && \
 # Install patched dnsmasq
 COPY --from=alpine-dnsmasq /root/packages/main /tmp/dnsmasq-pkgs/
 RUN ALPINE_ARCH=$(uname -m) && \
-    cp -a /tmp/dnsmasq-pkgs/$ALPINE_ARCH/. /tmp/dnsmasq/ && \
-    apk add --allow-untrusted /tmp/dnsmasq/dnsmasq-2*.apk /tmp/dnsmasq/dnsmasq-common*.apk
+    apk add --allow-untrusted /tmp/dnsmasq-pkgs/$ALPINE_ARCH/dnsmasq-2*.apk \
+                              /tmp/dnsmasq-pkgs/$ALPINE_ARCH/dnsmasq-common*.apk
 
 # Install patched dropbear
+# libepka_file.so must land in /tmp/dropbear/, where BUNDELF_EXTRA_LIBS expects it
 COPY --from=alpine-dropbear /root/packages/main /tmp/dropbear-pkgs/
 COPY --from=alpine-dropbear /usr/local/lib/libepka_file.so /tmp/dropbear/
 RUN ALPINE_ARCH=$(uname -m) && \
-    cp -a /tmp/dropbear-pkgs/$ALPINE_ARCH/. /tmp/dropbear/ && \
-    apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/dropbear-dbclient*.apk /tmp/dropbear/dropbear-2*.apk
+    apk add --allow-untrusted /tmp/dropbear-pkgs/$ALPINE_ARCH/dropbear-ssh*.apk \
+                              /tmp/dropbear-pkgs/$ALPINE_ARCH/dropbear-dbclient*.apk \
+                              /tmp/dropbear-pkgs/$ALPINE_ARCH/dropbear-2*.apk
 
 # Patch the binaries and set up symlinks
 COPY build-utils/make-bundelf-bundle.sh /usr/local/bin/make-bundelf-bundle.sh
@@ -194,10 +204,9 @@ RUN cd /root/qemu-exit && cc -o /root/qemu-exit/qemu-exit -std=gnu99 -static -s 
 FROM alpine:$ALPINE_VERSION as alpine-kernel
 
 # Install patched mkinitfs
+# NB: no coreutils in this stage, so avoid relying on GNU cp semantics
 COPY --from=alpine-mkinitfs /root/packages/main /tmp/mkinitfs-pkgs/
-RUN ALPINE_ARCH=$(uname -m) && \
-    cp -a /tmp/mkinitfs-pkgs/$ALPINE_ARCH/. /tmp/mkinitfs/ && \
-    apk add --allow-untrusted /tmp/mkinitfs/*.apk
+RUN apk add --allow-untrusted /tmp/mkinitfs-pkgs/$(uname -m)/*.apk
 RUN apk add --no-cache linux-virt
 RUN echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules && \
     sed -ri 's/\b(ata|nvme|raid|scsi|usb|cdrom|kms|mmc)\b//g; s/[ ]+/ /g' /etc/mkinitfs/mkinitfs.conf && \
@@ -222,7 +231,6 @@ RUN mkdir -p /opt/runcvm/kernels/openwrt/$(basename $(ls -d /lib/modules/*))/mod
 
 # --- BUILD STAGE ---
 # Build Debian bookworm kernel and initramfs with virtiofs module
-ARG TARGETPLATFORM
 FROM --platform=$TARGETPLATFORM debian:bookworm as debian-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -243,7 +251,6 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
 
 # --- BUILD STAGE ---
 # Build Ubuntu jammy kernel and initramfs with virtiofs module
-ARG TARGETPLATFORM
 FROM --platform=$TARGETPLATFORM ubuntu:jammy as ubuntu-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -264,7 +271,6 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
 
 # --- BUILD STAGE ---
 # Build Oracle Linux kernel and initramfs with virtiofs module
-ARG TARGETPLATFORM
 FROM --platform=$TARGETPLATFORM oraclelinux:9 as oracle-kernel
 
 RUN dnf install -y kernel
@@ -288,12 +294,6 @@ COPY --from=qemu-exit /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
 RUN apk update && apk add --no-cache rsync
 
 ADD runcvm-scripts /opt/runcvm/scripts/
-
-# Patch runcvm-runtime shebang to use the correct musl dynamic linker for this arch
-# (the script is invoked directly by dockerd/podman as an OCI runtime)
-RUN LD_BIN=$(ls /opt/runcvm/lib/ld-musl-*.so.1 | head -1 | xargs basename) && \
-    sed -i "1s|.*|#!/opt/runcvm/lib/${LD_BIN} /opt/runcvm/bin/bash|" \
-      /opt/runcvm/scripts/runcvm-runtime
 
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]

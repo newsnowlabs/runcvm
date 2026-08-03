@@ -178,8 +178,6 @@ if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
   fi
 else
   CMD="$(which qemu-system-x86_64)"
-  MACHINE+=(-enable-kvm)
-  MACHINE+=(-cpu host,pmu=off)
 
   # QEMU machine configuration:
   # - q35: modern Intel chipset with PCIe and UEFI support
@@ -199,7 +197,15 @@ else
     USB="off"
   fi
 
-  MACHINE+=(-machine q35,accel=kvm,sata=off,vmport=off,smm=on,dump-guest-core=off,hpet=off,usb=$USB,kernel_irqchip=on)
+  # Use KVM when /dev/kvm is available, otherwise fall back to software emulation.
+  # kernel_irqchip is a KVM-only feature, so it is omitted from the TCG variant.
+  if [ -e /dev/kvm ]; then
+    MACHINE+=(-cpu host,pmu=off)
+    MACHINE+=(-machine q35,accel=kvm,sata=off,vmport=off,smm=on,dump-guest-core=off,hpet=off,usb=$USB,kernel_irqchip=on)
+  else
+    MACHINE+=(-cpu max)
+    MACHINE+=(-machine q35,accel=tcg,sata=off,vmport=off,smm=on,dump-guest-core=off,hpet=off,usb=$USB)
+  fi
 
   # Enable the QEMU debug exit device for debugging purposes.
   # This device allows the guest to trigger a debug exit, which can be useful for debugging
