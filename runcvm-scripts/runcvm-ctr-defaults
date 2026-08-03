@@ -17,6 +17,7 @@ clean_env() {
   RUNCVM_BIOS_DEBUG RUNCVM_BIOS \
   RUNCVM_DISPLAY_MODE \
   RUNCVM_QEMU_DEBUG RUNCVM_QEMU_ARCH RUNCVM_QEMU_DISPLAY RUNCVM_QEMU_VGA RUNCVM_QEMU_VNC_DISPLAY RUNCVM_QEMU_USB RUNCVM_QEMU_NET_VHOST RUNCVM_QEMU_MEM_PREALLOC \
+  RUNCVM_IPV6 \
   RUNCVM_KERNEL RUNCVM_KERNEL_ROOT RUNCVM_KERNEL_APPEND RUNCVM_KERNEL_INITRAMFS_PATH RUNCVM_KERNEL_DEBUG RUNCVM_KERNEL_PATH \
   RUNCVM_DISKS \
   RUNCVM_UIDGID RUNCVM_VM_MOUNTPOINT RUNCVM_TMPFS \
@@ -33,6 +34,22 @@ load_network() {
   local if="${1:-default}"
   [ -d /.runcvm/network/devices ] && [ -s /.runcvm/network/devices/$if ] || return 1
   read -r DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW </.runcvm/network/devices/$if
+  return 0
+}
+
+# Loads IPv6 addressing for interface $1 (or the default-route interface, if
+# omitted), if any was captured. Returns 1 (leaving DOCKER_IF6_* unset) for an
+# interface with no IPv6 address, or when the container has no IPv6 at all,
+# i.e. /.runcvm/network/devices6 does not exist.
+load_network6() {
+  local if="${1:-default}"
+  # Always reset first: unlike load_network(), this is routinely called for
+  # interfaces that turn out to have no IPv6, and callers rely on
+  # DOCKER_IF6_* being genuinely empty (not left over from a previous
+  # interface) when this returns 1.
+  DOCKER_IF6= DOCKER_IF6_IP= DOCKER_IF6_IP_NETPREFIX= DOCKER_IF6_IP_GW=
+  [ -d /.runcvm/network/devices6 ] && [ -s /.runcvm/network/devices6/$if ] || return 1
+  read -r DOCKER_IF6 DOCKER_IF6_IP DOCKER_IF6_IP_NETPREFIX DOCKER_IF6_IP_GW </.runcvm/network/devices6/$if
   return 0
 }
 
