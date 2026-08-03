@@ -1,5 +1,8 @@
 # Handoff: build testing `claude/macos-docker-compatibility-InrFB`
 
+**PR:** https://github.com/newsnowlabs/runcvm/pull/28 — already open for this
+branch. Do **not** open another; pushing to the branch updates it.
+
 **Status:** all code changes are committed and pushed. Nothing has ever been
 build-tested — the previous environment had no registry or package-repo egress.
 **Your job is to run the builds and fix whatever they surface.**
