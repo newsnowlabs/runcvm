@@ -3,10 +3,13 @@
 # Alpine version to build with
 ARG ALPINE_VERSION=3.19
 
-# Platform args, declared globally so they are usable in FROM expansions below.
-# BuildKit supplies these automatically; the defaults only matter if it does not.
-ARG TARGETARCH=amd64
-ARG TARGETPLATFORM
+# Platform args (TARGETARCH, TARGETPLATFORM) are referenced directly in FROM
+# expansions below without an ARG declaration here. BuildKit auto-populates these
+# for any FROM reference that doesn't shadow them; declaring them at global scope
+# (with or without a default) freezes them at that default instead, since an
+# explicit ARG overrides BuildKit's implicit value. Each stage that needs
+# $TARGETARCH in a RUN re-declares ARG TARGETARCH locally after its own FROM
+# (see the "binaries" stage), which is unaffected by this.
 
 # --- BUILD STAGE ---
 # Build base alpine-sdk image for later build stages
