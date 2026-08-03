@@ -125,6 +125,8 @@ do_networks() {
   local id=0 ifpath if mac vhost
   local DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW
 
+  HAS_IPV6=0
+
   for ifpath in /.runcvm/network/devices/*
   do
     if=$(busybox basename "$ifpath")
@@ -132,6 +134,12 @@ do_networks() {
     [ "$if" = "default" ] && continue
 
     load_network "$if"
+
+    # Set (not local): read by the caller to decide whether to enable IPv6
+    # on the VM's kernel command line.
+    if load_network6 "$if"; then
+      HAS_IPV6=1
+    fi
 
     mac=$(busybox sed -r 's/^..:..:../52:54:00/' <<<$DOCKER_IF_MAC)
 
@@ -329,8 +337,17 @@ VIRTIOFS+=(
 # Experimental: Enable for a SCSI bus
 # OPTS+=(-device virtio-scsi-pci,id=scsi0,disable-modern=true)
 
-# Disable IPv6, which is currently unsupported, at kernel boot time
-APPEND+=(ipv6.disable=1 panic=-1)
+# Enable IPv6 in the VM only if a global IPv6 address was captured for at
+# least one interface (set by do_networks(), above), unless overridden with
+# --env=RUNCVM_IPV6=<0|1>. Otherwise, disable IPv6 entirely at kernel boot
+# time, as before.
+case "$RUNCVM_IPV6" in
+  1) HAS_IPV6=1 ;;
+  0) HAS_IPV6=0 ;;
+esac
+
+[ "$HAS_IPV6" = "1" ] || APPEND+=(ipv6.disable=1)
+APPEND+=(panic=-1)
 
 # Disable unneeded functionality
 APPEND+=(scsi_mod.scan=none tsc=reliable no_timer_check rcupdate.rcu_expedited=1 i8042.direct=1 i8042.dumbkbd=1 i8042.nopnp=1 i8042.noaux=1 noreplace-smp reboot=k cryptomgr.notests pci=lastbus=0 selinux=0)
