@@ -122,8 +122,12 @@ do
   # devices6/<if> file for an interface is what signals "no IPv6 on this
   # interface" downstream. Unlike IPv4, no container-side IPv6 address or
   # route is restored below: the VM is the sole owner of this address.
+  # (Under `set -e`, this read legitimately fails, with nothing to abort
+  # for, whenever this interface has no global IPv6 address - the common
+  # case for an IPv4-only container - since the underlying jq select()
+  # then produces no output at all for read to consume.)
   read -r DOCKER_IF6_IP DOCKER_IF6_IP_NETPREFIX < \
-    <(ip -json addr show "$if" | jq -r '.[0].addr_info[] | select(.family=="inet6" and .scope=="global" and ((.deprecated // false) | not)) | [.local, .prefixlen] | @tsv' | head -n 1)
+    <(ip -json addr show "$if" | jq -r '.[0].addr_info[] | select(.family=="inet6" and .scope=="global" and ((.deprecated // false) | not)) | [.local, .prefixlen] | @tsv' | head -n 1) || true
 
   # Save container network parameters
   if [ "$if" = "$DOCKER_GW_IF" ]; then
