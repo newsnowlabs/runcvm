@@ -1,4 +1,4 @@
-#!/opt/runcvm/lib/ld-musl-x86_64.so.1 /opt/runcvm/bin/bash
+#!/opt/runcvm/lib/ld /opt/runcvm/bin/bash
 
 # REFERENCES
 
@@ -428,14 +428,30 @@ if [ "$COMMAND" = "create" ]; then
   set_config_env "RUNCVM_KERNEL_INITRAMFS_PATH" "$RUNCVM_KERNEL_INITRAMFS_PATH"
   set_config_env "RUNCVM_KERNEL_ROOT" "$RUNCVM_KERNEL_ROOT"
 
-  # Configure devices
+  # Auto-detect host architecture; respect user-supplied RUNCVM_QEMU_ARCH if set
+  case "$(uname -m)" in
+    aarch64) RUNCVM_QEMU_ARCH_DEFAULT="arm64" ;;
+    x86_64)  RUNCVM_QEMU_ARCH_DEFAULT="x86_64" ;;
+    *)       RUNCVM_QEMU_ARCH_DEFAULT="x86_64" ;;
+  esac
+  RUNCVM_QEMU_ARCH="$(get_config_env 'RUNCVM_QEMU_ARCH' "$RUNCVM_QEMU_ARCH_DEFAULT")"
+  set_config_env "RUNCVM_QEMU_ARCH" "$RUNCVM_QEMU_ARCH"
 
-  if [ "$(get_config_env 'RUNCVM_QEMU_NET_VHOST')" = "1" ]; then
-    jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":232,"access":"rwm"},{"allow":true,"type":"c","major":10,"minor":200,"access":"rwm"},{"allow":true,"type":"c","major":10,"minor":238,"access":"rwm"}]'
-    jq_set "$CFG" '.linux.devices+=[{"path":"/dev/net/tun","type":"c","major":10,"minor":200,"fileMode":8630,"uid":0,"gid":0},{"path":"/dev/kvm","type":"c","major":10,"minor":232,"fileMode":8630,"uid":0,"gid":0},{"path":"/dev/vhost-net","type":"c","major":10,"minor":238,"fileMode":8630,"uid":0,"gid":0}]'
-  else
-    jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":232,"access":"rwm"},{"allow":true,"type":"c","major":10,"minor":200,"access":"rwm"}]'
-    jq_set "$CFG" '.linux.devices+=[{"path":"/dev/net/tun","type":"c","major":10,"minor":200,"fileMode":8630,"uid":0,"gid":0},{"path":"/dev/kvm","type":"c","major":10,"minor":232,"fileMode":8630,"uid":0,"gid":0}]'
+  # Configure devices
+  # /dev/net/tun — always needed
+  jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":200,"access":"rwm"}]'
+  jq_set "$CFG" '.linux.devices+=[{"path":"/dev/net/tun","type":"c","major":10,"minor":200,"fileMode":8630,"uid":0,"gid":0}]'
+
+  # /dev/kvm — only inject if it exists on the host (runc fails if a listed device is absent)
+  if [ -e /dev/kvm ]; then
+    jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":232,"access":"rwm"}]'
+    jq_set "$CFG" '.linux.devices+=[{"path":"/dev/kvm","type":"c","major":10,"minor":232,"fileMode":8630,"uid":0,"gid":0}]'
+  fi
+
+  # /dev/vhost-net — only if explicitly requested AND the device exists on the host
+  if [ "$(get_config_env 'RUNCVM_QEMU_NET_VHOST')" = "1" ] && [ -e /dev/vhost-net ]; then
+    jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":238,"access":"rwm"}]'
+    jq_set "$CFG" '.linux.devices+=[{"path":"/dev/vhost-net","type":"c","major":10,"minor":238,"fileMode":8630,"uid":0,"gid":0}]'
   fi
   
   # For now, hardcode --security-opt=seccomp=unconfined;
