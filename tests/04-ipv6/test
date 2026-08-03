@@ -1,0 +1,112 @@
+#!/bin/bash -e
+
+# Load framework functions
+. ../framework.sh
+
+# TEST VARIABLES
+NODE=runcvm-04-ipv6-test
+NETWORK="$NODE-network"
+NETWORK2="$NODE-network2"
+IMAGE="alpine"
+RUNTIME="${RUNTIME:-runcvm}"
+SUBNET6="fd00:$(printf '%04x' $RANDOM):$(printf '%04x' $RANDOM)::/64"
+
+# OVERRIDE FRAMEWORK FUNCTIONS
+nodes() { echo "$NODE-a" "$NODE-b" "$NODE-multi"; }
+networks() { echo "$NETWORK" "$NETWORK2"; }
+
+# TEST FUNCTIONS
+# --------------
+
+ERRORS=0
+
+test_result() {
+  local desc="$1" rc="$2"
+  if [ "$rc" = "0" ]; then
+    log "$desc - PASS"
+  else
+    log "$desc - FAIL"
+    ERRORS=$((ERRORS+1))
+  fi
+}
+
+# TEST PROCEDURE
+# --------------
+
+# Run routine cleanup of any preexisting containers, volumes, networks, and images
+cleanup
+
+# Create a dual-stack network. If dockerd doesn't support --ipv6 (e.g. IPv6
+# is not enabled in daemon.json), skip this test cleanly rather than fail
+# it: dual-stack RunCVM support requires the host and dockerd to already be
+# IPv6-configured, which this test cannot itself provide.
+log -n "Creating dual-stack network '$NETWORK' (subnet $SUBNET6) ..."
+if ! docker network create --ipv6 --subnet="$SUBNET6" "$NETWORK" >/tmp/04-ipv6-network-create.log 2>&1; then
+  log "SKIPPED: could not create an IPv6-enabled Docker network - is dockerd running with --ipv6 (or an equivalent daemon.json 'ipv6: true' / 'default-address-pools' with an IPv6 pool)?"
+  cat /tmp/04-ipv6-network-create.log
+  rm -f /tmp/04-ipv6-network-create.log
+  exit 0
+fi
+rm -f /tmp/04-ipv6-network-create.log
+
+log -n "Creating plain (IPv4-only) network '$NETWORK2' ..."
+docker network create "$NETWORK2"
+
+# Launch two RunCVM containers on the dual-stack network.
+for n in a b; do
+  log -n "Launching RunCVM container '$NODE-$n' ..."
+  docker run -d --rm --runtime=$RUNTIME --network=$NETWORK --name=$NODE-$n --hostname=$NODE-$n $IMAGE \
+    sh -c 'while true; do sleep 1; done'
+done
+
+# Regression test for the runcvm-vm-init default-gateway sentinel bug
+# (fixed alongside this test): a container attached to a second network at
+# create time - the only way RunCVM supports multiple interfaces - must
+# still boot. Before the fix, the VM's PID1 died during boot for any
+# non-default-gateway interface.
+log -n "Creating multi-interface container '$NODE-multi' (regression test) ..."
+docker create --runtime=$RUNTIME --name=$NODE-multi --hostname=$NODE-multi --network=$NETWORK $IMAGE \
+  sh -c 'while true; do sleep 1; done' >/dev/null
+docker network connect "$NETWORK2" $NODE-multi
+docker start $NODE-multi >/dev/null
+
+# Give the VMs time to finish booting (dropbear must be up for 'docker exec').
+log "Waiting for VMs to finish booting ..."
+sleep 8
+
+test_result "Multi-interface container boots and accepts 'docker exec'" \
+  "$(docker exec $NODE-multi true >/dev/null 2>&1; echo $?)"
+
+# Confirm the VM picked up the IPv4 address Docker assigned to the container
+# (regression check: dual-stack support must not disturb existing IPv4).
+EXPECTED_IP4=$(docker inspect $NODE-a --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+VM_IP4=$(docker exec $NODE-a sh -c "ip -o -4 addr show eth0 | awk '{print \$4}' | cut -d/ -f1" 2>/dev/null || true)
+test_result "VM has Docker-assigned IPv4 address (expected '$EXPECTED_IP4', got '$VM_IP4')" \
+  "$([ -n "$EXPECTED_IP4" ] && [ "$VM_IP4" = "$EXPECTED_IP4" ] && echo 0 || echo 1)"
+
+# Confirm the VM picked up the IPv6 address Docker assigned to the container.
+EXPECTED_IP6=$(docker inspect $NODE-a --format='{{range .NetworkSettings.Networks}}{{.GlobalIPv6Address}}{{end}}')
+VM_IP6=$(docker exec $NODE-a sh -c "ip -o -6 addr show eth0 scope global | awk '{print \$4}' | cut -d/ -f1" 2>/dev/null || true)
+test_result "VM has Docker-assigned IPv6 address (expected '$EXPECTED_IP6', got '$VM_IP6')" \
+  "$([ -n "$EXPECTED_IP6" ] && [ "$VM_IP6" = "$EXPECTED_IP6" ] && echo 0 || echo 1)"
+
+# Confirm the VM's IPv6 default route matches the network's gateway.
+GATEWAYS=$(docker network inspect "$NETWORK" --format='{{range .IPAM.Config}}{{.Gateway}}{{"\n"}}{{end}}')
+EXPECTED_GW6=$(echo "$GATEWAYS" | grep ':' || true)
+VM_GW6=$(docker exec $NODE-a sh -c "ip -6 route show default | awk '{print \$3}'" 2>/dev/null || true)
+test_result "VM has IPv6 default route via network gateway (expected '$EXPECTED_GW6', got '$VM_GW6')" \
+  "$([ -n "$EXPECTED_GW6" ] && [ "$VM_GW6" = "$EXPECTED_GW6" ] && echo 0 || echo 1)"
+
+# The money test: node A reaches node B by container name over IPv6. This
+# exercises Docker DNS returning an AAAA record (resolved via the existing
+# IPv4-only helper channel: dnsmasq in the container, reached over the
+# container's own loopback/bridge - unaffected by this change) *and* the
+# IPv6 datapath across the container<->VM hub bridge on both ends.
+docker exec -d $NODE-b sh -c "nc -6 -l -p 12345 >/tmp/nc-listen.out 2>&1"
+sleep 1
+test_result "IPv6 connectivity from '$NODE-a' to '$NODE-b' by container name" \
+  "$(docker exec $NODE-a sh -c "echo hello | nc -6 -w 3 $NODE-b 12345" >/dev/null 2>&1; echo $?)"
+
+# Final output
+log "Tests completed with $ERRORS errors"
+exit $ERRORS
