@@ -86,6 +86,11 @@ read -r DOCKER_GW_IF DOCKER_GW_IF_IP < \
   <(ip -json route show | jq -r '.[] | (select(.dst == "default") | [.dev, .gateway]) | @tsv')
 # e.g. eth0 172.25.10.1
 
+# Identify IPv6 default gateway device and IP address, if any.
+read -r DOCKER_GW_IF6 DOCKER_GW_IF6_IP < \
+  <(ip -6 -json route show default | jq -r '.[0] | [.dev, .gateway] | @tsv')
+# e.g. eth0 fd00:1::1
+
 QEMU_BRIDGE_IP=169.254.1.1
 RUNCVM_DNS_IP=169.254.169.254
 
@@ -94,18 +99,31 @@ mkdir -p /.runcvm/network/devices
 # Save non-link-scope non-default routes for later restoration in the running VM.
 ip -json route show | jq -r '.[] | select(.scope != "link" and .dst != "default") | "\(.dst) \(.gateway) \(.dev) \(.prefsrc)"' >/.runcvm/network/routes
 
+# Save non-kernel (i.e. non-connected, non-link-local) non-default IPv6 routes
+# for later restoration in the running VM. Kernel-derived on-link prefix routes
+# are handled per-interface (as DOCKER_NET6, below); fe80::/64 is link-local and
+# is recreated automatically by the kernel when the VM brings up its interface.
+ip -6 -json route show | jq -r '.[] | select(.protocol != "kernel" and .dst != "default" and .dst != "fe80::/64") | "\(.dst) \(.gateway) \(.dev)"' >/.runcvm/network/routes6
+
 for if in $(ip -json link show | jq -r '.[] | .ifname')
 do
 
   [ "$if" = "lo" ] && continue
 
   read -r DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_MAC DOCKER_IF_MTU < \
-    <(ip -json addr show "$if" | jq -r '.[0] | [.addr_info[0].local, .addr_info[0].prefixlen, .address, .mtu] | @tsv')
+    <(ip -json addr show "$if" | jq -r '.[0] as $l | first($l.addr_info[] | select(.family=="inet")) as $a | [$a.local, $a.prefixlen, $l.address, $l.mtu] | @tsv')
   # e.g. 172.25.10.2 24 52:54:00:b7:0b:b6 1500
 
   # Capture the on-link (connected) route prefix for this interface, before its
   # address (and the kernel route derived from it) is flushed below.
   DOCKER_NET=$(ip -json route show dev "$if" scope link | jq -r '.[0].dst')
+
+  # Capture a global IPv6 address for this interface, if any. Absence of a
+  # devices6/<if> file for an interface is what signals "no IPv6 on this
+  # interface" downstream. Unlike IPv4, no container-side IPv6 address or
+  # route is restored below: the VM is the sole owner of this address.
+  read -r DOCKER_IF6_IP DOCKER_IF6_IP_NETPREFIX < \
+    <(ip -json addr show "$if" | jq -r '.[0].addr_info[] | select(.family=="inet6" and .scope=="global" and ((.deprecated // false) | not)) | [.local, .prefixlen] | @tsv' | head -n 1)
 
   # Save container network parameters
   if [ "$if" = "$DOCKER_GW_IF" ]; then
@@ -117,6 +135,20 @@ do
     printf "%s %s %s %s %s %s\n" \
       "$if" "$DOCKER_IF_MAC" "$DOCKER_IF_MTU" "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX" "-" \
       >/.runcvm/network/devices/$if
+  fi
+
+  if [ -n "$DOCKER_IF6_IP" ]; then
+    mkdir -p /.runcvm/network/devices6
+    if [ "$if" = "$DOCKER_GW_IF6" ]; then
+      printf "%s %s %s %s\n" \
+        "$if" "$DOCKER_IF6_IP" "$DOCKER_IF6_IP_NETPREFIX" "$DOCKER_GW_IF6_IP" \
+        >/.runcvm/network/devices6/$if
+      ln -s "$if" /.runcvm/network/devices6/default
+    else
+      printf "%s %s %s %s\n" \
+        "$if" "$DOCKER_IF6_IP" "$DOCKER_IF6_IP_NETPREFIX" "-" \
+        >/.runcvm/network/devices6/$if
+    fi
   fi
 
   # RECONFIGURE CONTAINER NETWORK
