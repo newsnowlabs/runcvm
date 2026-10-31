@@ -4,6 +4,12 @@ Experimental implementation; real QEMU/virtio-serial and VM shutdown validation
 is still required. The local suite exercises the actual C host/guest relays over
 Unix sockets, not a replacement implementation.
 
+See [PLAN.md](PLAN.md) for the aims, proposed multiple-channel transport,
+KVM handoff, and stretch goal of a shared execution agent replacing Dropbear.
+The single-port protocol below describes the current implementation, not that
+proposal. Init roles and potential replacements are discussed separately in
+[RUNCVM-INIT.md](../RUNCVM-INIT.md).
+
 Plain `docker run -i` automatically selects RunCVM's existing BusyBox guest init
 and the pipe bridge. The application runs as its descendant, with a new session
 and process group, no controlling terminal, and ordinary stdin/stdout/stderr pipes.
