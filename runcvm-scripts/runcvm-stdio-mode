@@ -1,0 +1,26 @@
+#!/bin/bash
+
+# Source before saving /.runcvm/config. Docker gives a pipe to -i, /dev/null
+# without -i, and a terminal to -t. This is runtime behavior, not an OCI field.
+# Explicit modes also support runtimes that use different stdin descriptors.
+RUNCVM_STDIO_BRIDGE=0
+case "${RUNCVM_STDIO:-auto}" in
+  auto)
+    if [ "${RUNCVM_LEGACY_STDIO:-0}" != 1 ] && [ ! -t 0 ] && [ -p /proc/self/fd/0 ]; then
+      RUNCVM_STDIO_BRIDGE=1
+    fi
+    ;;
+  pipe)
+    if [ -t 0 ]; then
+      echo 'RunCVM: RUNCVM_STDIO=pipe requires non-terminal stdin' >&2
+      exit 125
+    fi
+    [ "${RUNCVM_LEGACY_STDIO:-0}" = 1 ] || RUNCVM_STDIO_BRIDGE=1
+    ;;
+  legacy) ;;
+  *) echo 'RunCVM: RUNCVM_STDIO must be auto, pipe, or legacy' >&2; exit 125 ;;
+esac
+if [ "$RUNCVM_STDIO_BRIDGE" = 1 ]; then
+  export RUNCVM_INIT=1
+fi
+export RUNCVM_STDIO_BRIDGE

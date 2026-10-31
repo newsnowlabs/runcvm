@@ -257,6 +257,13 @@ case "${RUNCVM_DISPLAY_MODE:-headless}" in
     error "Error: RUNCVM_DISPLAY_MODE '$RUNCVM_DISPLAY_MODE' invalid, must be one of: default|headless, serial, vnc" ;;
 esac
 
+if [ "${RUNCVM_STDIO_BRIDGE:-0}" = 1 ]; then
+  # Keep the system console out of the application streams. The host bridge
+  # captures QEMU diagnostics in /.runcvm/qemu.log.
+  CONSOLE=(-chardev null,id=char0 -device virtconsole,chardev=char0,id=console0)
+  CONSOLE_DEV="hvc0"
+fi
+
 # Save choice of console device
 echo "$CONSOLE_DEV" >/.runcvm/console
 
@@ -395,6 +402,14 @@ ARGS=(
   -L $RUNCVM_GUEST/usr/share/qemu
   -append "$RUNCVM_KERNEL_ROOT $INIT rw ${APPEND[*]} $RUNCVM_KERNEL_APPEND"
 )
+
+if [ "${RUNCVM_STDIO_BRIDGE:-0}" = 1 ]; then
+  ARGS+=(
+    -chardev socket,id=runcvmstdio,path=/.runcvm/stdio.sock,server=on,wait=off
+    -device virtserialport,chardev=runcvmstdio,name=org.runcvm.stdio
+  )
+  exec "$RUNCVM_GUEST/sbin/runcvm-stdio" --host /.runcvm/stdio.sock -- "$CMD" "${ARGS[@]}"
+fi
 
 if [[ "$RUNCVM_BREAK" =~ preqemu ]]; then echo "Preparing to run: '$CMD' ${ARGS[@]@Q}"; bash; fi
 

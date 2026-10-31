@@ -786,6 +786,11 @@ Now follow the main [installation instructions](#installation) to install your b
 
 ## Testing
 
+The experimental non-terminal stdin bridge and its local/VM validation commands
+are described in [runcvm-stdio/README.md](runcvm-stdio/README.md). Plain `-i`
+selects a pipe bridge and implicitly enables guest init; terminal mode is unchanged.
+Use `RUNCVM_LEGACY_STDIO=1` to retain the previous behavior.
+
 Test RunCVM using nested RunCVM. You can do this using a Docker image capable of installing RunCVM, or an image built with a version of RunCVM preinstalled.
 
 Build a suitable image as follows:

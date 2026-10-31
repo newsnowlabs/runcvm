@@ -63,6 +63,7 @@ if [ -z "$RUNCVM_CPUS" ] || [ "$RUNCVM_CPUS" -le 0 ]; then
 fi
 
 # SAVE ENVIRONMENT
+. $RUNCVM_GUEST/scripts/runcvm-stdio-mode
 export -n SHLVL OLDPWD
 
 export >/.runcvm/config

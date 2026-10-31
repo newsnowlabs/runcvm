@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""Run on a host with the newly built/installed RunCVM runtime."""
+import os
+import subprocess
+import uuid
+
+image = os.environ.get("RUNCVM_TEST_IMAGE", "debian")
+runtime = os.environ.get("RUNTIME", "runcvm")
+
+
+def check(args, data, stdout, stderr=b"", status=0, options=()):
+    name = "runcvm-stdio-" + uuid.uuid4().hex
+    try:
+        p = subprocess.run(["docker", "run", "--rm", "--name", name,
+                            "--runtime=" + runtime, "-i", *options,
+                            "--entrypoint", args[0], image, *args[1:]],
+                           input=data, capture_output=True, timeout=90)
+        assert (p.returncode, p.stdout, p.stderr) == (status, stdout, stderr), (
+            args, p.returncode, p.stdout[:1000], p.stderr[:1000])
+        print("PASS:", args)
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=15)
+
+
+check(["sed", "s/^/XXX /; s/$/YYY/;"], b"hello\n", b"XXX helloYYY\n")
+check(["cat"], b"", b"")
+data = bytes(range(256)) * 16384
+check(["cat"], data, data)
+check(["cat"], b"partial line", b"partial line")
+check(["sh", "-c", "cat >/dev/null; sleep 1; printf done"], b"", b"done")
+check(["sh", "-c", "printf out; printf err >&2; exit 37"], b"", b"out", b"err", 37)
+check(["sed", "s/^/XXX /; s/$/YYY/;"], b"hello\n", b"XXX helloYYY\n",
+      options=("--init",))
