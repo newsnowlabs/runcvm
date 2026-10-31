@@ -160,6 +160,13 @@ ADD qemu-exit /root/qemu-exit
 RUN cd /root/qemu-exit && cc -o /root/qemu-exit/qemu-exit -std=gnu99 -static -s -Wall -Werror -O3 qemu-exit.c
 
 # --- BUILD STAGE ---
+# Build the non-terminal application stdio bridge
+FROM alpine:$ALPINE_VERSION as runcvm-stdio
+RUN apk add --no-cache gcc musl-dev
+COPY runcvm-stdio/bridge.c /root/bridge.c
+RUN cc -o /root/runcvm-stdio -std=gnu99 -static -s -Wall -Wextra -Werror -O3 /root/bridge.c
+
+# --- BUILD STAGE ---
 # Build alpine kernel and initramfs with virtiofs module
 FROM alpine:$ALPINE_VERSION as alpine-kernel
 
@@ -245,6 +252,7 @@ FROM alpine:$ALPINE_VERSION as installer
 COPY --from=binaries /opt/runcvm /opt/runcvm
 COPY --from=runcvm-init /root/runcvm-init/runcvm-init /opt/runcvm/sbin/
 COPY --from=qemu-exit /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
+COPY --from=runcvm-stdio /root/runcvm-stdio /opt/runcvm/sbin/
 
 RUN apk update && apk add --no-cache rsync
 
