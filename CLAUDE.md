@@ -27,6 +27,35 @@ the runtime or the scripts.
   test, and say plainly in any report what could not be tested there (e.g. "not tested on
   KVM", "not tested on arm64").
 
+## Integration tests
+
+- `tests/run` runs the suite: `--tier core|extended|all`, or tests by name or pattern; `--list`
+  shows what would run. It exits non-zero if any test fails or times out, and writes logs, TAP,
+  JUnit and JSON results to `--results` (default `${TMPDIR:-/tmp}/runcvm-tests/<run id>`).
+  Its docstring is the reference for options, test metadata and exit codes.
+- `tests/run --mock` (stand-in mode) runs the tests with `runc` in place of RunCVM, skipping
+  those that require real VMs. Use it to develop tests and the runner where RunCVM can't run.
+- After changing `tests/run`, `tests/framework.sh` or `tests/framework.py`, run
+  `tests/selftest/run-selftest` (no Docker needed), and with `--docker` where a Docker daemon
+  is available.
+
+### Writing tests
+
+- A test is a directory under `tests/` holding an executable `test` file, in bash or Python:
+  exit 0 to pass, 77 to skip (after logging `SKIP: <reason>`), anything else to fail. Optional
+  files `tier` (`core` or `extended`), `timeout` (seconds) and `requires` (`vm`, `kvm`,
+  `ipv6`) describe it to the runner. Numbering follows the tier: `1x` core, `5x` extended.
+- Use the helpers in `tests/framework.sh` or `tests/framework.py` (same names in both):
+  `unique` for every Docker object name and `labels` on every object created, so that runs can
+  proceed concurrently and the runner can remove leftovers; `vm_opts` on every RunCVM
+  Container/VM; `check`, `check_cmd` and `expect_exit` for results; `wait_for` and
+  `wait_for_exec` for every wait, so nothing waits without a deadline; `skip` and `finish` to
+  end.
+- Tests must not download anything at run time beyond pulling images: containers on Docker
+  networks may have no outbound access in sandboxed or CI environments.
+- Where behaviour should be the same with and without `--init`, test both, recording the mode
+  with `param`.
+
 ## Language
 
 Use British English spelling in docs, code comments, commit messages and PR descriptions

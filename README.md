@@ -64,7 +64,7 @@ Launch a 3-node Docker Swarm on a network with 9000 MTU and, on the swarm, an ht
 
 ```console
 git clone https://github.com/newsnowlabs/runcvm.git && \
-cd runcvm/tests/00-http-docker-swarm && \
+cd runcvm/tests/50-http-docker-swarm && \
 NODES=3 MTU=9000 ./test
 ```
 
@@ -838,6 +838,33 @@ docker run -d --runtime=runcvm -m 2g --name=ubuntu-docker-runcvm ubuntu-docker-r
 Then `docker exec -it -u runcvm ubuntu-docker-runcvm bash` to obtain a command prompt and perform testing.
 
 Run `docker rm -fv ubuntu-docker-runcvm` to clean up after testing.
+
+### Running the integration tests
+
+From a host or VM with RunCVM installed (for example, the container/VM above), run:
+
+```sh
+tests/run                      # all tests
+tests/run --tier core          # core tests only (extended: slower or less deterministic tests)
+tests/run 10-user-workdir      # named tests (shell patterns allowed, e.g. '1*')
+tests/run --list               # list tests with their tier, timeout and requirements
+```
+
+Tests are numbered by tier: `1x` core, `5x` extended.
+
+`tests/run` (Python 3, standard library only) exits `0` if every selected test passed or was skipped, `1` if any failed or timed out, and `2` on a harness error (for example, no tests selected, an unknown requirement, or the Docker daemon or runtime not available). It writes per-test logs, `results.tap`, `junit.xml`, `results.json`, `summary.txt` and `status` to a results directory (`--results DIR`, default `${TMPDIR:-/tmp}/runcvm-tests/<run-id>`), and removes any containers, networks and volumes a test leaves behind that carry the test's labels. Use `--runtime NAME` (or `RUNTIME`) to test a runtime other than `runcvm`.
+
+Each test is a directory under `tests/` containing an executable `test` file, in any language, which exits `0` to pass, `77` to skip (logging `SKIP: <reason>`), and any other code to fail. Optional files in the directory set its `tier` (`core`, the default, or `extended`), `timeout` (seconds; default 1800) and `requires` (any of `vm`, `kvm`, `ipv6`; a test whose requirements are not met is skipped without running; `kvm` means VMs actually use KVM acceleration).
+
+Helpers for tests are in `tests/framework.sh` (bash) and `tests/framework.py` (Python), with the same names: unique per-run names (`unique`), labels that let the runner remove leftovers (`labels`), options for RunCVM Container/VMs (`vm_opts`), recorded checks (`check`, `check_cmd`, `expect_exit`), parameters (`param`), polling with deadlines (`wait_for`, `wait_for_exec`), results volumes (`volume_create`, `volume_read`), `skip` and `finish`.
+
+`--accel kvm|auto|tcg` (or `RUNCVM_TEST_ACCEL`) selects QEMU acceleration for the tests' RunCVM Container/VMs, which tests pass on as `RUNCVM_QEMU_ACCEL` using the `vm_opts` helper (where the RunCVM version under test supports it). With `--accel tcg`, real RunCVM Container/VMs run under software emulation where KVM is unavailable: slow, but it exercises RunCVM itself; tests that require `kvm` are skipped.
+
+#### Developing the tests without KVM (stand-in mode)
+
+`tests/run --mock` (or `RUNCVM_TEST_MOCK=1`) runs the tests with a standard runtime (`runc`, unless `--runtime` is given) in place of RunCVM, skipping tests that require `vm`; tests see `RUNCVM_TEST_MOCK=1`. This exercises the runner, the helpers and most test logic on any host with Docker, but proves nothing about RunCVM itself.
+
+`tests/selftest/run-selftest` tests the runner and both sets of helpers using fake tests, without Docker; add `--docker` to also run the repository's tests and further real-Docker scenarios in stand-in mode.
 
 ## Support
 

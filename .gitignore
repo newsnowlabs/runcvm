@@ -13,3 +13,4 @@ perllocal.pod
 .Trash-1000
 .vscode
 depot.json
+__pycache__/

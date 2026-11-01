@@ -1,0 +1,435 @@
+#!/usr/bin/env python3
+"""Self-test for tests/run and the framework.sh / framework.py helpers.
+
+Builds fake tests in a temporary directory and runs tests/run against them,
+checking statuses, exit codes and results files.
+
+  tests/selftest/run-selftest            # runner tests; no Docker needed
+  tests/selftest/run-selftest --docker   # also real-Docker tests in stand-in mode
+                                         # (runc in place of RunCVM; needs dockerd
+                                         # and the alpine image)
+
+Results are listed one line per test (as Class.method, which can be given as
+an argument to run that test alone), with the reason for any skip. Any other
+arguments are passed to unittest (e.g. -q for the summary only).
+Standard library only.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import unittest
+import xml.etree.ElementTree as ET
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+TESTS = os.path.dirname(HERE)
+RUNNER = os.path.join(TESTS, "run")
+WITH_DOCKER = False
+
+PY_PREAMBLE = ("#!/usr/bin/env python3\nimport os, sys\n"
+               "sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))\n"
+               "import framework as t\n")
+
+
+class FakeTests:
+    """A temporary tests directory with the real framework files."""
+
+    def __init__(self):
+        self.root = tempfile.mkdtemp(prefix="runcvm-selftest-")
+        self.dir = os.path.join(self.root, "tests")
+        os.makedirs(self.dir)
+        for f in ("framework.sh", "framework.py"):
+            shutil.copy(os.path.join(TESTS, f), self.dir)
+
+    def add(self, name, script, tier=None, timeout=None, requires=None):
+        d = os.path.join(self.dir, name)
+        os.makedirs(d)
+        path = os.path.join(d, "test")
+        with open(path, "w") as f:
+            f.write(textwrap.dedent(script).lstrip())
+        os.chmod(path, 0o755)
+        for meta, value in (("tier", tier), ("timeout", timeout), ("requires", requires)):
+            if value is not None:
+                with open(os.path.join(d, meta), "w") as f:
+                    f.write("%s\n" % value)
+
+    def run(self, *args, env=None, preflight=False):
+        results = tempfile.mkdtemp(dir=self.root)
+        cmd = [RUNNER, "--dir", self.dir, "--results", results] + list(args)
+        if not preflight:
+            cmd.append("--no-preflight")
+        e = dict(os.environ)
+        e.update({"RUNCVM_TEST_KILL_AFTER": "2"})
+        e.pop("RUNCVM_TEST_MOCK", None)
+        e.pop("RUNCVM_TEST_ACCEL", None)
+        if env:
+            e.update(env)
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           universal_newlines=True, env=e, timeout=600)
+        return Run(p, results)
+
+    def cleanup(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+class Run:
+    def __init__(self, proc, results):
+        self.rc = proc.returncode
+        self.out = proc.stdout
+        self.results = results
+
+    def read(self, name):
+        with open(os.path.join(self.results, name)) as f:
+            return f.read()
+
+    def json(self):
+        return json.loads(self.read("results.json"))
+
+    def status(self, test):
+        for t in self.json()["tests"]:
+            if t["name"] == test:
+                return t["status"]
+        return None
+
+    def test(self, test):
+        return next(t for t in self.json()["tests"] if t["name"] == test)
+
+
+class RunnerTests(unittest.TestCase):
+    """Runner behaviour, using fake tests that do not need Docker."""
+
+    @classmethod
+    def setUpClass(cls):
+        ft = cls.ft = FakeTests()
+        ft.add("a-pass", """\
+            #!/bin/bash -e
+            . ../framework.sh
+            param mode test
+            check "one equals one" 1 1
+            check_cmd "true succeeds" true
+            finish
+            """)
+        # The runner must record the test's own exit status, though it pipes the test's output.
+        ft.add("b-fail-piped", """\
+            #!/bin/bash
+            echo "some output"
+            exit 3
+            """)
+        ft.add("c-many-failures", """\
+            #!/bin/bash
+            . ../framework.sh
+            for i in $(seq 1 256); do check "check $i" yes no >/dev/null; done
+            finish
+            """)
+        ft.add("d-skip", """\
+            #!/bin/bash
+            . ../framework.sh
+            skip "IPv6 not enabled in dockerd"
+            """)
+        ft.add("e-timeout", "#!/bin/bash\nsleep 30\n", timeout=2)
+        ft.add("f-timeout-ignores-term", "#!/bin/bash\ntrap '' TERM\nsleep 30\n", timeout=2)
+        ft.add("g-killed-early", "#!/bin/bash\nkill -9 $$\n", timeout=60)
+        ft.add("h-extended", "#!/bin/bash\nexit 0\n", tier="extended")
+        ft.add("i-exit-124", "#!/bin/bash\nexit 124\n", timeout=60)
+        os.makedirs(os.path.join(ft.dir, "j-not-a-test"))
+        ft.add("k-bash-helpers", """\
+            #!/bin/bash -e
+            . ../framework.sh
+            n=$(unique "x/y z")
+            check "unique() name is Docker-safe" "1" "$(echo "$n" | grep -cE '^[a-zA-Z0-9][a-zA-Z0-9_.-]+$')"
+            check "unique() includes run id" "1" "$(echo "$n" | grep -c "$RUNCVM_TEST_RUN_ID")"
+            check "labels() names run and test" "--label runcvm-test.run=$RUNCVM_TEST_RUN_ID --label runcvm-test.test=k-bash-helpers" "$(labels)"
+            expect_exit "expect_exit sees status 3" 3 sh -c 'exit 3'
+            check_cmd "wait_for succeeds when ready" wait_for "a file" 5 test -e ../framework.sh
+            if wait_for "never" 2 false; then r=0; else r=1; fi
+            check "wait_for times out" 1 "$r"
+            check "RUNCVM_TEST_MOCK passed to tests" "0" "$RUNCVM_TEST_MOCK"
+            finish
+            """)
+        ft.add("l-python-helpers", PY_PREAMBLE + textwrap.dedent("""\
+            n = t.unique("x/y z")
+            t.check("unique() name is Docker-safe", True, bool(__import__("re").match(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]+$", n)))
+            t.check("unique() includes run id", True, t.RUN_ID in n)
+            t.check("labels() names run and test", ["--label", "runcvm-test.run=" + t.RUN_ID, "--label", "runcvm-test.test=l-python-helpers"], t.labels())
+            t.expect_exit("expect_exit sees status 3", 3, ["sh", "-c", "exit 3"])
+            t.check_cmd("wait_for succeeds when ready", lambda: t.wait_for("a file", 5, ["test", "-e", "../framework.py"]))
+            t.check("wait_for times out", False, t.wait_for("never", 2, lambda: False))
+            t.param("language", "python")
+            t.finish()
+            """))
+        ft.add("m-python-fail", PY_PREAMBLE + "t.check('deliberate', 1, 2)\nt.finish()\n")
+        ft.add("n-python-skip", PY_PREAMBLE + "t.skip('needs something absent')\n")
+        # Leaves a background process holding the output pipe: the runner must not hang.
+        ft.add("o-background-child", "#!/bin/bash\nsleep 300 &\necho started\nexit 0\n", timeout=60)
+        ft.add("p-requires-vm", "#!/bin/bash\nexit 0\n", requires="vm")
+        cls.full = ft.run(env={"RUNTIME": "runcvm"})
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.ft.cleanup()
+
+    def test_overall_exit_code_is_failure(self):
+        self.assertEqual(self.full.rc, 1, self.full.out)
+        self.assertEqual(self.full.read("status").strip(), "1")
+
+    def test_statuses(self):
+        expected = {
+            "a-pass": "pass", "b-fail-piped": "fail", "c-many-failures": "fail", "d-skip": "skip",
+            "e-timeout": "timeout", "f-timeout-ignores-term": "timeout", "g-killed-early": "fail",
+            "h-extended": "pass", "i-exit-124": "fail", "k-bash-helpers": "pass",
+            "l-python-helpers": "pass", "m-python-fail": "fail", "n-python-skip": "skip",
+            "o-background-child": "pass", "p-requires-vm": "pass",
+        }
+        for name, status in expected.items():
+            with self.subTest(test=name):
+                self.assertEqual(self.full.status(name), status, self.full.out)
+        self.assertIsNone(self.full.status("j-not-a-test"))
+
+    def test_reasons(self):
+        self.assertEqual(self.full.test("b-fail-piped")["reason"], "exit code 3")
+        self.assertEqual(self.full.test("d-skip")["reason"], "IPv6 not enabled in dockerd")
+        self.assertEqual(self.full.test("n-python-skip")["reason"], "needs something absent")
+        self.assertEqual(self.full.test("e-timeout")["reason"], "timed out after 2s")
+        self.assertEqual(self.full.test("g-killed-early")["reason"], "killed by signal 9")
+
+    def test_background_child_does_not_delay_runner(self):
+        self.assertLess(self.full.test("o-background-child")["duration"], 15)
+
+    def test_logs_and_console(self):
+        self.assertIn("some output", self.full.read("logs/b-fail-piped.log"))
+        self.assertIn("b-fail-piped - some output", self.full.out)
+
+    def test_checks_and_params_recorded(self):
+        a = self.full.test("a-pass")
+        self.assertEqual([c["description"] for c in a["checks"]], ["one equals one", "true succeeds"])
+        self.assertEqual(a["params"], {"mode": "test"})
+        self.assertEqual(self.full.test("l-python-helpers")["params"], {"language": "python"})
+        self.assertEqual(sum(1 for c in self.full.test("c-many-failures")["checks"] if c["status"] == "FAIL"), 256)
+
+    def test_tap(self):
+        tap = self.full.read("results.tap").splitlines()
+        self.assertEqual(tap[0], "TAP version 13")
+        self.assertEqual(tap[1], "1..15")
+        self.assertTrue(any(l.endswith(" - a-pass") and l.startswith("ok ") for l in tap))
+        self.assertTrue(any(l.startswith("not ok ") and "b-fail-piped # exit code 3" in l for l in tap))
+        self.assertTrue(any("d-skip # SKIP IPv6 not enabled" in l for l in tap))
+        self.assertIn("    ok 1 - one equals one", tap)
+
+    def test_junit(self):
+        root = ET.fromstring(self.full.read("junit.xml"))
+        suites = {s.get("name"): s for s in root.findall("testsuite")}
+        self.assertIn("a-pass", suites)
+        self.assertIsNotNone(suites["e-timeout"].find("testcase[@name='e-timeout']/failure[@type='timeout']"))
+        self.assertIsNotNone(suites["d-skip"].find("testcase/skipped"))
+        props = {p.get("name"): p.get("value") for p in suites["a-pass"].find("properties")}
+        self.assertEqual(props["mode"], "test")
+        self.assertEqual(props["runtime"], "runcvm")
+
+    def test_tier_selection(self):
+        r = self.ft.run("--tier", "extended")
+        self.assertEqual(r.rc, 0, r.out)
+        self.assertEqual([t["name"] for t in r.json()["tests"]], ["h-extended"])
+
+    def test_list(self):
+        r = self.ft.run("--list", "--tier", "core")
+        self.assertEqual(r.rc, 0)
+        self.assertRegex(r.out, r"(?m)^a-pass +core +1800s")
+        self.assertRegex(r.out, r"(?m)^e-timeout +core +2s")
+        self.assertRegex(r.out, r"(?m)^p-requires-vm +core +1800s  vm$")
+        self.assertNotIn("h-extended", r.out)
+
+    def test_selection_by_name_and_pattern(self):
+        self.assertEqual(self.ft.run("a-pass", "d-skip").rc, 0)
+        self.assertEqual(self.ft.run("k-*").rc, 0)
+
+    def test_harness_errors(self):
+        self.assertEqual(self.ft.run("no-such-test").rc, 2)
+        self.assertEqual(self.ft.run("zz-*").rc, 2)
+        self.assertEqual(self.ft.run("--tier", "bogus").rc, 2)
+
+    def test_exitfirst(self):
+        r = self.ft.run("--exitfirst", "a-pass", "b-fail-piped", "c-many-failures")
+        self.assertEqual(r.rc, 1)
+        self.assertEqual([t["name"] for t in r.json()["tests"]], ["a-pass", "b-fail-piped"])
+
+    def test_mock_mode_skips_vm_tests(self):
+        for args, env in ((["--mock"], None), ([], {"RUNCVM_TEST_MOCK": "1"})):
+            with self.subTest(args=args, env=env):
+                r = self.ft.run("p-requires-vm", "a-pass", *args, env=env)
+                self.assertEqual(r.rc, 0, r.out)
+                self.assertEqual(r.status("p-requires-vm"), "skip")
+                self.assertEqual(r.test("p-requires-vm")["reason"], "requires vm (stand-in mode)")
+                self.assertEqual(r.json()["runtime"], "runc")
+                self.assertTrue(r.json()["mock"])
+
+    def test_mock_mode_seen_by_tests(self):
+        ft = FakeTests()
+        try:
+            ft.add("q-mock", '#!/bin/bash\n[ "$RUNCVM_TEST_MOCK" = 1 ] && [ "$RUNTIME" = runc ]\n')
+            self.assertEqual(ft.run("--mock").rc, 0)
+            self.assertEqual(ft.run("--mock", "--runtime", "other").json()["runtime"], "other")
+        finally:
+            ft.cleanup()
+
+    def test_accel(self):
+        ft = FakeTests()
+        try:
+            ft.add("x-accel-bash", """\
+                #!/bin/bash -e
+                . ../framework.sh
+                check "RUNCVM_TEST_ACCEL" "$EXPECT" "$RUNCVM_TEST_ACCEL"
+                check "vm_opts" "$EXPECT_OPTS" "$(vm_opts)"
+                finish
+                """)
+            ft.add("y-accel-python", PY_PREAMBLE + textwrap.dedent("""\
+                t.check("ACCEL", os.environ["EXPECT"] or None, t.ACCEL)
+                t.check("vm_opts", os.environ["EXPECT_OPTS"].split(), t.vm_opts())
+                t.finish()
+                """))
+            ft.add("z-needs-kvm", "#!/bin/bash\nexit 0\n", requires="kvm")
+            r = ft.run("--accel", "tcg", env={"EXPECT": "tcg", "EXPECT_OPTS": "--env=RUNCVM_QEMU_ACCEL=tcg"})
+            self.assertEqual(r.status("x-accel-bash"), "pass", r.out)
+            self.assertEqual(r.status("y-accel-python"), "pass", r.out)
+            self.assertEqual(r.status("z-needs-kvm"), "skip")
+            self.assertEqual(r.json()["accel"], "tcg")
+            r = ft.run("x-accel-bash", "y-accel-python", env={"EXPECT": "", "EXPECT_OPTS": ""})
+            self.assertEqual(r.rc, 0, r.out)
+            self.assertIsNone(r.json()["accel"])
+            r = ft.run("x-accel-bash", env={"RUNCVM_TEST_ACCEL": "auto", "EXPECT": "auto",
+                                            "EXPECT_OPTS": "--env=RUNCVM_QEMU_ACCEL=auto"})
+            self.assertEqual(r.rc, 0, r.out)
+            self.assertEqual(ft.run("--accel", "bogus").rc, 2)
+        finally:
+            ft.cleanup()
+
+    def test_requirements(self):
+        ft = FakeTests()
+        try:
+            ft.add("r-kvm", "#!/bin/bash\nexit 0\n", requires="kvm")
+            r = ft.run()
+            self.assertEqual(r.status("r-kvm"), "pass" if os.path.exists("/dev/kvm") else "skip")
+            ft.add("s-typo", "#!/bin/bash\nexit 0\n", requires="vmm")
+            r = ft.run()
+            self.assertEqual(r.rc, 2)
+            self.assertIn("unknown requirement 'vmm'", r.out)
+        finally:
+            ft.cleanup()
+
+
+@unittest.skipUnless(WITH_DOCKER or "--docker" in sys.argv, "real-Docker tests need --docker")
+class DockerStandInTests(unittest.TestCase):
+    """Real Docker, in stand-in mode (runc in place of RunCVM)."""
+
+    def test_repository_tests_in_stand_in_mode(self):
+        results = tempfile.mkdtemp(prefix="runcvm-selftest-")
+        try:
+            p = subprocess.run([RUNNER, "--mock", "--results", results], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, universal_newlines=True, timeout=1800)
+            with open(os.path.join(results, "results.json")) as f:
+                data = json.load(f)
+            statuses = {t["name"]: t["status"] for t in data["tests"]}
+            for name, t in ((t["name"], t) for t in data["tests"]):
+                with self.subTest(test=name):
+                    if "vm" in t["requires"]:
+                        self.assertEqual(t["status"], "skip")
+                    elif t["status"] == "skip" and t["requires"]:
+                        # Another requirement (e.g. ipv6) is not met on this host
+                        self.assertTrue(t["reason"].startswith("requires "), t["reason"])
+                    else:
+                        self.assertEqual(t["status"], "pass", p.stdout[-4000:])
+            self.assertEqual(p.returncode, 0, statuses)
+        finally:
+            shutil.rmtree(results, ignore_errors=True)
+
+    def test_failures_leftovers_timeouts_and_volumes(self):
+        ft = FakeTests()
+        try:
+            ft.add("t-wrong", """\
+                #!/bin/bash -e
+                . ../framework.sh
+                check "user id" 1001 "$(docker run --rm $(labels) --runtime=$RUNTIME --user 1000 alpine id -u)"
+                finish
+                """)
+            ft.add("u-leaky-and-volumes", """\
+                #!/bin/bash -e
+                . ../framework.sh
+                V=$(unique results)
+                volume_create $V
+                docker run --rm --runtime=$RUNTIME $(labels) -v $V:/out alpine sh -c 'echo 42 >/out/answer'
+                check "workload wrote result to volume" 42 "$(volume_read $V answer)"
+                expect_exit "exit status of a container" 7 docker run --rm --runtime=$RUNTIME $(labels) alpine sh -c 'exit 7'
+                docker network create $(labels) $(unique leaked-net) >/dev/null
+                docker run -d $(labels) --name $(unique leaked) alpine sleep 600 >/dev/null
+                trap - EXIT
+                finish
+                """)
+            ft.add("v-hang", """\
+                #!/bin/bash -e
+                . ../framework.sh
+                N=$(unique hang)
+                docker run -d --rm --runtime=$RUNTIME $(labels) --name $N alpine sh -c 'while true; do echo waiting; sleep 1; done' >/dev/null
+                docker logs -f $N | sed '/never-appears/q0'
+                """, timeout=5)
+            ft.add("w-python-docker", PY_PREAMBLE + textwrap.dedent("""\
+                v = t.unique("pyresults")
+                t.volume_create(v)
+                t.docker("run", "--rm", "--runtime", t.RUNTIME, *t.labels(), "-v", v + ":/out", "alpine",
+                         "sh", "-c", "echo hello >/out/greeting", check=True)
+                t.check("python: workload wrote result to volume", "hello\\n", t.volume_read(v, "greeting"))
+                c = t.unique("pyexec")
+                t.docker("run", "-d", "--rm", "--runtime", t.RUNTIME, *t.labels(), "--name", c, "--hostname", c, "alpine", "sleep", "600", check=True)
+                t.cleanup_container(c)
+                t.check_cmd("python: wait_for_exec", lambda: t.wait_for_exec(c, 30))
+                t.check("python: exec output", c, t.docker("exec", c, "hostname").stdout.strip())
+                t.finish()
+                """))
+            run_id = "selftest-%d" % os.getpid()
+            r = ft.run("--mock", preflight=True, env={"RUNCVM_TEST_RUN_ID": run_id})
+            self.assertEqual(r.rc, 1, r.out)
+            self.assertEqual(r.status("t-wrong"), "fail")
+            self.assertEqual(r.status("u-leaky-and-volumes"), "pass", r.out)
+            self.assertEqual(r.status("v-hang"), "timeout")
+            self.assertEqual(r.status("w-python-docker"), "pass", r.out)
+            for kind in (["ps", "-aq"], ["network", "ls", "-q"], ["volume", "ls", "-q"]):
+                left = subprocess.run(["docker"] + kind + ["--filter", "label=runcvm-test.run=" + run_id],
+                                      stdout=subprocess.PIPE, universal_newlines=True).stdout.split()
+                self.assertEqual(left, [], "leftover %s" % kind[0])
+        finally:
+            ft.cleanup()
+
+    def test_concurrent_runs_do_not_clash(self):
+        procs, dirs = [], []
+        for i in (1, 2):
+            d = tempfile.mkdtemp(prefix="runcvm-selftest-")
+            dirs.append(d)
+            procs.append(subprocess.Popen([RUNNER, "--mock", "--tier", "core", "--results", d],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+                                          env=dict(os.environ, RUNCVM_TEST_RUN_ID="concurrent-%d-%d" % (os.getpid(), i))))
+        try:
+            for p in procs:
+                self.assertEqual(p.wait(timeout=900), 0)
+        finally:
+            for d in dirs:
+                shutil.rmtree(d, ignore_errors=True)
+
+
+class _Result(unittest.TextTestResult):
+    """Name each test once, as Class.method: the form accepted as an argument to run it alone."""
+
+    def getDescription(self, test):
+        return "%s.%s" % (type(test).__name__, test._testMethodName)
+
+
+class _Runner(unittest.TextTestRunner):
+    resultclass = _Result
+
+
+if __name__ == "__main__":
+    if "--docker" in sys.argv:
+        WITH_DOCKER = True
+        sys.argv.remove("--docker")
+    unittest.main(verbosity=2, testRunner=_Runner)
