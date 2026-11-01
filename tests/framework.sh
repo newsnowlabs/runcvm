@@ -68,8 +68,8 @@ trap term TERM INT QUIT
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
-# Helpers for tests run by tests/run (all optional; existing tests that use
-# only the functions above continue to work unchanged)
+# Helpers for tests run by tests/run (all optional: a test may use only the
+# functions above)
 # ---------------------------------------------------------------------------
 
 # Run identity: set by tests/run; defaults allow running a test directly.
@@ -200,8 +200,8 @@ skip() {
 }
 
 # finish
-# End the test: exit 0 if no checks failed, else 1. (Unlike 'exit $ERRORS',
-# this cannot wrap to 0 when there are 256 or more errors.)
+# End the test: exit 0 if no checks failed, else 1. Use this rather than
+# 'exit $ERRORS': exit statuses wrap modulo 256, so 256 errors would exit 0.
 finish() {
   log "Tests completed with $ERRORS errors"
   [ "$ERRORS" -eq 0 ] && exit 0

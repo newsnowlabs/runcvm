@@ -113,7 +113,7 @@ class RunnerTests(unittest.TestCase):
             check_cmd "true succeeds" true
             finish
             """)
-        # The original bash runner recorded the exit status of a sed pipeline, not the test's.
+        # The runner must record the test's own exit status, though it pipes the test's output.
         ft.add("b-fail-piped", """\
             #!/bin/bash
             echo "some output"
