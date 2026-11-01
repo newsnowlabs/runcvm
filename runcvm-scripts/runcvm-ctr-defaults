@@ -10,21 +10,46 @@ QEMU_MONITOR_SOCKET=/run/.qemu-monitor-socket
 SSHD_PORT=22222
 
 clean_env() {
-  export -n \
-  RUNCVM_BREAK RUNCVM_INIT \
-  RUNCVM_GUEST \
-  RUNCVM_RUNTIME_DEBUG \
-  RUNCVM_BIOS_DEBUG RUNCVM_BIOS \
-  RUNCVM_DISPLAY_MODE \
-  RUNCVM_QEMU_DEBUG RUNCVM_QEMU_ARCH RUNCVM_QEMU_DISPLAY RUNCVM_QEMU_VGA RUNCVM_QEMU_VNC_DISPLAY RUNCVM_QEMU_USB RUNCVM_QEMU_NET_VHOST RUNCVM_QEMU_MEM_PREALLOC RUNCVM_QEMU_ACCEL RUNCVM_QEMU_TCG_TB_MEM_SIZE \
-  RUNCVM_IPV6 \
-  RUNCVM_KERNEL RUNCVM_KERNEL_ROOT RUNCVM_KERNEL_APPEND RUNCVM_KERNEL_INITRAMFS_PATH RUNCVM_KERNEL_DEBUG RUNCVM_KERNEL_PATH \
-  RUNCVM_DISKS \
-  RUNCVM_UIDGID RUNCVM_VM_MOUNTPOINT RUNCVM_TMPFS \
-  RUNCVM_CPUS RUNCVM_MEM_SIZE RUNCVM_HUGETLB \
-  RUNCVM_HAS_HOME \
-  RUNCVM_VIRTIOFSD_CACHE \
-  RUNCVM_CGROUPFS
+  # Variables used only by RunCVM, to be removed from the workload's environment.
+  # One per line, sorted, so that changes merge cleanly.
+  local vars=(
+    RUNCVM_BIOS
+    RUNCVM_BIOS_DEBUG
+    RUNCVM_BREAK
+    RUNCVM_CGROUPFS
+    RUNCVM_CPUS
+    RUNCVM_DISKS
+    RUNCVM_DISPLAY_MODE
+    RUNCVM_GUEST
+    RUNCVM_HAS_HOME
+    RUNCVM_HUGETLB
+    RUNCVM_INIT
+    RUNCVM_IPV6
+    RUNCVM_KERNEL
+    RUNCVM_KERNEL_APPEND
+    RUNCVM_KERNEL_DEBUG
+    RUNCVM_KERNEL_INITRAMFS_PATH
+    RUNCVM_KERNEL_PATH
+    RUNCVM_KERNEL_ROOT
+    RUNCVM_MEM_SIZE
+    RUNCVM_QEMU_ACCEL
+    RUNCVM_QEMU_ARCH
+    RUNCVM_QEMU_DEBUG
+    RUNCVM_QEMU_DISPLAY
+    RUNCVM_QEMU_MEM_PREALLOC
+    RUNCVM_QEMU_NET_VHOST
+    RUNCVM_QEMU_TCG_TB_MEM_SIZE
+    RUNCVM_QEMU_USB
+    RUNCVM_QEMU_VGA
+    RUNCVM_QEMU_VNC_DISPLAY
+    RUNCVM_RUNTIME_DEBUG
+    RUNCVM_TMPFS
+    RUNCVM_UIDGID
+    RUNCVM_VIRTIOFSD_CACHE
+    RUNCVM_VM_MOUNTPOINT
+  )
+
+  export -n "${vars[@]}"
 
   # May be set in VM by busybox init process
   export -n USER
@@ -61,17 +86,54 @@ which() {
 }
 
 create_aliases() {
-  for cmd in \
-      bash \
-      busybox awk cat chgrp chmod cut grep head hostname init ln ls mkdir mountpoint poweroff ps rm rmdir sh sysctl touch tr \
-      ip jq \
-      dnsmasq \
-      blkid findmnt getent mke2fs mount nc \
-      xtables-nft-multi xtables-legacy-multi \
-      qemu-system-x86_64 qemu-ga \
-      dbclient dropbear dropbearkey \
-      s6-applyuidgid \
-      tput
+  # Commands to run from the RunCVM guest tree, regardless of the workload's PATH.
+  # One per line, sorted, so that changes merge cleanly.
+  local cmds=(
+    awk
+    bash
+    blkid
+    busybox
+    cat
+    chgrp
+    chmod
+    cut
+    dbclient
+    dnsmasq
+    dropbear
+    dropbearkey
+    findmnt
+    getent
+    grep
+    head
+    hostname
+    init
+    ip
+    jq
+    ln
+    ls
+    mkdir
+    mke2fs
+    mount
+    mountpoint
+    nc
+    poweroff
+    ps
+    qemu-ga
+    qemu-system-x86_64
+    rm
+    rmdir
+    s6-applyuidgid
+    sh
+    sysctl
+    touch
+    tput
+    tr
+    xtables-legacy-multi
+    xtables-nft-multi
+  )
+
+  local cmd
+  for cmd in "${cmds[@]}"
   do
     eval "$cmd() { $(which $cmd) \"\$@\"; }"
   done
