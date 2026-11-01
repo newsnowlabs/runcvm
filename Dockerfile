@@ -18,10 +18,9 @@ FROM alpine:$ALPINE_VERSION as alpine-sdk
 # Redeclare so $ALPINE_VERSION is visible inside this stage's RUN
 ARG ALPINE_VERSION
 
-# Pin aports to the stable branch matching the base image. Cloning master HEAD
-# against an older base pulls in APKBUILDs that depend on newer abuild/toolchain
-# features than the base provides (e.g. dropbear's nftrules subpackage, which
-# fails with 'nftrules: not found').
+# aports must be checked out at the stable branch matching the base image:
+# APKBUILDs on master can depend on abuild features that the base release
+# lacks (e.g. dropbear's nftrules subpackage).
 RUN apk update && apk add --no-cache alpine-sdk coreutils && \
     abuild-keygen -an && \
     # Copy the public keys to the system keys
