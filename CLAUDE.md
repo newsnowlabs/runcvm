@@ -10,6 +10,12 @@ the runtime or the scripts.
   run inside the VM. Both run under the RunCVM package's own bash and tools in
   `/.runcvm/guest` (a read-only bind of `/opt/runcvm`), never the image's.
   `runcvm-ctr-defaults`, sourced by both, defines shared defaults and wraps the tools they use.
+- `runcvm-runtime` reports errors with `error()`, which writes them to the log file the caller
+  passes with `--log`: containerd shows users only what is written there, not the runtime's
+  stderr.
+- The variable list in `clean_env` and the command list in `create_aliases`
+  (`runcvm-ctr-defaults`) hold one name per line, sorted, so that changes merge cleanly; keep
+  them that way.
 - `/.runcvm` is a root-only tmpfs (`mode=700`) inside each container; its contents are
   RunCVM's private state, not part of the workload's filesystem.
 
@@ -21,11 +27,12 @@ the runtime or the scripts.
 - Changes confined to `runcvm-scripts/` can be tried without a rebuild by copying the scripts
   into `/opt/runcvm/scripts/`. They take effect for Container/VMs created afterwards — on that
   host, for every user of RunCVM, so do this only on a development or test host.
-- RunCVM is designed for hosts with KVM (`/dev/kvm`); without it, VMs can run only under much
-  slower software emulation, where supported. The integration tests need a Docker daemon with
-  the `runcvm` runtime registered. Check what the current environment has before choosing what to
-  test, and say plainly in any report what could not be tested there (e.g. "not tested on
-  KVM", "not tested on arm64").
+- RunCVM is designed for hosts with KVM (`/dev/kvm`). Without it, a Container/VM launched with
+  `--env=RUNCVM_QEMU_ACCEL=tcg` runs under QEMU's software emulation (TCG): much slower, but it
+  exercises RunCVM itself, so it suits sandboxes and CI hosts without nested virtualisation.
+  The integration tests need a Docker daemon with the `runcvm` runtime registered. Check what
+  the current environment has before choosing what to test, and say plainly in any report what
+  could not be tested there (e.g. "not tested on KVM", "not tested on arm64").
 
 ## Integration tests
 
@@ -35,6 +42,9 @@ the runtime or the scripts.
   Its docstring is the reference for options, test metadata and exit codes.
 - `tests/run --mock` (stand-in mode) runs the tests with `runc` in place of RunCVM, skipping
   those that require real VMs. Use it to develop tests and the runner where RunCVM can't run.
+- `tests/run --accel tcg` runs real RunCVM Container/VMs under software emulation where KVM is
+  unavailable; tests requiring `kvm` are skipped. Expect each VM to take tens of seconds to
+  start, and allow for that in any wait.
 - After changing `tests/run`, `tests/framework.sh` or `tests/framework.py`, run
   `tests/selftest/run-selftest` (no Docker needed), and with `--docker` where a Docker daemon
   is available.
