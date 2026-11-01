@@ -140,6 +140,7 @@ class Environment:
         self.run_id = run_id
         self.use_docker = use_docker
         self._probes = {}
+        self._probe_notes = {}  # requirement -> why it is unmet, where known
 
     def preflight(self):
         if docker("info", "--format", "{{json .ServerVersion}}").returncode != 0:
@@ -170,12 +171,17 @@ class Environment:
         if req == "ipv6":
             if not self.use_docker:
                 return False
+            # A random unique-local subnet, so concurrent runs, or a network
+            # already using a fixed subnet, cannot make the probe fail.
+            subnet = "fd%02x:%04x:%04x::/64" % tuple(int.from_bytes(os.urandom(n), "big") for n in (1, 2, 2))
             name = "rcvt-%s-ipv6-probe" % self.run_id
-            r = docker("network", "create", "--ipv6", "--subnet", "fd00:7263:7674::/64",
+            r = docker("network", "create", "--ipv6", "--subnet", subnet,
                        "--label", "runcvm-test.run=%s" % self.run_id, name)
             if r.returncode == 0:
                 docker("network", "rm", name)
                 return True
+            err = [l for l in (r.stderr or "").splitlines() if l.strip() and l.strip() != "exit status 1"]
+            self._probe_notes[req] = "could not create an IPv6 network%s" % (": " + err[-1].strip() if err else "")
             return False
         raise HarnessError("unknown requirement '%s'" % req)
 
@@ -502,8 +508,10 @@ def main(argv):
     for t in selected:
         unmet = [r for r in t.requires if not env.requirement_met(r)]
         if unmet:
-            reason = "requires %s%s" % (", ".join(unmet),
-                                        " (stand-in mode)" if "vm" in unmet and args.mock else "")
+            notes = [env._probe_notes[r] for r in unmet if r in env._probe_notes]
+            if "vm" in unmet and args.mock:
+                notes.insert(0, "stand-in mode")
+            reason = "requires %s%s" % (", ".join(unmet), " (%s)" % "; ".join(notes) if notes else "")
             with open(os.path.join(logs_dir, t.name + ".log"), "w") as f:
                 f.write("SKIP: %s\n" % reason)
             results.append(Result(t, "skip", None, 0, reason))
