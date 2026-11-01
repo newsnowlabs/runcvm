@@ -457,7 +457,7 @@ if [ "$COMMAND" = "create" ]; then
   set_config_env "RUNCVM_QEMU_ARCH" "$RUNCVM_QEMU_ARCH"
 
   # QEMU acceleration:
-  # - kvm (default): use KVM; fail now if /dev/kvm is unavailable on this host
+  # - kvm (default): use KVM; fail at creation if /dev/kvm is unavailable on this host
   # - auto: use KVM if /dev/kvm is available, otherwise (much slower) software emulation
   # - tcg: always use software emulation (e.g. for testing where KVM is unavailable)
   RUNCVM_QEMU_ACCEL="$(get_config_env 'RUNCVM_QEMU_ACCEL' 'kvm')"
