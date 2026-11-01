@@ -423,7 +423,7 @@ def parse_args(argv):
                     "all tests in the selected tier run.",
         epilog="Environment: RUNTIME, RUNCVM_TEST_MOCK, RUNCVM_TEST_ACCEL, RUNCVM_TEST_RUN_ID, RUNCVM_TEST_RESULTS, "
                "RUNCVM_TEST_KILL_AFTER (seconds between SIGTERM and SIGKILL on timeout; "
-               "default %d). See the comment at the top of this file for details." % DEFAULT_KILL_AFTER)
+               "default %d), RUNCVM_TEST_JOBS (Container/VMs a test may run at once; default 3). See the comment at the top of this file for details." % DEFAULT_KILL_AFTER)
     p.add_argument("tests", nargs="*", metavar="TEST")
     p.add_argument("-t", "--tier", choices=TIERS + ("all",), default="all",
                    help="tier to run (default: all)")

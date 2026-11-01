@@ -158,6 +158,7 @@ class RunnerTests(unittest.TestCase):
             t.expect_exit("expect_exit sees status 3", 3, ["sh", "-c", "exit 3"])
             t.check_cmd("wait_for succeeds when ready", lambda: t.wait_for("a file", 5, ["test", "-e", "../framework.py"]))
             t.check("wait_for times out", False, t.wait_for("never", 2, lambda: False))
+            t.check("parallel keeps order", [1, 4, 9, 16], t.parallel(lambda x: x * x, [1, 2, 3, 4], jobs=2))
             t.param("language", "python")
             t.finish()
             """))

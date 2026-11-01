@@ -59,8 +59,8 @@ the runtime or the scripts.
   `unique` for every Docker object name and `labels` on every object created, so that runs can
   proceed concurrently and the runner can remove leftovers; `vm_opts` on every RunCVM
   Container/VM; `check`, `check_cmd` and `expect_exit` for results; `wait_for` and
-  `wait_for_exec` for every wait, so nothing waits without a deadline; `skip` and `finish` to
-  end.
+  `wait_for_exec` for every wait, so nothing waits without a deadline; `parallel` (Python) to
+  run independent cases at once; `skip` and `finish` to end.
 - Tests must not download anything at run time beyond pulling images: containers on Docker
   networks may have no outbound access in sandboxed or CI environments.
 - Where behaviour should be the same with and without `--init`, test both, recording the mode
