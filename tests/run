@@ -171,8 +171,8 @@ class Environment:
         if req == "ipv6":
             if not self.use_docker:
                 return False
-            # A random unique-local subnet, so concurrent runs, or a network
-            # already using a fixed subnet, cannot make the probe fail.
+            # A random unique-local subnet, so that concurrent runs, or an existing
+            # network on the same subnet, cannot make the probe fail.
             subnet = "fd%02x:%04x:%04x::/64" % tuple(int.from_bytes(os.urandom(n), "big") for n in (1, 2, 2))
             name = "rcvt-%s-ipv6-probe" % self.run_id
             r = docker("network", "create", "--ipv6", "--subnet", subnet,
