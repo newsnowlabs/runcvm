@@ -46,24 +46,35 @@ Work:
 - `set -o pipefail`; capture `${PIPESTATUS[0]}` per test; non-zero overall exit on any failure.
 - Select tests by tier (`core`, `extended`) and by name.
 - Per-test timeout.
-- Machine-readable results (TAP or JUnit) written to a configurable results directory, plus per-test logs.
+- Machine-readable results (TAP or JUnit) written to a configurable results directory, plus per-test logs. Each result records the test's parameters (e.g. `--init` or not, user, kernel) so the same test run in several modes reports separately.
+- Helpers in `tests/framework.sh` for each way a test observes L2 (see F3): expected exit status, results volume, `docker exec` probe, stdout capture.
 - Unique per-run naming helpers in `tests/framework.sh` (names, networks, volumes, ports, temp files) so runs can be concurrent and clean-up is reliable; label everything created by a run.
 
 Done when: a deliberately failing test makes `tests/run` exit non-zero, and results/logs appear in the results directory.
 
-#### A2. Exit-code pass-through check
+#### A2. Exit-code and shutdown behaviour: baseline tests
 
-The CI contract depends on a Container/VM's exit code reaching `docker run`. The mechanism exists (`/.runcvm/exitcode`, `runcvm-scripts/runcvm-ctr-exit`) but is not covered by a test.
+RunCVM does not currently pass the entrypoint's exit status through automatically. Per the README, an application must write `/.runcvm/exitcode` (0–255) or call `qemu-exit` (0–127); otherwise `runcvm-ctr-exit` derives a code from QEMU's exit status. Behaviour also differs by init mode:
 
-Work: core test asserting `docker run --runtime=runcvm … sh -c 'exit N'` returns `N` for several values, including after `docker stop`/`kill`.
+- Without `--init`, the entrypoint is exec'd as the VM's PID 1; when it exits the kernel panics and QEMU exits (`-no-reboot`), with no clean shutdown.
+- With `--init`, busybox init is PID 1 and runs the entrypoint as a descendant via `runcvm-vm-start-wrapper`; when the entrypoint exits, init respawns the wrapper, which finds `/.runcvm/once` and powers off cleanly. The entrypoint's status is discarded.
 
-Done when: the test passes and is part of the core tier.
+Work: core tests that record current behaviour precisely, reading `docker run`'s exit status directly (no wrapper, since this is the behaviour under test), across:
+- `--init` and without;
+- entrypoint exits normally (various codes), writes `/.runcvm/exitcode`, calls `qemu-exit`;
+- root and `-u <non-root>` (`/.runcvm` is a root-only tmpfs, `mode=700`);
+- `docker stop` and `docker kill`;
+- whether data written to a `RUNCVM_DISKS` disk survives each kind of shutdown.
+
+These are regression tests for the separate project upgrading RunCVM's VM and container init processes; expected values are updated when that project changes the contract.
+
+Done when: the tests pass against current behaviour and are part of the core tier.
 
 #### A3. Core test tier
 
-Small, fast, deterministic tests (one or two VMs each) that gate CI:
+Small, fast, deterministic tests (one or two VMs each) that gate CI. Each test declares which RunCVM options it exercises and observes L2 by the method appropriate to them (F3). Where behaviour is meant to be the same with and without `--init`, the test runs in both modes.
 
-- Boot and exit code (A2).
+- Exit codes and shutdown (A2).
 - `--env`/`--env-file`, `--user`, `--workdir` (existing `02-user-workdir`, `03-env`).
 - Mounts: volume, bind, tmpfs; `RUNCVM_DISKS` creation, formatting, prepopulation and persistence in a volume.
 - Networking: default bridge, custom network, Docker DNS between containers, `-p` publishing, custom MTU.
@@ -103,9 +114,11 @@ A Dockerfile in the repository (e.g. `tests/env/Dockerfile`), based on the READM
 - Docker CE, systemd, non-root dev user with sudo and docker group, git and build prerequisites.
 - KVM module selection by CPU vendor (`kvm_intel`/`kvm_amd`), replacing the hardcoded `kvm_intel` in the README images, or removed if shown to be unnecessary.
 - rp_filter settings correct for inner bridges (the installer already handles this).
-- Two modes:
-  - **Dev mode** (default): systemd as PID 1, dockerd running; long-lived. For interactive use, Dockside, and Claude Code.
-  - **Batch mode**: entrypoint `runcvm-selftest` (B2). Runs *without* systemd as PID 1 so that the entrypoint's exit status becomes the container's exit code via the existing `/.runcvm/exitcode` path; starts dockerd itself (RunCVM's default `RUNCVM_CGROUPFS=hybrid` supports this).
+- systemd as PID 1 in all modes, with dockerd and `systemd-logind` (needed for ACPI power-down on `docker stop`).
+- Entrypoint wrapper: a small script saves its arguments (NUL-separated) and relevant environment variables (as a systemd `EnvironmentFile`) to the root filesystem (e.g. `/etc/runcvm-l1/`; not `/run`, which systemd replaces with a fresh tmpfs), then execs systemd with no arguments. Needed because systemd as PID 1 does not treat its arguments as instructions for us, and services do not inherit PID 1's environment.
+- Mode chosen from the saved arguments:
+  - **Dev mode** (no arguments): long-lived. For interactive use, Dockside, and Claude Code.
+  - **Batch mode** (`selftest <ref> [tier|tests…]`): a systemd unit runs `runcvm-selftest` (B2), then powers off (`SuccessAction=`/`FailureAction=poweroff`). See F2.
 - Optional Claude Code CLI installation for dev mode. API keys supplied via a file on a `/disks` volume or Dockside's secrets mechanism rather than `--env`, which is visible in `docker inspect` on L0.
 
 Done when: the image launches in dev mode on L0 and in Dockside, and `docker run --runtime=runcvm hello-world` works inside it with the stock RunCVM preinstalled.
@@ -113,10 +126,10 @@ Done when: the image launches in dev mode on L0 and in Dockside, and `docker run
 #### B2. In-L1 tooling: `runcvm-dev` and `runcvm-selftest`
 
 - `runcvm-dev install <git-ref | source-dir | image>`: build (inside L1) and install a RunCVM version. Uses the existing installer's `REPO=<image>` support; once C is in place, installs as a new version alongside others.
-- `runcvm-selftest <git-ref> [tier|tests…]`: clone the ref, build, install, run `tests/run`, write results to `/results` (a volume or `/disks` file), power off with the suite's status.
+- `runcvm-selftest <git-ref> [tier|tests…]`: clone the ref, build, install, run `tests/run`, write results to the `/results` mount (F2).
 - Building happens inside L1, never on L0, so no branch-controlled Dockerfile `RUN` steps execute on L0.
 
-Done when: `runcvm-selftest main core` run in L1 returns the suite's status as the L1 container's exit code, with results available on L0 after exit.
+Done when: `selftest main core` launched as L1's command leaves complete results and a `done` marker in the results mount, and L1's exit code matches the recorded harness status.
 
 #### B3. L0 launcher script
 
@@ -125,7 +138,9 @@ A reviewed, pinned script installed on L0 (source kept in the repository, e.g. `
 - Accepts only a ref (validated against a pattern and restricted to the upstream repository) and a test selection.
 - Fixed flags: `--runtime=runcvm`, memory, CPUs, `RUNCVM_DISKS`, `RUNCVM_QEMU_NET_VHOST=1` (if proven), batch-mode command.
 - Unique name and labels per run (e.g. run ID); hard timeout; no `--rm` — copy results out, then remove the container and its volumes.
-- Streams L1's console to stdout; exits with L1's exit code.
+- Mounts a fresh results volume or directory per run at `/results`; after L1 exits, reads `status` and the `done` marker, cross-checks L1's exit code, and exits with the result (F2 conventions). A missing `done` marker is an infrastructure failure, whatever the exit code.
+- Streams L1's console to stdout for live progress only.
+- Generous `--stop-timeout`; on timeout, collects diagnostics with `docker exec` (e.g. `journalctl`) before `docker stop -t N`, then `docker kill`.
 - Label-based reaper for anything left behind by cancelled or crashed runs.
 - Suitable as an SSH forced command (D3).
 
@@ -137,7 +152,7 @@ Manual launches to settle what the documentation does not demonstrate:
 
 - Full core tier at L2 depth; extended tier including the swarm test (memory sizing).
 - Current Docker, cgroup v2 and systemd together in L1.
-- Exit-code pass-through from L1 (batch mode) to L0.
+- Results mount, `done` marker and `/.runcvm/exitcode` from L1's `ExecStopPost` reach L0 as designed (F2); `docker stop` of a systemd L1 powers off via ACPI and `systemd-logind`.
 - Teardown: `docker rm -f` of L1 with L2s running leaves no taps, iptables rules or volumes on L0.
 - Concurrency: several L1s on L0 (KVM contention, disk usage in L0's `/var/lib/docker`).
 - Performance: `RUNCVM_QEMU_NET_VHOST=1` in L1 (needs `vhost_net` and `/dev/vhost-net` in the L1 guest), `RUNCVM_HUGETLB`, `RUNCVM_QEMU_MEM_PREALLOC`.
@@ -333,7 +348,54 @@ Done when: the L1 image (B1) uses one data disk for `/var/lib/docker`, `/var/lib
 
 ---
 
-### F. Deferred and possible future work
+### F. Communication and control between levels
+
+How each level is launched, reports results and is controlled. L0↔L1 and L1↔L2 follow the same principles.
+
+#### F1. What RunCVM provides, and how it behaves
+
+| Channel | How RunCVM implements it | systemd as PID 1 | `--init` (busybox init as PID 1) | No init (entrypoint as PID 1) |
+|---|---|---|---|---|
+| Command line | Saved to `/.runcvm/entrypoint`; exec'd in the VM | Arguments go to systemd, not to us; use an entrypoint wrapper (B1) | Passed to the entrypoint | Passed to the entrypoint |
+| Environment | Saved to `/.runcvm/config`; restored for the entrypoint | Not inherited by services; wrapper saves an `EnvironmentFile` | Passed | Passed |
+| stdin/stdout | VM console (`hvc0`/`ttyS0`) is QEMU's stdio | Owned by systemd: status output, possibly a getty; not usable for stdin | Console with controlling tty | Console |
+| Exit code | `runcvm-ctr-exit` reads `/.runcvm/exitcode` after QEMU exits, else derives one from QEMU's status; `qemu-exit` exits QEMU immediately | Only if a unit writes `/.runcvm/exitcode` before power-off | Status discarded; clean power-off | Status lost; kernel panic, no clean shutdown |
+| `docker exec` | dropbear in the VM, reached via `dbclient`; exit codes and separate stdout/stderr preserved | Works | Works; dropbear respawned | Works |
+| `docker stop` | `runcvm-ctr-shutdown`: ACPI power-down, then `busybox poweroff`, then `kill 1` | ACPI only (needs `systemd-logind`); the fallbacks do not work on systemd (SIGTERM makes systemd re-execute) | `busybox poweroff` fallback | `kill 1` |
+| Mounts | Volumes and bind mounts served over virtiofs | Work | Work | Work |
+
+README caveats apply to the console: stdout and stderr are not separated, and output just after boot or just before shutdown may be corrupted or lost.
+
+#### F2. L1 to L0
+
+L1 runs systemd, so L1's exit code cannot carry the results of individual L2 tests.
+
+- **Results mount (authoritative)**: a per-run volume or directory at `/results`. The self-test writes per-test results and logs, aggregate JUnit/TAP, a `status` file, and a `done` marker last.
+- **L1 exit code (cross-check of harness outcome only)**: the self-test unit's `ExecStopPost=` (given `$EXIT_STATUS` and `$SERVICE_RESULT` by systemd) writes the harness status to `/results/status` and `/.runcvm/exitcode`, runs `sync`, and the unit powers off. Not `qemu-exit`, which skips a clean shutdown and risks unflushed `RUNCVM_DISKS` data.
+- **Codes**: 0 all gating tests passed; 1 test failures; 2 harness error; 124 timeout. No `done` marker means infrastructure failure.
+- **Console (live progress only)**: the self-test unit writes to the console (`StandardOutput=tty`, `TTYPath=/dev/hvc0`) with a recognisable prefix. Batch mode reduces noise with `RUNCVM_KERNEL_APPEND=systemd.show_status=0` and a masked console getty. Nothing is parsed from it.
+- **Control**: launch parameters via L1's command line and environment (B1 wrapper); `docker exec` for status and diagnostics; `docker stop` with a generous timeout. stdin is not used.
+
+#### F3. L2 to L1
+
+L2 tests span RunCVM's behaviours, with and without `--init` and with systemd images, so each test reports by a method that suits the options under test rather than a single uniform mechanism:
+
+- **Exit status of `docker run`**: only where exit-code behaviour is itself under test (A2), or where the test's options make it reliable.
+- **Results volume**: a volume mounted into L2 to which the workload writes results; works in every init mode and for non-root users (given suitable permissions). Preferred for most behaviour tests (environment, mounts, disks).
+- **`docker exec` probe**: run L2 detached with a long-lived entrypoint, check state with `docker exec` (which preserves exit codes), then stop it. Suits networking, services and anything needing a running VM.
+- **Exit-code wrapper** (`run_vm` helper): `--entrypoint=/.runcvm/guest/bin/bash … -c '"$@"; echo $? >/.runcvm/exitcode'`. Only for tests run as root that are not about the entrypoint, PID 1 or init (without `--init` it makes bash PID 1, changing what is tested). Relies on RunCVM's internal `/.runcvm/guest` path, acceptable for RunCVM's own suite only.
+- **stdout**: only where stdout is itself under test, allowing for the console caveats.
+- **systemd L2s** (nested Docker, swarm nodes): as F2 — results volume and `docker exec`.
+
+#### F4. RunCVM extension: systemd-aware shutdown
+
+`runcvm-ctr-shutdown` falls back to `busybox poweroff` and `kill 1`, neither of which shuts down systemd. When PID 1 in the VM is systemd, fall back instead to `systemctl poweroff` via the exec channel, or systemd's power-off signal (`SIGRTMIN+4`) to PID 1. Test: `docker stop` of a systemd L2 without `systemd-logind` powers off cleanly.
+
+Automatic pass-through of the entrypoint's exit status is out of scope here: it touches the process structure inside the VM, which is a deliberate RunCVM feature, and belongs to the separate init-process project. One candidate for that project, confined to the `--init` path: `runcvm-vm-start-wrapper` (root, not PID 1) runs `runcvm-vm-start` as a child rather than exec'ing it and writes the status to `/.runcvm/exitcode` unless the application already has, taking care over signal handlers, waiting until the child has gone, and keeping the entrypoint in the console's foreground process group.
+
+---
+
+### G. Deferred and possible future work
 
 - **Overlay root with a block-backed upper layer**: in the VM, root becomes an overlayfs with the image (virtiofs) as the read-only lower layer and the upper layer on the data disk, so writes anywhere under `/` go to the block device. `/var/lib/docker` and containerd storage would still be bind-mounted directly from the data disk (overlay2 cannot run on overlayfs). Needs the root switch moved into the initramfs, and `docker diff`/`docker commit` would no longer see VM-side changes. Worth considering for dev mode after E.
 
@@ -349,6 +411,7 @@ Done when: the L1 image (B1) uses one data disk for `/var/lib/docker`, `/var/lib
 A1 ──► A2, A3, A4, B2
 B1 ──► B2 ──► B3 ──► B4 ──► D1 ──► D2 ──► D3 ──► D4
 B1 (dev mode) ──► C (developed and tested in L1)
+F1/F2 ──► B1 (batch mode), B2, B3;  F3 ──► A1 helpers, A2, A3
 A3 ──► C5
 C4 ──► B2 (runcvm-dev install as a new version, once C exists)
 E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
@@ -364,13 +427,13 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 1. A1, A2 — trustworthy runner and exit-code check.
 2. B1 (dev mode) — L1 image, proven by manual launch on L0 and in Dockside.
 3. C — versioned layout, bootstrap and main wrapper changes, developed in L1. Decide the bootstrap implementation (static binary vs BundELF bundle) at the start.
-4. B1 (batch mode), B2, B3 — self-test entrypoint and launcher.
+4. B1 (batch mode), B2, B3, F2 — self-test unit, results mount and launcher.
 5. B4 — proving runs; record settings.
-6. A3, A4 — core tier and hardened swarm test, developed in L1.
+6. A2, A3, A4, F3, F4 — baseline exit-code tests, core tier, hardened swarm test, systemd-aware shutdown; developed in L1.
 7. D1, D2, D4 (`workflow_dispatch` only) — first CI runs.
 8. D3, then widen D4 triggers.
 9. E — shared data disk; can run alongside 2–6, starting with E3. B1 switches to it when ready.
-10. F — as needed.
+10. G — as needed.
 
 ## 5. Open decisions
 
@@ -389,7 +452,8 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 
 - Nesting depth and performance at L2 (memory, network throughput, boot time).
 - Swarm test may remain unreliable for reasons unrelated to RunCVM.
-- Exit-code pass-through in batch mode depends on not running systemd as PID 1 in L1.
+- L1's results depend on the results mount and `ExecStopPost` writing `/.runcvm/exitcode` before power-off; `docker stop` of L1 depends on `systemd-logind` handling ACPI power-down until F4 lands.
+- RunCVM's exit-code contract will change under the separate init-process project; A2's expected values must be updated with it.
 - Dockside profile capabilities (memory/CPU limits, interaction with `/disks`).
 - BundELF relocatability to `/opt/runcvm/<version>` is assumed, not yet verified.
 - Exec routing after bootstrap updates or host reboots (records in `/run` are lost at reboot; containers are recreated by `create`, which rewrites them).
