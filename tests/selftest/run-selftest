@@ -1,0 +1,190 @@
+#!/bin/bash
+
+# Self-test for tests/run and the tests/framework.sh helpers.
+#
+# Builds fake tests in a temporary directory, runs tests/run against them
+# (without Docker: --no-preflight), and checks statuses, exit codes and
+# results files. Needs only bash, coreutils and python3 (for XML checking).
+#
+# Usage: tests/selftest/run-selftest
+
+set -o pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+RUNNER="$HERE/../run"
+FRAMEWORK="$HERE/../framework.sh"
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+FAILS=0
+ok()   { echo "ok - $1"; }
+fail() { echo "NOT OK - $1"; FAILS=$((FAILS+1)); }
+assert_eq() { if [ "$2" = "$3" ]; then ok "$1"; else fail "$1 (expected '$2', got '$3')"; fi; }
+assert_grep() { if grep -qE -- "$2" "$3"; then ok "$1"; else fail "$1 (no match for '$2' in $(basename "$3"))"; fi; }
+
+T="$WORK/tests"
+mkdir -p "$T"
+cp "$FRAMEWORK" "$T/framework.sh"
+
+mktest() {
+  local name="$1" tier="$2" timeout="$3"
+  mkdir -p "$T/$name"
+  cat >"$T/$name/test"
+  chmod +x "$T/$name/test"
+  [ -n "$tier" ] && echo "$tier" >"$T/$name/tier"
+  [ -n "$timeout" ] && echo "$timeout" >"$T/$name/timeout"
+  return 0
+}
+
+mktest a-pass "" "" <<'EOF'
+#!/bin/bash -e
+. ../framework.sh
+param mode test
+check "one equals one" 1 1
+check_cmd "true succeeds" true
+finish
+EOF
+
+# A failing exit code from a test whose output is piped: the old runner
+# reported this as 0 errors (it recorded sed's status, not the test's).
+mktest b-fail-piped "" "" <<'EOF'
+#!/bin/bash
+echo "some output"
+exit 3
+EOF
+
+# 256 failed checks: 'exit $ERRORS' would wrap to 0; finish must exit 1.
+mktest c-many-failures "" "" <<'EOF'
+#!/bin/bash
+. ../framework.sh
+for i in $(seq 1 256); do check "check $i" yes no >/dev/null; done
+finish
+EOF
+
+mktest d-skip "" "" <<'EOF'
+#!/bin/bash
+. ../framework.sh
+skip "IPv6 not enabled in dockerd"
+EOF
+
+mktest e-timeout "" 2 <<'EOF'
+#!/bin/bash
+sleep 30
+EOF
+
+# Ignores SIGTERM, so must be killed with SIGKILL after the grace period.
+mktest f-timeout-ignores-term "" 2 <<'EOF'
+#!/bin/bash
+trap '' TERM
+sleep 30
+EOF
+
+# Killed early for a reason other than the timeout: a failure, not a timeout.
+mktest g-killed-early "" 60 <<'EOF'
+#!/bin/bash
+kill -9 $$
+EOF
+
+mktest h-extended "extended" "" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+
+# A test exiting 124 by itself (not timed out) is a failure.
+mktest i-exit-124 "" 60 <<'EOF'
+#!/bin/bash
+exit 124
+EOF
+
+# Not a test: no executable 'test' file.
+mkdir -p "$T/j-not-a-test"
+
+# Framework helpers that do not need Docker
+mktest k-helpers "" "" <<'EOF'
+#!/bin/bash -e
+. ../framework.sh
+n=$(unique "x/y z")
+check "unique() name is Docker-safe" "1" "$(echo "$n" | grep -cE '^[a-zA-Z0-9][a-zA-Z0-9_.-]+$')"
+check "unique() includes run id" "1" "$(echo "$n" | grep -c "$RUNCVM_TEST_RUN_ID")"
+check "labels() names run and test" "--label runcvm-test.run=$RUNCVM_TEST_RUN_ID --label runcvm-test.test=k-helpers" "$(labels)"
+expect_exit "expect_exit sees status 3" 3 sh -c 'exit 3'
+check_cmd "wait_for succeeds when ready" wait_for "a file" 5 test -e ../framework.sh
+if wait_for "never" 2 false; then r=0; else r=1; fi
+check "wait_for times out" 1 "$r"
+finish
+EOF
+
+echo "# Full run (all tiers)"
+R1="$WORK/results1"
+RUNCVM_TEST_KILL_AFTER=2 "$RUNNER" --dir "$T" --no-preflight --results "$R1" >"$WORK/run1.out" 2>&1
+assert_eq "runner exits 1 when tests fail" 1 "$?"
+assert_eq "status file records 1" 1 "$(cat "$R1/status")"
+
+status_of() { awk -v n="$1" '$2==n {print $1}' "$R1/summary.txt"; }
+assert_eq "a-pass passes" PASS "$(status_of a-pass)"
+assert_eq "b-fail-piped fails despite piped output" FAIL "$(status_of b-fail-piped)"
+assert_eq "c-many-failures fails (no wrap at 256)" FAIL "$(status_of c-many-failures)"
+assert_eq "d-skip is skipped" SKIP "$(status_of d-skip)"
+assert_eq "e-timeout times out" TIMEOUT "$(status_of e-timeout)"
+assert_eq "f-timeout-ignores-term times out" TIMEOUT "$(status_of f-timeout-ignores-term)"
+assert_eq "g-killed-early fails, not a timeout" FAIL "$(status_of g-killed-early)"
+assert_eq "h-extended runs in tier 'all'" PASS "$(status_of h-extended)"
+assert_eq "i-exit-124 fails, not a timeout" FAIL "$(status_of i-exit-124)"
+assert_eq "k-helpers passes" PASS "$(status_of k-helpers)"
+assert_eq "j-not-a-test is not run" "" "$(status_of j-not-a-test)"
+
+assert_grep "skip reason reported" 'SKIP +d-skip .*IPv6 not enabled in dockerd' "$R1/summary.txt"
+assert_grep "per-test log written" 'some output' "$R1/logs/b-fail-piped.log"
+assert_grep "console output prefixed with test name" '^b-fail-piped - some output' "$WORK/run1.out"
+assert_grep "TAP: pass" '^ok [0-9]+ - a-pass$' "$R1/results.tap"
+assert_grep "TAP: skip" '^ok [0-9]+ - d-skip # SKIP IPv6 not enabled' "$R1/results.tap"
+assert_grep "TAP: fail" '^not ok [0-9]+ - b-fail-piped # exit code 3' "$R1/results.tap"
+assert_grep "TAP: timeout" '^not ok [0-9]+ - e-timeout # timed out after 2s' "$R1/results.tap"
+assert_grep "TAP: sub-results" '^    ok 1 - one equals one$' "$R1/results.tap"
+assert_grep "TAP: plan" '^1\.\.10$' "$R1/results.tap"
+
+if python3 -I -c "import sys, xml.etree.ElementTree as E; E.parse(sys.argv[1])" "$R1/junit.xml" 2>/dev/null; then
+  ok "JUnit XML is well-formed"
+else
+  fail "JUnit XML is well-formed"
+fi
+assert_grep "JUnit: parameter recorded" 'property name="mode" value="test"' "$R1/junit.xml"
+assert_grep "JUnit: timeout recorded" 'failure type="timeout"' "$R1/junit.xml"
+assert_grep "JUnit: skip recorded" 'skipped message="IPv6 not enabled in dockerd"' "$R1/junit.xml"
+assert_eq "JUnit: 256 failed sub-results recorded" 256 "$(grep -c 'name="check [0-9]*"><failure' "$R1/junit.xml")"
+
+echo "# Tier selection"
+"$RUNNER" --dir "$T" --no-preflight --tier extended --results "$WORK/r2" >"$WORK/run2.out" 2>&1
+assert_eq "extended tier: passing test exits 0" 0 "$?"
+assert_eq "extended tier runs only extended tests" "h-extended" "$(awk 'NF>2 && $1 ~ /^(PASS|FAIL|SKIP|TIMEOUT)$/ {print $2}' "$WORK/r2/summary.txt" | tr '\n' ' ' | sed 's/ $//')"
+
+"$RUNNER" --dir "$T" --no-preflight --list --tier core >"$WORK/list.out" 2>&1
+assert_grep "--list shows core tests" '^a-pass +core' "$WORK/list.out"
+if grep -q h-extended "$WORK/list.out"; then fail "--list --tier core excludes extended tests"; else ok "--list --tier core excludes extended tests"; fi
+assert_grep "--list shows per-test timeout" '^e-timeout +core +2s' "$WORK/list.out"
+
+echo "# Selection by name and pattern"
+"$RUNNER" --dir "$T" --no-preflight --results "$WORK/r3" a-pass d-skip >/dev/null 2>&1
+assert_eq "pass and skip only: exits 0" 0 "$?"
+"$RUNNER" --dir "$T" --no-preflight --results "$WORK/r4" 'k-*' >/dev/null 2>&1
+assert_eq "pattern selects k-helpers, which passes" 0 "$?"
+"$RUNNER" --dir "$T" --no-preflight --results "$WORK/r5" no-such-test >/dev/null 2>&1
+assert_eq "unknown test name is a harness error" 2 "$?"
+"$RUNNER" --dir "$T" --no-preflight --results "$WORK/r6" 'zz-*' >/dev/null 2>&1
+assert_eq "no tests selected is a harness error" 2 "$?"
+"$RUNNER" --dir "$T" --no-preflight --tier bogus >/dev/null 2>&1
+assert_eq "bad tier is a harness error" 2 "$?"
+
+echo "# --exitfirst"
+"$RUNNER" --dir "$T" --no-preflight --exitfirst --results "$WORK/r7" a-pass b-fail-piped c-many-failures >/dev/null 2>&1
+assert_eq "--exitfirst exits 1" 1 "$?"
+if grep -q c-many-failures "$WORK/r7/summary.txt"; then fail "--exitfirst stops after first failure"; else ok "--exitfirst stops after first failure"; fi
+
+echo
+if [ "$FAILS" -eq 0 ]; then
+  echo "Self-test passed"
+  exit 0
+fi
+echo "Self-test FAILED: $FAILS failure(s)"
+exit 1

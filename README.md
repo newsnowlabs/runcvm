@@ -839,6 +839,23 @@ Then `docker exec -it -u runcvm ubuntu-docker-runcvm bash` to obtain a command p
 
 Run `docker rm -fv ubuntu-docker-runcvm` to clean up after testing.
 
+### Running the integration tests
+
+From a host or VM with RunCVM installed (for example, the container/VM above), run:
+
+```sh
+tests/run                      # all tests
+tests/run --tier core          # core tests only (extended: slower or less deterministic tests)
+tests/run 02-user-workdir      # named tests (shell patterns allowed, e.g. '0[23]-*')
+tests/run --list               # list tests with their tier and timeout
+```
+
+`tests/run` exits `0` if every selected test passed or was skipped, `1` if any failed or timed out, and `2` on a harness error (for example, no tests selected, or the Docker daemon or runtime not available). It writes per-test logs, `results.tap`, `junit.xml`, `summary.txt` and `status` to a results directory (`--results DIR`, default `${TMPDIR:-/tmp}/runcvm-tests/<run-id>`). Set `RUNTIME` to test a runtime other than `runcvm`.
+
+Each test is a directory under `tests/` containing an executable `test` script, which exits `0` to pass, `77` to skip, and any other code to fail. Optional files `tier` (`core`, the default, or `extended`) and `timeout` (seconds; default 1800) set its tier and time limit. Helpers in `tests/framework.sh` give tests unique per-run names (`unique`), labels that let the runner remove anything a test leaves behind (`labels`), recorded checks (`check`, `check_cmd`, `expect_exit`), polling with deadlines (`wait_for`, `wait_for_exec`), results volumes (`volume_create`, `volume_read`), `skip` and `finish`.
+
+`tests/selftest/run-selftest` tests the runner itself and needs no Docker.
+
 ## Support
 
 **Support launching images:** If you encounter any Docker image that launches in a standard container runtime that does not launch in RunCVM, or launches but with unexpected behaviour, please [raise an issue](https://github.com/newsnowlabs/runcvm/issues) titled _Launch failure for image `<image>`_ or _Unexpected behaviour for image `<image>`_ and include log excerpts and an explanation of the failure, or expected and unexpected behaviour.

@@ -1,32 +1,336 @@
-#!/bin/bash -e
+#!/bin/bash
 
-ERRORS=0
+# RunCVM integration test runner
+#
+# Runs each test (a directory under the tests directory containing an
+# executable 'test' script), records an honest status for each, writes
+# per-test logs and machine-readable results, and exits non-zero if any
+# selected test failed or timed out.
+#
+# Test status is taken from the test script's exit code:
+#   0        pass
+#   77       skipped (e.g. a prerequisite such as IPv6-enabled dockerd is absent)
+#   124, 137 timed out (killed by the runner's per-test timeout)
+#   other    fail
+#
+# Runner exit codes:
+#   0  all selected tests passed or were skipped
+#   1  one or more tests failed or timed out
+#   2  harness error (bad arguments, no tests selected, preflight failure)
+#
+# Optional per-test metadata files, in each test directory:
+#   tier     'core' (default) or 'extended'
+#   timeout  per-test timeout in seconds (overrides --timeout)
 
-DIR=$(dirname $0)
+set -o pipefail
 
-if [ -d "$DIR" ]; then
-  echo "Running RunCVM integration tests in '$DIR' ..."
-  cd $DIR
-else
-  echo "$0: Error: RunCVM integration test directory '$DIR' not found; aborting!"
-  exit -1
-fi
+usage() {
+  cat <<_EOE_
+Usage: $0 [options] [TEST...]
 
-for test in *
-do
+Run RunCVM integration tests. TEST may be a test directory name (e.g. 02-user-workdir)
+or a shell pattern (e.g. '0[23]-*'). With no TEST, all tests in the selected tier run.
 
-  [ -d "$test" ] || continue;
+Options:
+  -t, --tier TIER      core, extended or all (default: all)
+  -T, --timeout SECS   default per-test timeout in seconds (default: 1800)
+  -r, --results DIR    write logs and results to DIR
+                       (default: \$RUNCVM_TEST_RESULTS, else \${TMPDIR:-/tmp}/runcvm-tests/<run-id>)
+  -d, --dir DIR        tests directory (default: the directory containing this script)
+  -x, --exitfirst      stop after the first failed or timed-out test
+  -l, --list           list selected tests with their tier and timeout, and exit
+      --no-preflight   skip Docker and runtime checks
+  -h, --help           show this help
 
-  cd $test
-  ./test 2>&1 | sed "s/^/$test - /"
-  TEST_ERRORS=$?
-  ERRORS=$((ERRORS+$TEST_ERRORS))
+Environment:
+  RUNTIME              container runtime under test (default: runcvm); passed to tests
+  RUNCVM_TEST_RUN_ID   run identifier used in names and labels (default: generated)
+  RUNCVM_TEST_KILL_AFTER  seconds after the timeout signal before SIGKILL (default: 30)
+_EOE_
+}
 
-  cd ..
-  
-  echo "RunCVM test $test finished with $TEST_ERRORS errors"
+TIER="all"
+DEFAULT_TIMEOUT=1800
+RESULTS_DIR="${RUNCVM_TEST_RESULTS:-}"
+TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+EXITFIRST=0
+LIST=0
+PREFLIGHT=1
+PATTERNS=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -t|--tier) TIER="$2"; shift 2 ;;
+    -T|--timeout) DEFAULT_TIMEOUT="$2"; shift 2 ;;
+    -r|--results) RESULTS_DIR="$2"; shift 2 ;;
+    -d|--dir) TESTS_DIR="$(cd "$2" 2>/dev/null && pwd)" || { echo "$0: Error: tests directory '$2' not found" >&2; exit 2; }; shift 2 ;;
+    -x|--exitfirst) EXITFIRST=1; shift ;;
+    -l|--list) LIST=1; shift ;;
+    --no-preflight) PREFLIGHT=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; PATTERNS+=("$@"); break ;;
+    -*) echo "$0: Error: unknown option '$1'" >&2; usage >&2; exit 2 ;;
+    *) PATTERNS+=("$1"); shift ;;
+  esac
 done
 
-echo "RunCVM integration tests completed with $ERRORS errors"
+case "$TIER" in
+  core|extended|all) ;;
+  *) echo "$0: Error: tier must be core, extended or all (got '$TIER')" >&2; exit 2 ;;
+esac
 
-exit $ERRORS
+case "$DEFAULT_TIMEOUT" in
+  ''|*[!0-9]*) echo "$0: Error: timeout must be a whole number of seconds (got '$DEFAULT_TIMEOUT')" >&2; exit 2 ;;
+esac
+
+export RUNTIME="${RUNTIME:-runcvm}"
+KILL_AFTER="${RUNCVM_TEST_KILL_AFTER:-30}"
+export RUNCVM_TEST_RUN_ID="${RUNCVM_TEST_RUN_ID:-$(date +%Y%m%d-%H%M%S)-$$}"
+RESULTS_DIR="${RESULTS_DIR:-${TMPDIR:-/tmp}/runcvm-tests/$RUNCVM_TEST_RUN_ID}"
+
+test_tier() {
+  local tier="core"
+  [ -f "$1/tier" ] && read -r tier <"$1/tier"
+  echo "${tier:-core}"
+}
+
+test_timeout() {
+  local timeout="$DEFAULT_TIMEOUT"
+  [ -f "$1/timeout" ] && read -r timeout <"$1/timeout"
+  case "$timeout" in ''|*[!0-9]*) timeout="$DEFAULT_TIMEOUT" ;; esac
+  echo "$timeout"
+}
+
+matches_patterns() {
+  local name="$1" p
+  [ ${#PATTERNS[@]} -eq 0 ] && return 0
+  for p in "${PATTERNS[@]}"; do
+    # shellcheck disable=SC2053
+    [[ "$name" == $p ]] && return 0
+  done
+  return 1
+}
+
+# Select tests
+SELECTED=()
+for dir in "$TESTS_DIR"/*/; do
+  dir="${dir%/}"
+  name="$(basename "$dir")"
+  [ -x "$dir/test" ] || continue
+  matches_patterns "$name" || continue
+  tier="$(test_tier "$dir")"
+  [ "$TIER" = "all" ] || [ "$tier" = "$TIER" ] || continue
+  SELECTED+=("$name")
+done
+
+# Check that each explicitly named test (not a pattern) exists
+for p in "${PATTERNS[@]}"; do
+  case "$p" in *[\*\?\[]*) continue ;; esac
+  if ! [ -x "$TESTS_DIR/$p/test" ]; then
+    echo "$0: Error: test '$p' not found in '$TESTS_DIR'" >&2
+    exit 2
+  fi
+done
+
+if [ "$LIST" = "1" ]; then
+  for name in "${SELECTED[@]}"; do
+    printf "%-32s %-9s %ss\n" "$name" "$(test_tier "$TESTS_DIR/$name")" "$(test_timeout "$TESTS_DIR/$name")"
+  done
+  exit 0
+fi
+
+if [ ${#SELECTED[@]} -eq 0 ]; then
+  echo "$0: Error: no tests selected (tier '$TIER'${PATTERNS:+, patterns: ${PATTERNS[*]}})" >&2
+  exit 2
+fi
+
+# Preflight checks
+if [ "$PREFLIGHT" = "1" ]; then
+  if ! docker info >/dev/null 2>&1; then
+    echo "$0: Error: cannot reach the Docker daemon ('docker info' failed)" >&2
+    exit 2
+  fi
+  if ! docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q "\"$RUNTIME\""; then
+    echo "$0: Error: runtime '$RUNTIME' is not registered with Docker" >&2
+    exit 2
+  fi
+  if [ "$RUNTIME" = "runcvm" ] && ! [ -e /dev/kvm ]; then
+    echo "$0: Warning: /dev/kvm not found; RunCVM VMs may fail or run without KVM acceleration" >&2
+  fi
+fi
+
+mkdir -p "$RESULTS_DIR/logs" || { echo "$0: Error: cannot create results directory '$RESULTS_DIR'" >&2; exit 2; }
+
+xml_escape() {
+  sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
+
+# Remove anything left behind by a test that carries this run's and test's labels
+reap() {
+  local name="$1" filter ids
+  filter=(--filter "label=runcvm-test.run=$RUNCVM_TEST_RUN_ID" --filter "label=runcvm-test.test=$name")
+  ids=$(docker ps -aq "${filter[@]}" 2>/dev/null)
+  [ -n "$ids" ] && docker rm -fv $ids >/dev/null 2>&1
+  ids=$(docker network ls -q "${filter[@]}" 2>/dev/null)
+  [ -n "$ids" ] && docker network rm $ids >/dev/null 2>&1
+  ids=$(docker volume ls -q "${filter[@]}" 2>/dev/null)
+  [ -n "$ids" ] && docker volume rm -f $ids >/dev/null 2>&1
+  return 0
+}
+
+echo "Running RunCVM integration tests"
+echo "  run id:   $RUNCVM_TEST_RUN_ID"
+echo "  runtime:  $RUNTIME"
+echo "  tier:     $TIER"
+echo "  tests:    ${SELECTED[*]}"
+echo "  results:  $RESULTS_DIR"
+echo
+
+declare -A STATUS DURATION REASON
+PASSED=0 FAILED=0 SKIPPED=0 TIMEDOUT=0
+RAN=()
+
+for name in "${SELECTED[@]}"; do
+  dir="$TESTS_DIR/$name"
+  log="$RESULTS_DIR/logs/$name.log"
+  checks="$RESULTS_DIR/logs/$name.checks"
+  params="$RESULTS_DIR/logs/$name.params"
+  timeout="$(test_timeout "$dir")"
+  : >"$checks"; : >"$params"
+
+  echo "=== $name (tier $(test_tier "$dir"), timeout ${timeout}s)"
+  start=$(date +%s)
+
+  (
+    cd "$dir" &&
+    RUNCVM_TEST_NAME="$name" RUNCVM_TEST_CHECKS="$checks" RUNCVM_TEST_PARAMS="$params" \
+      exec timeout --kill-after="$KILL_AFTER" "$timeout" ./test
+  ) </dev/null 2>&1 | tee "$log" | sed -u "s/^/$name - /"
+  rc=${PIPESTATUS[0]}
+
+  DURATION[$name]=$(( $(date +%s) - start ))
+  RAN+=("$name")
+
+  if [ "$PREFLIGHT" = "1" ]; then
+    reap "$name"
+  fi
+
+  case "$rc" in
+    0) STATUS[$name]=pass; PASSED=$((PASSED+1)) ;;
+    77) STATUS[$name]=skip; SKIPPED=$((SKIPPED+1))
+        REASON[$name]="$(grep -m1 -o 'SKIP: .*' "$log" | sed 's/^SKIP: //')" ;;
+    124|137)
+      # Only a real timeout if the test ran for its full time limit; otherwise
+      # the test itself exited 124, or was killed for another reason.
+      if [ "${DURATION[$name]}" -ge "$timeout" ]; then
+        STATUS[$name]=timeout; TIMEDOUT=$((TIMEDOUT+1)); REASON[$name]="timed out after ${timeout}s"
+      else
+        STATUS[$name]=fail; FAILED=$((FAILED+1)); REASON[$name]="exit code $rc"
+      fi
+      ;;
+    *) STATUS[$name]=fail; FAILED=$((FAILED+1)); REASON[$name]="exit code $rc" ;;
+  esac
+
+  echo "=== $name: ${STATUS[$name]^^}${REASON[$name]:+ (${REASON[$name]})} in ${DURATION[$name]}s"
+  echo
+
+  if [ "$EXITFIRST" = "1" ] && { [ "${STATUS[$name]}" = "fail" ] || [ "${STATUS[$name]}" = "timeout" ]; }; then
+    echo "Stopping after first failure (--exitfirst)"
+    break
+  fi
+done
+
+# TAP results
+{
+  echo "TAP version 13"
+  echo "1..${#RAN[@]}"
+  echo "# run id: $RUNCVM_TEST_RUN_ID; runtime: $RUNTIME; tier: $TIER"
+  n=0
+  for name in "${RAN[@]}"; do
+    n=$((n+1))
+    # Sub-results recorded by the test with check()/record_result()
+    if [ -s "$RESULTS_DIR/logs/$name.checks" ]; then
+      echo "    1..$(wc -l <"$RESULTS_DIR/logs/$name.checks")"
+      m=0
+      while IFS=$'\t' read -r cstatus cdesc; do
+        m=$((m+1))
+        case "$cstatus" in
+          PASS) echo "    ok $m - $cdesc" ;;
+          SKIP) echo "    ok $m - $cdesc # SKIP" ;;
+          *) echo "    not ok $m - $cdesc" ;;
+        esac
+      done <"$RESULTS_DIR/logs/$name.checks"
+    fi
+    case "${STATUS[$name]}" in
+      pass) echo "ok $n - $name" ;;
+      skip) echo "ok $n - $name # SKIP ${REASON[$name]}" ;;
+      timeout) echo "not ok $n - $name # ${REASON[$name]}" ;;
+      *) echo "not ok $n - $name # ${REASON[$name]}" ;;
+    esac
+  done
+} >"$RESULTS_DIR/results.tap"
+
+# JUnit XML results
+{
+  total=0
+  for name in "${RAN[@]}"; do
+    total=$((total+1))
+    [ -s "$RESULTS_DIR/logs/$name.checks" ] && total=$((total+$(wc -l <"$RESULTS_DIR/logs/$name.checks")))
+  done
+  echo '<?xml version="1.0" encoding="UTF-8"?>'
+  echo "<testsuites name=\"runcvm\" tests=\"$total\">"
+  for name in "${RAN[@]}"; do
+    ename="$(printf '%s' "$name" | xml_escape)"
+    echo "  <testsuite name=\"$ename\" time=\"${DURATION[$name]}\">"
+    echo "    <properties>"
+    echo "      <property name=\"runtime\" value=\"$(printf '%s' "$RUNTIME" | xml_escape)\"/>"
+    echo "      <property name=\"tier\" value=\"$(test_tier "$TESTS_DIR/$name")\"/>"
+    while IFS=$'\t' read -r pkey pval; do
+      [ -n "$pkey" ] || continue
+      echo "      <property name=\"$(printf '%s' "$pkey" | xml_escape)\" value=\"$(printf '%s' "$pval" | xml_escape)\"/>"
+    done <"$RESULTS_DIR/logs/$name.params"
+    echo "    </properties>"
+    while IFS=$'\t' read -r cstatus cdesc; do
+      [ -n "$cstatus" ] || continue
+      edesc="$(printf '%s' "$cdesc" | xml_escape)"
+      case "$cstatus" in
+        PASS) echo "    <testcase classname=\"$ename\" name=\"$edesc\"/>" ;;
+        SKIP) echo "    <testcase classname=\"$ename\" name=\"$edesc\"><skipped/></testcase>" ;;
+        *) echo "    <testcase classname=\"$ename\" name=\"$edesc\"><failure message=\"check failed\"/></testcase>" ;;
+      esac
+    done <"$RESULTS_DIR/logs/$name.checks"
+    ereason="$(printf '%s' "${REASON[$name]}" | xml_escape)"
+    echo -n "    <testcase classname=\"$ename\" name=\"$ename\" time=\"${DURATION[$name]}\">"
+    case "${STATUS[$name]}" in
+      pass) ;;
+      skip) echo -n "<skipped message=\"$ereason\"/>" ;;
+      timeout) echo -n "<failure type=\"timeout\" message=\"$ereason\"/>" ;;
+      *) echo -n "<failure message=\"$ereason\"/>" ;;
+    esac
+    echo -n "<system-out>"
+    tail -n 200 "$RESULTS_DIR/logs/$name.log" | tr -d '\000-\010\013\014\016-\037' | xml_escape
+    echo "</system-out></testcase>"
+    echo "  </testsuite>"
+  done
+  echo "</testsuites>"
+} >"$RESULTS_DIR/junit.xml"
+
+# Summary and overall status
+{
+  for name in "${RAN[@]}"; do
+    printf "%-8s %-32s %5ss  %s\n" "${STATUS[$name]^^}" "$name" "${DURATION[$name]}" "${REASON[$name]}"
+  done
+  echo
+  echo "passed: $PASSED  failed: $FAILED  timed out: $TIMEDOUT  skipped: $SKIPPED  (of ${#SELECTED[@]} selected)"
+} | tee "$RESULTS_DIR/summary.txt"
+
+if [ $((FAILED + TIMEDOUT)) -gt 0 ]; then
+  STATUS_CODE=1
+else
+  STATUS_CODE=0
+fi
+echo "$STATUS_CODE" >"$RESULTS_DIR/status"
+
+echo "Results: $RESULTS_DIR (results.tap, junit.xml, summary.txt, logs/)"
+echo "RunCVM integration tests completed with status $STATUS_CODE"
+exit $STATUS_CODE
