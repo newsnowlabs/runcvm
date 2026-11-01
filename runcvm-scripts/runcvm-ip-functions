@@ -6,3 +6,13 @@ is_natural_int() {
         *) return 0 ;;            # numeric and > 0
     esac
 }
+# ip_prefix_to_network IP PREFIXLEN
+# Print the IPv4 network address for IP/PREFIXLEN, e.g. 172.25.10.2 24 -> 172.25.10.0
+ip_prefix_to_network() {
+  local i1 i2 i3 i4 mask
+  IFS=. read -r i1 i2 i3 i4 <<< "$1"
+  mask=$(( (0xffffffff << (32 - $2)) & 0xffffffff ))
+  printf "%d.%d.%d.%d\n" \
+    $(( i1 & (mask >> 24) & 255 )) $(( i2 & (mask >> 16) & 255 )) \
+    $(( i3 & (mask >> 8) & 255 )) $(( i4 & mask & 255 ))
+}

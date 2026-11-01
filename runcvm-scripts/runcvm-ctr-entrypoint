@@ -116,7 +116,14 @@ do
 
   # Capture the on-link (connected) route prefix for this interface, before its
   # address (and the kernel route derived from it) is flushed below.
-  DOCKER_NET=$(ip -json route show dev "$if" scope link | jq -r '.[0].dst')
+  DOCKER_NET=$(ip -json route show dev "$if" scope link | jq -r '.[0].dst // empty')
+
+  # Fall back to deriving the prefix from the interface's IPv4 address, for an
+  # interface with no on-link route (otherwise 'ip route add' below would fail
+  # and abort the entrypoint).
+  if [ -z "$DOCKER_NET" ]; then
+    DOCKER_NET=$(ip_prefix_to_network "$DOCKER_IF_IP" "$DOCKER_IF_IP_NETPREFIX")/"$DOCKER_IF_IP_NETPREFIX"
+  fi
 
   # Capture a global IPv6 address for this interface, if any. Absence of a
   # devices6/<if> file for an interface is what signals "no IPv6 on this
