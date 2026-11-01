@@ -163,6 +163,13 @@ if [ -n "$RUNCVM_DISKS" ]; then
   do_disks "$RUNCVM_DISKS"
 fi
 
+# vhost-net needs /dev/vhost-net, which the runtime passes into the container only if it
+# exists on the host: without it, QEMU would fail to start with vhost=on.
+if [ "$RUNCVM_QEMU_NET_VHOST" = "1" ] && ! [ -e /dev/vhost-net ]; then
+  echo "RunCVM: Warning: RUNCVM_QEMU_NET_VHOST=1 but /dev/vhost-net is unavailable; continuing without vhost-net" >&2
+  RUNCVM_QEMU_NET_VHOST=0
+fi
+
 IFACES=()
 do_networks
 
@@ -177,13 +184,42 @@ fi
 # TODO:
 # - Consider using '-device pvpanic'
 
+# Choose QEMU acceleration according to RUNCVM_QEMU_ACCEL (validated by runcvm-runtime):
+# - kvm (default): KVM, which requires /dev/kvm
+# - auto: KVM if /dev/kvm is available, otherwise software emulation (TCG), with a warning
+# - tcg: always software emulation (TCG), deliberately and so without a warning
+case "${RUNCVM_QEMU_ACCEL:-kvm}" in
+  tcg)
+    ACCEL="tcg"
+    ;;
+  auto)
+    if [ -e /dev/kvm ]; then
+      ACCEL="kvm"
+    else
+      ACCEL="tcg"
+      echo "RunCVM: Warning: /dev/kvm is unavailable; falling back to software emulation (TCG), which is much slower" >&2
+    fi
+    ;;
+  *)
+    [ -e /dev/kvm ] || error "RunCVM: Error: /dev/kvm is unavailable; launch with --env=RUNCVM_QEMU_ACCEL=auto or tcg to allow software emulation"
+    ACCEL="kvm"
+    ;;
+esac
+
+# Software emulation (TCG) keeps a cache of translated code which, by default, may grow to
+# 1GiB. Size it to RUNCVM_QEMU_TCG_TB_MEM_SIZE (Mb), which runcvm-runtime adds to the
+# container's memory limit, keeping the container's memory limit aligned with QEMU's use.
+TCG_ACCEL=(-accel tcg,tb-size=${RUNCVM_QEMU_TCG_TB_MEM_SIZE:-128})
+
 if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
   CMD="$(which qemu-system-aarch64)"
-  MACHINE+=(-cpu max -machine virt,gic-version=max,usb=off)
+  if [ "$ACCEL" = "kvm" ]; then
+    MACHINE+=(-cpu host -machine virt,accel=kvm,gic-version=max,usb=off)
+  else
+    MACHINE+=(-cpu max -machine virt,gic-version=max,usb=off "${TCG_ACCEL[@]}")
+  fi
 else
   CMD="$(which qemu-system-x86_64)"
-  MACHINE+=(-enable-kvm)
-  MACHINE+=(-cpu host,pmu=off)
 
   # QEMU machine configuration:
   # - q35: modern Intel chipset with PCIe and UEFI support
@@ -203,7 +239,15 @@ else
     USB="off"
   fi
 
-  MACHINE+=(-machine q35,accel=kvm,sata=off,vmport=off,smm=on,dump-guest-core=off,hpet=off,usb=$USB,kernel_irqchip=on)
+  # Use KVM or software emulation, as chosen above.
+  # kernel_irqchip is a KVM-only feature, so it is omitted from the TCG variant.
+  if [ "$ACCEL" = "kvm" ]; then
+    MACHINE+=(-cpu host,pmu=off)
+    MACHINE+=(-machine q35,accel=kvm,sata=off,vmport=off,smm=on,dump-guest-core=off,hpet=off,usb=$USB,kernel_irqchip=on)
+  else
+    MACHINE+=(-cpu max)
+    MACHINE+=(-machine q35,sata=off,vmport=off,smm=on,dump-guest-core=off,hpet=off,usb=$USB "${TCG_ACCEL[@]}")
+  fi
 
   # Enable the QEMU debug exit device for debugging purposes.
   # This device allows the guest to trigger a debug exit, which can be useful for debugging

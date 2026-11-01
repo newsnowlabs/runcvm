@@ -602,6 +602,16 @@ Enable use of [virtio vhost-net](https://www.redhat.com/en/blog/introduction-vir
 ### `--env=RUNCVM_IPV6=<0|1>`
 
 By default, IPv6 is enabled in the VM automatically if a global IPv6 address was assigned to the container (i.e. the Docker network is dual-stack), and disabled otherwise. Set to `1` to force IPv6 on regardless, or `0` to force it off (e.g. to keep a container IPv4-only despite being attached to a dual-stack network).
+### `--env=RUNCVM_QEMU_ACCEL=<kvm|auto|tcg>`
+
+Selects how QEMU runs the VM:
+- `kvm` (the default) uses KVM, and fails with an error if `/dev/kvm` is unavailable on the host;
+- `auto` uses KVM if `/dev/kvm` is available, and otherwise falls back to software emulation (TCG), with a warning;
+- `tcg` always uses software emulation, which is much slower but works without KVM (for example, for testing in environments without nested virtualisation).
+
+### `--env=RUNCVM_QEMU_TCG_TB_MEM_SIZE=<Mb>`
+
+Under software emulation (see `RUNCVM_QEMU_ACCEL`), sets the size of QEMU's cache of translated code, in Mb (default 128; from 32 to 4096). This is added to the container's memory limit, in addition to the VM's memory (`--memory`) and the usual allowance for RunCVM's helper processes. Increase it for workloads that run a large amount of code. It has no effect when KVM is used.
 
 ### `--env=RUNCVM_SYS_ADMIN=1`
 
