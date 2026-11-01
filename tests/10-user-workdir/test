@@ -4,7 +4,7 @@
 . ../framework.sh
 
 # TEST VARIABLES
-NODE=$(unique 02-user-workdir)
+NODE=$(unique 10-user-workdir)
 NETWORK="$NODE-network"
 IMAGE="alpine"
 RUNTIME="${RUNTIME:-runcvm}"

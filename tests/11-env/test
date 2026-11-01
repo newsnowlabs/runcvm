@@ -4,7 +4,7 @@
 . ../framework.sh
 
 # TEST VARIABLES
-NODE=$(unique 03-env)
+NODE=$(unique 11-env)
 NETWORK="$NODE-network"
 IMAGE="alpine"
 RUNTIME="${RUNTIME:-runcvm}"

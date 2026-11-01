@@ -4,7 +4,7 @@
 . ../framework.sh
 
 # TEST VARIABLES
-NODE=00-http-docker-swarm-node
+NODE=50-http-docker-swarm-node
 
 # Number of nodes
 NODES=${NODES:-3}
@@ -67,7 +67,7 @@ do
   docker run \
     -d \
     --rm \
-    --runtime=runcvm \
+    --runtime=${RUNTIME:-runcvm} \
     --network=runcvm-mtu \
     --publish=$((8080+$n-1)):80 \
     --name=$NODE$n \
