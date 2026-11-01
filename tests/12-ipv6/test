@@ -23,9 +23,6 @@ networks() { echo "$NETWORK" "$NETWORK2"; }
 # TEST PROCEDURE
 # --------------
 
-# Run routine cleanup of any preexisting containers, volumes, networks, and images
-cleanup
-
 log -n "Creating dual-stack network '$NETWORK' (subnet $SUBNET6) ..."
 if ! docker network create $(labels) --ipv6 --subnet="$SUBNET6" "$NETWORK"; then
   skip "could not create an IPv6-enabled Docker network - is dockerd configured for IPv6?"
