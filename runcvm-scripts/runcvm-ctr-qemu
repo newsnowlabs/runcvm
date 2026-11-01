@@ -155,6 +155,13 @@ if [ -n "$RUNCVM_DISKS" ]; then
   do_disks "$RUNCVM_DISKS"
 fi
 
+# vhost-net needs /dev/vhost-net, which the runtime passes into the container only if it
+# exists on the host: without it, QEMU would fail to start with vhost=on.
+if [ "$RUNCVM_QEMU_NET_VHOST" = "1" ] && ! [ -e /dev/vhost-net ]; then
+  echo "RunCVM: Warning: RUNCVM_QEMU_NET_VHOST=1 but /dev/vhost-net is unavailable; continuing without vhost-net" >&2
+  RUNCVM_QEMU_NET_VHOST=0
+fi
+
 IFACES=()
 do_networks
 
@@ -168,6 +175,12 @@ fi
 
 # TODO:
 # - Consider using '-device pvpanic'
+
+# Without /dev/kvm, QEMU falls back to software emulation (below), which works but is far
+# slower: say so, rather than silently running much slower than expected.
+if ! [ -e /dev/kvm ]; then
+  echo "RunCVM: Warning: /dev/kvm is unavailable; falling back to software emulation (TCG), which is much slower" >&2
+fi
 
 if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
   CMD="$(which qemu-system-aarch64)"
