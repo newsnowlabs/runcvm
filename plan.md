@@ -473,11 +473,15 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 
 ## 4. Suggested sequence (for prioritisation)
 
+0. **A buildable `main`**
+   - PR #32: pin aports to `${ALPINE_VERSION}-stable` (with dropbear patch paths for Alpine 3.19's dropbear 2022.83). `main` currently fails to build (`nftrules: not found`); B2 depends on this. Check `docker exec` (patched dropbear) on a KVM host before merging.
 1. **Trustworthy results**
    - A1. Trustworthy test runner (`tests/run`)
    - A2. Exit-code and shutdown behaviour: baseline tests
 
    Small, and unblocks everything; can be done in the existing libvirt development VM.
+
+   Then merge the open PRs, tested in the libvirt development VM with the trustworthy runner: #30 (dual-stack IPv6; also fixes VM boot failure for containers with a second network) first, then #28 (ARM64, TCG fallback, Podman, installer), rebased onto or merged with `main` after #32 so that its duplicated build changes drop out. Both land before A3 (needs #30's fix), B2, C3/C4, E3 and E6 (which touch the same code). Follow-ups: a framework check that L2s really run under KVM (#28's TCG fallback would otherwise hide missing nested KVM), multi-interface and overlay-network tests in A3, and `tests/04-ipv6` adapted to A1's conventions.
 2. **First L1 environment**
    - B1. L1 image — dev mode, proven by manual launch on L0 and in Dockside
 3. **Side-by-side versions**, developed in L1
@@ -493,6 +497,7 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
    - F2. L1 to L0 (results mount, exit-code conventions, console, control)
 5. **Proving runs**
    - B4. Proving L1 on L0 and in Dockside — record outcomes and settings, including the disk layout measurements
+   - Then: upgrade Alpine from 3.19 (out of support) to a current stable release as its own pull request, with the dropbear patch paths back to the `src/` layout; compare full-suite results before and after in L1.
 6. **The test suite proper**, developed in L1
    - A3. Core test tier
    - A4. Extended tier, including a hardened swarm test
