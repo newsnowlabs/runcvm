@@ -7,13 +7,21 @@ ARG ALPINE_VERSION=3.19
 # Build base alpine-sdk image for later build stages
 FROM alpine:$ALPINE_VERSION as alpine-sdk
 
+# Redeclare so $ALPINE_VERSION is visible inside this stage's RUN
+ARG ALPINE_VERSION
+
+# aports must be checked out at the stable branch matching the base image:
+# APKBUILDs on master can depend on abuild features that the base release
+# lacks (e.g. dropbear's nftrules subpackage).
 RUN apk update && apk add --no-cache alpine-sdk coreutils && \
     abuild-keygen -an && \
     # Copy the public keys to the system keys
     cp -a /root/.abuild/*.pub /etc/apk/keys && \
-    git clone --depth 1 --single-branch --filter=blob:none --sparse https://gitlab.alpinelinux.org/alpine/aports.git ~/aports && \
+    git clone --depth 1 --single-branch --filter=blob:none --sparse \
+      --branch ${ALPINE_VERSION}-stable \
+      https://gitlab.alpinelinux.org/alpine/aports.git ~/aports && \
     cd ~/aports/ && \
-    git sparse-checkout set main/seabios main/
+    git sparse-checkout set main/seabios main/dnsmasq main/dropbear main/mkinitfs
 
 # --- BUILD STAGE ---
 # Build patched SeaBIOS packages
