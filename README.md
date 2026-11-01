@@ -602,6 +602,7 @@ Enable use of [virtio vhost-net](https://www.redhat.com/en/blog/introduction-vir
 ### `--env=RUNCVM_IPV6=<0|1>`
 
 By default, IPv6 is enabled in the VM automatically if a global IPv6 address was assigned to the container (i.e. the Docker network is dual-stack), and disabled otherwise. Set to `1` to force IPv6 on regardless, or `0` to force it off (e.g. to keep a container IPv4-only despite being attached to a dual-stack network).
+
 ### `--env=RUNCVM_QEMU_ACCEL=<kvm|auto|tcg>`
 
 Selects how QEMU runs the VM:
