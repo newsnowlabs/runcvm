@@ -63,6 +63,7 @@ class FakeTests:
         e = dict(os.environ)
         e.update({"RUNCVM_TEST_KILL_AFTER": "2"})
         e.pop("RUNCVM_TEST_MOCK", None)
+        e.pop("RUNCVM_TEST_ACCEL", None)
         if env:
             e.update(env)
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -269,6 +270,37 @@ class RunnerTests(unittest.TestCase):
             ft.add("q-mock", '#!/bin/bash\n[ "$RUNCVM_TEST_MOCK" = 1 ] && [ "$RUNTIME" = runc ]\n')
             self.assertEqual(ft.run("--mock").rc, 0)
             self.assertEqual(ft.run("--mock", "--runtime", "other").json()["runtime"], "other")
+        finally:
+            ft.cleanup()
+
+    def test_accel(self):
+        ft = FakeTests()
+        try:
+            ft.add("x-accel-bash", """\
+                #!/bin/bash -e
+                . ../framework.sh
+                check "RUNCVM_TEST_ACCEL" "$EXPECT" "$RUNCVM_TEST_ACCEL"
+                check "vm_opts" "$EXPECT_OPTS" "$(vm_opts)"
+                finish
+                """)
+            ft.add("y-accel-python", PY_PREAMBLE + textwrap.dedent("""\
+                t.check("ACCEL", os.environ["EXPECT"] or None, t.ACCEL)
+                t.check("vm_opts", os.environ["EXPECT_OPTS"].split(), t.vm_opts())
+                t.finish()
+                """))
+            ft.add("z-needs-kvm", "#!/bin/bash\nexit 0\n", requires="kvm")
+            r = ft.run("--accel", "tcg", env={"EXPECT": "tcg", "EXPECT_OPTS": "--env=RUNCVM_QEMU_ACCEL=tcg"})
+            self.assertEqual(r.status("x-accel-bash"), "pass", r.out)
+            self.assertEqual(r.status("y-accel-python"), "pass", r.out)
+            self.assertEqual(r.status("z-needs-kvm"), "skip")
+            self.assertEqual(r.json()["accel"], "tcg")
+            r = ft.run("x-accel-bash", "y-accel-python", env={"EXPECT": "", "EXPECT_OPTS": ""})
+            self.assertEqual(r.rc, 0, r.out)
+            self.assertIsNone(r.json()["accel"])
+            r = ft.run("x-accel-bash", env={"RUNCVM_TEST_ACCEL": "auto", "EXPECT": "auto",
+                                            "EXPECT_OPTS": "--env=RUNCVM_QEMU_ACCEL=auto"})
+            self.assertEqual(r.rc, 0, r.out)
+            self.assertEqual(ft.run("--accel", "bogus").rc, 2)
         finally:
             ft.cleanup()
 

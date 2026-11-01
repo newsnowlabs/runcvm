@@ -40,7 +40,7 @@ log -n "Launching runcvm container with command '$COMMAND' ..."
 docker run \
   -d \
   --rm \
-  $(labels) \
+  $(labels) $(vm_opts) \
   --runtime=$RUNTIME \
   --network=$NETWORK \
   --name=$NODE \

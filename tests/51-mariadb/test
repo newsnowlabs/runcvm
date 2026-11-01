@@ -73,7 +73,7 @@ docker network create $NODE-network
 
 # Launch a mariadb VM using RunCVM
 echo "> ($h) Launch RunCVM mariadb server as $NODE-mysqld ..."
-docker run --runtime=${RUNTIME:-runcvm} -d --rm --name=$NODE-mysqld --hostname=$NODE-mysqld --network=$NODE-network --cpus=1 --memory=1G --env=MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb
+docker run --runtime=${RUNTIME:-runcvm} ${RUNCVM_TEST_ACCEL:+--env=RUNCVM_QEMU_ACCEL=$RUNCVM_TEST_ACCEL} -d --rm --name=$NODE-mysqld --hostname=$NODE-mysqld --network=$NODE-network --cpus=1 --memory=1G --env=MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb
 
 echo "> ($h) Monitoring mariadb logs ..."
 docker logs -f -t -n 0 $NODE-mysqld &
@@ -81,11 +81,14 @@ docker logs -f -t -n 0 $NODE-mysqld &
 # Allow final test to complete, even if we encounter errors
 set +e
 
+# Seconds to wait for mariadb to accept connections: much longer under software emulation
+if [ "$RUNCVM_TEST_ACCEL" = "tcg" ]; then WAIT=600; else WAIT=40; fi
+
 # Launch standard runc container to test connecting to the mariadb VM
 echo "> ($h) Waiting for mariadb startup and running test queries in a standard container ..."
 # Use the mariadb image (which includes the mariadb client) so that the test does not
 # depend on installing a client from the internet at run time.
-docker run --rm --network=$NODE-network --name=$NODE-mysql --hostname=$NODE-mysql --env=host=$NODE-mysqld mariadb bash -c 'for a in $(seq 40 -1 1); do if mariadb --skip-ssl-verify-server-cert -u root -h $host mysql -e ""; then echo "> $(hostname) Connected to mysqld ..."; break; else echo "> $(hostname) Waiting for mysqld (#$a) ..."; sleep 1; fi; done && mariadb --skip-ssl-verify-server-cert -u root -h $host mysql -e "select count(*) from user"'
+docker run --rm --network=$NODE-network --name=$NODE-mysql --hostname=$NODE-mysql --env=host=$NODE-mysqld --env=wait=$WAIT mariadb bash -c 'for a in $(seq $wait -1 1); do if mariadb --skip-ssl-verify-server-cert -u root -h $host mysql -e ""; then echo "> $(hostname) Connected to mysqld ..."; break; else echo "> $(hostname) Waiting for mysqld (#$a) ..."; sleep 1; fi; done && mariadb --skip-ssl-verify-server-cert -u root -h $host mysql -e "select count(*) from user"'
 ERRORS=$?
 
 echo "> ($h) Completed $NODE test with $ERRORS errors"
