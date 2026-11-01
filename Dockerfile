@@ -85,7 +85,7 @@ EOF
 
 # --- BUILD STAGE ---
 # Build patched mkinitfs/nlplug-findfs
-# with shorter timeout for speedier boot (saving ~4s)
+# with a shorter maximum device-event timeout than upstream (1s, not 5s), for faster boot
 FROM alpine-sdk as alpine-mkinitfs
 
 ADD patches/mkinitfs/nlplug-findfs.patch /root/aports/main/mkinitfs/nlplug-findfs.patch

@@ -55,7 +55,7 @@ docker logs -f $NODE 2>&1 | sed "s/^/($NODE) > /; /===DONE===/q0; /failed/q129;"
 
 # Test docker run command:
 # - Retrieve first line of logs from container
-# - Strip carriage returns for now. as it's unclear why they are present and are not present in the expected output
+# - Strip carriage returns: the container's output contains them (cause unknown), and the expected output does not
 test_output "run" "$EXPECTED_OUTPUT" "$(docker logs $NODE | grep -v '===DONE===' | tr -d '\015')" || true
 
 # Test docker exec command:
