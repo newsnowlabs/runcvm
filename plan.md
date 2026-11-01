@@ -473,16 +473,51 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 
 ## 4. Suggested sequence (for prioritisation)
 
-1. A1, A2 — trustworthy runner and exit-code check.
-2. B1 (dev mode) — L1 image, proven by manual launch on L0 and in Dockside.
-3. C — versioned layout, bootstrap and main wrapper changes, developed in L1. Decide the bootstrap implementation (static binary vs BundELF bundle) at the start.
-4. B1 (batch mode), B2, B3, F2 — self-test unit, results mount and launcher.
-5. B4 — proving runs; record settings.
-6. A2, A3, A4, F3, F4 — baseline exit-code tests, core tier, hardened swarm test, systemd-aware shutdown; developed in L1.
-7. D1, D2, D4 (`workflow_dispatch` only) — first CI runs.
-8. D3, then widen D4 triggers.
-9. E — shared data and whole-root disks; can run alongside 2–6, starting with E3 (patched mke2fs), on its own branches (section 4a). B1 adopts whichever layout B4's measurements favour.
-10. G — as needed.
+1. **Trustworthy results**
+   - A1. Trustworthy test runner (`tests/run`)
+   - A2. Exit-code and shutdown behaviour: baseline tests
+
+   Small, and unblocks everything; can be done in the existing libvirt development VM.
+2. **First L1 environment**
+   - B1. L1 image — dev mode, proven by manual launch on L0 and in Dockside
+3. **Side-by-side versions**, developed in L1
+   - C1. Versioned layout
+   - C2. Bootstrap wrapper — decide static binary or BundELF bundle at the start
+   - C3. Main wrapper changes
+   - C4. Installer and lifecycle
+   - C5. Tests
+4. **Batch runs and the launcher**
+   - B1. L1 image — batch mode
+   - B2. In-L1 tooling: `runcvm-dev` and `runcvm-selftest`
+   - B3. L0 launcher script
+   - F2. L1 to L0 (results mount, exit-code conventions, console, control)
+5. **Proving runs**
+   - B4. Proving L1 on L0 and in Dockside — record outcomes and settings, including the disk layout measurements
+6. **The test suite proper**, developed in L1
+   - A3. Core test tier
+   - A4. Extended tier, including a hardened swarm test
+   - F3. L2 to L1 (how each test observes L2)
+   - F4. RunCVM extension: systemd-aware shutdown
+7. **First CI runs**
+   - D1. Runner container (first version)
+   - D2. Controls on what jobs can do
+   - D4. Workflows — `workflow_dispatch` only
+8. **CI hardening and wider triggers**
+   - D3. Hardening
+   - D4. Workflows — pushes, then pull requests
+9. **Faster VM storage**, alongside steps 2–6, on its own branches (section 4a)
+   - E3. Build and bundling changes (patched mke2fs) — first
+   - E1. Multi-path disk specs (both flavours)
+   - E2. Populating a multi-path disk in one pass: repeated `-d SRC=SUBDIR`
+   - E4. Adding a destination to an existing disk — if wanted
+   - E5. Tests
+   - E6. Optional whole-root disk — second branch
+
+   B1 adopts whichever layout B4's measurements favour.
+10. **As needed**
+    - G. Deferred and possible future work
+
+F1 (what RunCVM provides, and how it behaves) is reference material for steps 4 and 6 rather than work in itself.
 
 ## 4a. Implementation branches and pull requests
 
