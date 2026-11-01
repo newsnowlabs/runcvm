@@ -98,7 +98,7 @@ Done when: the swarm test passes N consecutive runs in L1 (N to be agreed) and f
 A Dockerfile in the repository (e.g. `tests/env/Dockerfile`), based on the README "Testing" image, usable in three ways: plain `docker run`, Dockside, and CI.
 
 - Self-configuring: defaults baked in with `ENV`/`VOLUME`, so `docker run --runtime=runcvm <image>` or a Dockside profile works without extra flags:
-  - `RUNCVM_DISKS` for `/var/lib/docker` and `/opt/runcvm` (avoids overlay-on-virtiofs and nested virtiofs), plus an optional build-cache disk;
+  - `RUNCVM_DISKS` for `/var/lib/docker`, `/var/lib/containerd` and `/opt/runcvm` (avoids overlay-on-virtiofs and nested virtiofs), plus an optional build-cache disk; once E is available, a single shared data disk covering these and `/home`;
   - `VOLUME /disks`.
 - Docker CE, systemd, non-root dev user with sudo and docker group, git and build prerequisites.
 - KVM module selection by CPU vendor (`kvm_intel`/`kvm_amd`), replacing the hardcoded `kvm_intel` in the README images, or removed if shown to be unnecessary.
@@ -143,6 +143,7 @@ Manual launches to settle what the documentation does not demonstrate:
 - Performance: `RUNCVM_QEMU_NET_VHOST=1` in L1 (needs `vhost_net` and `/dev/vhost-net` in the L1 guest), `RUNCVM_HUGETLB`, `RUNCVM_QEMU_MEM_PREALLOC`.
 - Inner-network MTU and rp_filter in L1.
 - Dockside: whether profiles can set the `--memory`/`--cpus` L1 needs; whether Dockside's IDE injection coexists with systemd and `/disks`.
+- Where Docker in L1 (and L2) stores images: `/var/lib/containerd` with the containerd image store versus `/var/lib/docker` with the classic store; test both in L2, since users get whichever Docker defaults to.
 - Outbound HTTPS and DNS from L1 (for git, registries, Claude Code, the GitHub runner if ever moved into L1).
 
 Done when: each item has a recorded outcome and recommended setting, captured in the README or a `tests/env/README.md`.
@@ -251,7 +252,90 @@ Done when (D1, D2): a manually triggered run for a branch goes green or red corr
 
 ---
 
-### E. Deferred and possible future work
+### E. Faster VM storage: one data disk shared by several paths
+
+The VM's root is the container's root filesystem, shared over virtiofs. `RUNCVM_DISKS` gives block-device performance to chosen paths, but needs one disk per path. Each disk has its own size ceiling (one can fill while another is nearly empty, although sparse backing files and `discard=unmap` mean host space is consumed only as written), and declaring a disk per path does not scale.
+
+Impact on this plan:
+- **CI (batch mode): low**, provided both Docker storage paths are on disks. Most heavy I/O in L1 is under `/var/lib/docker` (images, builds, L2 root filesystems, L2 backing files). With the containerd image store, which recent Docker Engine releases are understood to enable by default on fresh installs, image content and snapshots live in `/var/lib/containerd` instead (checked in B4).
+- **Dev mode and Dockside: significant.** Home directories, source trees, toolchain and package caches, and Claude Code workspaces are write-heavy and spread across the root filesystem.
+
+A block-device root is not proposed: the virtiofs root also carries `/.runcvm` (config, network set-up, fstab, dropbear keys, `exitcode`), `/.runcvm/guest` (including the kernel's `init=`), user volumes and bind mounts, and Docker's `/etc/hosts`/`resolv.conf`/`hostname` bind mounts; and it would break Docker's image-plus-writable-layer model (`docker diff`, `docker cp`, `docker commit`, image updates).
+
+#### E1. Multi-path disk specs
+
+Extend `RUNCVM_DISKS` so one disk can serve several destinations, separated by `:`:
+
+```
+RUNCVM_DISKS=/disks/data,/var/lib/docker:/var/lib/containerd:/home:/opt/runcvm,ext4,40G
+```
+
+- A spec with one destination keeps today's behaviour exactly (`mke2fs -d <dst>`, disk mounted directly at the destination).
+- A spec with several destinations creates one filesystem with a subdirectory per destination (e.g. `var-lib-docker`, `home`), mounts the disk at a hidden mountpoint (e.g. `/.runcvm/disks/<n>`) and bind-mounts each subdirectory over its destination on every boot. Changes are confined to `do_disk` in `runcvm-ctr-qemu` and the fstab handling in `runcvm-vm-init` (`:105`).
+- Overlapping destinations within one spec (e.g. `/var/lib` and `/var/lib/docker`) are rejected.
+
+#### E2. Populating a multi-path disk in one pass (option 3)
+
+The container side cannot mount the image (no `CAP_SYS_ADMIN`, so no loop or FUSE mounts), and `mke2fs -d <dir>` takes a single source directory. Instead, stream all destinations, already renamed to their subdirectories, as a tarball into `mke2fs -d -`:
+
+```sh
+LC_ALL=C.UTF-8 tar -C /vm --xattrs --xattrs-include='*' --numeric-owner -cf - \
+    --transform='s,^var/lib/docker,var-lib-docker,;s,^home,home,' \
+    var/lib/docker home \
+  | LC_ALL=C.UTF-8 mke2fs -q -F -t ext4 -d - "$src"
+```
+
+No staging copy, so no temporary second copy of the data.
+
+Tested in a development sandbox (e2fsprogs 1.47.2 built from source with libarchive; GNU tar 1.35):
+
+| Check | Result |
+|---|---|
+| Paths renamed into subdirectories by `--transform` | Correct |
+| Ownership (numeric uid/gid), modes including setuid | Preserved |
+| Hard links within a tree | Preserved (same inode, link count 2) |
+| Symlinks | Preserved |
+| `security.capability` | Preserved |
+| Other xattrs (`user.*`; by the same code path also `trusted.*`, `security.selinux`, POSIX ACLs) | **Dropped.** The tarball importer copies only `security.capability` and `gnu.translator` (`misc/create_inode_libarchive.c`, `set_inode_xattr_tar`; unchanged on e2fsprogs master as of September 2026). Directory mode (`mke2fs -d <dir>`) copies all xattrs. |
+| Non-ASCII file names | Fail unless run under a UTF-8 locale (`LC_ALL=C.UTF-8`); musl may behave differently, to be checked |
+| Speed, `/usr/lib` (2.3 GB, ~40k files) into a 20 GB sparse file | Tarball: ~17 s; directory mode: ~7 s |
+| Speed vs staging copy (`/usr/share` + `/usr/lib`, 2.7 GB) | Tarball: ~13 s; `cp -a` to staging then `mke2fs -d`: ~87 s |
+
+The xattr limitation matters where a destination is pre-populated with content that relies on xattrs. The important case is a `/var/lib/docker` or `/var/lib/containerd` pre-loaded in an image (e.g. an L1 image with test images baked in for offline speed): overlay2 relies on `trusted.overlay.*` xattrs (e.g. opaque directories), so losing them would silently corrupt layers. Empty destinations, and typical `/home` and `/opt/runcvm` contents, are unaffected. Options:
+1. Patch e2fsprogs so the tarball importer copies all xattrs (or add an option to do so), and propose the change upstream. RunCVM would build e2fsprogs itself anyway (E3).
+2. Fall back to VM-side copying (E4) for destinations needing full xattr fidelity.
+3. Document the limitation and recommend a single-destination disk (directory mode) for pre-populated Docker storage.
+
+#### E3. Build and bundling changes
+
+- e2fsprogs ≥ 1.47.1 built with libarchive. RunCVM builds on Alpine 3.19 (`Dockerfile:4`), which is believed to ship 1.47.0 (no tarball support). Either move to a newer Alpine release (and check its package is built with libarchive) or build e2fsprogs in its own Dockerfile stage, as is done for SeaBIOS and dnsmasq; the latter also allows the E2 xattr patch.
+- libarchive bundled explicitly via `BUNDELF_EXTRA_LIBS`: it is loaded with `dlopen`, so BundELF's dependency scan will not find it.
+- A tar that can rename paths and write xattrs: GNU tar (`--transform`) or bsdtar (`-s`, from libarchive). busybox tar supports neither.
+- A UTF-8 locale for both tar and mke2fs.
+
+#### E4. Adding a destination to an existing disk
+
+The tarball method only populates a disk when it is created. For a destination added to an existing multi-path disk (and optionally for the xattr fallback in E2), the VM populates it on boot, before bind-mounting:
+
+```
+[ -d $M/<sub> ] || { rm -rf $M/<sub>.tmp && cp -a <dst> $M/<sub>.tmp && mv $M/<sub>.tmp $M/<sub>; }
+```
+
+The rename makes `<sub>`'s existence the completion marker; an interrupted copy is discarded and retried. GNU coreutils is already bundled and virtiofsd runs with `-o xattr` (`runcvm-ctr-virtiofsd:11`), so `cp -a` preserves all xattrs. This can be deferred: initially, adding a destination later may simply be unsupported.
+
+#### E5. Tests
+
+- Core: a multi-path disk with sample trees; compare ownership, modes, hard links, symlinks, `security.capability`, and (once E2 option 1 or 2 is chosen) other xattrs between source and disk.
+- Core: Docker in the VM using a multi-path disk for `/var/lib/docker` and `/var/lib/containerd`, with both the containerd image store and the classic store.
+- Single-destination specs behave exactly as before.
+
+Done when: the L1 image (B1) uses one data disk for `/var/lib/docker`, `/var/lib/containerd`, `/opt/runcvm` and `/home`, and E5 passes.
+
+---
+
+### F. Deferred and possible future work
+
+- **Overlay root with a block-backed upper layer**: in the VM, root becomes an overlayfs with the image (virtiofs) as the read-only lower layer and the upper layer on the data disk, so writes anywhere under `/` go to the block device. `/var/lib/docker` and containerd storage would still be bind-mounted directly from the data disk (overlay2 cannot run on overlayfs). Needs the root switch moved into the initramfs, and `docker diff`/`docker commit` would no longer see VM-side changes. Worth considering for dev mode after E.
 
 - **Named-volume payload**: the wrapper detects a user-supplied mount at a reserved destination (e.g. `--mount type=volume,src=runcvm-1.2.3,dst=/.runcvm/guest`) and uses it instead of its own bind mount. Benefits: install a payload without host filesystem writes, `daemon.json` edits or dockerd restarts; per-container selection; `docker volume rm` to remove. Costs: wrapper/payload version skew becomes a compatibility contract needing an interface version; only covers payload changes, not wrapper changes. Revisit after C, once the wrapper–payload interface is documented.
 - **GitHub runner inside a RunCVM VM**: not initially. Note that RunCVM does not support bind-mounting host sockets, so such a runner could only nest everything.
@@ -267,11 +351,13 @@ B1 ──► B2 ──► B3 ──► B4 ──► D1 ──► D2 ──► D3
 B1 (dev mode) ──► C (developed and tested in L1)
 A3 ──► C5
 C4 ──► B2 (runcvm-dev install as a new version, once C exists)
+E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 ```
 
 - A1 is small and unblocks everything; it can be done in the existing libvirt development VM.
 - C needs only B1 in dev mode, so it can proceed alongside A3/A4 and B2/B3.
 - D needs B3 and enough of A3 to be meaningful.
+- E can start at any time; E3 (e2fsprogs/libarchive/tar build) comes first. B1 can use per-path disks until E lands.
 
 ## 4. Suggested sequence (for prioritisation)
 
@@ -283,7 +369,8 @@ C4 ──► B2 (runcvm-dev install as a new version, once C exists)
 6. A3, A4 — core tier and hardened swarm test, developed in L1.
 7. D1, D2, D4 (`workflow_dispatch` only) — first CI runs.
 8. D3, then widen D4 triggers.
-9. E — as needed.
+9. E — shared data disk; can run alongside 2–6, starting with E3. B1 switches to it when ready.
+10. F — as needed.
 
 ## 5. Open decisions
 
@@ -294,6 +381,9 @@ C4 ──► B2 (runcvm-dev install as a new version, once C exists)
 - Socket variant with D2 controls only, or go straight to D3.
 - Registry for prebuilt images (if any), or always build inside L1.
 - Whether people should also be required to use the launcher on L0, or only CI.
+- Tarball importer xattr limitation (E2): patch e2fsprogs, fall back to VM-side copying, or document.
+- Newer Alpine release versus building e2fsprogs in its own stage (E3); GNU tar versus bsdtar.
+- Whether adding a destination to an existing multi-path disk (E4) is supported initially.
 
 ## 6. Risks and unproven areas
 
@@ -304,3 +394,5 @@ C4 ──► B2 (runcvm-dev install as a new version, once C exists)
 - BundELF relocatability to `/opt/runcvm/<version>` is assumed, not yet verified.
 - Exec routing after bootstrap updates or host reboots (records in `/run` are lost at reboot; containers are recreated by `create`, which rewrites them).
 - Runner security depends on controls outside workflow files (D2/D3); misconfiguration exposes L0.
+- Tarball population drops xattrs other than `security.capability`; pre-populated Docker storage would be silently corrupted unless addressed (E2).
+- Tarball population tested on glibc/Ubuntu only; behaviour under musl/Alpine within RunCVM (locale, libarchive loading) to be confirmed.
