@@ -9,9 +9,9 @@ checking statuses, exit codes and results files.
                                          # (runc in place of RunCVM; needs dockerd
                                          # and the alpine image)
 
-Results are listed one line per test, with the reason for any skip. Any other
-arguments are passed to unittest (e.g. -q for one character per test, or a
-test name).
+Results are listed one line per test (as Class.method, which can be given as
+an argument to run that test alone), with the reason for any skip. Any other
+arguments are passed to unittest (e.g. -q for the summary only).
 Standard library only.
 """
 
@@ -417,8 +417,19 @@ class DockerStandInTests(unittest.TestCase):
                 shutil.rmtree(d, ignore_errors=True)
 
 
+class _Result(unittest.TextTestResult):
+    """Name each test once, as Class.method: the form accepted as an argument to run it alone."""
+
+    def getDescription(self, test):
+        return "%s.%s" % (type(test).__name__, test._testMethodName)
+
+
+class _Runner(unittest.TextTestRunner):
+    resultclass = _Result
+
+
 if __name__ == "__main__":
     if "--docker" in sys.argv:
         WITH_DOCKER = True
         sys.argv.remove("--docker")
-    unittest.main(verbosity=2)
+    unittest.main(verbosity=2, testRunner=_Runner)
