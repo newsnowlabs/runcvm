@@ -20,7 +20,8 @@ ARG ALPINE_VERSION
 
 # Pin aports to the stable branch matching the base image. Cloning master HEAD
 # against an older base pulls in APKBUILDs that depend on newer abuild/toolchain
-# features than the base provides (this is what produced 'nftrules: not found').
+# features than the base provides (e.g. dropbear's nftrules subpackage, which
+# fails with 'nftrules: not found').
 RUN apk update && apk add --no-cache alpine-sdk coreutils && \
     abuild-keygen -an && \
     # Copy the public keys to the system keys
