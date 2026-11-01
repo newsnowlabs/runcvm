@@ -440,6 +440,14 @@ ARGS=(
   -append "$RUNCVM_KERNEL_ROOT $INIT rw ${APPEND[*]} $RUNCVM_KERNEL_APPEND"
 )
 
+# virtiofsd is started in the background by runcvm-ctr-entrypoint, and QEMU fails at once if the
+# virtiofsd socket does not yet exist: wait up to 30s for it.
+for ((i = 0; i < 300; i++)); do
+  [ -S "$QEMU_VIRTIOFSD_SOCKET" ] && break
+  busybox sleep 0.1
+done
+[ -S "$QEMU_VIRTIOFSD_SOCKET" ] || error "RunCVM: Error: virtiofsd socket $QEMU_VIRTIOFSD_SOCKET not created within 30s (see /run/.virtiofsd.log)"
+
 if [[ "$RUNCVM_BREAK" =~ preqemu ]]; then echo "Preparing to run: '$CMD' ${ARGS[@]@Q}"; bash; fi
 
 if [ "$RUNCVM_QEMU_DEBUG" = "1" ]; then
