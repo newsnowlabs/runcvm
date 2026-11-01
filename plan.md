@@ -52,7 +52,7 @@ Work:
 
 Done when: a deliberately failing test makes `tests/run` exit non-zero, and results/logs appear in the results directory.
 
-Status: implemented in PR #34 (`a1-test-runner`). `tests/run` is a standard-library Python runner; tests stay language-neutral (any executable `test`; exit 0 pass, 77 skip, other fail) with metadata files `tier`, `timeout` and `requires` (`vm`, `kvm`, `ipv6`). It writes TAP, JUnit, JSON and a summary, runs each test in its own process group with a timeout, and removes leftovers by label. Helpers exist in both `tests/framework.sh` and `tests/framework.py`. Tests are numbered by tier (`1x` core, `5x` extended). `--mock` runs the suite with `runc` in place of RunCVM (tests requiring `vm` skip), and `--accel kvm|auto|tcg` selects QEMU acceleration via `RUNCVM_QEMU_ACCEL` (PR #33), so the suite also runs under TCG emulation in environments without `/dev/kvm`. `tests/selftest/run-selftest` tests the runner itself.
+Status: done; merged to `main` as #34. `tests/run` is a standard-library Python runner; tests stay language-neutral (any executable `test`; exit 0 pass, 77 skip, other fail) with metadata files `tier`, `timeout` and `requires` (`vm`, `kvm`, `ipv6`). It writes TAP, JUnit, JSON and a summary, runs each test in its own process group with a timeout, and removes leftovers by label. Helpers exist in both `tests/framework.sh` and `tests/framework.py`. Tests are numbered by tier (`1x` core, `5x` extended). `--mock` runs the suite with `runc` in place of RunCVM (tests requiring `vm` skip), and `--accel kvm|auto|tcg` selects QEMU acceleration via `RUNCVM_QEMU_ACCEL` (#33, also merged), so the suite also runs under TCG emulation in environments without `/dev/kvm`. `tests/selftest/run-selftest` tests the runner itself.
 
 #### A2. Exit-code and shutdown behaviour: baseline tests
 
@@ -478,15 +478,14 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 
 ## 4. Suggested sequence (for prioritisation)
 
-0. **A buildable `main`**
-   - PR #32: pin aports to `${ALPINE_VERSION}-stable` (with dropbear patch paths for Alpine 3.19's dropbear 2022.83). `main` currently fails to build (`nftrules: not found`); B2 depends on this. Check `docker exec` (patched dropbear) on a KVM host before merging.
+0. **A buildable `main`** — done: #32 (aports pinned to `${ALPINE_VERSION}-stable`) is merged.
 1. **Trustworthy results**
-   - A1. Trustworthy test runner (`tests/run`)
+   - A1. Trustworthy test runner (`tests/run`) — done (#34)
    - A2. Exit-code and shutdown behaviour: baseline tests
 
    Small, and unblocks everything; can be done in the existing libvirt development VM.
 
-   Then merge the open PRs in stack order (section 4a), each tested in the libvirt development VM with the trustworthy runner: #34 (A1), #33 (explicit QEMU acceleration modes), #30 (dual-stack IPv6; also fixes VM boot failure for containers with a second network), then #28 (ARM64, Podman, installer). All land before A3 (needs #30's fix), B2, C3/C4, E3 and E6 (which touch the same code). #33 provides the check that L2s really run under KVM: `RUNCVM_QEMU_ACCEL=kvm` fails at creation if `/dev/kvm` is absent, rather than silently falling back to TCG. Follow-ups: multi-interface and overlay-network tests in A3.
+   #34 (A1) and #33 (explicit QEMU acceleration modes) are merged. Still to merge, each tested in the libvirt development VM with the runner: #30 (dual-stack IPv6; also fixes VM boot failure for containers with a second network), then #28 (ARM64, Podman, installer). All land before A3 (needs #30's fix), B2, C3/C4, E3 and E6 (which touch the same code). #33 provides the check that L2s really run under KVM: `RUNCVM_QEMU_ACCEL=kvm` fails at creation if `/dev/kvm` is absent, rather than silently falling back to TCG. Follow-ups: multi-interface and overlay-network tests in A3.
 2. **First L1 environment**
    - B1. L1 image — dev mode, proven by manual launch on L0 and in Dockside
 3. **Side-by-side versions**, developed in L1
@@ -540,22 +539,31 @@ Implementation is split into independent branches, each with its own pull reques
 
 Branch 2 needs only the mke2fs part of branch 1. If branch 1 is not yet merged, branch 2 is based on it (or the mke2fs build stage is split into a small first pull request that both build on). Other deliverables (A, B, C, D, F) get their own branches as they are started.
 
-### Open pull requests (stack)
+### Pull requests
+
+Merged to `main` (1–2 November 2026), each squash-merged with its branch history kept in a `raw/<branch>` tag, cited by a `Raw-History:` trailer:
+
+| Pull request | Contents |
+|---|---|
+| #36 | `CLAUDE.md`: repository notes and conventions (British English; comments and commit messages describe current code; repo-only references; compliance sweeps; human authorship; how branches land on `main`). |
+| #32 | aports pinned to `${ALPINE_VERSION}-stable`; dropbear patch paths. `main` builds. |
+| #34 | A1 runner, helpers, self-test; tests regrouped by tier. |
+| #33 | `RUNCVM_QEMU_ACCEL` (`kvm` default, failing without `/dev/kvm`; `auto`; `tcg`); `RUNCVM_QEMU_TCG_TB_MEM_SIZE` (TCG translation cache, added to the container's memory limit); runtime errors reported through containerd's log; `tests/13-qemu-accel`; `runcvm-ctr-defaults` lists one name per line, sorted. |
+
+Open:
 
 | Pull request | Branch | Based on | Contents |
 |---|---|---|---|
-| #32 | `fix/pin-aports-stable` | `main` | Pin aports to `${ALPINE_VERSION}-stable`; dropbear patch paths. Makes `main` build. |
-| #34 | `a1-test-runner` | `main` | A1 runner, helpers, self-test; tests regrouped by tier. |
-| #33 | `qemu-accel` | #34 | `RUNCVM_QEMU_ACCEL` (`kvm` default and fails without `/dev/kvm`, `auto`, `tcg`); `RUNCVM_QEMU_TCG_TB_MEM_SIZE` (TCG translation cache, added to the container's memory allowance); runtime errors reported through containerd's log; `tests/13-qemu-accel`; `clean_env` and `create_aliases` lists one name per line. |
-| #30 | `claude/runcvm-ipv6-support-iwotel` | #33 | Dual-stack IPv6; multi-network boot fix; `tests/12-ipv6`. |
+| #30 | `claude/runcvm-ipv6-support-iwotel` | `main` | Dual-stack IPv6; multi-network boot fix; `tests/12-ipv6`. |
 | #28 | `claude/macos-docker-compatibility-InrFB` | #30 | ARM64, Podman, installer. |
+| #37 (draft) | `docs/conventions-sweep-main` | `main` | `CLAUDE.md` compliance fixes to text already on `main`. |
 
-#32 and #34 are independent; test them merged together on a KVM host.
+Changes lower in a stack are merged upwards, never rebased (see `CLAUDE.md`).
 
 KVM results (libvirt development VM, 1 November 2026):
-- `main` with #32 and #34 merged: self-test (with `--docker`) and `tests/run --tier all` pass: `10`, `11`, `50-http-docker-swarm` and `51-mariadb`. `docker exec` (#32's patched dropbear) works.
+- `main` with #32 and #34: self-test (with `--docker`) and `tests/run --tier all` pass: `10`, `11`, `50-http-docker-swarm` and `51-mariadb`. `docker exec` (#32's patched dropbear) works.
 - Whole stack (#28's branch, including #33 and #30): `10`, `11`, `13-qemu-accel` (default, `kvm`, `auto` and `tcg` on a KVM host), `50` and `51` pass.
-- Still to confirm: `12-ipv6` on KVM. The development VM's kernel has IPv6 disabled (no `/proc/sys/net/ipv6`), so the test skips there. To be run on another bare-metal host or in L1. Changes lower in the stack are merged upwards (#34 → #33 → #30 → #28), never rebased. The lists in `runcvm-ctr-defaults` are one name per line, sorted, so that branches adding names merge cleanly.
+- Still to confirm: `12-ipv6`, for #30. The development VM's kernel has IPv6 disabled (no `/proc/sys/net/ipv6`), so the test skips there. To be run on another bare-metal host or in L1.
 
 ## 5. Open decisions
 
