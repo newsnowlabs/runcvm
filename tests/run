@@ -1,32 +1,560 @@
-#!/bin/bash -e
+#!/usr/bin/env python3
+"""RunCVM integration test runner.
 
-ERRORS=0
+Runs each test (a directory under the tests directory containing an
+executable 'test' file, in any language), records an honest status for each,
+writes per-test logs and machine-readable results, and exits non-zero if any
+selected test failed or timed out.
 
-DIR=$(dirname $0)
+Test status comes from the test's exit code:
+  0       pass
+  77      skipped (a prerequisite is absent; the test logs 'SKIP: <reason>')
+  other   fail
+A test still running at its time limit is stopped (SIGTERM to its whole
+process group, then SIGKILL after a grace period) and recorded as timed out.
 
-if [ -d "$DIR" ]; then
-  echo "Running RunCVM integration tests in '$DIR' ..."
-  cd $DIR
-else
-  echo "$0: Error: RunCVM integration test directory '$DIR' not found; aborting!"
-  exit -1
-fi
+Runner exit codes:
+  0    all selected tests passed or were skipped
+  1    one or more tests failed or timed out
+  2    harness error (bad arguments, no tests selected, unknown tier or
+       requirement, Docker or runtime unavailable)
+  130  interrupted
 
-for test in *
-do
+Optional per-test metadata files, in each test directory:
+  tier      'core' (default) or 'extended'
+  timeout   time limit in seconds (overrides --timeout)
+  requires  whitespace-separated requirements; a test whose requirements are
+            not met is skipped without running:
+              vm    real RunCVM Container/VMs (not met in stand-in mode)
+              kvm   VMs use KVM acceleration: /dev/kvm present on this host,
+                    and not in stand-in mode or with --accel tcg
+              ipv6  dockerd can create an IPv6-enabled network
 
-  [ -d "$test" ] || continue;
+Stand-in mode (--mock, or RUNCVM_TEST_MOCK=1) runs tests with a standard
+runtime (runc, unless --runtime or a non-RunCVM $RUNTIME is given) in place
+of RunCVM, for developing the tests and the runner where KVM is unavailable.
+Tests requiring 'vm' are skipped, and tests see RUNCVM_TEST_MOCK=1.
 
-  cd $test
-  ./test 2>&1 | sed "s/^/$test - /"
-  TEST_ERRORS=$?
-  ERRORS=$((ERRORS+$TEST_ERRORS))
+QEMU acceleration (--accel kvm|auto|tcg, or RUNCVM_TEST_ACCEL) is passed to
+tests as RUNCVM_TEST_ACCEL; tests pass it to RunCVM Container/VMs as
+RUNCVM_QEMU_ACCEL (framework helper vm_opts). With --accel tcg, real RunCVM
+Container/VMs run under software emulation, e.g. where KVM is unavailable:
+slow, but unlike stand-in mode it exercises RunCVM itself. Unset, RunCVM's
+default applies.
 
-  cd ..
-  
-  echo "RunCVM test $test finished with $TEST_ERRORS errors"
-done
+Requires only Python 3.6+ and the docker CLI.
+"""
 
-echo "RunCVM integration tests completed with $ERRORS errors"
+import argparse
+import fnmatch
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+import xml.etree.ElementTree as ET
 
-exit $ERRORS
+SKIP_CODE = 77
+TIERS = ("core", "extended")
+KNOWN_REQUIREMENTS = ("vm", "kvm", "ipv6")
+ACCELS = ("kvm", "auto", "tcg")
+DEFAULT_TIMEOUT = 1800
+DEFAULT_KILL_AFTER = 30
+
+
+class HarnessError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Test discovery and selection
+# ---------------------------------------------------------------------------
+
+def read_meta(test_dir, name):
+    path = os.path.join(test_dir, name)
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        return f.read().strip()
+
+
+class Test:
+    def __init__(self, tests_dir, name, default_timeout):
+        self.name = name
+        self.dir = os.path.join(tests_dir, name)
+        self.tier = (read_meta(self.dir, "tier") or "core").split()[0]
+        timeout = read_meta(self.dir, "timeout")
+        self.timeout = int(timeout) if timeout and timeout.isdigit() else default_timeout
+        self.requires = (read_meta(self.dir, "requires") or "").split()
+
+
+def discover(tests_dir, default_timeout):
+    tests = []
+    for name in sorted(os.listdir(tests_dir)):
+        path = os.path.join(tests_dir, name, "test")
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            tests.append(Test(tests_dir, name, default_timeout))
+    return tests
+
+
+def select(tests, tier, patterns):
+    by_name = {t.name: t for t in tests}
+    for p in patterns:
+        if not any(c in p for c in "*?[") and p not in by_name:
+            raise HarnessError("test '%s' not found" % p)
+    selected = []
+    for t in tests:
+        if patterns and not any(fnmatch.fnmatchcase(t.name, p) for p in patterns):
+            continue
+        if tier != "all" and t.tier != tier:
+            continue
+        selected.append(t)
+    return selected
+
+
+# ---------------------------------------------------------------------------
+# Environment: Docker checks, requirements, clean-up
+# ---------------------------------------------------------------------------
+
+def docker(*args, timeout=60):
+    """Run a docker CLI command; return a CompletedProcess (never raises on failure)."""
+    try:
+        return subprocess.run(("docker",) + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return subprocess.CompletedProcess(("docker",) + args, 255, "", str(e))
+
+
+def warn(msg):
+    print("%s: Warning: %s" % (os.path.basename(sys.argv[0]), msg), file=sys.stderr, flush=True)
+
+
+class Environment:
+    def __init__(self, runtime, mock, run_id, use_docker, accel=None):
+        self.runtime = runtime
+        self.mock = mock
+        self.accel = accel
+        self.run_id = run_id
+        self.use_docker = use_docker
+        self._probes = {}
+
+    def preflight(self):
+        if docker("info", "--format", "{{json .ServerVersion}}").returncode != 0:
+            raise HarnessError("cannot reach the Docker daemon ('docker info' failed)")
+        r = docker("info", "--format", "{{json .Runtimes}}")
+        try:
+            runtimes = json.loads(r.stdout or "{}")
+        except ValueError:
+            runtimes = {}
+        if self.runtime not in runtimes:
+            raise HarnessError("runtime '%s' is not registered with Docker (registered: %s)"
+                               % (self.runtime, ", ".join(sorted(runtimes)) or "none"))
+        if (not self.mock and self.runtime.startswith("runcvm") and not os.path.exists("/dev/kvm")
+                and self.accel in (None, "kvm")):
+            warn("/dev/kvm not found: RunCVM VMs will fail unless emulation is allowed "
+                 "(try --accel tcg, or --mock for stand-in mode)")
+
+    def requirement_met(self, req):
+        if req not in self._probes:
+            self._probes[req] = self._probe(req)
+        return self._probes[req]
+
+    def _probe(self, req):
+        if req == "vm":
+            return not self.mock
+        if req == "kvm":
+            return not self.mock and self.accel != "tcg" and os.path.exists("/dev/kvm")
+        if req == "ipv6":
+            if not self.use_docker:
+                return False
+            name = "rcvt-%s-ipv6-probe" % self.run_id
+            r = docker("network", "create", "--ipv6", "--subnet", "fd00:7263:7674::/64",
+                       "--label", "runcvm-test.run=%s" % self.run_id, name)
+            if r.returncode == 0:
+                docker("network", "rm", name)
+                return True
+            return False
+        raise HarnessError("unknown requirement '%s'" % req)
+
+    def reap(self, test_name):
+        """Remove anything left behind that carries this run's and test's labels."""
+        if not self.use_docker:
+            return
+        filters = ("--filter", "label=runcvm-test.run=%s" % self.run_id,
+                   "--filter", "label=runcvm-test.test=%s" % test_name)
+        ids = docker("ps", "-aq", *filters).stdout.split()
+        if ids:
+            docker("rm", "-fv", *ids, timeout=120)
+        ids = docker("network", "ls", "-q", *filters).stdout.split()
+        if ids:
+            docker("network", "rm", *ids)
+        ids = docker("volume", "ls", "-q", *filters).stdout.split()
+        if ids:
+            docker("volume", "rm", "-f", *ids)
+
+
+# ---------------------------------------------------------------------------
+# Running a test
+# ---------------------------------------------------------------------------
+
+class Result:
+    def __init__(self, test, status, rc=None, duration=0, reason=""):
+        self.test = test
+        self.status = status          # pass, fail, skip, timeout, interrupted
+        self.rc = rc
+        self.duration = duration
+        self.reason = reason
+        self.checks = []              # [(STATUS, description)]
+        self.params = []              # [(key, value)]
+
+
+def read_pairs(path):
+    pairs = []
+    if os.path.isfile(path):
+        with open(path, errors="replace") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if line:
+                    a, _, b = line.partition("\t")
+                    pairs.append((a, b))
+    return pairs
+
+
+def signal_group(pgid, sig):
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def run_test(test, env, logs_dir, kill_after):
+    log_path = os.path.join(logs_dir, test.name + ".log")
+    checks_path = os.path.join(logs_dir, test.name + ".checks")
+    params_path = os.path.join(logs_dir, test.name + ".params")
+    for p in (checks_path, params_path):
+        open(p, "w").close()
+
+    child_env = dict(os.environ)
+    child_env.update({
+        "RUNTIME": env.runtime,
+        "RUNCVM_TEST_MOCK": "1" if env.mock else "0",
+        "RUNCVM_TEST_ACCEL": env.accel or "",
+        "RUNCVM_TEST_RUN_ID": env.run_id,
+        "RUNCVM_TEST_NAME": test.name,
+        "RUNCVM_TEST_CHECKS": checks_path,
+        "RUNCVM_TEST_PARAMS": params_path,
+    })
+
+    start = time.time()
+    proc = subprocess.Popen(["./test"], cwd=test.dir, env=child_env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    pgid = proc.pid
+    prefix = (test.name + " - ").encode()
+    skip_reason = []
+
+    def pump():
+        with open(log_path, "wb") as log:
+            for line in iter(proc.stdout.readline, b""):
+                log.write(line)
+                log.flush()
+                sys.stdout.buffer.write(prefix + line)
+                sys.stdout.buffer.flush()
+                m = re.search(rb"SKIP: (.*)", line)
+                if m and not skip_reason:
+                    skip_reason.append(m.group(1).decode(errors="replace").strip())
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+
+    timed_out = False
+    try:
+        try:
+            proc.wait(timeout=test.timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            signal_group(pgid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=kill_after)
+            except subprocess.TimeoutExpired:
+                signal_group(pgid, signal.SIGKILL)
+                proc.wait()
+    except KeyboardInterrupt:
+        signal_group(pgid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            signal_group(pgid, signal.SIGKILL)
+            proc.wait()
+        raise
+    finally:
+        # Stop anything the test left running in its process group (e.g. a
+        # backgrounded 'docker logs -f'), so that it cannot hold the output
+        # pipe open or outlive the test.
+        signal_group(pgid, signal.SIGTERM)
+        reader.join(5)
+        if reader.is_alive():
+            signal_group(pgid, signal.SIGKILL)
+            reader.join(5)
+
+    duration = int(round(time.time() - start))
+    raw = proc.returncode
+    rc = 128 - raw if raw is not None and raw < 0 else raw
+
+    if timed_out:
+        result = Result(test, "timeout", rc, duration, "timed out after %ss" % test.timeout)
+    elif rc == 0:
+        result = Result(test, "pass", rc, duration)
+    elif rc == SKIP_CODE:
+        result = Result(test, "skip", rc, duration, skip_reason[0] if skip_reason else "skipped")
+    elif raw is not None and raw < 0:
+        result = Result(test, "fail", rc, duration, "killed by signal %d" % -raw)
+    else:
+        result = Result(test, "fail", rc, duration, "exit code %d" % rc)
+
+    result.checks = read_pairs(checks_path)
+    result.params = read_pairs(params_path)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Results
+# ---------------------------------------------------------------------------
+
+CONTROL_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def tail(path, lines=200):
+    try:
+        with open(path, errors="replace") as f:
+            return CONTROL_CHARS.sub("", "".join(f.readlines()[-lines:]))
+    except OSError:
+        return ""
+
+
+def write_tap(path, results, header):
+    out = ["TAP version 13", "1..%d" % len(results), "# " + header]
+    for n, r in enumerate(results, 1):
+        if r.checks:
+            out.append("    1..%d" % len(r.checks))
+            for m, (status, desc) in enumerate(r.checks, 1):
+                if status == "PASS":
+                    out.append("    ok %d - %s" % (m, desc))
+                elif status == "SKIP":
+                    out.append("    ok %d - %s # SKIP" % (m, desc))
+                else:
+                    out.append("    not ok %d - %s" % (m, desc))
+        if r.status == "pass":
+            out.append("ok %d - %s" % (n, r.test.name))
+        elif r.status == "skip":
+            out.append("ok %d - %s # SKIP %s" % (n, r.test.name, r.reason))
+        else:
+            out.append("not ok %d - %s # %s" % (n, r.test.name, r.reason))
+    with open(path, "w") as f:
+        f.write("\n".join(out) + "\n")
+
+
+def write_junit(path, results, env, logs_dir):
+    total = sum(1 + len(r.checks) for r in results)
+    root = ET.Element("testsuites", name="runcvm", tests=str(total))
+    for r in results:
+        suite = ET.SubElement(root, "testsuite", name=r.test.name, time=str(r.duration))
+        props = ET.SubElement(suite, "properties")
+        for k, v in [("runtime", env.runtime), ("mock", "1" if env.mock else "0"),
+                     ("accel", env.accel or ""),
+                     ("tier", r.test.tier), ("requires", " ".join(r.test.requires))] + r.params:
+            ET.SubElement(props, "property", name=k, value=v)
+        for status, desc in r.checks:
+            case = ET.SubElement(suite, "testcase", classname=r.test.name, name=desc)
+            if status == "SKIP":
+                ET.SubElement(case, "skipped")
+            elif status != "PASS":
+                ET.SubElement(case, "failure", message="check failed")
+        case = ET.SubElement(suite, "testcase", classname=r.test.name, name=r.test.name,
+                             time=str(r.duration))
+        if r.status == "skip":
+            ET.SubElement(case, "skipped", message=r.reason)
+        elif r.status == "timeout":
+            ET.SubElement(case, "failure", type="timeout", message=r.reason)
+        elif r.status != "pass":
+            ET.SubElement(case, "failure", message=r.reason)
+        ET.SubElement(case, "system-out").text = tail(os.path.join(logs_dir, r.test.name + ".log"))
+    ET.ElementTree(root).write(path, encoding="UTF-8", xml_declaration=True)
+
+
+def write_json(path, results, env, tier, status_code):
+    data = {
+        "run_id": env.run_id, "runtime": env.runtime, "mock": env.mock, "accel": env.accel, "tier": tier,
+        "status": status_code,
+        "tests": [{
+            "name": r.test.name, "tier": r.test.tier, "requires": r.test.requires,
+            "status": r.status, "exit_code": r.rc, "duration": r.duration, "reason": r.reason,
+            "checks": [{"status": s, "description": d} for s, d in r.checks],
+            "params": dict(r.params),
+        } for r in results],
+    }
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def truthy(value):
+    return (value or "").strip().lower() in ("1", "yes", "true", "on")
+
+
+def parse_args(argv):
+    here = os.path.dirname(os.path.abspath(__file__))
+    p = argparse.ArgumentParser(
+        prog=os.path.basename(sys.argv[0]),
+        description="Run RunCVM integration tests. TEST may be a test directory name "
+                    "(e.g. 10-user-workdir) or a shell pattern (e.g. '1*'). With no TEST, "
+                    "all tests in the selected tier run.",
+        epilog="Environment: RUNTIME, RUNCVM_TEST_MOCK, RUNCVM_TEST_ACCEL, RUNCVM_TEST_RUN_ID, RUNCVM_TEST_RESULTS, "
+               "RUNCVM_TEST_KILL_AFTER (seconds between SIGTERM and SIGKILL on timeout; "
+               "default %d). See the comment at the top of this file for details." % DEFAULT_KILL_AFTER)
+    p.add_argument("tests", nargs="*", metavar="TEST")
+    p.add_argument("-t", "--tier", choices=TIERS + ("all",), default="all",
+                   help="tier to run (default: all)")
+    p.add_argument("-T", "--timeout", type=int, default=DEFAULT_TIMEOUT,
+                   help="default per-test timeout in seconds (default: %d)" % DEFAULT_TIMEOUT)
+    p.add_argument("-r", "--results", metavar="DIR", default=os.environ.get("RUNCVM_TEST_RESULTS"),
+                   help="results directory (default: $RUNCVM_TEST_RESULTS, else "
+                        "${TMPDIR:-/tmp}/runcvm-tests/<run-id>)")
+    p.add_argument("-d", "--dir", default=here, help="tests directory (default: this script's directory)")
+    p.add_argument("--runtime", default=None,
+                   help="container runtime under test (default: $RUNTIME, else runcvm; runc with --mock)")
+    p.add_argument("--mock", action="store_true", default=truthy(os.environ.get("RUNCVM_TEST_MOCK")),
+                   help="stand-in mode: use a standard runtime and skip tests requiring 'vm'")
+    p.add_argument("--accel", choices=ACCELS, default=os.environ.get("RUNCVM_TEST_ACCEL") or None,
+                   help="QEMU acceleration for RunCVM Container/VMs (passed as RUNCVM_QEMU_ACCEL): "
+                        "kvm, auto or tcg (software emulation); default: RunCVM's default")
+    p.add_argument("-x", "--exitfirst", action="store_true", help="stop after the first failure or timeout")
+    p.add_argument("-l", "--list", action="store_true", help="list selected tests and exit")
+    p.add_argument("--no-preflight", action="store_true",
+                   help="skip Docker checks and clean-up (for tests that do not use Docker)")
+    return p.parse_args(argv)
+
+
+def choose_runtime(args):
+    if args.runtime:
+        return args.runtime
+    env_runtime = os.environ.get("RUNTIME")
+    if args.mock:
+        return env_runtime if env_runtime and not env_runtime.startswith("runcvm") else "runc"
+    return env_runtime or "runcvm"
+
+
+def main(argv):
+    args = parse_args(argv)
+    tests_dir = os.path.abspath(args.dir)
+    if not os.path.isdir(tests_dir):
+        raise HarnessError("tests directory '%s' not found" % args.dir)
+
+    runtime = choose_runtime(args)
+    run_id = os.environ.get("RUNCVM_TEST_RUN_ID") or "%s-%d" % (time.strftime("%Y%m%d-%H%M%S"), os.getpid())
+    kill_after = int(os.environ.get("RUNCVM_TEST_KILL_AFTER") or DEFAULT_KILL_AFTER)
+
+    selected = select(discover(tests_dir, args.timeout), args.tier, args.tests)
+    for t in selected:
+        if t.tier not in TIERS:
+            raise HarnessError("test '%s' has unknown tier '%s'" % (t.name, t.tier))
+        for req in t.requires:
+            if req not in KNOWN_REQUIREMENTS:
+                raise HarnessError("test '%s' has unknown requirement '%s' (known: %s)"
+                                   % (t.name, req, ", ".join(KNOWN_REQUIREMENTS)))
+
+    if args.list:
+        for t in selected:
+            print("%-32s %-9s %6ss  %s" % (t.name, t.tier, t.timeout, " ".join(t.requires)))
+        return 0
+    if not selected:
+        raise HarnessError("no tests selected (tier '%s'%s)"
+                           % (args.tier, ", patterns: " + " ".join(args.tests) if args.tests else ""))
+
+    env = Environment(runtime, args.mock, run_id, use_docker=not args.no_preflight, accel=args.accel)
+    if not args.no_preflight:
+        env.preflight()
+
+    results_dir = args.results or os.path.join(os.environ.get("TMPDIR", "/tmp"), "runcvm-tests", run_id)
+    logs_dir = os.path.join(results_dir, "logs")
+    try:
+        os.makedirs(logs_dir, exist_ok=True)
+    except OSError as e:
+        raise HarnessError("cannot create results directory '%s': %s" % (results_dir, e))
+
+    print("Running RunCVM integration tests")
+    print("  run id:   %s" % run_id)
+    print("  runtime:  %s%s" % (runtime, " (stand-in mode)" if args.mock else ""))
+    print("  accel:    %s" % (args.accel or "(RunCVM default)"))
+    print("  tier:     %s" % args.tier)
+    print("  tests:    %s" % " ".join(t.name for t in selected))
+    print("  results:  %s" % results_dir)
+    print(flush=True)
+
+    results = []
+    interrupted = False
+    for t in selected:
+        unmet = [r for r in t.requires if not env.requirement_met(r)]
+        if unmet:
+            reason = "requires %s%s" % (", ".join(unmet),
+                                        " (stand-in mode)" if "vm" in unmet and args.mock else "")
+            with open(os.path.join(logs_dir, t.name + ".log"), "w") as f:
+                f.write("SKIP: %s\n" % reason)
+            results.append(Result(t, "skip", None, 0, reason))
+            print("=== %s: SKIP (%s)\n" % (t.name, reason), flush=True)
+            continue
+
+        print("=== %s (tier %s, timeout %ss)" % (t.name, t.tier, t.timeout), flush=True)
+        try:
+            r = run_test(t, env, logs_dir, kill_after)
+        except KeyboardInterrupt:
+            r = Result(t, "interrupted", None, 0, "interrupted")
+            interrupted = True
+        env.reap(t.name)
+        results.append(r)
+        print("=== %s: %s%s in %ss\n" % (t.name, r.status.upper(),
+                                         " (%s)" % r.reason if r.reason else "", r.duration), flush=True)
+        if interrupted:
+            break
+        if args.exitfirst and r.status in ("fail", "timeout"):
+            print("Stopping after first failure (--exitfirst)")
+            break
+
+    counts = {s: sum(1 for r in results if r.status == s) for s in ("pass", "fail", "timeout", "skip")}
+    status_code = 130 if interrupted else (1 if counts["fail"] or counts["timeout"] else 0)
+
+    header = "run id: %s; runtime: %s; mock: %d; accel: %s; tier: %s" % (
+        run_id, runtime, int(args.mock), args.accel or "default", args.tier)
+    write_tap(os.path.join(results_dir, "results.tap"), results, header)
+    write_junit(os.path.join(results_dir, "junit.xml"), results, env, logs_dir)
+    write_json(os.path.join(results_dir, "results.json"), results, env, args.tier, status_code)
+
+    lines = ["%-8s %-32s %5ss  %s" % (r.status.upper(), r.test.name, r.duration, r.reason) for r in results]
+    lines += ["", "passed: %d  failed: %d  timed out: %d  skipped: %d  (of %d selected)"
+              % (counts["pass"], counts["fail"], counts["timeout"], counts["skip"], len(selected))]
+    summary = "\n".join(lines) + "\n"
+    with open(os.path.join(results_dir, "summary.txt"), "w") as f:
+        f.write(summary)
+    with open(os.path.join(results_dir, "status"), "w") as f:
+        f.write("%d\n" % status_code)
+
+    print(summary, end="")
+    print("Results: %s (results.tap, junit.xml, results.json, summary.txt, logs/)" % results_dir)
+    print("RunCVM integration tests completed with status %d" % status_code)
+    return status_code
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except HarnessError as e:
+        print("%s: Error: %s" % (os.path.basename(sys.argv[0]), e), file=sys.stderr)
+        sys.exit(2)
+    except KeyboardInterrupt:
+        sys.exit(130)
