@@ -93,6 +93,16 @@ labels() {
   echo "--label runcvm-test.run=$RUNCVM_TEST_RUN_ID --label runcvm-test.test=$RUNCVM_TEST_NAME"
 }
 
+# vm_opts
+# Print 'docker run' options for RunCVM Container/VMs selected by the runner,
+# currently the QEMU acceleration (--accel kvm|auto|tcg, as RUNCVM_QEMU_ACCEL).
+# Usage: docker run $(labels) $(vm_opts) --runtime=$RUNTIME ...
+vm_opts() {
+  if [ -n "$RUNCVM_TEST_ACCEL" ]; then
+    echo "--env=RUNCVM_QEMU_ACCEL=$RUNCVM_TEST_ACCEL"
+  fi
+}
+
 # record_result STATUS DESCRIPTION
 # Record a sub-result (PASS, FAIL or SKIP) for inclusion in the runner's
 # TAP and JUnit output.

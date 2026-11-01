@@ -26,13 +26,21 @@ Optional per-test metadata files, in each test directory:
   requires  whitespace-separated requirements; a test whose requirements are
             not met is skipped without running:
               vm    real RunCVM Container/VMs (not met in stand-in mode)
-              kvm   /dev/kvm present on this host
+              kvm   VMs use KVM acceleration: /dev/kvm present on this host,
+                    and not in stand-in mode or with --accel tcg
               ipv6  dockerd can create an IPv6-enabled network
 
 Stand-in mode (--mock, or RUNCVM_TEST_MOCK=1) runs tests with a standard
 runtime (runc, unless --runtime or a non-RunCVM $RUNTIME is given) in place
 of RunCVM, for developing the tests and the runner where KVM is unavailable.
 Tests requiring 'vm' are skipped, and tests see RUNCVM_TEST_MOCK=1.
+
+QEMU acceleration (--accel kvm|auto|tcg, or RUNCVM_TEST_ACCEL) is passed to
+tests as RUNCVM_TEST_ACCEL; tests pass it to RunCVM Container/VMs as
+RUNCVM_QEMU_ACCEL (framework helper vm_opts). With --accel tcg, real RunCVM
+Container/VMs run under software emulation, e.g. where KVM is unavailable:
+slow, but unlike stand-in mode it exercises RunCVM itself. Unset, RunCVM's
+default applies.
 
 Requires only Python 3.6+ and the docker CLI.
 """
@@ -52,6 +60,7 @@ import xml.etree.ElementTree as ET
 SKIP_CODE = 77
 TIERS = ("core", "extended")
 KNOWN_REQUIREMENTS = ("vm", "kvm", "ipv6")
+ACCELS = ("kvm", "auto", "tcg")
 DEFAULT_TIMEOUT = 1800
 DEFAULT_KILL_AFTER = 30
 
@@ -124,9 +133,10 @@ def warn(msg):
 
 
 class Environment:
-    def __init__(self, runtime, mock, run_id, use_docker):
+    def __init__(self, runtime, mock, run_id, use_docker, accel=None):
         self.runtime = runtime
         self.mock = mock
+        self.accel = accel
         self.run_id = run_id
         self.use_docker = use_docker
         self._probes = {}
@@ -142,8 +152,10 @@ class Environment:
         if self.runtime not in runtimes:
             raise HarnessError("runtime '%s' is not registered with Docker (registered: %s)"
                                % (self.runtime, ", ".join(sorted(runtimes)) or "none"))
-        if not self.mock and self.runtime.startswith("runcvm") and not os.path.exists("/dev/kvm"):
-            warn("/dev/kvm not found; RunCVM VMs may fail or run without KVM acceleration")
+        if (not self.mock and self.runtime.startswith("runcvm") and not os.path.exists("/dev/kvm")
+                and self.accel in (None, "kvm")):
+            warn("/dev/kvm not found: RunCVM VMs will fail unless emulation is allowed "
+                 "(try --accel tcg, or --mock for stand-in mode)")
 
     def requirement_met(self, req):
         if req not in self._probes:
@@ -154,7 +166,7 @@ class Environment:
         if req == "vm":
             return not self.mock
         if req == "kvm":
-            return os.path.exists("/dev/kvm")
+            return not self.mock and self.accel != "tcg" and os.path.exists("/dev/kvm")
         if req == "ipv6":
             if not self.use_docker:
                 return False
@@ -229,6 +241,7 @@ def run_test(test, env, logs_dir, kill_after):
     child_env.update({
         "RUNTIME": env.runtime,
         "RUNCVM_TEST_MOCK": "1" if env.mock else "0",
+        "RUNCVM_TEST_ACCEL": env.accel or "",
         "RUNCVM_TEST_RUN_ID": env.run_id,
         "RUNCVM_TEST_NAME": test.name,
         "RUNCVM_TEST_CHECKS": checks_path,
@@ -350,6 +363,7 @@ def write_junit(path, results, env, logs_dir):
         suite = ET.SubElement(root, "testsuite", name=r.test.name, time=str(r.duration))
         props = ET.SubElement(suite, "properties")
         for k, v in [("runtime", env.runtime), ("mock", "1" if env.mock else "0"),
+                     ("accel", env.accel or ""),
                      ("tier", r.test.tier), ("requires", " ".join(r.test.requires))] + r.params:
             ET.SubElement(props, "property", name=k, value=v)
         for status, desc in r.checks:
@@ -372,7 +386,7 @@ def write_junit(path, results, env, logs_dir):
 
 def write_json(path, results, env, tier, status_code):
     data = {
-        "run_id": env.run_id, "runtime": env.runtime, "mock": env.mock, "tier": tier,
+        "run_id": env.run_id, "runtime": env.runtime, "mock": env.mock, "accel": env.accel, "tier": tier,
         "status": status_code,
         "tests": [{
             "name": r.test.name, "tier": r.test.tier, "requires": r.test.requires,
@@ -401,7 +415,7 @@ def parse_args(argv):
         description="Run RunCVM integration tests. TEST may be a test directory name "
                     "(e.g. 10-user-workdir) or a shell pattern (e.g. '1*'). With no TEST, "
                     "all tests in the selected tier run.",
-        epilog="Environment: RUNTIME, RUNCVM_TEST_MOCK, RUNCVM_TEST_RUN_ID, RUNCVM_TEST_RESULTS, "
+        epilog="Environment: RUNTIME, RUNCVM_TEST_MOCK, RUNCVM_TEST_ACCEL, RUNCVM_TEST_RUN_ID, RUNCVM_TEST_RESULTS, "
                "RUNCVM_TEST_KILL_AFTER (seconds between SIGTERM and SIGKILL on timeout; "
                "default %d). See the comment at the top of this file for details." % DEFAULT_KILL_AFTER)
     p.add_argument("tests", nargs="*", metavar="TEST")
@@ -417,6 +431,9 @@ def parse_args(argv):
                    help="container runtime under test (default: $RUNTIME, else runcvm; runc with --mock)")
     p.add_argument("--mock", action="store_true", default=truthy(os.environ.get("RUNCVM_TEST_MOCK")),
                    help="stand-in mode: use a standard runtime and skip tests requiring 'vm'")
+    p.add_argument("--accel", choices=ACCELS, default=os.environ.get("RUNCVM_TEST_ACCEL") or None,
+                   help="QEMU acceleration for RunCVM Container/VMs (passed as RUNCVM_QEMU_ACCEL): "
+                        "kvm, auto or tcg (software emulation); default: RunCVM's default")
     p.add_argument("-x", "--exitfirst", action="store_true", help="stop after the first failure or timeout")
     p.add_argument("-l", "--list", action="store_true", help="list selected tests and exit")
     p.add_argument("--no-preflight", action="store_true",
@@ -460,7 +477,7 @@ def main(argv):
         raise HarnessError("no tests selected (tier '%s'%s)"
                            % (args.tier, ", patterns: " + " ".join(args.tests) if args.tests else ""))
 
-    env = Environment(runtime, args.mock, run_id, use_docker=not args.no_preflight)
+    env = Environment(runtime, args.mock, run_id, use_docker=not args.no_preflight, accel=args.accel)
     if not args.no_preflight:
         env.preflight()
 
@@ -474,6 +491,7 @@ def main(argv):
     print("Running RunCVM integration tests")
     print("  run id:   %s" % run_id)
     print("  runtime:  %s%s" % (runtime, " (stand-in mode)" if args.mock else ""))
+    print("  accel:    %s" % (args.accel or "(RunCVM default)"))
     print("  tier:     %s" % args.tier)
     print("  tests:    %s" % " ".join(t.name for t in selected))
     print("  results:  %s" % results_dir)
@@ -511,7 +529,8 @@ def main(argv):
     counts = {s: sum(1 for r in results if r.status == s) for s in ("pass", "fail", "timeout", "skip")}
     status_code = 130 if interrupted else (1 if counts["fail"] or counts["timeout"] else 0)
 
-    header = "run id: %s; runtime: %s; mock: %d; tier: %s" % (run_id, runtime, int(args.mock), args.tier)
+    header = "run id: %s; runtime: %s; mock: %d; accel: %s; tier: %s" % (
+        run_id, runtime, int(args.mock), args.accel or "default", args.tier)
     write_tap(os.path.join(results_dir, "results.tap"), results, header)
     write_junit(os.path.join(results_dir, "junit.xml"), results, env, logs_dir)
     write_json(os.path.join(results_dir, "results.json"), results, env, args.tier, status_code)

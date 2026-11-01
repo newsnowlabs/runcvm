@@ -68,6 +68,7 @@ do
     -d \
     --rm \
     --runtime=${RUNTIME:-runcvm} \
+    ${RUNCVM_TEST_ACCEL:+--env=RUNCVM_QEMU_ACCEL=$RUNCVM_TEST_ACCEL} \
     --network=runcvm-mtu \
     --publish=$((8080+$n-1)):80 \
     --name=$NODE$n \

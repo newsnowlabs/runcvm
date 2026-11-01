@@ -73,7 +73,7 @@ docker network create $NODE-network
 
 # Launch a mariadb VM using RunCVM
 echo "> ($h) Launch RunCVM mariadb server as $NODE-mysqld ..."
-docker run --runtime=${RUNTIME:-runcvm} -d --rm --name=$NODE-mysqld --hostname=$NODE-mysqld --network=$NODE-network --cpus=1 --memory=1G --env=MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb
+docker run --runtime=${RUNTIME:-runcvm} ${RUNCVM_TEST_ACCEL:+--env=RUNCVM_QEMU_ACCEL=$RUNCVM_TEST_ACCEL} -d --rm --name=$NODE-mysqld --hostname=$NODE-mysqld --network=$NODE-network --cpus=1 --memory=1G --env=MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb
 
 echo "> ($h) Monitoring mariadb logs ..."
 docker logs -f -t -n 0 $NODE-mysqld &

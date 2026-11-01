@@ -30,6 +30,7 @@ RUN_ID = os.environ.get("RUNCVM_TEST_RUN_ID") or "manual-%d" % os.getpid()
 TEST_NAME = os.environ.get("RUNCVM_TEST_NAME") or os.path.basename(os.getcwd())
 RUNTIME = os.environ.get("RUNTIME") or "runcvm"
 MOCK = os.environ.get("RUNCVM_TEST_MOCK") == "1"
+ACCEL = os.environ.get("RUNCVM_TEST_ACCEL") or None
 
 errors = 0
 _cleanups = []
@@ -48,6 +49,11 @@ def unique(name):
 def labels():
     """Options labelling a Docker object with this run and test, so the runner can remove leftovers."""
     return ["--label", "runcvm-test.run=%s" % RUN_ID, "--label", "runcvm-test.test=%s" % TEST_NAME]
+
+
+def vm_opts():
+    """'docker run' options for RunCVM Container/VMs selected by the runner (QEMU acceleration)."""
+    return ["--env=RUNCVM_QEMU_ACCEL=%s" % ACCEL] if ACCEL else []
 
 
 def docker(*args, check=False, timeout=None, capture=True):
