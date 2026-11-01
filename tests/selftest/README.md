@@ -5,8 +5,10 @@
 ```sh
 tests/selftest/run-selftest            # fake tests only; no Docker needed (about 15s)
 tests/selftest/run-selftest --docker   # also real Docker in stand-in mode (about 40s)
-tests/selftest/run-selftest -v         # verbose; other unittest arguments also accepted
+tests/selftest/run-selftest -q         # quieter; other unittest arguments also accepted
 ```
+
+Each test is listed on its own line with its result (`ok`, `FAIL`, `ERROR`, or `skipped` with the reason).
 
 With `--docker`, it runs the repository's tests with `tests/run --mock` (standard `runc` in place of RunCVM; tests requiring `vm` are skipped), and real-Docker scenarios: a failing check, a test that leaves containers, networks and volumes behind (which the runner must remove), a test hung on `docker logs -f` (which must time out and be cleaned up), the volume helpers in both languages, and two runs at once.
 
