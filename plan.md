@@ -82,7 +82,19 @@ Small, fast, deterministic tests (one or two VMs each) that gate CI. Each test d
 - Networking: default bridge, custom network, Docker DNS between containers, `-p` publishing, custom MTU.
 - `docker exec` (interactive and non-interactive), `docker stop`/`kill` signal handling.
 - Docker inside a RunCVM VM (overlay2 on a `RUNCVM_DISKS` disk) and nested RunCVM `hello-world`.
-- Kernel selection (`RUNCVM_KERNEL`) for each shipped kernel.
+- Kernel selection (`RUNCVM_KERNEL`) for each shipped kernel; loading kernel modules in the VM (e.g. `modprobe ip_vs`).
+- Resources: `--memory` and `--cpus` reach the VM and set the container's limits; `RUNCVM_HUGETLB`, `RUNCVM_TMPFS`, `RUNCVM_KERNEL_APPEND`.
+- Image variety: Alpine, Debian, Ubuntu and systemd images; images declaring a non-root `USER`; images with no shell.
+- Lifecycle: `--rm`, restart policies, `docker restart`; `docker logs`, `docker cp`, `docker top`; `--hostname`, `--add-host`, `--dns`, `--env-file`.
+- Isolation: a non-root workload cannot read `/.runcvm`; `RUNCVM_*` settings do not reach the workload; `/opt/runcvm` is read-only in the VM.
+- Error reporting: invalid settings fail `docker run` with RunCVM's own message.
+- Volumes shared between VMs with `RUNCVM_VIRTIOFSD_CACHE=none`: a write in one VM is visible at once in another.
+- Networking between VMs: traffic on a custom network with a large MTU (9000); VXLAN overlay networks; several published ports; whether the client's source address is preserved through `-p`.
+- Leaks: after many Container/VMs are created and removed, no processes, `/dev/shm` files or networks remain.
+- Boot time, recorded (not gating), to show regressions.
+- Installer: `runcvm-install-runtime.sh` on a fresh Docker host (in L1, alongside B and C).
+
+Tests are added in batches of three or four related tests per pull request, after A2: lifecycle and isolation; mounts and disks; resources; networking; images and kernels; nested Docker. Several of these are drawn from what `50-http-docker-swarm` exercises only implicitly (kernel modules, shared volumes without caching, MTU, overlay networks, Docker on a `RUNCVM_DISKS` disk), so that a failure there can be traced to a specific core test.
 
 Done when: the core tier runs in L1 in a bounded time (target to be set after first measurements) with no known flaky tests.
 
