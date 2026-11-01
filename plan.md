@@ -289,48 +289,49 @@ RUNCVM_DISKS=/disks/data,/var/lib/docker:/var/lib/containerd:/home:/opt/runcvm,e
 - A spec with several destinations creates one filesystem with a subdirectory per destination (e.g. `var-lib-docker`, `home`), mounts the disk at a hidden mountpoint (e.g. `/.runcvm/disks/<n>`) and bind-mounts each subdirectory over its destination on every boot. Changes are confined to `do_disk` in `runcvm-ctr-qemu` and the fstab handling in `runcvm-vm-init` (`:105`).
 - Overlapping destinations within one spec (e.g. `/var/lib` and `/var/lib/docker`) are rejected.
 
-#### E2. Populating a multi-path disk in one pass (option 3)
+#### E2. Populating a multi-path disk in one pass: repeated `-d SRC=SUBDIR`
 
-The container side cannot mount the image (no `CAP_SYS_ADMIN`, so no loop or FUSE mounts), and `mke2fs -d <dir>` takes a single source directory. Instead, stream all destinations, already renamed to their subdirectories, as a tarball into `mke2fs -d -`:
+The container side cannot mount the image (no `CAP_SYS_ADMIN`, so no loop or FUSE mounts), and `mke2fs -d <dir>` takes a single source directory. A small patch to mke2fs makes `-d` repeatable, with each `-d SRC=SUBDIR` copying directory SRC into a new top-level directory SUBDIR using the existing directory-mode code (`__populate_fs()`). SUBDIR takes SRC's own owner, mode, times and xattrs. A plain `-d SRC` (no `=`) behaves exactly as today and may be given at most once.
 
 ```sh
-LC_ALL=C.UTF-8 tar -C /vm --xattrs --xattrs-include='*' --numeric-owner -cf - \
-    --transform='s,^var/lib/docker,var-lib-docker,;s,^home,home,' \
-    var/lib/docker home \
-  | LC_ALL=C.UTF-8 mke2fs -q -F -t ext4 -d - "$src"
+mke2fs -q -F -t ext4 -d /vm/var/lib/docker=var-lib-docker -d /vm/home=home "$src"
 ```
 
-No staging copy, so no temporary second copy of the data.
+Prototype: `patches/e2fsprogs/mke2fs-multi-d.patch`, against e2fsprogs v1.47.2 (about 110 lines: `populate_fs_subdir()` in `misc/create_inode.c`, option handling in `misc/mke2fs.c`). Not yet wired into the build, and the man page is not yet updated. SUBDIR must be a single path component; duplicate SUBDIRs are rejected. The patch restores the working directory between sources, because `__populate_fs()` calls `chdir()`.
 
-Tested in a development sandbox (e2fsprogs 1.47.2 built from source with libarchive; GNU tar 1.35):
+Tested in a development sandbox (patched e2fsprogs 1.47.2, glibc):
 
 | Check | Result |
 |---|---|
-| Paths renamed into subdirectories by `--transform` | Correct |
-| Ownership (numeric uid/gid), modes including setuid | Preserved |
+| Each source copied into its subdirectory | Correct |
+| Subdirectory's own owner and mode (e.g. `1000:1000`, `0751`) | Taken from SRC |
+| Ownership, modes including setuid | Preserved |
 | Hard links within a tree | Preserved (same inode, link count 2) |
 | Symlinks | Preserved |
-| `security.capability` | Preserved |
-| Other xattrs (`user.*`; by the same code path also `trusted.*`, `security.selinux`, POSIX ACLs) | **Dropped.** The tarball importer copies only `security.capability` and `gnu.translator` (`misc/create_inode_libarchive.c`, `set_inode_xattr_tar`; unchanged on e2fsprogs master as of September 2026). Directory mode (`mke2fs -d <dir>`) copies all xattrs. |
-| Non-ASCII file names | Fail unless run under a UTF-8 locale (`LC_ALL=C.UTF-8`); musl may behave differently, to be checked |
-| Speed, `/usr/lib` (2.3 GB, ~40k files) into a 20 GB sparse file | Tarball: ~17 s; directory mode: ~7 s |
-| Speed vs staging copy (`/usr/share` + `/usr/lib`, 2.7 GB) | Tarball: ~13 s; `cp -a` to staging then `mke2fs -d`: ~87 s |
+| `security.capability` and `user.*` xattrs | Preserved (directory mode copies all xattrs, so also `trusted.*`, `security.selinux`, POSIX ACLs) |
+| Non-ASCII file names | Correct with no locale set |
+| `e2fsck -fn` on the result | Clean |
+| Invalid SUBDIR (`a/b`), duplicate SUBDIR | Rejected with a clear error, non-zero exit |
+| Speed, `/usr/share` + `/usr/lib` (2.7 GB, ~48k files) into a 20 GB sparse file, warm cache | ~11–13 s, against ~29–36 s for the tarball method below; repeated runs varied, but the ratio was consistent |
 
-The xattr limitation matters where a destination is pre-populated with content that relies on xattrs. The important case is a `/var/lib/docker` or `/var/lib/containerd` pre-loaded in an image (e.g. an L1 image with test images baked in for offline speed): overlay2 relies on `trusted.overlay.*` xattrs (e.g. opaque directories), so losing them would silently corrupt layers. Empty destinations, and typical `/home` and `/opt/runcvm` contents, are unaffected. Options:
-1. Patch e2fsprogs so the tarball importer copies all xattrs (or add an option to do so), and propose the change upstream. RunCVM would build e2fsprogs itself anyway (E3).
-2. Fall back to VM-side copying (E4) for destinations needing full xattr fidelity.
-3. Document the limitation and recommend a single-destination disk (directory mode) for pre-populated Docker storage.
+Full xattr fidelity matters for pre-populated Docker storage: overlay2 relies on `trusted.overlay.*` xattrs (e.g. opaque directories), so an image shipping a pre-loaded `/var/lib/docker` or `/var/lib/containerd` must keep them.
+
+Upstreaming: propose the change to e2fsprogs. Until accepted, RunCVM carries the patch (E3).
+
+**Alternative considered: tarball into `mke2fs -d -`.** e2fsprogs ≥ 1.47.1 built with libarchive accepts a tarball, so all destinations can be streamed, renamed with GNU tar `--transform`, with no patch. Rejected as the primary method because, as tested:
+- it drops all xattrs except `security.capability` and `gnu.translator` (`set_inode_xattr_tar` in `misc/create_inode_libarchive.c`; unchanged on e2fsprogs master as of September 2026), which would silently corrupt pre-populated overlay2 storage;
+- it fails on non-ASCII file names unless run under a UTF-8 locale;
+- it is about 2.5 times slower than repeated `-d`;
+- it needs libarchive (loaded with `dlopen`, so bundled explicitly) and GNU tar or bsdtar in the RunCVM bundle.
 
 #### E3. Build and bundling changes
 
-- e2fsprogs ≥ 1.47.1 built with libarchive. RunCVM builds on Alpine 3.19 (`Dockerfile:4`), which is believed to ship 1.47.0 (no tarball support). Either move to a newer Alpine release (and check its package is built with libarchive) or build e2fsprogs in its own Dockerfile stage, as is done for SeaBIOS and dnsmasq; the latter also allows the E2 xattr patch.
-- libarchive bundled explicitly via `BUNDELF_EXTRA_LIBS`: it is loaded with `dlopen`, so BundELF's dependency scan will not find it.
-- A tar that can rename paths and write xattrs: GNU tar (`--transform`) or bsdtar (`-s`, from libarchive). busybox tar supports neither.
-- A UTF-8 locale for both tar and mke2fs.
+- Build e2fsprogs in its own Dockerfile stage with `patches/e2fsprogs/mke2fs-multi-d.patch` applied, as is done for SeaBIOS and dnsmasq, and bundle the resulting `mke2fs` in place of Alpine's. No libarchive, tar or locale requirements.
+- Confirm the patched build under musl/Alpine.
 
 #### E4. Adding a destination to an existing disk
 
-The tarball method only populates a disk when it is created. For a destination added to an existing multi-path disk (and optionally for the xattr fallback in E2), the VM populates it on boot, before bind-mounting:
+mke2fs only populates a disk when it is created. For a destination added to an existing multi-path disk, the VM populates it on boot, before bind-mounting:
 
 ```
 [ -d $M/<sub> ] || { rm -rf $M/<sub>.tmp && cp -a <dst> $M/<sub>.tmp && mv $M/<sub>.tmp $M/<sub>; }
@@ -340,7 +341,8 @@ The rename makes `<sub>`'s existence the completion marker; an interrupted copy 
 
 #### E5. Tests
 
-- Core: a multi-path disk with sample trees; compare ownership, modes, hard links, symlinks, `security.capability`, and (once E2 option 1 or 2 is chosen) other xattrs between source and disk.
+- Core: a multi-path disk with sample trees; compare ownership, modes, hard links, symlinks and xattrs (`security.capability`, `user.*`, `trusted.*`) between source and disk.
+- Core: Docker in the VM with a `/var/lib/docker` pre-populated in the image, on a multi-path disk.
 - Core: Docker in the VM using a multi-path disk for `/var/lib/docker` and `/var/lib/containerd`, with both the containerd image store and the classic store.
 - Single-destination specs behave exactly as before.
 
@@ -420,7 +422,7 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 - A1 is small and unblocks everything; it can be done in the existing libvirt development VM.
 - C needs only B1 in dev mode, so it can proceed alongside A3/A4 and B2/B3.
 - D needs B3 and enough of A3 to be meaningful.
-- E can start at any time; E3 (e2fsprogs/libarchive/tar build) comes first. B1 can use per-path disks until E lands.
+- E can start at any time; E3 (patched e2fsprogs build) comes first. B1 can use per-path disks until E lands.
 
 ## 4. Suggested sequence (for prioritisation)
 
@@ -432,7 +434,7 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 6. A2, A3, A4, F3, F4 — baseline exit-code tests, core tier, hardened swarm test, systemd-aware shutdown; developed in L1.
 7. D1, D2, D4 (`workflow_dispatch` only) — first CI runs.
 8. D3, then widen D4 triggers.
-9. E — shared data disk; can run alongside 2–6, starting with E3. B1 switches to it when ready.
+9. E — shared data disk; can run alongside 2–6, starting with E3 (patched mke2fs). B1 switches to it when ready.
 10. G — as needed.
 
 ## 5. Open decisions
@@ -444,8 +446,7 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 - Socket variant with D2 controls only, or go straight to D3.
 - Registry for prebuilt images (if any), or always build inside L1.
 - Whether people should also be required to use the launcher on L0, or only CI.
-- Tarball importer xattr limitation (E2): patch e2fsprogs, fall back to VM-side copying, or document.
-- Newer Alpine release versus building e2fsprogs in its own stage (E3); GNU tar versus bsdtar.
+- Syntax for repeated `-d` (`SRC=SUBDIR` proposed); whether to propose it upstream before or after RunCVM adopts it (E2).
 - Whether adding a destination to an existing multi-path disk (E4) is supported initially.
 
 ## 6. Risks and unproven areas
@@ -458,5 +459,4 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 - BundELF relocatability to `/opt/runcvm/<version>` is assumed, not yet verified.
 - Exec routing after bootstrap updates or host reboots (records in `/run` are lost at reboot; containers are recreated by `create`, which rewrites them).
 - Runner security depends on controls outside workflow files (D2/D3); misconfiguration exposes L0.
-- Tarball population drops xattrs other than `security.capability`; pre-populated Docker storage would be silently corrupted unless addressed (E2).
-- Tarball population tested on glibc/Ubuntu only; behaviour under musl/Alpine within RunCVM (locale, libarchive loading) to be confirmed.
+- RunCVM carries an e2fsprogs patch (E2) until accepted upstream; tested on glibc only so far, musl/Alpine build to be confirmed.
