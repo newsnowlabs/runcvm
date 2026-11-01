@@ -1,8 +1,89 @@
 diff --git a/misc/create_inode.c b/misc/create_inode.c
-index 4e292a2..fb641c0 100644
+index 4e292a2..da64707 100644
 --- a/misc/create_inode.c
 +++ b/misc/create_inode.c
-@@ -1114,6 +1114,78 @@ out:
+@@ -18,6 +18,7 @@
+ #include <sys/types.h>
+ #include <unistd.h>
+ #include <limits.h> /* for PATH_MAX */
++#include <fnmatch.h> /* for fnmatch() */
+ #include <dirent.h> /* for scandir() and alphasort() */
+ #if defined HAVE_SYS_XATTR_H
+ #include <sys/xattr.h>
+@@ -808,6 +809,39 @@ static int alphasort(const struct dirent **a, const struct dirent **b) {
+ #endif
+ 
+ /* Copy files from source_dir to fs in alphabetical order */
++/* Exclusions (-x) and one-file-system (-X) support for populating */
++#define MAX_POPULATE_EXCLUDES 256
++static const char *populate_excludes[MAX_POPULATE_EXCLUDES];
++static int populate_num_excludes;
++static int populate_one_fs;
++static dev_t populate_root_dev;
++
++errcode_t populate_fs_add_exclude(const char *pattern)
++{
++	if (populate_num_excludes == MAX_POPULATE_EXCLUDES)
++		return EXT2_ET_NO_MEMORY;
++	populate_excludes[populate_num_excludes++] = pattern;
++	return 0;
++}
++
++void populate_fs_set_one_fs(int one_fs)
++{
++	populate_one_fs = one_fs;
++}
++
++/* path is relative to the source root, e.g. "/var/cache" */
++static int populate_pruned(const char *path, const struct stat *st)
++{
++	int i;
++
++	if (populate_one_fs && st->st_dev != populate_root_dev)
++		return 1;
++	for (i = 0; i < populate_num_excludes; i++)
++		if (fnmatch(populate_excludes[i], path, FNM_PATHNAME) == 0)
++			return 1;
++	return 0;
++}
++
+ static errcode_t __populate_fs(ext2_filsys fs, ext2_ino_t parent_ino,
+ 			       const char *source_dir, ext2_ino_t root,
+ 			       struct hdlinks_s *hdlinks,
+@@ -879,6 +913,14 @@ static errcode_t __populate_fs(ext2_filsys fs, ext2_ino_t parent_ino,
+ 			goto out;
+ 		}
+ 
++		/* Excluded or on another filesystem: skip non-directories
++		 * entirely; directories are created empty (see S_IFDIR) */
++		if (!S_ISDIR(st.st_mode) && populate_pruned(target->path, &st)) {
++			target->path_len = cur_dir_path_len;
++			target->path[target->path_len] = 0;
++			continue;
++		}
++
+ 		if (fs_callbacks && fs_callbacks->create_new_inode) {
+ 			retval = fs_callbacks->create_new_inode(fs,
+ 				target->path, name, parent_ino, root,
+@@ -970,6 +1012,9 @@ find_lnf:
+ 				com_err(name, retval, 0);
+ 					goto out;
+ 			}
++			/* Excluded or a mountpoint with -X: leave it empty */
++			if (populate_pruned(target->path, &st))
++				break;
+ 			/* Populate the dir recursively*/
+ 			retval = __populate_fs(fs, ino, name, root, hdlinks,
+ 					       target, fs_callbacks);
+@@ -1104,6 +1149,7 @@ errcode_t populate_fs2(ext2_filsys fs, ext2_ino_t parent_ino,
+ 			_("while copying xattrs on root directory"));
+ 		goto out;
+ 	}
++	populate_root_dev = st.st_dev;
+ 
+ 	retval = __populate_fs(fs, parent_ino, source, root, &hdlinks,
+ 			       &file_info, fs_callbacks);
+@@ -1114,6 +1160,79 @@ out:
  	return retval;
  }
  
@@ -53,6 +134,7 @@ index 4e292a2..fb641c0 100644
 +	retval = set_inode_xattr(fs, ino, source);
 +	if (retval)
 +		return retval;
++	populate_root_dev = st.st_dev;
 +
 +	hdlinks.count = 0;
 +	hdlinks.size = HDLINK_CNT;
@@ -82,20 +164,22 @@ index 4e292a2..fb641c0 100644
  		      const char *source, ext2_ino_t root)
  {
 diff --git a/misc/create_inode.h b/misc/create_inode.h
-index c75d685..24bd575 100644
+index c75d685..8a50d11 100644
 --- a/misc/create_inode.h
 +++ b/misc/create_inode.h
-@@ -63,5 +63,8 @@ extern errcode_t add_link(ext2_filsys fs, ext2_ino_t parent_ino,
+@@ -63,5 +63,10 @@ extern errcode_t add_link(ext2_filsys fs, ext2_ino_t parent_ino,
  			  ext2_ino_t ino, const char *name);
  extern errcode_t set_inode_extra(ext2_filsys fs, ext2_ino_t ino,
  				 const struct stat *st);
++extern errcode_t populate_fs_add_exclude(const char *pattern);
++extern void populate_fs_set_one_fs(int one_fs);
 +extern errcode_t populate_fs_subdir(ext2_filsys fs, const char *source,
 +				    const char *subdir,
 +				    struct fs_ops_callbacks *fs_callbacks);
  
  #endif /* _CREATE_INODE_H */
 diff --git a/misc/mke2fs.c b/misc/mke2fs.c
-index f24076b..b475493 100644
+index f24076b..e0aaeb9 100644
 --- a/misc/mke2fs.c
 +++ b/misc/mke2fs.c
 @@ -119,6 +119,10 @@ char *journal_device;
@@ -109,7 +193,16 @@ index f24076b..b475493 100644
  static char *undo_file;
  
  static int android_sparse_file; /* -E android_sparse */
-@@ -1769,9 +1773,28 @@ profile_error:
+@@ -1736,7 +1740,7 @@ profile_error:
+ 	}
+ 
+ 	while ((c = getopt (argc, argv,
+-		    "b:cd:e:g:i:jl:m:no:qr:s:t:vC:DE:FG:I:J:KL:M:N:O:R:ST:U:Vz:")) != EOF) {
++		    "b:cd:e:g:i:jl:m:no:qr:s:t:vx:C:DE:FG:I:J:KL:M:N:O:R:ST:U:VXz:")) != EOF) {
+ 		switch (c) {
+ 		case 'b':
+ 			blocksize = parse_num_blocks2(optarg, -1);
+@@ -1769,8 +1773,37 @@ profile_error:
  				exit(1);
  			}
  			break;
@@ -135,12 +228,21 @@ index f24076b..b475493 100644
 +			*eq = 0;
 +			src_subdir_src[src_subdirs] = optarg;
 +			src_subdir_dst[src_subdirs++] = eq + 1;
- 			break;
++			break;
 +		}
++		case 'x':
++			if (populate_fs_add_exclude(optarg)) {
++				com_err(program_name, 0, "%s",
++					_("too many -x options"));
++				exit(1);
++			}
++			break;
++		case 'X':
++			populate_fs_set_one_fs(1);
+ 			break;
  		case 'D':
  			direct_io = 1;
- 			break;
-@@ -3630,6 +3653,16 @@ no_journal:
+@@ -3630,6 +3663,16 @@ no_journal:
  		} else if (!quiet)
  			printf("%s", _("done\n"));
  	}

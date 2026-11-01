@@ -275,7 +275,7 @@ Impact on this plan:
 - **CI (batch mode): low**, provided both Docker storage paths are on disks. Most heavy I/O in L1 is under `/var/lib/docker` (images, builds, L2 root filesystems, L2 backing files). With the containerd image store, which recent Docker Engine releases are understood to enable by default on fresh installs, image content and snapshots live in `/var/lib/containerd` instead (checked in B4).
 - **Dev mode and Dockside: significant.** Home directories, source trees, toolchain and package caches, and Claude Code workspaces are write-heavy and spread across the root filesystem.
 
-A block-device root is not proposed: the virtiofs root also carries `/.runcvm` (config, network set-up, fstab, dropbear keys, `exitcode`), `/.runcvm/guest` (including the kernel's `init=`), user volumes and bind mounts, and Docker's `/etc/hosts`/`resolv.conf`/`hostname` bind mounts; and it would break Docker's image-plus-writable-layer model (`docker diff`, `docker cp`, `docker commit`, image updates).
+Booting from a block-device root (kernel `root=`) is not proposed: the virtiofs root also carries `/.runcvm` (config, network set-up, fstab, dropbear keys, `exitcode`), `/.runcvm/guest` (including the kernel's `init=`), user volumes and bind mounts, and Docker's `/etc/hosts`/`resolv.conf`/`hostname` bind mounts; and it would break Docker's image-plus-writable-layer model (`docker diff`, `docker cp`, `docker commit`, image updates). An optional whole-root disk that the VM switches to after booting from virtiofs is feasible, though, with the same semantic trade-offs (E6).
 
 #### E1. Multi-path disk specs
 
@@ -297,7 +297,7 @@ The container side cannot mount the image (no `CAP_SYS_ADMIN`, so no loop or FUS
 mke2fs -q -F -t ext4 -d /vm/var/lib/docker=var-lib-docker -d /vm/home=home "$src"
 ```
 
-Prototype: `patches/e2fsprogs/mke2fs-multi-d.patch`, against e2fsprogs v1.47.2 (about 110 lines: `populate_fs_subdir()` in `misc/create_inode.c`, option handling in `misc/mke2fs.c`). Not yet wired into the build, and the man page is not yet updated. SUBDIR must be a single path component; duplicate SUBDIRs are rejected. The patch restores the working directory between sources, because `__populate_fs()` calls `chdir()`.
+Prototype: `patches/e2fsprogs/mke2fs-populate.patch`, against e2fsprogs v1.47.2 (about 170 lines in `misc/create_inode.c` and `misc/mke2fs.c`; also adds `-x`/`-X`, see E6). Not yet wired into the build, and the man page is not yet updated. SUBDIR must be a single path component; duplicate SUBDIRs are rejected. The patch restores the working directory between sources, because `__populate_fs()` calls `chdir()`.
 
 Tested in a development sandbox (patched e2fsprogs 1.47.2, glibc):
 
@@ -326,7 +326,7 @@ Upstreaming: propose the change to e2fsprogs. Until accepted, RunCVM carries the
 
 #### E3. Build and bundling changes
 
-- Build e2fsprogs in its own Dockerfile stage with `patches/e2fsprogs/mke2fs-multi-d.patch` applied, as is done for SeaBIOS and dnsmasq, and bundle the resulting `mke2fs` in place of Alpine's. No libarchive, tar or locale requirements.
+- Build e2fsprogs in its own Dockerfile stage with `patches/e2fsprogs/mke2fs-populate.patch` applied, as is done for SeaBIOS and dnsmasq, and bundle the resulting `mke2fs` in place of Alpine's. No libarchive, tar or locale requirements.
 - Confirm the patched build under musl/Alpine.
 
 #### E4. Adding a destination to an existing disk
@@ -347,6 +347,48 @@ The rename makes `<sub>`'s existence the completion marker; an interrupted copy 
 - Single-destination specs behave exactly as before.
 
 Done when: the L1 image (B1) uses one data disk for `/var/lib/docker`, `/var/lib/containerd`, `/opt/runcvm` and `/home`, and E5 passes.
+
+#### E6. Optional whole-root disk
+
+A variation that needs no knowledge of what is in `/`: copy the whole root, minus what must stay live, onto one disk, and have the VM run from it. Proposed syntax: `RUNCVM_DISKS=/disks/root,/,ext4,40G` (destination `/`, which today would be unsafe and should be rejected until this exists).
+
+**Populating: `-x` and `-X` in the same mke2fs patch.**
+- `-x PATTERN` (repeatable): skip paths matching a shell pattern (`fnmatch`, `FNM_PATHNAME`), relative to the source root, e.g. `-x /disks/root -x '/var/cache/*'`. An excluded directory is still created, empty, with its own attributes; excluded files are omitted.
+- `-X`: do not cross filesystem boundaries, like `tar --one-file-system`. Mountpoint directories are created empty; files on other filesystems are omitted.
+
+```sh
+mke2fs -q -F -t ext4 -d /vm -X -x '/disks/*' "$src"
+```
+
+In the container, `/vm` is an rbind of the container's root filesystem, and everything that must stay live in the VM is a separate mount: the `/.runcvm` tmpfs, `/.runcvm/guest` (host `/opt/runcvm`), user volumes and bind mounts, Docker's `/etc/hosts`/`resolv.conf`/`hostname` bind mounts, and kernel modules. So `-X` excludes exactly those, and RunCVM only needs to add `-x` for a backing file stored in the container's own filesystem. `-X` relies on device numbers, so a bind mount from the same filesystem is not detected (as with tar and rsync); in RunCVM's case the root is overlayfs and all bind sources are host paths, so device numbers differ.
+
+Tested in a development sandbox against a mock `/vm` (tmpfs "volume", tmpfs `/.runcvm`, `/etc/hosts` bind-mounted from a tmpfs, backing file inside the tree): the volume, `/.runcvm` and `/disks` arrived as empty directories, `/etc/hosts` was omitted, `/var/cache/*` was excluded while `/var/cache` itself was kept, everything else was copied, and `e2fsck -fn` was clean. Without `-X`, the volume's contents were copied, as expected.
+
+Possible refinement: with `-X`, create empty placeholder files for file mountpoints (e.g. `/etc/hosts`) rather than omitting them, so the VM need not create them before re-attaching the bind mounts.
+
+**VM side: switch to the disk early in `runcvm-vm-init`, without initramfs changes.** The VM still boots from virtiofs, so the kernel's `init=` (`/.runcvm/guest/scripts/runcvm-vm-init`) and the initramfs are unchanged. Before anything else starts, `runcvm-vm-init` (PID 1, running from `/.runcvm/guest`):
+1. mounts the disk at a temporary mountpoint;
+2. moves each live mount (`/proc`, `/sys`, `/dev`, `/.runcvm` with `/.runcvm/guest`, user volumes, Docker's file bind mounts, kernel modules) onto the matching empty path on the disk (`mount --move`);
+3. `pivot_root`s to the disk, keeping the virtiofs root at a hidden path (e.g. `/.runcvm/vmroot`) or detaching it;
+4. carries on as today (network, fstab, cgroups, dropbear, then the entrypoint).
+
+The process structure inside the VM is unchanged: `runcvm-vm-init` remains PID 1 and execs as today.
+
+**Trade-offs compared with multi-path disks (E1, E2):**
+
+| | Multi-path disk | Whole-root disk |
+|---|---|---|
+| What must be specified | Each heavy path | Only the disk and its size |
+| I/O on the block device | Listed paths | Everything except live mounts |
+| Creation cost | Listed paths' contents (often nearly empty) | Whole image plus container layer |
+| Host space | Small | Image contents duplicated on the disk |
+| `docker diff`/`cp`/`commit`/`export` | Unaffected except listed paths | Do not see VM-side changes |
+| If the disk outlives the image (e.g. in a named volume) | Listed paths stale | Whole root stale; image updates not seen |
+| VM-side work | Mount and bind-mount | Mount, move live mounts, `pivot_root` |
+
+Recommendation: multi-path disks as the default (CI, L1 batch mode), since Docker's semantics are kept and creation is cheap; whole-root as an option for dev mode and Dockside, where libvirt-like I/O across the whole root matters more. Either way, one mke2fs patch serves both.
+
+Tests: a whole-root L2 boots and runs its entrypoint; volumes, bind mounts, `/etc/hosts` and `docker exec` work; `docker stop` shuts down cleanly; writes outside volumes land on the disk; a backing file inside the container's filesystem is not copied into itself.
 
 ---
 
@@ -399,7 +441,7 @@ Automatic pass-through of the entrypoint's exit status is out of scope here: it 
 
 ### G. Deferred and possible future work
 
-- **Overlay root with a block-backed upper layer**: in the VM, root becomes an overlayfs with the image (virtiofs) as the read-only lower layer and the upper layer on the data disk, so writes anywhere under `/` go to the block device. `/var/lib/docker` and containerd storage would still be bind-mounted directly from the data disk (overlay2 cannot run on overlayfs). Needs the root switch moved into the initramfs, and `docker diff`/`docker commit` would no longer see VM-side changes. Worth considering for dev mode after E.
+- **Overlay root with a block-backed upper layer**: in the VM, root becomes an overlayfs with the image (virtiofs) as the read-only lower layer and the upper layer on the data disk, so writes anywhere under `/` go to the block device without copying the whole image. `/var/lib/docker` and containerd storage would still be bind-mounted directly from the data disk (overlay2 cannot run on overlayfs). The switch could be done in `runcvm-vm-init` as in E6; `docker diff`/`docker commit` would no longer see VM-side changes. An alternative to E6 if copying the whole image proves too costly.
 
 - **Named-volume payload**: the wrapper detects a user-supplied mount at a reserved destination (e.g. `--mount type=volume,src=runcvm-1.2.3,dst=/.runcvm/guest`) and uses it instead of its own bind mount. Benefits: install a payload without host filesystem writes, `daemon.json` edits or dockerd restarts; per-container selection; `docker volume rm` to remove. Costs: wrapper/payload version skew becomes a compatibility contract needing an interface version; only covers payload changes, not wrapper changes. Revisit after C, once the wrapper–payload interface is documented.
 - **GitHub runner inside a RunCVM VM**: not initially. Note that RunCVM does not support bind-mounting host sockets, so such a runner could only nest everything.
@@ -446,7 +488,8 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 - Socket variant with D2 controls only, or go straight to D3.
 - Registry for prebuilt images (if any), or always build inside L1.
 - Whether people should also be required to use the launcher on L0, or only CI.
-- Syntax for repeated `-d` (`SRC=SUBDIR` proposed); whether to propose it upstream before or after RunCVM adopts it (E2).
+- Syntax for repeated `-d` (`SRC=SUBDIR`) and for `-x`/`-X`; whether to propose them upstream before or after RunCVM adopts them (E2, E6).
+- Whether to offer the whole-root disk (E6), and whether to implement it before or after multi-path disks.
 - Whether adding a destination to an existing multi-path disk (E4) is supported initially.
 
 ## 6. Risks and unproven areas
