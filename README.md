@@ -594,6 +594,17 @@ By default SeaBIOS is used to boot the VM. Enable OVMF EFI boot with this option
 
 Enable use of [virtio vhost-net](https://www.redhat.com/en/blog/introduction-virtio-networking-and-vhost-net) (reliant on host `vhost_net` module and `/dev/vhost-net` device) to accelerate networking.
 
+### `--env=RUNCVM_QEMU_ACCEL=<kvm|auto|tcg>`
+
+Selects how QEMU runs the VM:
+- `kvm` (the default) uses KVM, and fails with an error if `/dev/kvm` is unavailable on the host;
+- `auto` uses KVM if `/dev/kvm` is available, and otherwise falls back to software emulation (TCG), with a warning;
+- `tcg` always uses software emulation, which is much slower but works without KVM (for example, for testing in environments without nested virtualisation).
+
+### `--env=RUNCVM_QEMU_TCG_TB_MEM_SIZE=<Mb>`
+
+Under software emulation (see `RUNCVM_QEMU_ACCEL`), sets the size of QEMU's cache of translated code, in Mb (default 128; from 32 to 4096). This is added to the container's memory limit, in addition to the VM's memory (`--memory`) and the usual allowance for RunCVM's helper processes. Increase it for workloads that run a large amount of code. It has no effect when KVM is used.
+
 ### `--env=RUNCVM_SYS_ADMIN=1`
 
 By default, `virtiofsd` is not launched with `-o modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.

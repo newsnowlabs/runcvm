@@ -1,0 +1,136 @@
+#!/bin/bash -e
+
+# QEMU acceleration (RUNCVM_QEMU_ACCEL) and the translation cache memory used under
+# software emulation (RUNCVM_QEMU_TCG_TB_MEM_SIZE), each set explicitly:
+# - kvm (and the default): KVM; Container/VM creation fails with a clear error without /dev/kvm
+# - auto: KVM if /dev/kvm is available, otherwise software emulation (TCG) with a warning
+# - tcg: always software emulation, without a warning
+# - under TCG, the translation cache size appears on QEMU's command line and is added to
+#   the container's memory limit (VM memory + 256Mb helper allowance + cache)
+# - invalid values are rejected
+#
+# Expectations depend on whether this host has /dev/kvm. The acceleration in use is
+# read from QEMU's command line in the container's process list, and the memory limit
+# from the container's cgroup on the host.
+
+# Load framework functions
+. ../framework.sh
+
+RUNTIME="${RUNTIME:-runcvm}"
+IMAGE="alpine"
+WARNING="falling back to software emulation"
+OVERHEAD=256      # RunCVM's helper memory allowance (Mb)
+DEFAULT_MEM=512   # RunCVM's default VM memory (Mb)
+DEFAULT_TB=128    # Default RUNCVM_QEMU_TCG_TB_MEM_SIZE (Mb)
+
+if [ -e /dev/kvm ]; then HAS_KVM=1; else HAS_KVM=0; fi
+param host_has_kvm "$HAS_KVM"
+
+NAMES=()
+nodes() { echo "${NAMES[@]}"; }
+
+# launch NAME [DOCKER_RUN_OPTIONS...]: start a long-running Container/VM, printing docker's
+# output. (Not --rm, so that the logs of a Container/VM that exits early can be inspected.)
+launch() {
+  local name="$1"; shift
+  docker run -d $(labels) --runtime=$RUNTIME --env=RUNCVM_QEMU_DEBUG=1 ${KERNEL_DEBUG:+--env=RUNCVM_KERNEL_DEBUG=1} \
+    "$@" --name "$name" --hostname "$name" $IMAGE sh -c 'while true; do sleep 1; done' 2>&1
+}
+
+# accel_in_use NAME: kvm or tcg, from QEMU's command line in the container
+accel_in_use() {
+  docker top "$1" -eo pid,args 2>/dev/null | grep -oE 'accel[= ](kvm|tcg)' | head -n 1 | cut -c7-
+}
+
+# tb_size_in_use NAME: the tb-size= value on QEMU's command line, if any
+tb_size_in_use() {
+  docker top "$1" -eo pid,args 2>/dev/null | grep -oE 'tb-size=[0-9]+' | head -n 1 | cut -d= -f2
+}
+
+# mem_limit_mb NAME: the container's cgroup memory limit in Mb, or empty if not found
+mem_limit_mb() {
+  local id f
+  id=$(docker inspect -f '{{.Id}}' "$1")
+  for f in /sys/fs/cgroup/memory/docker/$id/memory.limit_in_bytes \
+           /sys/fs/cgroup/system.slice/docker-$id.scope/memory.max \
+           /sys/fs/cgroup/docker/$id/memory.max; do
+    if [ -r "$f" ]; then echo $(( $(cat "$f") / 1024 / 1024 )); return; fi
+  done
+}
+
+# expect_failure LABEL OPTIONS...: Container/VM creation must fail, mentioning PATTERN
+expect_failure() {
+  local label="$1" pattern="$2"; shift 2
+  local name out rc
+  name=$(unique "accel-$label")
+  NAMES+=("$name")
+  if out=$(launch "$name" "$@"); then rc=0; else rc=$?; fi
+  check "$label: Container/VM creation fails" "fail" "$([ "$rc" -ne 0 ] && echo fail || echo started)" || true
+  check_cmd "$label: error mentions $pattern" grep -q "$pattern" <<<"$out" || true
+  docker rm -f "$name" >/dev/null 2>&1 || true
+}
+
+# expect_running LABEL ACCEL WARN TB MEM OPTIONS...: Container/VM must run with acceleration
+# ACCEL, the fallback warning logged if WARN=1, tb-size TB (if ACCEL=tcg), and a container
+# memory limit of MEM Mb
+expect_running() {
+  local label="$1" accel="$2" warn="$3" tb="$4" mem="$5"; shift 5
+  local name out rc limit
+  name=$(unique "accel-$label")
+  NAMES+=("$name")
+  if out=$(launch "$name" "$@"); then rc=0; else rc=$?; fi
+  if ! check "$label: Container/VM starts" "0" "$rc"; then
+    log "docker run output: $out"
+    return
+  fi
+
+  # Software emulation boots slowly: allow plenty of time
+  if ! check_cmd "$label: 'docker exec' works" wait_for_exec "$name" 300; then
+    log "State of '$name': $(docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} error={{.State.Error}}' "$name" 2>&1)"
+    log "Console output of '$name' (last 60 lines):"
+    docker logs "$name" 2>&1 | tail -n 60 | sed 's/^/    /'
+  fi
+
+  check "$label: QEMU acceleration in use" "$accel" "$(accel_in_use "$name")" || true
+  if [ "$accel" = "tcg" ]; then
+    check "$label: translation cache size (tb-size)" "$tb" "$(tb_size_in_use "$name")" || true
+  fi
+
+  limit=$(mem_limit_mb "$name")
+  if [ -n "$limit" ]; then
+    check "$label: container memory limit (Mb)" "$mem" "$limit" || true
+  else
+    log "$label: container memory limit: cgroup not found - SKIP"
+    record_result SKIP "$label: container memory limit (Mb)"
+  fi
+
+  if [ "$warn" = "1" ]; then
+    check_cmd "$label: fallback warning logged" grep -q "$WARNING" <<<"$(docker logs "$name" 2>&1)" || true
+  else
+    check "$label: no fallback warning" "0" "$(docker logs "$name" 2>&1 | grep -c "$WARNING" || true)" || true
+  fi
+  docker rm -f "$name" >/dev/null 2>&1 || true
+}
+
+cleanup
+
+KVM_MEM=$((DEFAULT_MEM + OVERHEAD))
+TCG_MEM=$((DEFAULT_MEM + OVERHEAD + DEFAULT_TB))
+
+if [ "$HAS_KVM" = "1" ]; then
+  expect_running "default" kvm 0 - $KVM_MEM
+  expect_running "kvm" kvm 0 - $KVM_MEM --env=RUNCVM_QEMU_ACCEL=kvm
+  expect_running "auto" kvm 0 - $KVM_MEM --env=RUNCVM_QEMU_ACCEL=auto
+else
+  expect_failure "default" RUNCVM_QEMU_ACCEL
+  expect_failure "kvm" RUNCVM_QEMU_ACCEL --env=RUNCVM_QEMU_ACCEL=kvm
+  expect_running "auto" tcg 1 $DEFAULT_TB $TCG_MEM --env=RUNCVM_QEMU_ACCEL=auto
+fi
+
+expect_running "tcg" tcg 0 $DEFAULT_TB $TCG_MEM --env=RUNCVM_QEMU_ACCEL=tcg
+expect_running "tcg-tb64-mem1g" tcg 0 64 $((1024 + OVERHEAD + 64)) \
+  --env=RUNCVM_QEMU_ACCEL=tcg --env=RUNCVM_QEMU_TCG_TB_MEM_SIZE=64 --memory=1g
+expect_failure "bogus-accel" RUNCVM_QEMU_ACCEL --env=RUNCVM_QEMU_ACCEL=bogus
+expect_failure "bad-tb-size" RUNCVM_QEMU_TCG_TB_MEM_SIZE --env=RUNCVM_QEMU_ACCEL=tcg --env=RUNCVM_QEMU_TCG_TB_MEM_SIZE=8
+
+finish
