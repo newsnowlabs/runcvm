@@ -42,14 +42,16 @@ if ! [ -h /dev/fd ]; then
   ln -s /proc/self/fd /dev/fd
 fi
 
-# FIXME: This must be run early enough, otherwise other interfaces like docker0 might have started
-IF=$(ls /sys/class/net/ | grep -vE '^(lo|docker)' | head -n 1)
-
+# Disable IPv6 on every interface by default (both those that already exist,
+# and any that may appear later), before any of them are renamed or brought
+# up, so that none of them briefly performs SLAAC/DAD or joins a
+# solicited-node multicast group using its unwanted kernel-assigned EUI-64
+# address. Interfaces with a captured IPv6 address are selectively
+# re-enabled, by their real (post-rename) name, below.
 # https://bugzilla.redhat.com/show_bug.cgi?id=501934
-for i in all $IF
+for i in default $(ls /sys/class/net/ | grep -v '^lo$')
 do
-  # /sbin/sysctl -q -w -e net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0 net.ipv6.conf.$i.accept_ra=0
-  sysctl -q -w -e net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0 || true
+  sysctl -q -w -e net.ipv6.conf.$i.disable_ipv6=1 net.ipv6.conf.$i.autoconf=0 net.ipv6.conf.$i.accept_ra=0 || true
 done
 
 # Bring up local interface
@@ -82,11 +84,33 @@ do
   load_network "$if"
 
   ip link set $DOCKER_IF-tmp name $DOCKER_IF
+
+  if load_network6 "$if"; then
+    # Re-enable IPv6 on this interface only. accept_ra/autoconf are left off
+    # (as set for every interface above): Docker addresses IPv6 statically,
+    # like IPv4, and runs no RA daemon on its bridge networks, so the VM
+    # should behave deterministically rather than react to anything it can
+    # now see on the raw L2 segment.
+    sysctl -q -w -e net.ipv6.conf.$DOCKER_IF.disable_ipv6=0 net.ipv6.conf.$DOCKER_IF.autoconf=0 net.ipv6.conf.$DOCKER_IF.accept_ra=0 || true
+  fi
+
   ip addr add $DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX broadcast + dev $DOCKER_IF
   ip link set $DOCKER_IF up mtu "${DOCKER_IF_MTU:=1500}"
 
   # If this is the default gateway interface, establish the default gateway
-  [ -n "$DOCKER_IF_IP_GW" ] && ip route add default via $DOCKER_IF_IP_GW
+  [ -n "$DOCKER_IF_IP_GW" ] && [ "$DOCKER_IF_IP_GW" != "-" ] && ip route add default via $DOCKER_IF_IP_GW
+
+  if [ -n "$DOCKER_IF6_IP" ]; then
+    # The address is definitionally ours: Docker allocated it, and the
+    # container released it (at entrypoint time, before enslaving this
+    # interface) well before this point, so nothing else can answer for it.
+    # Skip DAD so the address is usable immediately: with DAD enabled the
+    # address is 'tentative' for ~1s, and the default route below would
+    # otherwise intermittently fail ('Network is unreachable') against a
+    # tentative source address.
+    ip -6 addr add $DOCKER_IF6_IP/$DOCKER_IF6_IP_NETPREFIX dev $DOCKER_IF nodad
+    [ -n "$DOCKER_IF6_IP_GW" ] && [ "$DOCKER_IF6_IP_GW" != "-" ] && ip -6 route add default via $DOCKER_IF6_IP_GW dev $DOCKER_IF
+  fi
 done
 
 # Read and install any supplementary routes.
@@ -95,6 +119,13 @@ do
   [ -n "$DOCKER_RT_NET" ] && [ -n "$DOCKER_RT_GW" ] && [ -n "$DOCKER_RT_DEV" ] && \
     ip route add "$DOCKER_RT_NET" via "$DOCKER_RT_GW" dev "$DOCKER_RT_DEV" || true
 done </.runcvm/network/routes
+
+# Read and install any supplementary IPv6 routes.
+while read -r DOCKER_RT6_NET DOCKER_RT6_GW DOCKER_RT6_DEV
+do
+  [ -n "$DOCKER_RT6_NET" ] && [ -n "$DOCKER_RT6_GW" ] && [ -n "$DOCKER_RT6_DEV" ] && \
+    ip -6 route add "$DOCKER_RT6_NET" via "$DOCKER_RT6_GW" dev "$DOCKER_RT6_DEV" || true
+done </.runcvm/network/routes6
 
 # TODO
 # - bind-mount or overwrite /etc/resolv.conf, /etc/hosts and /etc/hostname?
