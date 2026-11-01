@@ -37,7 +37,7 @@ docker network create $(labels) "$NETWORK2"
 # Launch two RunCVM containers on the dual-stack network.
 for n in a b; do
   log -n "Launching RunCVM container '$NODE-$n' ..."
-  docker run -d --rm $(labels) --runtime=$RUNTIME --network=$NETWORK --name=$NODE-$n --hostname=$NODE-$n $IMAGE \
+  docker run -d --rm $(labels) $(vm_opts) --runtime=$RUNTIME --network=$NETWORK --name=$NODE-$n --hostname=$NODE-$n $IMAGE \
     sh -c 'while true; do sleep 1; done'
 done
 
@@ -46,7 +46,7 @@ done
 # supports multiple interfaces - must still boot. Before the fix, the VM's PID1
 # died during boot for any non-default-gateway interface.
 log -n "Creating multi-interface container '$NODE-multi' (regression test) ..."
-docker create $(labels) --runtime=$RUNTIME --name=$NODE-multi --hostname=$NODE-multi --network=$NETWORK $IMAGE \
+docker create $(labels) $(vm_opts) --runtime=$RUNTIME --name=$NODE-multi --hostname=$NODE-multi --network=$NETWORK $IMAGE \
   sh -c 'while true; do sleep 1; done' >/dev/null
 docker network connect "$NETWORK2" $NODE-multi
 docker start $NODE-multi >/dev/null
