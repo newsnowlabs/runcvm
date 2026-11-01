@@ -52,6 +52,8 @@ Work:
 
 Done when: a deliberately failing test makes `tests/run` exit non-zero, and results/logs appear in the results directory.
 
+Status: implemented in PR #34 (`a1-test-runner`). `tests/run` is a standard-library Python runner; tests stay language-neutral (any executable `test`; exit 0 pass, 77 skip, other fail) with metadata files `tier`, `timeout` and `requires` (`vm`, `kvm`, `ipv6`). It writes TAP, JUnit, JSON and a summary, runs each test in its own process group with a timeout, and removes leftovers by label. Helpers exist in both `tests/framework.sh` and `tests/framework.py`. Tests are numbered by tier (`1x` core, `5x` extended). `--mock` runs the suite with `runc` in place of RunCVM (tests requiring `vm` skip), and `--accel kvm|auto|tcg` selects QEMU acceleration via `RUNCVM_QEMU_ACCEL` (PR #33), so the suite also runs under TCG emulation in environments without `/dev/kvm`. `tests/selftest/run-selftest` tests the runner itself.
+
 #### A2. Exit-code and shutdown behaviour: baseline tests
 
 RunCVM does not currently pass the entrypoint's exit status through automatically. Per the README, an application must write `/.runcvm/exitcode` (0–255) or call `qemu-exit` (0–127); otherwise `runcvm-ctr-exit` derives a code from QEMU's exit status. Behaviour also differs by init mode:
@@ -97,6 +99,8 @@ The current suite is suggestive, not mandatory. `00-http-docker-swarm` is a dema
 | Fixed 200-iteration poll | Poll with an explicit deadline; distinguish "slow" from "failed" |
 
 `01-mariadb` also moves to the extended tier.
+
+Status: in PR #34, the tests are renumbered `50-http-docker-swarm` (requires `vm kvm`) and `51-mariadb` (passes under TCG); the hardening above is still to do.
 
 Done when: the swarm test passes N consecutive runs in L1 (N to be agreed) and fails with a clear diagnosis rather than hanging. Promotion to the core tier is a later decision.
 
@@ -481,7 +485,7 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 
    Small, and unblocks everything; can be done in the existing libvirt development VM.
 
-   Then merge the open PRs, tested in the libvirt development VM with the trustworthy runner: #30 (dual-stack IPv6; also fixes VM boot failure for containers with a second network) first, then #28 (ARM64, TCG fallback, Podman, installer), rebased onto or merged with `main` after #32 so that its duplicated build changes drop out. Both land before A3 (needs #30's fix), B2, C3/C4, E3 and E6 (which touch the same code). Follow-ups: a framework check that L2s really run under KVM (#28's TCG fallback would otherwise hide missing nested KVM), multi-interface and overlay-network tests in A3, and `tests/04-ipv6` adapted to A1's conventions.
+   Then merge the open PRs in stack order (section 4a), each tested in the libvirt development VM with the trustworthy runner: #34 (A1), #33 (explicit QEMU acceleration modes), #30 (dual-stack IPv6; also fixes VM boot failure for containers with a second network), then #28 (ARM64, Podman, installer). All land before A3 (needs #30's fix), B2, C3/C4, E3 and E6 (which touch the same code). #33 provides the check that L2s really run under KVM: `RUNCVM_QEMU_ACCEL=kvm` fails at creation if `/dev/kvm` is absent, rather than silently falling back to TCG. Follow-ups: multi-interface and overlay-network tests in A3.
 2. **First L1 environment**
    - B1. L1 image — dev mode, proven by manual launch on L0 and in Dockside
 3. **Side-by-side versions**, developed in L1
@@ -535,11 +539,23 @@ Implementation is split into independent branches, each with its own pull reques
 
 Branch 2 needs only the mke2fs part of branch 1. If branch 1 is not yet merged, branch 2 is based on it (or the mke2fs build stage is split into a small first pull request that both build on). Other deliverables (A, B, C, D, F) get their own branches as they are started.
 
+### Open pull requests (stack)
+
+| Pull request | Branch | Based on | Contents |
+|---|---|---|---|
+| #32 | `fix/pin-aports-stable` | `main` | Pin aports to `${ALPINE_VERSION}-stable`; dropbear patch paths. Makes `main` build. |
+| #34 | `a1-test-runner` | `main` | A1 runner, helpers, self-test; tests regrouped by tier. |
+| #33 | `qemu-accel` | #34 | `RUNCVM_QEMU_ACCEL` (`kvm` default and fails without `/dev/kvm`, `auto`, `tcg`); `RUNCVM_QEMU_TCG_TB_MEM_SIZE` (TCG translation cache, added to the container's memory allowance); runtime errors reported through containerd's log; `tests/13-qemu-accel`; `clean_env` and `create_aliases` lists one name per line. |
+| #30 | `claude/runcvm-ipv6-support-iwotel` | #33 | Dual-stack IPv6; multi-network boot fix; `tests/12-ipv6`. |
+| #28 | `claude/macos-docker-compatibility-InrFB` | #30 | ARM64, Podman, installer. |
+
+#32 and #34 are independent; test them merged together on a KVM host. Changes lower in the stack are merged upwards (#34 → #33 → #30 → #28), never rebased. The lists in `runcvm-ctr-defaults` are one name per line, sorted, so that branches adding names merge cleanly.
+
 ## 5. Open decisions
 
 - Bootstrap implementation: static binary (e.g. Go) or independent BundELF bundle (C2).
 - Location of the L1 image and tooling in the repository (`tests/env/` proposed).
-- Results format: TAP or JUnit.
+- ~~Results format: TAP or JUnit.~~ Both, plus JSON (A1).
 - Core tier time budget; swarm-test reliability threshold for promotion.
 - Socket variant with D2 controls only, or go straight to D3.
 - Registry for prebuilt images (if any), or always build inside L1.
@@ -559,4 +575,6 @@ Branch 2 needs only the mke2fs part of branch 1. If branch 1 is not yet merged, 
 - BundELF relocatability to `/opt/runcvm/<version>` is assumed, not yet verified.
 - Exec routing after bootstrap updates or host reboots (records in `/run` are lost at reboot; containers are recreated by `create`, which rewrites them).
 - Runner security depends on controls outside workflow files (D2/D3); misconfiguration exposes L0.
+- QEMU 8.1.5 under TCG occasionally segfaults (exit 139, reported as container exit code 70), seen only in full-suite runs; recorded in #33. KVM runs are unaffected; a QEMU upgrade may fix it.
+- `RUNCVM_QEMU_DEBUG` reads `memory.events`, which exists only under cgroup v2.
 - RunCVM carries an e2fsprogs patch (E2) until accepted upstream; tested on glibc only so far, musl/Alpine build to be confirmed.
