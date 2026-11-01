@@ -118,6 +118,7 @@ A Dockerfile in the repository (e.g. `tests/env/Dockerfile`), based on the READM
 - Docker CE, systemd, non-root dev user with sudo and docker group, git and build prerequisites.
 - KVM module selection by CPU vendor (`kvm_intel`/`kvm_amd`), replacing the hardcoded `kvm_intel` in the README images, or removed if shown to be unnecessary.
 - rp_filter settings correct for inner bridges (the installer already handles this).
+- IPv6 enabled in L1's kernel and dockerd able to create IPv6 networks, so that `12-ipv6` runs rather than skips (B4 checks this).
 - systemd as PID 1 in all modes, with dockerd and `systemd-logind` (needed for ACPI power-down on `docker stop`).
 - Entrypoint wrapper: a small script saves its arguments (NUL-separated) and relevant environment variables (as a systemd `EnvironmentFile`) to the root filesystem (e.g. `/etc/runcvm-l1/`; not `/run`, which systemd replaces with a fresh tmpfs), then execs systemd with no arguments. Needed because systemd as PID 1 does not treat its arguments as instructions for us, and services do not inherit PID 1's environment.
 - Mode chosen from the saved arguments:
@@ -549,7 +550,12 @@ Branch 2 needs only the mke2fs part of branch 1. If branch 1 is not yet merged, 
 | #30 | `claude/runcvm-ipv6-support-iwotel` | #33 | Dual-stack IPv6; multi-network boot fix; `tests/12-ipv6`. |
 | #28 | `claude/macos-docker-compatibility-InrFB` | #30 | ARM64, Podman, installer. |
 
-#32 and #34 are independent; test them merged together on a KVM host. Changes lower in the stack are merged upwards (#34 → #33 → #30 → #28), never rebased. The lists in `runcvm-ctr-defaults` are one name per line, sorted, so that branches adding names merge cleanly.
+#32 and #34 are independent; test them merged together on a KVM host.
+
+KVM results (libvirt development VM, 1 November 2026):
+- `main` with #32 and #34 merged: self-test (with `--docker`) and `tests/run --tier all` pass: `10`, `11`, `50-http-docker-swarm` and `51-mariadb`. `docker exec` (#32's patched dropbear) works.
+- Whole stack (#28's branch, including #33 and #30): `10`, `11`, `13-qemu-accel` (default, `kvm`, `auto` and `tcg` on a KVM host), `50` and `51` pass.
+- Still to confirm: `12-ipv6` on KVM. The development VM's kernel has IPv6 disabled (no `/proc/sys/net/ipv6`), so the test skips there. To be run on another bare-metal host or in L1. Changes lower in the stack are merged upwards (#34 → #33 → #30 → #28), never rebased. The lists in `runcvm-ctr-defaults` are one name per line, sorted, so that branches adding names merge cleanly.
 
 ## 5. Open decisions
 
