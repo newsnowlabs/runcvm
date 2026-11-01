@@ -57,12 +57,13 @@ def case_running():
         ("--env-file", "one|two words", ex("sh", "-c", 'echo "$FROM_FILE|$SPACED"')),
     ]
 
-    logs = subprocess.run(["docker", "logs", name], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          universal_newlines=True)
+    # Read as bytes: text mode would translate the CRLF line endings under test.
+    logs = subprocess.run(["docker", "logs", name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out = logs.stdout.decode(errors="replace")
     results += [
         ("docker logs: stdout and stderr on the stdout stream, CRLF line endings",
-         ["to-stdout\r", "to-stderr\r"], [l for l in logs.stdout.split("\n") if l.startswith("to-")]),
-        ("docker logs: nothing on the stderr stream", "", logs.stderr.strip()),
+         ["to-stdout\r", "to-stderr\r"], [l for l in out.split("\n") if l.startswith("to-")]),
+        ("docker logs: nothing on the stderr stream", "", logs.stderr.decode(errors="replace").strip()),
     ]
 
     with tempfile.TemporaryDirectory() as d:
