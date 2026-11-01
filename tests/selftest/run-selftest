@@ -302,6 +302,9 @@ class DockerStandInTests(unittest.TestCase):
                 with self.subTest(test=name):
                     if "vm" in t["requires"]:
                         self.assertEqual(t["status"], "skip")
+                    elif t["status"] == "skip" and t["requires"]:
+                        # Another requirement (e.g. ipv6) is not met on this host
+                        self.assertTrue(t["reason"].startswith("requires "), t["reason"])
                     else:
                         self.assertEqual(t["status"], "pass", p.stdout[-4000:])
             self.assertEqual(p.returncode, 0, statuses)
