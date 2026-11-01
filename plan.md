@@ -155,6 +155,7 @@ Manual launches to settle what the documentation does not demonstrate:
 - Results mount, `done` marker and `/.runcvm/exitcode` from L1's `ExecStopPost` reach L0 as designed (F2); `docker stop` of a systemd L1 powers off via ACPI and `systemd-logind`.
 - Teardown: `docker rm -f` of L1 with L2s running leaves no taps, iptables rules or volumes on L0.
 - Concurrency: several L1s on L0 (KVM contention, disk usage in L0's `/var/lib/docker`).
+- Disk layout for L1: for each of per-path disks, multi-path disk (both E1 flavours) and whole-root disk (E6), measure disk set-up time at first boot, boot time, and the duration of a representative batch run (build of RunCVM, core tier, extended tier) and of typical dev-mode operations (git, builds). Choose the L1 default from the results.
 - Performance: `RUNCVM_QEMU_NET_VHOST=1` in L1 (needs `vhost_net` and `/dev/vhost-net` in the L1 guest), `RUNCVM_HUGETLB`, `RUNCVM_QEMU_MEM_PREALLOC`.
 - Inner-network MTU and rp_filter in L1.
 - Dockside: whether profiles can set the `--memory`/`--cpus` L1 needs; whether Dockside's IDE injection coexists with systemd and `/disks`.
@@ -289,6 +290,10 @@ RUNCVM_DISKS=/disks/data,/var/lib/docker:/var/lib/containerd:/home:/opt/runcvm,e
 - A spec with several destinations creates one filesystem with a subdirectory per destination (e.g. `var-lib-docker`, `home`), mounts the disk at a hidden mountpoint (e.g. `/.runcvm/disks/<n>`) and bind-mounts each subdirectory over its destination on every boot. Changes are confined to `do_disk` in `runcvm-ctr-qemu` and the fstab handling in `runcvm-vm-init` (`:105`).
 - Overlapping destinations within one spec (e.g. `/var/lib` and `/var/lib/docker`) are rejected.
 
+Two flavours, both using the E2/E6 mke2fs patch:
+- **Listed destinations** (as above): the disk holds one subdirectory per listed path (`-d SRC=SUBDIR`).
+- **Exclusion list**: the disk holds a copy of the whole root minus exclusions (`-d /vm -X -x …`), laid out as in `/`, and every non-excluded top-level directory on the disk is bind-mounted over its counterpart in the virtiofs root. Nothing about the contents of `/` needs specifying. Live mounts beneath a bind-mounted directory (e.g. Docker's `/etc/hosts`, volumes under `/home`, kernel modules under `/lib/modules`) must be re-attached on top after binding (moved or re-bound from their original locations). The root itself stays virtiofs, so no `pivot_root`.
+
 #### E2. Populating a multi-path disk in one pass: repeated `-d SRC=SUBDIR`
 
 The container side cannot mount the image (no `CAP_SYS_ADMIN`, so no loop or FUSE mounts), and `mke2fs -d <dir>` takes a single source directory. A small patch to mke2fs makes `-d` repeatable, with each `-d SRC=SUBDIR` copying directory SRC into a new top-level directory SUBDIR using the existing directory-mode code (`__populate_fs()`). SUBDIR takes SRC's own owner, mode, times and xattrs. A plain `-d SRC` (no `=`) behaves exactly as today and may be given at most once.
@@ -386,7 +391,7 @@ The process structure inside the VM is unchanged: `runcvm-vm-init` remains PID 1
 | If the disk outlives the image (e.g. in a named volume) | Listed paths stale | Whole root stale; image updates not seen |
 | VM-side work | Mount and bind-mount | Mount, move live mounts, `pivot_root` |
 
-Recommendation: multi-path disks as the default (CI, L1 batch mode), since Docker's semantics are kept and creation is cheap; whole-root as an option for dev mode and Dockside, where libvirt-like I/O across the whole root matters more. Either way, one mke2fs patch serves both.
+Recommendation: whole-root is a candidate for long-lived L1s in both dev and batch mode, since L1 needs none of the Docker subcommands it affects; multi-path disks remain the default for general RunCVM use and for short-lived L2s, where Docker's semantics matter and creation must be cheap. Whether whole-root pays off for L1 depends on disk set-up time against runtime saved by faster disk throughput over the L1's lifetime, and is to be measured (B4). One mke2fs patch serves all approaches.
 
 Tests: a whole-root L2 boots and runs its entrypoint; volumes, bind mounts, `/etc/hosts` and `docker exec` work; `docker stop` shuts down cleanly; writes outside volumes land on the disk; a backing file inside the container's filesystem is not copied into itself.
 
@@ -476,8 +481,19 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 6. A2, A3, A4, F3, F4 — baseline exit-code tests, core tier, hardened swarm test, systemd-aware shutdown; developed in L1.
 7. D1, D2, D4 (`workflow_dispatch` only) — first CI runs.
 8. D3, then widen D4 triggers.
-9. E — shared data disk; can run alongside 2–6, starting with E3 (patched mke2fs). B1 switches to it when ready.
+9. E — shared data and whole-root disks; can run alongside 2–6, starting with E3 (patched mke2fs), on its own branches (section 4a). B1 adopts whichever layout B4's measurements favour.
 10. G — as needed.
+
+## 4a. Implementation branches and pull requests
+
+Implementation is split into independent branches, each with its own pull request against `main`, separate from this plan's branch:
+
+| Branch (pull request) | Contents | Depends on |
+|---|---|---|
+| 1. Patched mke2fs and multi-path disks | E3 (e2fsprogs build stage with `patches/e2fsprogs/mke2fs-populate.patch`), E1 (both flavours: listed destinations and exclusion list), E2, E4 if wanted, E5 | A1 for the tests |
+| 2. Whole-root disk | E6: `RUNCVM_DISKS` destination `/`, `pivot_root` in `runcvm-vm-init`, tests | The patched mke2fs from branch 1 |
+
+Branch 2 needs only the mke2fs part of branch 1. If branch 1 is not yet merged, branch 2 is based on it (or the mke2fs build stage is split into a small first pull request that both build on). Other deliverables (A, B, C, D, F) get their own branches as they are started.
 
 ## 5. Open decisions
 
@@ -489,7 +505,8 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 - Registry for prebuilt images (if any), or always build inside L1.
 - Whether people should also be required to use the launcher on L0, or only CI.
 - Syntax for repeated `-d` (`SRC=SUBDIR`) and for `-x`/`-X`; whether to propose them upstream before or after RunCVM adopts them (E2, E6).
-- Whether to offer the whole-root disk (E6), and whether to implement it before or after multi-path disks.
+- Default disk layout for L1 (per-path, multi-path or whole-root), from B4's measurements.
+- Whether the mke2fs build stage is a separate small pull request shared by branches 1 and 2 (section 4a).
 - Whether adding a destination to an existing multi-path disk (E4) is supported initially.
 
 ## 6. Risks and unproven areas
