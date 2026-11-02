@@ -6,6 +6,7 @@ is_natural_int() {
         *) return 0 ;;            # numeric and > 0
     esac
 }
+
 # ip_prefix_to_network IP PREFIXLEN
 # Print the IPv4 network address for IP/PREFIXLEN, e.g. 172.25.10.2 24 -> 172.25.10.0
 ip_prefix_to_network() {

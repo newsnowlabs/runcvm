@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""RUNCVM_DISKS: creating, formatting, prepopulating and mounting disks.
+
+- A disk whose backing file does not exist is created at the given size,
+  formatted with the given filesystem, and mounted in the VM at its
+  destination.
+- A new disk is prepopulated with the image's existing contents at its
+  destination.
+- Several disks, separated by ';', are each mounted.
+- A backing file may be in the container's own filesystem or in a volume.
+- /disks, where backing files are usually kept, is mounted only in the
+  container, not in the VM.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+volume = t.unique("disks")
+t.volume_create(volume)
+name = t.unique("disks")
+t.cleanup_container(name)
+
+# /disks/one in the volume, mounted at /data (new, empty); /disks/two in the volume, mounted at
+# /etc/apk (prepopulated from the image); /disk-overlay in the container's filesystem.
+disks = ";".join(["/disks/one,/data,ext4,64M", "/disks/two,/etc/apk,ext4,32M", "/disk-overlay,/extra,ext4,32M"])
+t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+         "--mount", "type=volume,src=%s,dst=/disks" % volume, "--env", "RUNCVM_DISKS=" + disks,
+         "alpine", "sleep", "600", check=True)
+if not t.wait_for_exec(name, BOOT_TIMEOUT):
+    t.check("Container/VM started", True, False)
+    t.finish()
+
+
+def ex(*cmd):
+    return t.docker("exec", name, *cmd).stdout.strip()
+
+
+for dst in ("/data", "/etc/apk", "/extra"):
+    t.check("%s is a mount point" % dst, True, t.docker("exec", name, "mountpoint", "-q", dst).returncode == 0)
+    t.check("%s is mounted as ext4" % dst, "ext4", ex("awk", "$2 == \"%s\" { print $3 }" % dst, "/proc/mounts"))
+
+# The backing file has exactly the requested size; the filesystem in it is smaller, by its own
+# overhead (journal and metadata).
+backing = t.docker("run", "--rm", "--runtime=runc", *t.labels(), "-v", volume + ":/v:ro",
+                   "alpine", "stat", "-c", "%s", "/v/one").stdout.strip()
+t.check("backing file /disks/one is 64M", str(64 * 1024 * 1024), backing)
+blocks, bsize = (ex("stat", "-f", "-c", "%b %S", "/data").split() + ["0", "0"])[:2]
+size_mb = int(blocks) * int(bsize) // (1024 * 1024)
+t.check("/data filesystem is over 40M of the 64M disk (got %dM)" % size_mb, True, 40 < size_mb <= 64)
+
+t.check("/etc/apk prepopulated from the image", True, "alpine" in ex("cat", "/etc/apk/repositories"))
+t.check("/data starts empty (apart from lost+found)", "lost+found", ex("ls", "/data"))
+t.check("/disks is not visible in the VM", False, t.docker("exec", name, "test", "-e", "/disks/one").returncode == 0)
+t.check("backing files created in the volume", "one two",
+        " ".join(sorted((t.docker("run", "--rm", "--runtime=runc", *t.labels(), "-v", volume + ":/v:ro",
+                                  "alpine", "ls", "/v").stdout.split()))))
+
+t.finish()

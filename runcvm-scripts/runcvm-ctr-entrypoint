@@ -81,10 +81,18 @@ if [[ "$RUNCVM_BREAK" =~ prenet ]]; then bash; fi
 
 # SAVE NETWORKING CONFIG AND CONFIGURE BRIDGES
 
-# Identify default gateway device and IP address
+# Identify default gateway device and IP address. '|| true' keeps 'bash -e' from exiting silently
+# when there is no default route, so that the check below can explain it.
 read -r DOCKER_GW_IF DOCKER_GW_IF_IP < \
-  <(ip -json route show | jq -r '.[] | (select(.dst == "default") | [.dev, .gateway]) | @tsv')
+  <(ip -json route show | jq -r '.[] | (select(.dst == "default") | [.dev, .gateway]) | @tsv') || true
 # e.g. eth0 172.25.10.1
+
+# The VM's networking, and 'docker exec' (which reaches the VM over it), are configured from the
+# interface holding the default route.
+if [ -z "$DOCKER_GW_IF" ]; then
+  echo "RunCVM: Error: the container has no default route (as with --network=none, or only --internal networks); a RunCVM Container/VM needs a network that provides a default route" >&2
+  exit 1
+fi
 
 # Identify IPv6 default gateway device and IP address, if any.
 read -r DOCKER_GW_IF6 DOCKER_GW_IF6_IP < \
@@ -101,8 +109,9 @@ ip -json route show | jq -r '.[] | select(.scope != "link" and .dst != "default"
 
 # Save non-kernel (i.e. non-connected, non-link-local) non-default IPv6 routes
 # for later restoration in the running VM. Kernel-derived on-link prefix routes
-# are handled per-interface (as DOCKER_NET6, below); fe80::/64 is link-local and
-# is recreated automatically by the kernel when the VM brings up its interface.
+# are not saved: the VM's kernel recreates each one when the VM adds the
+# interface's IPv6 address. fe80::/64 is link-local, and likewise recreated by
+# the kernel when the VM brings up its interface.
 ip -6 -json route show | jq -r '.[] | select(.protocol != "kernel" and .dst != "default" and .dst != "fe80::/64") | "\(.dst) \(.gateway) \(.dev)"' >/.runcvm/network/routes6
 
 for if in $(ip -json link show | jq -r '.[] | .ifname')

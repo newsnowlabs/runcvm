@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Isolation of RunCVM's own state from the workload in a Container/VM.
+
+- /.runcvm, RunCVM's private state, is accessible only to root.
+- /.runcvm/guest, the RunCVM package, is read-only even to root.
+- /opt/runcvm (the package's path on the host) is not visible in the VM.
+- RUNCVM_* settings given to 'docker run' do not reach the workload's
+  environment, either at start or under 'docker exec'.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+name = t.unique("isolation")
+t.cleanup_container(name)
+volume = t.unique("isolation")
+t.volume_create(volume)
+
+# The entrypoint records its environment on a volume, then waits.
+t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+         "--env=RUNCVM_KERNEL_DEBUG=0", "-v", volume + ":/out",
+         "alpine", "sh", "-c", "env >/out/env; sleep 600", check=True)
+if not t.wait_for_exec(name, BOOT_TIMEOUT):
+    t.check("Container/VM started", True, False)
+    t.finish()
+
+
+def ex(*cmd, user=None):
+    return t.docker("exec", *(["--user", user] if user else []), name, *cmd)
+
+
+t.check("non-root cannot list /.runcvm", False, ex("ls", "/.runcvm", user="1000").returncode == 0)
+t.check("root can list /.runcvm", True, ex("ls", "/.runcvm").returncode == 0)
+t.check("/.runcvm/guest is read-only to root", True,
+        "Read-only file system" in ex("touch", "/.runcvm/guest/x").stdout)
+t.check("/opt/runcvm is not visible in the VM", False, ex("test", "-e", "/opt/runcvm").returncode == 0)
+
+start_env = t.volume_read(volume, "env") or ""
+exec_env = ex("env").stdout
+t.check("entrypoint environment recorded", True, "PATH=" in start_env)
+t.check("no RUNCVM_ variables in the entrypoint's environment", [],
+        [l for l in start_env.splitlines() if l.startswith("RUNCVM_")])
+t.check("no RUNCVM_ variables in 'docker exec' environment", [],
+        [l for l in exec_env.splitlines() if l.startswith("RUNCVM_")])
+
+t.finish()

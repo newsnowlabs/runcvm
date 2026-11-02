@@ -18,7 +18,17 @@ Runner exit codes:
   1    one or more tests failed or timed out
   2    harness error (bad arguments, no tests selected, unknown tier or
        requirement, Docker or runtime unavailable)
-  130  interrupted
+  130  interrupted (SIGINT, e.g. Ctrl-C)
+  143  terminated (SIGTERM)
+On SIGINT or SIGTERM, the test in progress is stopped and the results so far
+are written. SIGHUP is ignored, so the run continues if the terminal goes away
+(e.g. a dropped SSH session); output to the terminal is then discarded, while
+logs and results are written as normal.
+
+Results files (results.tap, junit.xml, results.json, summary.txt, status) are
+rewritten before and after each test, so they always show the run's progress:
+until the run ends, results.json has "complete": false and status reads
+'running', and while a test runs, summary.txt and results.json name it.
 
 Optional per-test metadata files, in each test directory:
   tier      'core' (default) or 'extended'
@@ -229,6 +239,30 @@ def read_pairs(path):
     return pairs
 
 
+_terminal_ok = True
+
+
+def say(text="", end="\n"):
+    """Print to the terminal; once that fails (e.g. the terminal has gone away), stop trying."""
+    global _terminal_ok
+    if _terminal_ok:
+        try:
+            sys.stdout.write(text + end)
+            sys.stdout.flush()
+        except OSError:
+            _terminal_ok = False
+
+
+def say_bytes(data):
+    global _terminal_ok
+    if _terminal_ok:
+        try:
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+        except OSError:
+            _terminal_ok = False
+
+
 def signal_group(pgid, sig):
     try:
         os.killpg(pgid, sig)
@@ -266,8 +300,7 @@ def run_test(test, env, logs_dir, kill_after):
             for line in iter(proc.stdout.readline, b""):
                 log.write(line)
                 log.flush()
-                sys.stdout.buffer.write(prefix + line)
-                sys.stdout.buffer.flush()
+                say_bytes(prefix + line)
                 m = re.search(rb"SKIP: (.*)", line)
                 if m and not skip_reason:
                     skip_reason.append(m.group(1).decode(errors="replace").strip())
@@ -287,7 +320,7 @@ def run_test(test, env, logs_dir, kill_after):
             except subprocess.TimeoutExpired:
                 signal_group(pgid, signal.SIGKILL)
                 proc.wait()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, Terminated):
         signal_group(pgid, signal.SIGTERM)
         try:
             proc.wait(timeout=10)
@@ -390,10 +423,10 @@ def write_junit(path, results, env, logs_dir):
     ET.ElementTree(root).write(path, encoding="UTF-8", xml_declaration=True)
 
 
-def write_json(path, results, env, tier, status_code):
+def write_json(path, results, env, tier, status_code, running):
     data = {
         "run_id": env.run_id, "runtime": env.runtime, "mock": env.mock, "accel": env.accel, "tier": tier,
-        "status": status_code,
+        "complete": status_code is not None, "running": running, "status": status_code,
         "tests": [{
             "name": r.test.name, "tier": r.test.tier, "requires": r.test.requires,
             "status": r.status, "exit_code": r.rc, "duration": r.duration, "reason": r.reason,
@@ -404,6 +437,50 @@ def write_json(path, results, env, tier, status_code):
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
+
+
+def write_results(results_dir, logs_dir, results, env, args, selected, status_code=None, running=None):
+    """Write all results files for the tests run so far. With status_code None, the run is still in
+    progress, with the test named by 'running' (if any) under way. Each file is written to a
+    temporary name and renamed into place, so that a reader never sees a partly written file."""
+    counts = {s: sum(1 for r in results if r.status == s) for s in ("pass", "fail", "timeout", "skip")}
+    header = "run id: %s; runtime: %s; mock: %d; accel: %s; tier: %s" % (
+        env.run_id, env.runtime, int(args.mock), args.accel or "default", args.tier)
+
+    lines = ["%-8s %-32s %5ss  %s" % (r.status.upper(), r.test.name, r.duration, r.reason) for r in results]
+    if running:
+        lines.append("%-8s %s" % ("RUNNING", running))
+    lines += ["", "passed: %d  failed: %d  timed out: %d  skipped: %d  (of %d selected)"
+              % (counts["pass"], counts["fail"], counts["timeout"], counts["skip"], len(selected))]
+    if status_code is None:
+        lines.append("in progress: %d of %d tests done" % (len(results), len(selected)))
+    summary = "\n".join(lines) + "\n"
+
+    def replace(name, write):
+        path = os.path.join(results_dir, name)
+        write(path + ".tmp")
+        os.replace(path + ".tmp", path)
+
+    def write_text(text):
+        def write(path):
+            with open(path, "w") as f:
+                f.write(text)
+        return write
+
+    replace("results.tap", lambda p: write_tap(p, results, header))
+    replace("junit.xml", lambda p: write_junit(p, results, env, logs_dir))
+    replace("results.json", lambda p: write_json(p, results, env, args.tier, status_code, running))
+    replace("summary.txt", write_text(summary))
+    replace("status", write_text("running\n" if status_code is None else "%d\n" % status_code))
+    return summary
+
+
+class Terminated(Exception):
+    """Raised on SIGTERM, to stop the run as on SIGINT, but with exit status 143."""
+
+
+def on_sigterm(signum, frame):
+    raise Terminated()
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +500,7 @@ def parse_args(argv):
                     "all tests in the selected tier run.",
         epilog="Environment: RUNTIME, RUNCVM_TEST_MOCK, RUNCVM_TEST_ACCEL, RUNCVM_TEST_RUN_ID, RUNCVM_TEST_RESULTS, "
                "RUNCVM_TEST_KILL_AFTER (seconds between SIGTERM and SIGKILL on timeout; "
-               "default %d). See the comment at the top of this file for details." % DEFAULT_KILL_AFTER)
+               "default %d), RUNCVM_TEST_JOBS (Container/VMs a test may run at once; default 3). See the comment at the top of this file for details." % DEFAULT_KILL_AFTER)
     p.add_argument("tests", nargs="*", metavar="TEST")
     p.add_argument("-t", "--tier", choices=TIERS + ("all",), default="all",
                    help="tier to run (default: all)")
@@ -494,67 +571,66 @@ def main(argv):
     except OSError as e:
         raise HarnessError("cannot create results directory '%s': %s" % (results_dir, e))
 
-    print("Running RunCVM integration tests")
-    print("  run id:   %s" % run_id)
-    print("  runtime:  %s%s" % (runtime, " (stand-in mode)" if args.mock else ""))
-    print("  accel:    %s" % (args.accel or "(RunCVM default)"))
-    print("  tier:     %s" % args.tier)
-    print("  tests:    %s" % " ".join(t.name for t in selected))
-    print("  results:  %s" % results_dir)
-    print(flush=True)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, on_sigterm)
+
+    say("Running RunCVM integration tests")
+    say("  run id:   %s" % run_id)
+    say("  runtime:  %s%s" % (runtime, " (stand-in mode)" if args.mock else ""))
+    say("  accel:    %s" % (args.accel or "(RunCVM default)"))
+    say("  tier:     %s" % args.tier)
+    say("  tests:    %s" % " ".join(t.name for t in selected))
+    say("  results:  %s" % results_dir)
+    say()
 
     results = []
-    interrupted = False
-    for t in selected:
-        unmet = [r for r in t.requires if not env.requirement_met(r)]
-        if unmet:
-            notes = [env._probe_notes[r] for r in unmet if r in env._probe_notes]
-            if "vm" in unmet and args.mock:
-                notes.insert(0, "stand-in mode")
-            reason = "requires %s%s" % (", ".join(unmet), " (%s)" % "; ".join(notes) if notes else "")
-            with open(os.path.join(logs_dir, t.name + ".log"), "w") as f:
-                f.write("SKIP: %s\n" % reason)
-            results.append(Result(t, "skip", None, 0, reason))
-            print("=== %s: SKIP (%s)\n" % (t.name, reason), flush=True)
-            continue
+    stopped = None  # 130 (SIGINT) or 143 (SIGTERM) if the run was stopped
+    try:
+        write_results(results_dir, logs_dir, results, env, args, selected)
+        for t in selected:
+            unmet = [r for r in t.requires if not env.requirement_met(r)]
+            if unmet:
+                notes = [env._probe_notes[r] for r in unmet if r in env._probe_notes]
+                if "vm" in unmet and args.mock:
+                    notes.insert(0, "stand-in mode")
+                reason = "requires %s%s" % (", ".join(unmet), " (%s)" % "; ".join(notes) if notes else "")
+                with open(os.path.join(logs_dir, t.name + ".log"), "w") as f:
+                    f.write("SKIP: %s\n" % reason)
+                results.append(Result(t, "skip", None, 0, reason))
+                say("=== %s: SKIP (%s)\n" % (t.name, reason))
+                write_results(results_dir, logs_dir, results, env, args, selected)
+                continue
 
-        print("=== %s (tier %s, timeout %ss)" % (t.name, t.tier, t.timeout), flush=True)
-        try:
-            r = run_test(t, env, logs_dir, kill_after)
-        except KeyboardInterrupt:
-            r = Result(t, "interrupted", None, 0, "interrupted")
-            interrupted = True
-        env.reap(t.name)
-        results.append(r)
-        print("=== %s: %s%s in %ss\n" % (t.name, r.status.upper(),
-                                         " (%s)" % r.reason if r.reason else "", r.duration), flush=True)
-        if interrupted:
-            break
-        if args.exitfirst and r.status in ("fail", "timeout"):
-            print("Stopping after first failure (--exitfirst)")
-            break
+            write_results(results_dir, logs_dir, results, env, args, selected, running=t.name)
+            say("=== %s (tier %s, timeout %ss)" % (t.name, t.tier, t.timeout))
+            try:
+                r = run_test(t, env, logs_dir, kill_after)
+            except (KeyboardInterrupt, Terminated) as e:
+                stopped = 143 if isinstance(e, Terminated) else 130
+                r = Result(t, "interrupted", None, 0, "terminated" if stopped == 143 else "interrupted")
+            env.reap(t.name)
+            results.append(r)
+            say("=== %s: %s%s in %ss\n" % (t.name, r.status.upper(), " (%s)" % r.reason if r.reason else "",
+                                          r.duration))
+            if stopped:
+                break
+            write_results(results_dir, logs_dir, results, env, args, selected)
+            if args.exitfirst and r.status in ("fail", "timeout"):
+                say("Stopping after first failure (--exitfirst)")
+                break
+    except (KeyboardInterrupt, Terminated) as e:
+        # Stopped between tests: the results so far are complete.
+        stopped = stopped or (143 if isinstance(e, Terminated) else 130)
 
-    counts = {s: sum(1 for r in results if r.status == s) for s in ("pass", "fail", "timeout", "skip")}
-    status_code = 130 if interrupted else (1 if counts["fail"] or counts["timeout"] else 0)
+    # The final results must be written whole, so further SIGINT and SIGTERM wait until they are.
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+    failed = any(r.status in ("fail", "timeout") for r in results)
+    status_code = stopped or (1 if failed else 0)
+    summary = write_results(results_dir, logs_dir, results, env, args, selected, status_code)
 
-    header = "run id: %s; runtime: %s; mock: %d; accel: %s; tier: %s" % (
-        run_id, runtime, int(args.mock), args.accel or "default", args.tier)
-    write_tap(os.path.join(results_dir, "results.tap"), results, header)
-    write_junit(os.path.join(results_dir, "junit.xml"), results, env, logs_dir)
-    write_json(os.path.join(results_dir, "results.json"), results, env, args.tier, status_code)
-
-    lines = ["%-8s %-32s %5ss  %s" % (r.status.upper(), r.test.name, r.duration, r.reason) for r in results]
-    lines += ["", "passed: %d  failed: %d  timed out: %d  skipped: %d  (of %d selected)"
-              % (counts["pass"], counts["fail"], counts["timeout"], counts["skip"], len(selected))]
-    summary = "\n".join(lines) + "\n"
-    with open(os.path.join(results_dir, "summary.txt"), "w") as f:
-        f.write(summary)
-    with open(os.path.join(results_dir, "status"), "w") as f:
-        f.write("%d\n" % status_code)
-
-    print(summary, end="")
-    print("Results: %s (results.tap, junit.xml, results.json, summary.txt, logs/)" % results_dir)
-    print("RunCVM integration tests completed with status %d" % status_code)
+    say(summary, end="")
+    say("Results: %s (results.tap, junit.xml, results.json, summary.txt, logs/)" % results_dir)
+    say("RunCVM integration tests completed with status %d" % status_code)
     return status_code
 
 
@@ -566,3 +642,5 @@ if __name__ == "__main__":
         sys.exit(2)
     except KeyboardInterrupt:
         sys.exit(130)
+    except Terminated:
+        sys.exit(143)

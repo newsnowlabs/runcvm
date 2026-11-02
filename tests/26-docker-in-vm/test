@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Docker running inside a RunCVM Container/VM.
+
+The docker:dind image runs as a Container/VM, with /var/lib/docker on a
+RUNCVM_DISKS ext4 disk:
+
+- dockerd starts and uses an overlay storage driver (not vfs), since
+  /var/lib/docker is an ext4 filesystem rather than virtiofs.
+- An image loaded into it ('docker save | docker load', so nothing is
+  downloaded) runs as a container, which has a network address.
+"""
+
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+TIMEOUT = 900 if t.ACCEL == "tcg" else 180
+
+volume = t.unique("dind")
+t.volume_create(volume)
+name = t.unique("dind")
+t.cleanup_container(name)
+
+t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(), "--memory=1g",
+         "--mount", "type=volume,src=%s,dst=/disks" % volume,
+         "--env", "RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,2G", "docker:dind", check=True)
+
+
+def ex(*cmd):
+    return t.docker("exec", name, *cmd, timeout=TIMEOUT)
+
+
+if not t.wait_for("dockerd in the VM", TIMEOUT, ["docker", "exec", name, "docker", "info"], interval=2):
+    t.check("dockerd started in the VM", True, False)
+    t.log(t.docker("logs", "--tail", "30", name).stdout)
+    t.finish()
+
+t.check("/var/lib/docker is ext4", "ext4",
+        ex("awk", '$2 == "/var/lib/docker" { print $3 }', "/proc/mounts").stdout.strip())
+driver = ex("docker", "info", "-f", "{{.Driver}}").stdout.strip()
+t.check("storage driver is overlay-based (got %s)" % driver, True, driver.startswith("overlay"))
+
+save = subprocess.Popen(["docker", "save", "alpine"], stdout=subprocess.PIPE)
+load = subprocess.run(["docker", "exec", "-i", name, "docker", "load"], stdin=save.stdout,
+                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, timeout=TIMEOUT)
+save.wait()
+t.check("alpine image loaded into the VM's Docker", True, "Loaded image" in load.stdout)
+
+t.check("container runs in the VM's Docker", "inner-ok",
+        ex("docker", "run", "--rm", "alpine", "echo", "inner-ok").stdout.strip())
+t.check("container in the VM's Docker has a network address", True,
+        "inet " in ex("docker", "run", "--rm", "alpine", "ip", "-4", "-o", "addr", "show", "eth0").stdout)
+
+t.finish()

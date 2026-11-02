@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""'docker stop' and 'docker kill' of a running RunCVM Container/VM.
+
+On 'docker stop', RunCVM asks the VM to power off (ACPI), then runs
+'poweroff' in it, then sends SIGTERM to the VM's PID 1:
+
+- With --init, busybox init powers the VM off cleanly: exit status 0,
+  well within the stop timeout.
+- Without --init, the entrypoint is the VM's PID 1. An entrypoint that
+  does not handle SIGTERM (e.g. 'sleep') is killed when the stop timeout
+  expires: exit status 137.
+- An entrypoint that traps SIGTERM can write its exit status to
+  /.runcvm/exitcode and exit: that status is reported, in either mode.
+
+'docker kill' ends the Container/VM at once: exit status 137.
+
+The expected values describe current behaviour. A change to it must update
+them deliberately.
+"""
+
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+STOP_TIMEOUT = 30
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+SLEEP = ["sleep", "600"]
+TRAP = ["sh", "-c", "trap 'echo 9 >/.runcvm/exitcode; exit 0' TERM; while true; do sleep 1; done"]
+
+# (name, --init?, entrypoint, action, expected exit status, must finish before the stop timeout?)
+CASES = [
+    ("stop-sleep", False, SLEEP, "stop", 137, False),
+    ("stop-sleep", True, SLEEP, "stop", 0, True),
+    ("stop-trap", False, TRAP, "stop", 9, True),
+    ("stop-trap", True, TRAP, "stop", 9, True),
+    ("kill-sleep", False, SLEEP, "kill", 137, True),
+    ("kill-sleep", True, SLEEP, "kill", 137, True),
+]
+
+
+def run(case):
+    name, init, entrypoint, action, _, _ = case
+    container = t.unique("%s%s" % (name, "-init" if init else ""))
+    t.cleanup_container(container)
+    r = t.docker("run", "-d", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 *(["--init"] if init else []), "alpine", *entrypoint)
+    if r.returncode != 0:
+        return None, None, r.stdout
+    if not t.wait_for_exec(container, BOOT_TIMEOUT):
+        return None, None, t.docker("logs", container).stdout
+    start = time.time()
+    if action == "stop":
+        t.docker("stop", "-t", str(STOP_TIMEOUT), container)
+    else:
+        t.docker("kill", container)
+    t.docker("wait", container, timeout=STOP_TIMEOUT * 2)
+    elapsed = time.time() - start
+    status = t.docker("inspect", "-f", "{{.State.ExitCode}}", container).stdout.strip()
+    return int(status) if status.isdigit() else status, elapsed, ""
+
+
+results = t.parallel(run, CASES)
+
+for (name, init, entrypoint, action, expected, prompt), (status, elapsed, output) in zip(CASES, results):
+    desc = "%s, %s" % (name, "--init" if init else "no --init")
+    if status is None:
+        t.check("%s: Container/VM started" % desc, True, False)
+        t.log("output:\n%s" % output)
+        continue
+    t.log("%s: docker %s took %.0fs" % (desc, action, elapsed))
+    t.check("%s: exit status" % desc, expected, status)
+    if prompt:
+        t.check("%s: finished before the %ds stop timeout" % (desc, STOP_TIMEOUT), True, elapsed < STOP_TIMEOUT)
+
+t.finish()

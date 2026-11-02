@@ -298,7 +298,7 @@ At time of writing:
 
 We recommend `all/rp_filter` be set to 2, as this is the simplest change and provides a good balance of security.
 
-This requirement is IPv4-specific: Linux has no IPv6 equivalent of `rp_filter`, so no further host configuration is needed to support the IPv4-proxied DNS/exec helper channel used by dual-stack Container/VMs.
+This requirement concerns IPv4 only. A dual-stack Container/VM's DNS requests and `docker exec` connections still use IPv4, and Linux has no IPv6 equivalent of `rp_filter`, so IPv6 needs no further host configuration.
 
 ## Installation
 
@@ -375,10 +375,11 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [+] `--ip` is supported
       - [+] `--hostname` (or `-h`) is supported
       - [-] `docker network connect` on a running container is not supported
-      - [-] `--network=host` and `--network=container:name|id` are not supported
+      - [-] `--network=host` and `--network=container:name|id` are not supported (`--network=host` is rejected when the Container/VM is created)
+      - [-] `--network=none`, and attaching only to `--internal` networks, are not supported: a Container/VM needs a network that provides a default route, over which `docker exec` reaches the VM
       - [+] Dual-stack (IPv4 and IPv6) networking is supported, automatically, where the host and Docker are already configured for IPv6 (see `--env=RUNCVM_IPV6=<0|1>`)
       - [-] IPv6-only networks (i.e. with no IPv4 connectivity at all) are not supported: a working IPv4 leg is required
-      - [-] `--dns=<IPv6 address>` is not supported: outgoing DNS requests are proxied via `dnsmasq` running in the container, which is only ever given an IPv4 address
+      - [-] `--dns=<IPv6 address>` is not supported: the VM's DNS requests are proxied via `dnsmasq` running in the container, whose own traffic reaches the network only over IPv4 (as with IPv4, the VM holds the container's Docker-assigned address, and the container has no IPv6 address or route of its own)
    - Execution environment
       - [+] `--user` (or `-u`) is supported
       - [?] `--workdir` (or `-w`) is supported
@@ -399,7 +400,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [+] `--memory` (or `-m`) is supported to specify VM memory (and limit container memory to this value plus a 256Mb contingency)
       - [-] Other container resource limit options such as (`--cpu-*`), block IO (`--blkio-*`), kernel memory (`--kernel-memory`) are unsupported or untested
    - Exit code
-      - [+] Returning an exit code is supported, but it currently requires application support, which must either write the exit code to `/.runcvm/exitcode` (supported exit codes 0-255) or call `/opt/runcvm/sbin/qemu-exit <code>` (supported exit codes 0-127). Automatic handling of exit codes from the entrypoint may be provided in a later release.
+      - [+] Returning an exit code is supported, but it currently requires application support, which must either write the exit code to `/.runcvm/exitcode` (supported exit codes 0-255) or call `/.runcvm/guest/sbin/qemu-exit <code>` (supported exit codes 0-127). Both require the application to run as root, as `/.runcvm` is accessible only to root. Automatic handling of exit codes from the entrypoint may be provided in a later release.
    - Disk performance
       - [+] No mountpoints are required for basic operation for most applications. Volume or disk mountpoints may be needed for running `dockerd` or to improve disk performance
       - [-] `dockerd` mileage will vary unless a volume or disk is mounted over `/var/lib/docker`
@@ -560,7 +561,7 @@ docker run -it --runtime=runcvm --mount=type=volume,src=runcvm-disks,dst=/disks 
 
 This example behaves similarly, except that the `runcvm-disks` persistent Docker volume is first mounted at `/disks` within the container's filesystem, and therefore the backing files at `/disks/disk1` and `/disks/disk2` (mounted in the VM at `/home` and `/opt` respectively) are stored in the _persistent volume_ (typically stored in `/var/lib/docker` on the host, bypassing overlay2).
 
-> N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints, these are *NOT* mounted into the VM but only into the container, and are therefore suitable for use for mounting VM disks from bscking files that cannot be accessed within the VM's filesystem.
+> N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints, these are *NOT* mounted into the VM but only into the container, and are therefore suitable for use for mounting VM disks from backing files that cannot be accessed within the VM's filesystem.
 
 ### `--env=RUNCVM_DISPLAY_MODE=<value>`
 
@@ -765,7 +766,7 @@ The `runcvm-init` process:
 
 The `runcvm-ctr-qemu` script:
 - Prepares disk backing files as specified by `--env=RUNCVM_DISKS=<disks>`
-- Prepares network configuration as saved from the container (modifying the MAC address of each container interface), enabling IPv6 support in the VM's kernel command line if a global IPv6 address was saved for any interface (or if forced with `--env=RUNCVM_IPV6=1`)
+- Prepares network configuration as saved from the container (modifying the MAC address of each container interface), and leaves IPv6 enabled in the VM's kernel only if a global IPv6 address was saved for any interface (or if forced with `--env=RUNCVM_IPV6=1`); otherwise it adds `ipv6.disable=1` to the kernel command line
 - Launches [QEMU](https://www.qemu.org/) with the required kernel, network interfaces, disks, display, and with a root filesystem mounted via virtiofs from the container and with `runcvm-vm-init` as the VM's init process.
 
 The `runcvm-vm-init` process:

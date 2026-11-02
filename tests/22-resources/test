@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""CPU and memory resources, and kernel arguments, of a RunCVM Container/VM.
+
+- The VM's memory is --memory (default 512M).
+- The VM's CPU count is --cpus rounded down to a whole number. Without
+  --cpus, or with --cpus below 1, the VM has as many CPUs as the container
+  can use.
+- RUNCVM_KERNEL_APPEND is appended to the VM kernel's command line.
+
+The expected values describe current behaviour. A change to it must update
+them deliberately.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+host_cpus = int(t.docker("run", "--rm", "--runtime=runc", *t.labels(), "alpine", "nproc").stdout.strip() or 0)
+t.log("CPUs available to a container on this host: %d" % host_cpus)
+
+# (name, docker run options, expected VM CPUs, expected VM memory (MiB))
+CASES = [
+    ("defaults", [], host_cpus, 512),
+    ("cpus-2-memory-768m", ["--cpus=2", "--memory=768m"], min(2, host_cpus), 768),
+    ("cpus-1.5", ["--cpus=1.5"], 1, 512),
+    ("cpus-0.5", ["--cpus=0.5"], host_cpus, 512),
+    ("kernel-append", ["--env=RUNCVM_KERNEL_APPEND=runcvm.test=marker"], host_cpus, 512),
+]
+
+
+def run(case):
+    name, opts, _, _ = case
+    container = t.unique(name)
+    t.cleanup_container(container)
+    r = t.docker("run", "-d", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 *opts, "alpine", "sleep", "600")
+    if r.returncode != 0 or not t.wait_for_exec(container, BOOT_TIMEOUT):
+        return None
+    cpus = t.docker("exec", container, "nproc").stdout.strip()
+    meminfo = t.docker("exec", container, "grep", "MemTotal", "/proc/meminfo").stdout.split()
+    cmdline = t.docker("exec", container, "cat", "/proc/cmdline").stdout
+    return int(cpus) if cpus.isdigit() else cpus, int(meminfo[1]) // 1024 if len(meminfo) > 1 else 0, cmdline
+
+
+for (name, opts, cpus, memory), result in zip(CASES, t.parallel(run, CASES)):
+    if result is None:
+        t.check("%s: Container/VM started" % name, True, False)
+        continue
+    got_cpus, got_mem, cmdline = result
+    t.check("%s: VM CPUs" % name, cpus, got_cpus)
+    # MemTotal excludes memory reserved by the kernel: allow up to 12% less than the VM's memory.
+    t.check("%s: VM memory about %dM (MemTotal %dM)" % (name, memory, got_mem), True,
+            memory * 0.88 <= got_mem <= memory)
+    if name == "kernel-append":
+        t.check("%s: argument on the kernel command line" % name, True, "runcvm.test=marker" in cmdline.split())
+
+t.finish()

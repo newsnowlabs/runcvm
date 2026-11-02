@@ -31,18 +31,19 @@ fi
 log -n "Creating plain (IPv4-only) network '$NETWORK2' ..."
 docker network create $(labels) "$NETWORK2"
 
-# Launch two RunCVM containers on the dual-stack network.
+# Launch two RunCVM containers on the dual-stack network. '--dns-search=.' gives them no DNS
+# search domains, whatever the host's resolv.conf holds, so that name lookups between them behave
+# the same on every host.
 for n in a b; do
   log -n "Launching RunCVM container '$NODE-$n' ..."
-  docker run -d --rm $(labels) $(vm_opts) --runtime=$RUNTIME --network=$NETWORK --name=$NODE-$n --hostname=$NODE-$n $IMAGE \
+  docker run -d --rm $(labels) $(vm_opts) --runtime=$RUNTIME --network=$NETWORK --dns-search=. --name=$NODE-$n --hostname=$NODE-$n $IMAGE \
     sh -c 'while true; do sleep 1; done'
 done
 
-# Regression test for the runcvm-vm-init default-gateway sentinel bug: a
-# container attached to a second network at create time - the only way RunCVM
-# supports multiple interfaces - must still boot. Before the fix, the VM's PID1
-# died during boot for any non-default-gateway interface.
-log -n "Creating multi-interface container '$NODE-multi' (regression test) ..."
+# A container with a second network attached after 'docker create' and before
+# 'docker start' boots: runcvm-vm-init configures interfaces that do not hold
+# the default route, as well as the one that does.
+log -n "Creating multi-interface container '$NODE-multi' ..."
 docker create $(labels) $(vm_opts) --runtime=$RUNTIME --name=$NODE-multi --hostname=$NODE-multi --network=$NETWORK $IMAGE \
   sh -c 'while true; do sleep 1; done' >/dev/null
 docker network connect "$NETWORK2" $NODE-multi
@@ -55,7 +56,7 @@ done
 check_cmd "Multi-interface container boots and accepts 'docker exec'" wait_for_exec $NODE-multi 60 || true
 
 # Confirm the VM picked up the IPv4 address Docker assigned to the container
-# (regression check: dual-stack support must not disturb existing IPv4).
+# (dual-stack networking keeps the container's IPv4 addressing).
 EXPECTED_IP4=$(docker inspect $NODE-a --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
 VM_IP4=$(docker exec $NODE-a sh -c "ip -o -4 addr show eth0 | awk '{print \$4}' | cut -d/ -f1" 2>/dev/null || true)
 check "VM has Docker-assigned IPv4 address" "$EXPECTED_IP4" "$VM_IP4" || true
@@ -72,14 +73,19 @@ EXPECTED_GW6=$(echo "$GATEWAYS" | grep ':' || true)
 VM_GW6=$(docker exec $NODE-a sh -c "ip -6 route show default | awk '{print \$3}'" 2>/dev/null || true)
 check "VM has IPv6 default route via network gateway" "$EXPECTED_GW6" "$VM_GW6" || true
 
-# Node A reaches node B by container name over IPv6. This exercises Docker DNS
-# returning an AAAA record (resolved via the existing IPv4-only helper channel:
-# dnsmasq in the container) and the IPv6 datapath across the container<->VM hub
-# bridge on both ends.
-docker exec -d $NODE-b sh -c "nc -6 -l -p 12345 >/tmp/nc-listen.out 2>&1"
-wait_for "listener on $NODE-b" 10 docker exec $NODE-b sh -c "netstat -ltn 2>/dev/null | grep -q ':12345 '" || true
-check_cmd "IPv6 connectivity from '$NODE-a' to '$NODE-b' by container name" \
-  docker exec $NODE-a sh -c "echo hello | nc -6 -w 3 $NODE-b 12345" || true
+# IPv6 between containers. A lookup of node B's name in node A, made via the IPv4-only helper
+# channel (dnsmasq in the container), returns B's IPv6 address. The lookup uses getent, i.e. the
+# C library's resolver, as applications do. A TCP connection to B's IPv6 address then carries
+# data across the container<->VM bridge at both ends. BusyBox nc has no -6 option: binding the
+# listener to the IPv6 address (-s) makes it an IPv6 listener.
+B6=$(docker exec $NODE-b sh -c "ip -6 -o addr show dev eth0 scope global | awk '{print \$4}' | cut -d/ -f1 | head -n 1")
+B6_DNS=$(docker exec $NODE-a sh -c "getent ahosts $NODE-b | awk '\$1 ~ /:/ { print \$1 }' | sort -u" | tr -d '\r' | tr '\n' ' ')
+check "lookup of '$NODE-b' in '$NODE-a' returns its IPv6 address" "$B6 " "$B6_DNS" || true
+docker exec -d $NODE-b sh -c "nc -l -s $B6 -p 12345 >/tmp/nc-listen.out 2>&1"
+wait_for "IPv6 listener on $NODE-b" 10 docker exec $NODE-b sh -c "netstat -ltn 2>/dev/null | grep -q ':12345 '" || true
+docker exec $NODE-a sh -c "echo hello-over-ipv6 | nc -w 3 $B6 12345" || true
+check "IPv6 TCP connection from '$NODE-a' to '$NODE-b' ($B6) carries data" "hello-over-ipv6" \
+  "$(docker exec $NODE-b cat /tmp/nc-listen.out 2>/dev/null)" || true
 
 # Final output
 finish

@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Networking of RunCVM Container/VMs.
+
+- On a custom network with a 9000-byte MTU, each VM's interface has that
+  MTU, and large packets pass between VMs.
+- VMs on a custom network reach each other by name (Docker's DNS), and a
+  server sees a client VM's own address.
+- A port published with -p is reachable from the host.
+- On the default bridge network, a VM has an address and reaches the
+  gateway.
+
+Network configurations RunCVM does not support (--network=host, or no
+default route) are not tested here. --network=host must not be run against
+a RunCVM that does not reject it at creation: the Container/VM's network
+set-up would run in the host's network namespace and reconfigure the host's
+own interfaces.
+
+The expected values describe current behaviour. A change to it must update
+them deliberately.
+"""
+
+import os
+import socket
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+# '--dns-search=.' gives each Container/VM no DNS search domains, whatever the host's resolv.conf
+# holds, so that lookups of container names behave the same on every host.
+VM = ["--runtime=" + t.RUNTIME, *t.vm_opts(), "--dns-search=."]
+
+# A server answering 'hello' on port 80, logging each connection's source to /tmp/conns.
+SERVER = "echo hello >/hello; while true; do nc -l -v -p 80 </hello 2>>/tmp/conns; done"
+
+network = t.unique("net")
+t.docker("network", "create", *t.labels(), "--opt", "com.docker.network.driver.mtu=9000", network, check=True)
+t.cleanup_network(network)
+
+
+def start(label, *opts):
+    name = t.unique(label)
+    t.cleanup_container(name)
+    r = t.docker("run", "-d", "--name", name, *t.labels(), *VM, *opts)
+    return name if r.returncode == 0 and t.wait_for_exec(name, BOOT_TIMEOUT) else None
+
+
+def ex(name, *cmd):
+    return t.docker("exec", name, *cmd).stdout.strip()
+
+
+def case_custom_network():
+    server, client = t.parallel(lambda args: start(*args), [
+        ("server", "--network", network, "-p", "127.0.0.1::80", "alpine", "sh", "-c", SERVER),
+        ("client", "--network", network, "alpine", "sleep", "600"),
+    ], jobs=2)
+    if not (server and client):
+        return [("custom network: both Container/VMs started", True, False)]
+    client_ip = ex(client, "sh", "-c", "ip -4 -o addr show eth0 | awk '{print $4}' | cut -d/ -f1")
+    port = t.docker("port", server, "80/tcp").stdout.strip().rsplit(":", 1)[-1]
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=10) as s:
+            published = s.recv(100).decode().strip()
+    except (OSError, ValueError) as e:
+        published = "error: %s" % e
+    return [
+        ("custom network: server VM MTU", "9000", ex(server, "cat", "/sys/class/net/eth0/mtu")),
+        ("custom network: client VM MTU", "9000", ex(client, "cat", "/sys/class/net/eth0/mtu")),
+        ("custom network: client reaches server by name", "hello", ex(client, "nc", "-w", "5", server, "80")),
+        ("custom network: server sees the client VM's address", True,
+         bool(client_ip) and ("(%s:" % client_ip) in ex(server, "cat", "/tmp/conns")),
+        ("custom network: 8900-byte ping between VMs", True,
+         " 0% packet loss" in ex(client, "ping", "-c", "2", "-s", "8900", "-W", "5", server)),
+        ("custom network: published port reachable from the host", "hello", published),
+    ]
+
+
+def case_default_bridge():
+    name = start("bridge", "alpine", "sleep", "600")
+    if not name:
+        return [("default bridge: Container/VM started", True, False)]
+    gateway = ex(name, "sh", "-c", "ip route | awk '/^default/ { print $3 }'")
+    return [
+        ("default bridge: VM has an IPv4 address", True, bool(ex(name, "ip", "-4", "-o", "addr", "show", "eth0"))),
+        ("default bridge: VM reaches its gateway", True,
+         bool(gateway) and " 0% packet loss" in ex(name, "ping", "-c", "2", "-W", "5", gateway)),
+    ]
+
+
+CASES = [case_custom_network, case_default_bridge]
+
+for results in t.parallel(lambda f: f(), CASES, jobs=len(CASES)):
+    for desc, expected, actual in results:
+        t.check(desc, expected, actual)
+
+t.finish()

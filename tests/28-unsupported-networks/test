@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Unsupported network configurations fail with RunCVM's own error.
+
+- --network=host: a RunCVM Container/VM's network set-up moves the
+  container's addresses and routes onto bridges for the VM, which in the
+  host's network namespace would reconfigure the host's own interfaces.
+  runcvm-runtime refuses it before anything runs: 'docker run' fails with
+  exit status 125, and the host's interfaces and routes are unchanged.
+- --network=none, or only --internal networks: with no default route, the
+  container-side entrypoint fails with exit status 1 and an explanation,
+  before the VM starts.
+
+Run against a RunCVM that does not reject --network=host, the host case
+would itself reconfigure the host's network. That case therefore runs only
+if the installed runtime contains the rejection, and is recorded as skipped
+otherwise.
+"""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+HOST_MESSAGE = "The host's network namespace (e.g. --network=host) is not supported"
+NO_ROUTE_MESSAGE = "RunCVM: Error: the container has no default route"
+TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+
+def run(label, *opts):
+    return t.docker("run", "--rm", "--name", t.unique(label), *t.labels(), "--runtime=" + t.RUNTIME,
+                    *t.vm_opts(), *opts, "alpine", "echo", "workload-ran", timeout=TIMEOUT)
+
+
+def check_failure(desc, r, status, message):
+    t.check("%s: exit status" % desc, status, r.returncode)
+    if not t.check("%s: RunCVM's message" % desc, True, message in r.stdout):
+        t.log("output:\n%s" % r.stdout)
+    t.check("%s: workload did not run" % desc, False, "workload-ran" in r.stdout)
+
+
+internal = t.unique("internal")
+t.docker("network", "create", *t.labels(), "--internal", internal, check=True)
+t.cleanup_network(internal)
+
+for label, desc, opts in (("none", "--network=none", ["--network=none"]),
+                          ("internal", "--internal network", ["--network", internal])):
+    check_failure(desc, run(label, *opts), 1, NO_ROUTE_MESSAGE)
+
+runtimes = json.loads(t.docker("info", "--format", "{{json .Runtimes}}").stdout or "{}")
+path = (runtimes.get(t.RUNTIME) or {}).get("path")
+try:
+    with open(path) as f:
+        rejects_host = HOST_MESSAGE in f.read()
+except (OSError, TypeError):
+    rejects_host = False
+
+if rejects_host:
+    def host_network():
+        with open("/proc/net/route") as f:
+            return sorted(os.listdir("/sys/class/net")), f.read()
+
+    before = host_network()
+    check_failure("--network=host", run("host", "--network=host"), 125, HOST_MESSAGE)
+    t.check("--network=host: host interfaces and routes unchanged", before, host_network())
+else:
+    t.log("Not running --network=host: runtime '%s' (%s) does not reject it, so running it would "
+          "reconfigure the host's network" % (t.RUNTIME, path))
+    t.record_result("SKIP", "--network=host (runtime does not reject it)")
+
+t.finish()
