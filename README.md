@@ -51,13 +51,13 @@ docker run --runtime=runcvm --name ubuntu2 --env=RUNCVM_DISPLAY_MODE=vnc -p 5900
 Launch a VM with 1G memory and a 1G ext4-formatted backing file mounted at `/var/lib/docker` and stored in the underlying container's filesystem:
 
 ```console
-docker run -it --runtime=runcvm --memory=1G --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,1G <docker-image>
+docker run -it --runtime=runcvm --init --memory=1G --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,1G <docker-image>
 ```
 
 Launch a VM with 2G memory and a 5G ext4-formatted backing file mounted at `/var/lib/docker` and stored in a dedicated Docker volume on the host:
 
 ```console
-docker run -it --runtime=runcvm --memory=2G --mount=type=volume,src=runcvm-disks,dst=/disks --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,5G <docker-image>
+docker run -it --runtime=runcvm --init --memory=2G --mount=type=volume,src=runcvm-disks,dst=/disks --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,5G <docker-image>
 ```
 
 Launch a 3-node Docker Swarm on a network with 9000 MTU and, on the swarm, an http global service:
@@ -550,6 +550,7 @@ When RunCVM creates a Container/VM, fstab entries will be drafted. After the VM 
 > - With `--init`, the VM's init syncs its file systems before powering off, both when the entrypoint exits and on `docker stop`.
 > - Without `--init`, `docker stop` runs `poweroff` in the VM, which also syncs file systems first. But when the entrypoint exits by itself, the VM ends at once: the entrypoint is the VM's PID 1, and nothing runs after it. Data not yet written out is lost, and the file system needs journal recovery when next mounted.
 > - `docker kill` ends the VM at once in either mode.
+> - Launch an image whose entrypoint is its own init, such as systemd, without `--init`, which would displace it as the VM's PID 1. Such an init normally runs until `docker stop`, which syncs file systems as above.
 >
 > To keep a disk's data without `--init`, the workload must flush the disk before its entrypoint exits, for example with `sync -f <dst>` for each disk's `<dst>`, which flushes only that disk's file system and needs no special privileges; or, if the workload runs as root and nothing still uses the disk, with `umount <dst>`, which also leaves the disk's file system clean, needing no journal recovery. A plain `sync` also works, but flushes every file system in the VM, including the root file system that the VM shares with the container.
 >
@@ -558,7 +559,7 @@ When RunCVM creates a Container/VM, fstab entries will be drafted. After the VM 
 #### Example #1
 
 ```console
-docker run -it --runtime=runcvm --env=RUNCVM_DISKS=/disk1,/home,ext4,5G <docker-image>
+docker run -it --runtime=runcvm --init --env=RUNCVM_DISKS=/disk1,/home,ext4,5G <docker-image>
 ```
 
 In this example, RunCVM will check for existence of a file at `/disk1` within `<docker-image>`, and if not found create a 5G backing file (in the container's filesystem, typically overlay2) with an ext4 filesystem prepopulated with any preexisting contents of `/home`, then add the disk to `/etc/fstab` and mount it within the VM at `/home`.
@@ -566,7 +567,7 @@ In this example, RunCVM will check for existence of a file at `/disk1` within `<
 #### Example #2
 
 ```console
-docker run -it --runtime=runcvm --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=/disks/disk1,/home,ext4,5G;/disks/disk2,/opt,ext4,2G' <docker-image>
+docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=/disks/disk1,/home,ext4,5G;/disks/disk2,/opt,ext4,2G' <docker-image>
 ```
 
 This example behaves similarly, except that the `runcvm-disks` persistent Docker volume is first mounted at `/disks` within the container's filesystem, and therefore the backing files at `/disks/disk1` and `/disks/disk2` (mounted in the VM at `/home` and `/opt` respectively) are stored in the _persistent volume_ (typically stored in `/var/lib/docker` on the host, bypassing overlay2).
@@ -700,13 +701,13 @@ If running Docker within a VM, it is recommended that you mount a disk backing f
 e.g. To launch a VM with a 1G ext4-formatted backing file, stored in the underlying container's overlay filesystem, and mounted at `/var/lib/docker`, run:
 
 ```sh
-docker run -it --runtime=runcvm --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,1G <docker-image>
+docker run -it --runtime=runcvm --init --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,1G <docker-image>
 ```
 
 To launch a VM with a 5G ext4-formatted backing file, stored in a dedicated Docker volume on the host, and mounted at `/var/lib/docker`, run:
 
 ```sh
-docker run -it --runtime=runcvm --mount=type=volume,src=runcvm-disks,dst=/disks --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,5G <docker-image>
+docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,5G <docker-image>
 ```
 
 In both cases, RunCVM will check for existence of a file `/disks/docker` and, if not found, will create the disk backing file of the given size and format as an ext4 filesystem. It will add the disk to `/etc/fstab`.
