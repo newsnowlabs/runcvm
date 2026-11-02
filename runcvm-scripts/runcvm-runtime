@@ -233,6 +233,13 @@ if [ "$COMMAND" = "create" ]; then
     
   fi
   
+  # The Container/VM's network set-up (runcvm-ctr-entrypoint) moves the container's addresses and
+  # routes onto bridges for the VM, so it must run in a network namespace of the container's own:
+  # in the host's (e.g. 'docker run --network=host') it would reconfigure the host's interfaces.
+  if [ "$(jq_get "$CFG" '[.linux.namespaces[]? | select(.type == "network")] | length')" = "0" ]; then
+    error "The host's network namespace (e.g. --network=host) is not supported: a RunCVM Container/VM needs a network namespace of its own"
+  fi
+
   # Pending support for user-specified mountpoint for the guest (VM) binaries and scripts
   set_config_env "RUNCVM_GUEST" "$RUNCVM_GUEST"
 
