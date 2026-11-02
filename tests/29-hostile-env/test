@@ -55,6 +55,17 @@ def diagnose(name):
     t.log("docker logs %s:\n%s" % (name, t.docker("logs", name).stdout))
 
 
+def boots(name):
+    """Wait until 'docker exec' into the Container/VM works; fail at once if it stops running."""
+    def ready_or_stopped():
+        if t.docker("exec", name, "true").returncode == 0:
+            return True
+        return t.docker("inspect", "--format", "{{.State.Running}}", name).stdout.strip() != "true"
+
+    t.wait_for("'docker exec' into %s, or it stops" % name, BOOT_TIMEOUT, ready_or_stopped)
+    return t.docker("exec", name, "true").returncode == 0
+
+
 def init_opts(init):
     return ["--init"] if init else []
 
@@ -91,7 +102,7 @@ def hostile(item):
         os.unlink(f.name)
 
     r = t.docker("start", name)
-    if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
+    if r.returncode != 0 or not boots(name):
         diagnose(name)
         return [("%s: Container/VM boots and 'docker exec' works" % desc, True, False)]
 
@@ -129,7 +140,7 @@ def environments(runtime, opts, init):
     t.cleanup_container(name)
     r = t.docker("run", "-d", "--name", name, "--hostname=parity", *t.labels(), "--runtime=" + runtime, *opts,
                  *init_opts(init), *PARITY_ENV, "alpine", *ENTRYPOINT)
-    if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
+    if r.returncode != 0 or not boots(name):
         diagnose(name)
         return None
     envs = {"workload": sorted(t.docker("exec", name, "cat", "/run-env").stdout.splitlines())}
