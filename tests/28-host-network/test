@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""--network=host is rejected at Container/VM creation.
+
+A RunCVM Container/VM's network set-up moves the container's addresses and
+routes onto bridges for the VM. In the host's network namespace that would
+reconfigure the host's own interfaces, so runcvm-runtime refuses it before
+anything runs: 'docker run' fails (exit status 125) with RunCVM's message,
+and the host's interfaces and routes are unchanged.
+
+Run against a RunCVM that does not reject --network=host, this test would
+itself reconfigure the host's network. It therefore runs only if the
+installed runtime contains the rejection, and is skipped otherwise.
+"""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+MESSAGE = "The host's network namespace (e.g. --network=host) is not supported"
+
+if t.MOCK:
+    t.skip("stand-in mode")
+
+runtimes = json.loads(t.docker("info", "--format", "{{json .Runtimes}}").stdout or "{}")
+path = (runtimes.get(t.RUNTIME) or {}).get("path")
+try:
+    with open(path) as f:
+        rejects = MESSAGE in f.read()
+except (OSError, TypeError):
+    rejects = False
+if not rejects:
+    t.skip("runtime '%s' (%s) does not reject --network=host; running this test would reconfigure "
+           "the host's network" % (t.RUNTIME, path))
+
+
+def host_network():
+    with open("/proc/net/route") as f:
+        routes = f.read()
+    return sorted(os.listdir("/sys/class/net")), routes
+
+
+before = host_network()
+r = t.docker("run", "--rm", "--name", t.unique("host-network"), *t.labels(), "--runtime=" + t.RUNTIME,
+             *t.vm_opts(), "--network=host", "alpine", "echo", "workload-ran", timeout=120)
+t.check("--network=host: exit status", 125, r.returncode)
+if not t.check("--network=host: RunCVM's message", True, MESSAGE in r.stdout):
+    t.log("output:\n%s" % r.stdout)
+t.check("--network=host: workload did not run", False, "workload-ran" in r.stdout)
+t.check("host interfaces and routes unchanged", before, host_network())
+
+t.finish()
