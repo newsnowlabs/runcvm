@@ -534,13 +534,20 @@ Any custom kernel command line options e.g. `apparmor=0` or `systemd.unified_cgr
 
 Automatically create, format, prepopulate and mount backing files as virtual disks on the VM.
 
-Each `<diskN>` should be a comma-separated list of values of the form: `<src>,<dst>[:<dst2>:...],<filesystem>[,<size>][,layout=subdirs|root]`.
+Each `<diskN>` is a comma-separated list of fields, in either of two forms:
+
+- positional: `<src>,<dst>[:<dst2>:...],<filesystem>[,<size>][,layout=subdirs|root]`
+- keyed: `src=<src>,dst=<dst>[,dst=<dst2>...],fs=<filesystem>[,size=<size>][,layout=subdirs|root]`, in any order, recognised by its first field beginning `src=`
+
+where:
 
 - `<src>` is the path _within the container_ where the virtual disk backing file should be located. This may be in the container's overlayfs or within a volume (mounted using `--mount=type=volume`).
-- `<dst>` is both (a) the path within the VM where the disk's files should appear; and (b) the location of the directory with which contents the disk should be prepopulated. Several destinations, separated by `:`, may share one disk.
+- `<dst>` is both (a) the path within the VM where the disk's files should appear; and (b) the location of the directory with which contents the disk should be prepopulated. Several destinations may share one disk: separated by `:` in the positional form, or each given by its own `dst=` in the keyed form, where a destination may also contain `:`.
 - `<filesystem>` is the filesystem with which the backing disk should be formatted when first created.
 - `<size>` is the size of the backing file (in `truncate` format), and must be specified if `<src>` does not exist.
 - `layout=subdirs` or `layout=root` chooses the disk's layout (see [Disk layouts](#disk-layouts) below). It applies when the disk is created, and defaults to `subdirs`.
+
+In the keyed form, each field is split at its first `=`, so values may contain `=`; only `dst` may be given more than once. In either form, no value may contain `,` or `;`, and an unknown or repeated option is rejected.
 
 When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs` and prepopulated with any files preexisting at each `<dst>`, with their ownership, modes, timestamps, extended attributes and hard links. (`trusted.*` extended attributes are copied only if the container has `CAP_SYS_ADMIN`, e.g. with `--cap-add=SYS_ADMIN`, because `mke2fs` runs in the container.)
 
@@ -587,6 +594,12 @@ docker run -it --runtime=runcvm --mount=type=volume,src=runcvm-disks,dst=/disks 
 ```
 
 In this example, a single 40G backing file at `/disks/data`, in the `runcvm-disks` volume, holds `/var/lib/docker`, `/var/lib/containerd` and `/home`, in its directories `var-lib-docker`, `var-lib-containerd` and `home`.
+
+The same disk, in the keyed form:
+
+```console
+docker run -it --runtime=runcvm --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=src=/disks/data,dst=/var/lib/docker,dst=/var/lib/containerd,dst=/home,fs=ext4,size=40G' <docker-image>
+```
 
 > N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints, these are *NOT* mounted into the VM but only into the container, and are therefore suitable for use for mounting VM disks from backing files that cannot be accessed within the VM's filesystem.
 

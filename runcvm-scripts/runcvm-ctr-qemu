@@ -60,8 +60,12 @@ disk_subdir() {
 # created, and read from its label thereafter: any other label, or none, means layout 'root'.
 DISK_SUBDIRS_LABEL="runcvm-subdirs"
 
-# Argument: <src>,<dst>[:<dst2>:...],<fs>[,<size>][,layout=subdirs|root]
+# Argument, in positional form: <src>,<dst>[:<dst2>:...],<fs>[,<size>][,layout=subdirs|root]
 # e.g. /volume/disk1,/var/lib/docker:/var/lib/containerd:/home,ext4,5G
+#
+# or in keyed form, when the first field begins 'src=':
+#   src=<src>,dst=<dst>[,dst=<dst2>...],fs=<fs>[,size=<size>][,layout=subdirs|root]
+# e.g. src=/volume/disk1,dst=/var/lib/docker,dst=/home,fs=ext4,size=5G
 #
 # A disk with layout 'subdirs' (the default for a new disk) holds each destination's contents in its
 # own top-level directory, named by disk_subdir. It is mounted at /.runcvm/disks/<id>, and each
@@ -72,50 +76,85 @@ DISK_SUBDIRS_LABEL="runcvm-subdirs"
 do_disk() {
   local spec="$1"
   local id="$2"
-  local src dsts dst fs size="" layout layout_opt="" field dir UUID LABEL queues i j
+  local src="" dsts dst fs="" size="" layout layout_opt="" field key value dir UUID LABEL queues i j
   local -a fields=() dests=() subdirs=() populate=()
+  local -A seen=()
 
   IFS=',' read -r -a fields <<< "$spec"
-  src="${fields[0]}"
-  dsts="${fields[1]}"
-  fs="${fields[2]}"
 
-  if [[ -z "$src" || -z "$dsts" || -z "$fs" ]]; then
+  if [[ "${fields[0]}" = src=* ]]; then
+    # Keyed form: every field is <key>=<value>, split at the first '='; only dst may be repeated.
+    for field in "${fields[@]}"
+    do
+      [[ "$field" = *=* ]] || error "Error: disk spec '$spec' invalid: field '$field' must be of the form <key>=<value>"
+      key="${field%%=*}"
+      value="${field#*=}"
+
+      case "$key" in
+        src|fs|size|layout)
+          [ -z "${seen[$key]}" ] || error "Error: disk spec '$spec' invalid: $key specified more than once"
+          seen[$key]=1
+          ;;
+        dst)
+          [ -n "$value" ] || error "Error: disk spec '$spec' invalid: dst must not be empty"
+          dests+=("$value")
+          ;;
+        *)
+          error "Error: disk spec '$spec' invalid: unknown option '$key'"
+          ;;
+      esac
+
+      case "$key" in
+        src) src="$value" ;;
+        fs) fs="$value" ;;
+        size) size="$value" ;;
+        layout) layout_opt="$value" ;;
+      esac
+    done
+  else
+    # Positional form: <src>,<dst>[:<dst2>:...],<fs>, then an optional <size>, then options of the
+    # form <key>=<value>.
+    src="${fields[0]}"
+    dsts="${fields[1]}"
+    fs="${fields[2]}"
+
+    for i in "${!fields[@]}"
+    do
+      [ "$i" -ge 3 ] || continue
+      field="${fields[$i]}"
+      case "$field" in
+        layout=*)
+          [ -z "$layout_opt" ] || error "Error: disk spec '$spec' invalid: layout specified more than once"
+          layout_opt="${field#layout=}"
+          ;;
+        *=*)
+          error "Error: disk spec '$spec' invalid: unknown option '${field%%=*}'"
+          ;;
+        *)
+          [ "$i" -eq 3 ] || error "Error: disk spec '$spec' invalid: unexpected field '$field'"
+          size="$field"
+          ;;
+      esac
+    done
+
+    if [[ "$dsts" = :* || "$dsts" = *: || "$dsts" = *::* ]]; then
+      error "Error: disk spec '$spec' invalid: dst must not be empty"
+    fi
+
+    [ -z "$dsts" ] || IFS=':' read -r -a dests <<< "$dsts"
+  fi
+
+  if [[ -z "$src" || "${#dests[@]}" -eq 0 || -z "$fs" ]]; then
     error "Error: disk spec '$spec' invalid: src, dst and fs must all be specified"
   fi
 
-  # Fields after <fs>: an optional <size>, then options of the form <key>=<value>.
-  for i in "${!fields[@]}"
-  do
-    [ "$i" -ge 3 ] || continue
-    field="${fields[$i]}"
-    case "$field" in
-      layout=subdirs|layout=root)
-        [ -z "$layout_opt" ] || error "Error: disk spec '$spec' invalid: layout specified more than once"
-        layout_opt="${field#layout=}"
-        ;;
-      layout=*)
-        error "Error: disk spec '$spec' invalid: layout must be 'subdirs' or 'root'"
-        ;;
-      *=*)
-        error "Error: disk spec '$spec' invalid: unknown option '${field%%=*}'"
-        ;;
-      *)
-        [ "$i" -eq 3 ] || error "Error: disk spec '$spec' invalid: unexpected field '$field'"
-        size="$field"
-        ;;
-    esac
-  done
+  if [[ -n "$layout_opt" && "$layout_opt" != "subdirs" && "$layout_opt" != "root" ]]; then
+    error "Error: disk spec '$spec' invalid: layout must be 'subdirs' or 'root'"
+  fi
 
   if [[ -e "$src" && ! -f "$src" ]]; then
     error "Error: disk spec '$spec' invalid: src '$src' must be a plain file if it exists"
   fi
-
-  if [[ "$dsts" = :* || "$dsts" = *: || "$dsts" = *::* ]]; then
-    error "Error: disk spec '$spec' invalid: dst must not be empty"
-  fi
-
-  IFS=':' read -r -a dests <<< "$dsts"
 
   # An existing disk keeps the layout it was created with, as recorded by its label.
   if [[ -f "$src" ]]; then
@@ -215,7 +254,7 @@ do_disk() {
         populate+=(-P "${subdirs[$i]}=$RUNCVM_VM_MOUNTPOINT${dests[$i]}")
       done
     else
-      populate=(-d "$RUNCVM_VM_MOUNTPOINT/$dsts")
+      populate=(-d "$RUNCVM_VM_MOUNTPOINT/${dests[0]}")
     fi
 
     MKE2FS_CONFIG="$RUNCVM_GUEST/etc/mke2fs.conf" mke2fs -q -F -t "$fs" "${populate[@]}" "$src" >&2 || error "Error: disk spec '$spec' invalid: mke2fs on '$src' with fs '$fs' failed"
@@ -235,7 +274,7 @@ do_disk() {
       echo "/.runcvm/disks/$id/${subdirs[$i]} ${dests[$i]} none bind 0 0" >>/.runcvm/fstab
     done
   else
-    echo "UUID=$UUID $dsts $fs defaults,noatime 0 0" >>/.runcvm/fstab
+    echo "UUID=$UUID ${dests[0]} $fs defaults,noatime 0 0" >>/.runcvm/fstab
   fi
 
   # Add disk to QEMU command line.

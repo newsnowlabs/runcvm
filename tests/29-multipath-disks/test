@@ -3,8 +3,8 @@
 
 One disk, with the default layout 'subdirs', serves /mp/one, held in the
 image, and /mp/two, a Docker volume whose tree carries trusted.* xattrs
-(which image layers do not keep); a second, also 'subdirs', serves only
-/default; a third, with 'layout=root', serves only /single. The trees in
+(which image layers do not keep); a second, also 'subdirs' and given in
+the keyed form, serves only /default; a third, with 'layout=root', serves only /single. The trees in
 the image and the volume are built by trees.py, with assorted ownership,
 modes, times, hard links, symlinks, a FIFO and xattrs (user.*, trusted.*,
 security.capability).
@@ -34,7 +34,8 @@ BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
 IMAGE = "python:3.13-alpine"
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "trees.py")) as f:
     TREES = f.read()
-DISKS = "/disks/multi,/mp/one:/mp/two,ext4,64M;/disks/default,/default,ext4,32M;/disks/single,/single,ext4,32M,layout=root"
+DISKS = ("/disks/multi,/mp/one:/mp/two,ext4,64M;src=/disks/default,dst=/default,fs=ext4,size=32M;"
+         "/disks/single,/single,ext4,32M,layout=root")
 DSTS = ("/mp/one", "/mp/two", "/default", "/single")
 MOUNTS = ("/.runcvm/disks/0", "/.runcvm/disks/1", "/.runcvm/disks/2") + DSTS
 
