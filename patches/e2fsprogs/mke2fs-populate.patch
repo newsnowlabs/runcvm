@@ -48,10 +48,19 @@
  /* Copy files from source_dir to fs in alphabetical order */
  static errcode_t __populate_fs(ext2_filsys fs, ext2_ino_t parent_ino,
  			       const char *source_dir, ext2_ino_t root,
-@@ -1011,6 +1045,14 @@
- 			goto out;
+@@ -983,6 +1017,22 @@
  		}
- 
+ 		if (fgetflags(name, &fl) < 0)
+ 			fl = 0;
++
++		cur_dir_path_len = target->path_len;
++		retval = path_append(target, name);
++		if (retval) {
++			com_err(__func__, retval,
++				"while appending %s", name);
++			goto out;
++		}
++
 +		/* Excluded or on another filesystem: skip non-directories
 +		 * entirely; directories are created empty (see S_IFDIR) */
 +		if (!S_ISDIR(st.st_mode) && populate_pruned(target->path, &st)) {
@@ -59,11 +68,30 @@
 +			target->path[target->path_len] = 0;
 +			continue;
 +		}
-+
+ 
+ 		/* Check for hardlinks */
+ 		save_inode = 0;
+@@ -998,17 +1048,11 @@
+ 						"while linking %s", name);
+ 					goto out;
+ 				}
++				target->path_len = cur_dir_path_len;
++				target->path[target->path_len] = 0;
+ 				continue;
+ 			} else
+ 				save_inode = 1;
+-		}
+-
+-		cur_dir_path_len = target->path_len;
+-		retval = path_append(target, name);
+-		if (retval) {
+-			com_err(__func__, retval,
+-				"while appending %s", name);
+-			goto out;
+ 		}
+ 
  		if (fs_callbacks && fs_callbacks->create_new_inode) {
- 			retval = fs_callbacks->create_new_inode(fs,
- 				target->path, name, parent_ino, root,
-@@ -1102,6 +1144,9 @@
+@@ -1102,6 +1146,9 @@
  				com_err(name, retval, 0);
  					goto out;
  			}
@@ -73,7 +101,7 @@
  			/* Populate the dir recursively*/
  			retval = __populate_fs(fs, ino, name, root, hdlinks,
  					       target, flags, fs_callbacks);
-@@ -1238,6 +1283,7 @@
+@@ -1238,6 +1285,7 @@
  						fs_callbacks);
  		goto out;
  	}
@@ -81,7 +109,7 @@
  
  	if ((flags & POPULATE_FS_NO_COPY_XATTRS) == 0) {
  		retval = set_inode_xattr(fs, root, source);
-@@ -1265,6 +1311,86 @@
+@@ -1265,6 +1313,86 @@
  	return populate_fs3(fs, parent_ino, source, root, 0, fs_callbacks);
  }
  
@@ -251,10 +279,36 @@
  			break;
  		case 'D':
  			direct_io = 1;
-@@ -3754,6 +3788,17 @@
+@@ -3742,17 +3776,42 @@
+ 		com_err(program_name, retval, "while creating huge files");
+ 	/* Copy files from the specified directory or tarball */
+ 	if (src_root) {
++		int cwd_fd = open(".", O_RDONLY | O_DIRECTORY);
++
++		if (cwd_fd < 0) {
++			com_err(program_name, errno, "%s",
++				_("while saving working directory"));
++			exit(1);
++		}
+ 		if (!quiet)
+ 			printf("%s", _("Copying files into the device: "));
+ 
+ 		retval = populate_fs3(fs, EXT2_ROOT_INO, src_root,
+ 				      EXT2_ROOT_INO, populate_flags, NULL);
++		if (fchdir(cwd_fd) < 0) {
++			com_err(program_name, errno, "%s",
++				_("while restoring working directory"));
++			close(cwd_fd);
++			exit(1);
++		}
++		close(cwd_fd);
+ 		if (retval) {
+ 			com_err(program_name, retval, "%s",
+ 				_("while populating file system"));
+ 			exit(1);
  		} else if (!quiet)
  			printf("%s", _("done\n"));
- 	}
++	}
 +	for (i = 0; i < src_subdirs; i++) {
 +		retval = populate_fs_subdir(fs, src_subdir_src[i],
 +					    src_subdir_dst[i], populate_flags,
@@ -265,10 +319,9 @@
 +				src_subdir_dst[i], src_subdir_src[i]);
 +			exit(1);
 +		}
-+	}
+ 	}
  
  	if (!quiet)
- 		printf("%s", _("Writing superblocks and "
 --- a/misc/mke2fs.8.in
 +++ b/misc/mke2fs.8.in
 @@ -22,6 +22,15 @@
