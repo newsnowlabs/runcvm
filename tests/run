@@ -210,6 +210,9 @@ class Environment:
         ids = docker("volume", "ls", "-q", *filters).stdout.split()
         if ids:
             docker("volume", "rm", "-f", *ids)
+        ids = docker("image", "ls", "-q", *filters).stdout.split()
+        if ids:
+            docker("image", "rm", "-f", *ids)
 
 
 # ---------------------------------------------------------------------------
