@@ -39,7 +39,10 @@ the runtime or the scripts.
 - `tests/run` runs the suite: `--tier core|extended|all`, or tests by name or pattern; `--list`
   shows what would run. It exits non-zero if any test fails or times out, and writes logs, TAP,
   JUnit and JSON results to `--results` (default `${TMPDIR:-/tmp}/runcvm-tests/<run id>`).
-  Its docstring is the reference for options, test metadata and exit codes.
+  Its docstring is the reference for options, test metadata and exit codes. The results files
+  are rewritten before and after each test, so they show a run's progress, and a run survives
+  its terminal going away (SIGHUP is ignored); SIGINT or SIGTERM stops it, writing the results
+  so far.
 - `tests/run --mock` (stand-in mode) runs the tests with `runc` in place of RunCVM, skipping
   those that require real VMs. Use it to develop tests and the runner where RunCVM can't run.
 - `tests/run --accel tcg` runs real RunCVM Container/VMs under software emulation where KVM is

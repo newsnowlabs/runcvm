@@ -18,10 +18,12 @@ Standard library only.
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 import xml.etree.ElementTree as ET
 
@@ -319,6 +321,118 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("unknown requirement 'vmm'", r.out)
         finally:
             ft.cleanup()
+
+
+class ProgressAndSignalTests(unittest.TestCase):
+    """Results written during a run; SIGTERM, SIGHUP and a vanished terminal."""
+
+    def setUp(self):
+        self.ft = FakeTests()
+        self.flag = os.path.join(self.ft.root, "release")
+        self.pidfile = os.path.join(self.ft.root, "slow.pid")
+        self.ft.add("a-quick", "#!/bin/bash\nexit 0\n")
+        # Runs until the flag file exists, recording its PID; ignores SIGHUP.
+        self.ft.add("b-slow", """\
+            #!/bin/bash
+            trap '' HUP
+            echo $$ >%s
+            while [ ! -e %s ]; do sleep 0.2; done
+            exit 0
+            """ % (self.pidfile, self.flag))
+        self.ft.add("c-last", "#!/bin/bash\nfor i in $(seq 1 20000); do echo line $i; done\nexit 0\n")
+        self.results = tempfile.mkdtemp(dir=self.ft.root)
+
+    def tearDown(self):
+        open(self.flag, "w").close()
+        self.ft.cleanup()
+
+    def start(self, stdout=subprocess.DEVNULL):
+        e = dict(os.environ, RUNCVM_TEST_KILL_AFTER="2")
+        return subprocess.Popen([RUNNER, "--dir", self.ft.dir, "--results", self.results, "--no-preflight"],
+                                stdout=stdout, stderr=subprocess.STDOUT, env=e)
+
+    def read(self, name):
+        try:
+            with open(os.path.join(self.results, name)) as f:
+                return f.read()
+        except OSError:
+            return ""
+
+    def wait_for_running(self, test):
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if "RUNNING  %s" % test in self.read("summary.txt") and os.path.exists(self.pidfile):
+                return
+            time.sleep(0.2)
+        self.fail("runner never reported %s as running" % test)
+
+    def test_results_written_during_run(self):
+        p = self.start()
+        try:
+            self.wait_for_running("b-slow")
+            self.assertIn("PASS     a-quick", self.read("summary.txt"))
+            self.assertIn("in progress: 1 of 3 tests done", self.read("summary.txt"))
+            self.assertEqual(self.read("status"), "running\n")
+            data = json.loads(self.read("results.json"))
+            self.assertEqual((data["complete"], data["running"], data["status"]), (False, "b-slow", None))
+            self.assertEqual([t["name"] for t in data["tests"]], ["a-quick"])
+            open(self.flag, "w").close()
+            self.assertEqual(p.wait(timeout=60), 0)
+        finally:
+            p.kill()
+        self.assertNotIn("in progress", self.read("summary.txt"))
+        self.assertNotIn("RUNNING", self.read("summary.txt"))
+        self.assertEqual(self.read("status"), "0\n")
+        data = json.loads(self.read("results.json"))
+        self.assertEqual((data["complete"], data["running"], data["status"]), (True, None, 0))
+
+    def test_sigterm_stops_run_and_writes_results(self):
+        p = self.start()
+        try:
+            self.wait_for_running("b-slow")
+            p.terminate()
+            self.assertEqual(p.wait(timeout=60), 143)
+        finally:
+            p.kill()
+        with open(self.pidfile) as f:
+            pid = int(f.read())
+        self.assertFalse(os.path.exists("/proc/%d" % pid), "the test in progress was left running")
+        data = json.loads(self.read("results.json"))
+        self.assertEqual([(t["name"], t["status"]) for t in data["tests"]],
+                         [("a-quick", "pass"), ("b-slow", "interrupted")])
+        self.assertEqual((data["complete"], data["status"]), (True, 143))
+        self.assertEqual(self.read("status"), "143\n")
+
+    def test_sighup_does_not_stop_run(self):
+        p = self.start()
+        try:
+            self.wait_for_running("b-slow")
+            p.send_signal(signal.SIGHUP)
+            time.sleep(1)
+            self.assertIsNone(p.poll(), "the runner exited on SIGHUP")
+            open(self.flag, "w").close()
+            self.assertEqual(p.wait(timeout=60), 0)
+        finally:
+            p.kill()
+        self.assertEqual([t["status"] for t in json.loads(self.read("results.json"))["tests"]],
+                         ["pass", "pass", "pass"])
+
+    def test_vanished_terminal_does_not_stop_run(self):
+        # The runner's stdout is a pipe whose reader has gone, as when a terminal goes away; c-last
+        # writes more than a pipe holds.
+        r, w = os.pipe()
+        os.close(r)
+        open(self.flag, "w").close()
+        p = self.start(stdout=w)
+        os.close(w)
+        try:
+            self.assertEqual(p.wait(timeout=120), 0)
+        finally:
+            p.kill()
+        self.assertEqual([t["status"] for t in json.loads(self.read("results.json"))["tests"]],
+                         ["pass", "pass", "pass"])
+        with open(os.path.join(self.results, "logs", "c-last.log")) as f:
+            self.assertEqual(sum(1 for _ in f), 20000)
 
 
 @unittest.skipUnless(WITH_DOCKER or "--docker" in sys.argv, "real-Docker tests need --docker")
