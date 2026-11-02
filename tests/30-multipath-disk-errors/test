@@ -2,8 +2,9 @@
 """RUNCVM_DISKS: invalid disk specs, and disks whose spec changes.
 
 - A spec with layout 'subdirs' whose destinations overlap (one is the same
-  as, or an ancestor of, another), or which has an empty, relative, '..'
-  or whitespace-containing destination; layout 'root' with several
+  as, or an ancestor of, another, including through the image's symbolic
+  links /var/run and /var/lock), or which has an empty, relative, '..',
+  whitespace-containing or /lost+found destination; layout 'root' with several
   destinations; or an unknown or repeated option: the Container/VM exits
   with status 1, reporting the invalid spec.
 - An existing disk keeps the layout it was created with: a spec giving the
@@ -70,6 +71,12 @@ INVALID = [
      "src, dst and fs must all be specified"),
     ("keyed-overlap", "src=/disks/d,dst=/srv/a,dst=/srv/a/b,fs=ext4,size=16M",
      "dst '/srv/a' and dst '/srv/a/b' overlap"),
+    ("symlink-same", "/disks/d,/var/run:/run,ext4,16M",
+     "dst '/var/run' and dst '/run' overlap, as '/run' and '/run'"),
+    ("symlink-ancestor", "/disks/d,/run:/var/lock,ext4,16M",
+     "dst '/run' and dst '/var/lock' overlap, as '/run' and '/run/lock'"),
+    ("lost+found", "/disks/d,/lost+found:/home,ext4,16M",
+     "dst '/lost+found' requires layout 'root'"),
     ("keyed-alias-repeated", "fs=ext4,source=/disks/d,target=/srv/a,src=/disks/e,size=16M",
      "src specified more than once"),
 ]

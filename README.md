@@ -563,7 +563,8 @@ Each directory is named after its destination: the path without its leading `/`,
 
 The destinations of a disk with layout `subdirs`:
 - must be absolute paths other than `/`, without `.` or `..` components, whitespace or `\`;
-- must not overlap: no destination may be the same as, or an ancestor of, another (e.g. `/var/lib` and `/var/lib/docker` are rejected).
+- must not overlap: no destination may be the same as, or an ancestor of, another, once any symbolic links in the image are resolved (e.g. `/var/lib` and `/var/lib/docker` are rejected, as are `/var/run` and `/run` in an image where `/var/run` links to `/run`);
+- must not be `/lost+found`, whose directory name would clash with the `lost+found` that `mke2fs` creates in every filesystem's root (use `layout=root` for it).
 
 Destinations may be left out of an existing disk's spec, leaving their directories on the disk unmounted, so long as at least one remains; but destinations cannot be added: when a destination has no directory on an existing disk, the VM reports the error and powers off with exit status 1.
 

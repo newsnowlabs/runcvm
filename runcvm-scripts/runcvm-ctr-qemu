@@ -37,6 +37,36 @@ disk_normalise_path() {
   echo "$path"
 }
 
+# Prints normalised path $1 with each symbolic link in the image's filesystem (below
+# $RUNCVM_VM_MOUNTPOINT) resolved, as mounting at $1 in the VM would resolve it. Components that do
+# not exist are kept as given. Fails after 40 links, as the kernel does.
+disk_resolve_path() {
+  local rest="${1#/}" resolved="" comp target links=0
+
+  while [ -n "$rest" ]
+  do
+    comp="${rest%%/*}"
+    if [[ "$rest" = */* ]]; then rest="${rest#*/}"; else rest=""; fi
+
+    case "$comp" in
+      ""|.) continue ;;
+      ..) resolved="${resolved%/*}"; continue ;;
+    esac
+
+    if [ -L "$RUNCVM_VM_MOUNTPOINT$resolved/$comp" ]; then
+      links=$((links+1))
+      [ "$links" -le 40 ] || return 1
+      target=$(busybox readlink "$RUNCVM_VM_MOUNTPOINT$resolved/$comp") || return 1
+      [[ "$target" = /* ]] && resolved=""
+      rest="${target#/}${rest:+/$rest}"
+    else
+      resolved="$resolved/$comp"
+    fi
+  done
+
+  echo "${resolved:-/}"
+}
+
 # Prints the name of the top-level directory of a disk with layout 'subdirs' that holds destination
 # $1, a normalised path: the path without its leading '/', with each '%', '-' and '=' encoded as
 # '%25', '%2D' and '%3D', and then each '/' replaced by '-'. For example, '/var/lib/docker' is held
@@ -78,7 +108,7 @@ do_disk() {
   local spec="$1"
   local id="$2"
   local src="" dsts dst fs="" size="" layout layout_opt="" field key value dir UUID LABEL queues i j
-  local -a fields=() dests=() subdirs=() populate=()
+  local -a fields=() dests=() subdirs=() resolved=() populate=()
   local -A seen=()
 
   IFS=',' read -r -a fields <<< "$spec"
@@ -202,17 +232,31 @@ do_disk() {
       if [ "${#subdirs[$i]}" -gt 255 ]; then
         error "Error: disk spec '$spec' invalid: dst '$dst' is too long"
       fi
+
+      # mke2fs creates lost+found in the root of every filesystem, so no destination's directory may
+      # take that name.
+      if [ "${subdirs[$i]}" = "lost+found" ]; then
+        error "Error: disk spec '$spec' invalid: dst '$dst' requires layout 'root'"
+      fi
+
+      resolved[$i]=$(disk_resolve_path "${dests[$i]}") || \
+        error "Error: disk spec '$spec' invalid: dst '$dst' has too many levels of symbolic links"
     done
 
     # Each destination's directory is bind-mounted over the destination, so no destination may be
-    # another's ancestor: one bind mount would hide or be hidden by the other.
+    # another's ancestor, or the same, once symbolic links are resolved: one bind mount would hide or
+    # be hidden by the other.
     for i in "${!dests[@]}"
     do
       for j in "${!dests[@]}"
       do
         [ "$i" -lt "$j" ] || continue
-        if [[ "${dests[$i]}" = "${dests[$j]}" || "${dests[$j]}" = "${dests[$i]}"/* || "${dests[$i]}" = "${dests[$j]}"/* ]]; then
-          error "Error: disk spec '$spec' invalid: dst '${dests[$i]}' and dst '${dests[$j]}' overlap"
+        if [[ "${resolved[$i]}" = "${resolved[$j]}" || "${resolved[$j]}" = "${resolved[$i]%/}"/* || "${resolved[$i]}" = "${resolved[$j]%/}"/* ]]; then
+          if [[ "${resolved[$i]}" = "${dests[$i]}" && "${resolved[$j]}" = "${dests[$j]}" ]]; then
+            error "Error: disk spec '$spec' invalid: dst '${dests[$i]}' and dst '${dests[$j]}' overlap"
+          else
+            error "Error: disk spec '$spec' invalid: dst '${dests[$i]}' and dst '${dests[$j]}' overlap, as '${resolved[$i]}' and '${resolved[$j]}'"
+          fi
         fi
       done
     done
