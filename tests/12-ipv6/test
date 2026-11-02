@@ -72,18 +72,16 @@ EXPECTED_GW6=$(echo "$GATEWAYS" | grep ':' || true)
 VM_GW6=$(docker exec $NODE-a sh -c "ip -6 route show default | awk '{print \$3}'" 2>/dev/null || true)
 check "VM has IPv6 default route via network gateway" "$EXPECTED_GW6" "$VM_GW6" || true
 
-# IPv6 between containers. An AAAA lookup of node B's name, made in node A via the IPv4-only
-# helper channel (dnsmasq in the container), returns what Docker's DNS returns to a standard
-# (runc) container on the same network: whether Docker answers with B's IPv6 address depends on
-# the Docker version and configuration, not on RunCVM. A TCP connection to B's IPv6 address then
-# carries data across the container<->VM bridge at both ends. BusyBox nc has no -6 option:
-# binding the listener to the IPv6 address (-s) makes it an IPv6 listener.
+# IPv6 between containers. A lookup of node B's name in node A, made via the IPv4-only helper
+# channel (dnsmasq in the container), returns B's IPv6 address. The lookup uses getent, i.e. the
+# C library's resolver, as applications do: BusyBox nslookup never queries a bare name when
+# resolv.conf has a 'search' line, as it does on hosts whose own resolv.conf has one. A TCP
+# connection to B's IPv6 address then carries data across the container<->VM bridge at both
+# ends. BusyBox nc has no -6 option: binding the listener to the IPv6 address (-s) makes it an
+# IPv6 listener.
 B6=$(docker exec $NODE-b sh -c "ip -6 -o addr show dev eth0 scope global | awk '{print \$4}' | cut -d/ -f1 | head -n 1")
-AAAA="nslookup -type=AAAA $NODE-b 2>/dev/null | awk '/^Address:/ && \$2 !~ /:53\$/ { print \$2 }' | sort"
-AAAA_VM=$(docker exec $NODE-a sh -c "$AAAA" | tr -d '\r' | tr '\n' ' ')
-AAAA_RUNC=$(docker run --rm --runtime=runc $(labels) --network "$NETWORK" "$IMAGE" sh -c "$AAAA" | tr '\n' ' ')
-log "AAAA records for '$NODE-b' from Docker's DNS, to a runc container: '$AAAA_RUNC'"
-check "AAAA lookup of '$NODE-b' in '$NODE-a' matches a runc container's" "$AAAA_RUNC" "$AAAA_VM" || true
+B6_DNS=$(docker exec $NODE-a sh -c "getent ahosts $NODE-b | awk '\$1 ~ /:/ { print \$1 }' | sort -u" | tr -d '\r' | tr '\n' ' ')
+check "lookup of '$NODE-b' in '$NODE-a' returns its IPv6 address" "$B6 " "$B6_DNS" || true
 docker exec -d $NODE-b sh -c "nc -l -s $B6 -p 12345 >/tmp/nc-listen.out 2>&1"
 wait_for "IPv6 listener on $NODE-b" 10 docker exec $NODE-b sh -c "netstat -ltn 2>/dev/null | grep -q ':12345 '" || true
 docker exec $NODE-a sh -c "echo hello-over-ipv6 | nc -w 3 $B6 12345" || true
