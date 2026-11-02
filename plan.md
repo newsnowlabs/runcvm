@@ -570,6 +570,7 @@ Open:
 | #28 | `claude/macos-docker-compatibility-InrFB` | #30 | ARM64, Podman, installer. |
 | #37 (draft) | `docs/conventions-sweep-main` | `main` | `CLAUDE.md` compliance fixes to text already on `main`. |
 | #39 | `fix/virtiofsd-socket-wait` | `main` | `runcvm-ctr-qemu` waits for virtiofsd's socket before starting QEMU (start-up race on busy hosts). |
+| #44 | `fix/vm-init-minimal-images` | `main` | `runcvm-vm-init` runs minimal images such as `hello-world`; `27-minimal-images`. |
 | #38 | `tests/a2-exit-codes` | `main` | A2: `14-exit-codes`, `15-stop-kill`, `16-disk-persistence`; `parallel()` helper. |
 | #40 | `tests/a3-lifecycle-isolation` | #38 | A3: `17-lifecycle`, `18-isolation`, `19-config-errors`. |
 | #41 | `tests/a3-mounts-disks` | #40 | A3: `20-mounts`, `21-disks`. |
@@ -590,7 +591,9 @@ KVM results (libvirt development VM, 1 November 2026):
 - Non-root workloads cannot set the exit status (`/.runcvm` is root-only); the entrypoint's own status is never passed through.
 - On `docker stop`, the QEMU monitor's echo of `system_powerdown` appears in `docker logs`.
 - `docker logs` merges stdout and stderr with CRLF line endings (single console channel; #31 explores this).
-- `--network=none` fails silently with status 1; minimal images such as `hello-world` do not run, with exit status 0 and no output; an unrunnable entrypoint exits 0.
+- `--network=none` fails silently with status 1; an unrunnable entrypoint exits 0.
+- Minimal images such as `hello-world` did not run (`runcvm-vm-init`, PID 1 under `bash -e`, used the image's `chgrp`, `mv` and `readlink`): fixed in #44, with `27-minimal-images`.
+- With the default `headless` console and the Debian kernel (the default for images without `/etc/os-release`), failures early in VM start-up produce no output at all, even with `RUNCVM_KERNEL_DEBUG=1`; the Alpine kernel shows them. `RUNCVM_DISPLAY_MODE=serial` shows everything and is the way to diagnose such failures.
 - `--cpus` below 1 gives the VM every CPU available to the container.
 - The OpenWrt kernel cannot load modules (no `modules.dep`).
 - Under TCG, QEMU 8.1.5 intermittently segfaults as a short-lived VM shuts down (about one VM in 10–20; exit status 70). Candidate investigation: `-accel tcg,thread=single`, or a newer QEMU.
