@@ -230,7 +230,8 @@ echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
 # LAUNCH DNSMASQ
 # It will receive local DNS requests (within the container, on 127.0.0.1)
 # and requests redirected locally (via the iptables PREROUTING REDIRECT rule) for $RUNCVM_DNS_IP.
-dnsmasq -u root --no-hosts
+# '-C /dev/null' keeps it from reading the image's /etc/dnsmasq.conf (and any conf-dir it names).
+dnsmasq -C /dev/null -u root --no-hosts
 
 # LAUNCH VIRTIOFSD
 $RUNCVM_GUEST/scripts/runcvm-ctr-virtiofsd &
