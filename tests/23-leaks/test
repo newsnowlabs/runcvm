@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Nothing is left running or mounted on the host after Container/VMs end.
+
+Several Container/VMs are started and then ended in different ways (the
+VM's PID 1 ending, 'docker stop', 'docker kill', 'docker rm -f'). Once all
+are removed, no host process belongs to any of their cgroups, and none of
+their root filesystems is still mounted on the host. While each runs, both
+are checked to be detectable, so that the checks cannot pass vacuously.
+
+Reads /proc on the Docker host, so the test must run on that host.
+"""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+VM = ["--runtime=" + t.RUNTIME, *t.vm_opts()]
+ENDINGS = ["exit", "stop", "kill", "rm"]
+
+
+def run(ending):
+    """Start a Container/VM, end it as given, and remove it. Returns its ID, strings identifying its
+    root filesystem's mounts on the host, and whether both were detectable while it ran."""
+    name = t.unique("leak-" + ending)
+    t.cleanup_container(name)
+    r = t.docker("run", "-d", "--name", name, *t.labels(), *VM, "--init", "alpine", "sleep", "600")
+    cid = r.stdout.strip()
+    if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
+        return None
+    # With containerd's image store, the root filesystem's mount path includes the container ID; with
+    # Docker's graph drivers (e.g. overlay2), it is the driver's MergedDir.
+    info = json.loads(t.docker("inspect", name).stdout or "[{}]")[0]
+    mounts = [cid] + [d for d in [((info.get("GraphDriver") or {}).get("Data") or {}).get("MergedDir")] if d]
+    seen = bool(host_processes_in([cid])) and bool(host_mounts_of(mounts))
+    if ending == "exit":
+        t.docker("exec", "-d", name, "sh", "-c", "sleep 1; kill 1")
+        t.docker("wait", name, timeout=BOOT_TIMEOUT)
+    elif ending == "stop":
+        t.docker("stop", "-t", "30", name)
+    elif ending == "kill":
+        t.docker("kill", name)
+    t.docker("rm", "-f", name)
+    return cid, mounts, seen
+
+
+def host_processes_in(ids):
+    found = []
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            with open("/proc/%s/cgroup" % pid, errors="replace") as f:
+                cgroup = f.read()
+            with open("/proc/%s/cmdline" % pid, errors="replace") as f:
+                cmd = f.read().replace("\0", " ").strip()
+        except OSError:
+            continue
+        if any(i in cgroup for i in ids):
+            found.append("%s %s" % (pid, cmd[:100]))
+    return found
+
+
+def host_mounts_of(ids):
+    with open("/proc/self/mountinfo") as f:
+        return [l.strip() for l in f if any(i in l for i in ids)]
+
+
+results = t.parallel(run, ENDINGS)
+for ending, result in zip(ENDINGS, results):
+    t.check("%s: Container/VM ran" % ending, True, bool(result))
+    if result:
+        t.check("%s: its host processes and root filesystem mount detectable while running" % ending,
+                True, result[2])
+ids = [r[0] for r in results if r]
+mounts = [m for r in results if r for m in r[1]]
+
+# Allow a moment for processes to be reaped after removal.
+t.wait_for("no host processes left in the Container/VMs' cgroups", 30, lambda: not host_processes_in(ids))
+t.check("no host processes left in the Container/VMs' cgroups", [], host_processes_in(ids))
+t.check("no Container/VM root filesystem left mounted on the host", [], host_mounts_of(mounts))
+
+t.finish()
