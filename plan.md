@@ -584,7 +584,7 @@ Changes lower in a stack are merged upwards, never rebased (see `CLAUDE.md`).
 KVM results (libvirt development VM, 1 November 2026):
 - `main` with #32 and #34: self-test (with `--docker`) and `tests/run --tier all` pass: `10`, `11`, `50-http-docker-swarm` and `51-mariadb`. `docker exec` (#32's patched dropbear) works.
 - Whole stack (#28's branch, including #33 and #30): `10`, `11`, `13-qemu-accel` (default, `kvm`, `auto` and `tcg` on a KVM host), `50` and `51` pass.
-- The A2 and A3 tests (#38, #40–#43), with #39, #44 and #46, on KVM (2 November 2026): 19 of 20 pass, including `27-minimal-images` and `28-unsupported-networks`; `14-exit-codes` fails only its `qemu-exit 0` cases, fixed by #47 (to confirm).
+- The A2 and A3 tests (#38, #40–#43), with #39, #44 and #46, on KVM (2 November 2026): 19 of 20 pass, including `27-minimal-images` and `28-unsupported-networks`; `14-exit-codes` failed only its `qemu-exit 0` cases, which pass with #47 (confirmed on KVM).
 - Still to confirm: `12-ipv6`, for #30. The development VM's kernel has IPv6 disabled (no `/proc/sys/net/ipv6`), so the test skips there. To be run on another bare-metal host or in L1.
 
 ### Issues found by A2 and A3
