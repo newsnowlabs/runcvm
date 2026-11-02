@@ -10,6 +10,8 @@
 - A backing file may be in the container's own filesystem or in a volume.
 - /disks, where backing files are usually kept, is mounted only in the
   container, not in the VM.
+- A pre-existing backing file whose filesystem has a label (made here with
+  RunCVM's own mke2fs, from /opt/runcvm) is mounted, with its contents.
 """
 
 import os
@@ -25,9 +27,18 @@ t.volume_create(volume)
 name = t.unique("disks")
 t.cleanup_container(name)
 
+# A pre-existing labelled disk, /disks/labelled, holding the file 'marker'.
+t.docker("run", "--rm", *t.labels(), "--runtime=runc", "--network=none", "-v", volume + ":/disks",
+         "-v", "/opt/runcvm:/.runcvm/guest:ro", "alpine", "sh", "-c",
+         "mkdir /src && echo labelled >/src/marker && truncate -s 32M /disks/labelled && "
+         "MKE2FS_CONFIG=/.runcvm/guest/etc/mke2fs.conf /.runcvm/guest/sbin/mke2fs -q -F -t ext4 "
+         "-L runcvm-label -d /src /disks/labelled", check=True)
+
 # /disks/one in the volume, mounted at /data (new, empty); /disks/two in the volume, mounted at
-# /etc/apk (prepopulated from the image); /disk-overlay in the container's filesystem.
-disks = ";".join(["/disks/one,/data,ext4,64M", "/disks/two,/etc/apk,ext4,32M", "/disk-overlay,/extra,ext4,32M"])
+# /etc/apk (prepopulated from the image); /disk-overlay in the container's filesystem;
+# /disks/labelled, pre-existing, mounted at /labelled.
+disks = ";".join(["/disks/one,/data,ext4,64M", "/disks/two,/etc/apk,ext4,32M", "/disk-overlay,/extra,ext4,32M",
+                  "/disks/labelled,/labelled,ext4"])
 t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
          "--mount", "type=volume,src=%s,dst=/disks" % volume, "--env", "RUNCVM_DISKS=" + disks,
          "alpine", "sleep", "600", check=True)
@@ -40,7 +51,7 @@ def ex(*cmd):
     return t.docker("exec", name, *cmd).stdout.strip()
 
 
-for dst in ("/data", "/etc/apk", "/extra"):
+for dst in ("/data", "/etc/apk", "/extra", "/labelled"):
     t.check("%s is a mount point" % dst, True, t.docker("exec", name, "mountpoint", "-q", dst).returncode == 0)
     t.check("%s is mounted as ext4" % dst, "ext4", ex("awk", "$2 == \"%s\" { print $3 }" % dst, "/proc/mounts"))
 
@@ -55,8 +66,9 @@ t.check("/data filesystem is over 40M of the 64M disk (got %dM)" % size_mb, True
 
 t.check("/etc/apk prepopulated from the image", True, "alpine" in ex("cat", "/etc/apk/repositories"))
 t.check("/data starts empty (apart from lost+found)", "lost+found", ex("ls", "/data"))
+t.check("/labelled holds the pre-existing disk's contents", "labelled", ex("cat", "/labelled/marker"))
 t.check("/disks is not visible in the VM", False, t.docker("exec", name, "test", "-e", "/disks/one").returncode == 0)
-t.check("backing files created in the volume", "one two",
+t.check("backing files created in the volume", "labelled one two",
         " ".join(sorted((t.docker("run", "--rm", "--runtime=runc", *t.labels(), "-v", volume + ":/v:ro",
                                   "alpine", "ls", "/v").stdout.split()))))
 

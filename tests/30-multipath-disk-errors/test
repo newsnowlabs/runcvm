@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""RUNCVM_DISKS: invalid multi-destination disk specs, and disks whose spec changes.
+
+- A multi-destination spec whose destinations overlap (one is the same as,
+  or an ancestor of, another), or which has an empty, relative, '..' or
+  whitespace-containing destination: the Container/VM exits with status 1
+  before the VM starts, with the error from the entrypoint.
+- Adding a destination to an existing multi-destination disk, or giving an
+  existing single-destination disk several destinations: the VM reports
+  that the disk has no directory for the destination, and the
+  Container/VM exits with status 1.
+- Leaving a destination out of an existing multi-destination disk's spec:
+  the Container/VM runs, with the remaining destinations mounted.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+# (name, RUNCVM_DISKS, expected message)
+INVALID = [
+    ("ancestor", "/disks/d,/var/lib:/var/lib/docker,ext4,16M",
+     "dst '/var/lib' and dst '/var/lib/docker' overlap"),
+    ("descendant", "/disks/d,/srv/a/b:/home:/srv/a,ext4,16M",
+     "dst '/srv/a/b' and dst '/srv/a' overlap"),
+    ("same", "/disks/d,/home:/home/,ext4,16M",
+     "dst '/home' and dst '/home' overlap"),
+    ("same-unnormalised", "/disks/d,/srv//a:/srv/a/,ext4,16M",
+     "dst '/srv/a' and dst '/srv/a' overlap"),
+    ("empty", "/disks/d,/home::/srv,ext4,16M",
+     "dst must not be empty"),
+    ("trailing-colon", "/disks/d,/home:,ext4,16M",
+     "dst must not be empty"),
+    ("relative", "/disks/d,home:/srv,ext4,16M",
+     "dst 'home' must be an absolute path other than '/', without '.' or '..' components"),
+    ("dotdot", "/disks/d,/srv/../home:/srv,ext4,16M",
+     "dst '/srv/../home' must be an absolute path other than '/', without '.' or '..' components"),
+    ("root", "/disks/d,/:/srv,ext4,16M",
+     "dst '/' must be an absolute path other than '/', without '.' or '..' components"),
+    ("whitespace", "/disks/d,/srv/a b:/home,ext4,16M",
+     "dst '/srv/a b' must not contain whitespace or '\\'"),
+]
+
+
+def run_invalid(case):
+    name, disks, _ = case
+    return t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
+                    *t.vm_opts(), "--env", "RUNCVM_DISKS=" + disks, "alpine", "true", timeout=TIMEOUT)
+
+
+def run_changed(case):
+    """Create a disk with spec 'first', then use it with spec 'second'; return both runs' results."""
+    name, first, second = case
+    volume = t.unique("changed-" + name)
+    t.volume_create(volume)
+    results = []
+    for disks in (first, second):
+        results.append(t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
+                                *t.vm_opts(), "--mount", "type=volume,src=%s,dst=/disks" % volume,
+                                "--env", "RUNCVM_DISKS=" + disks, "alpine", "sh", "-c",
+                                "awk '$5 ~ \"^/(srv|home)\" { print $4, $5 }' /proc/self/mountinfo | sort",
+                                timeout=TIMEOUT))
+    return results
+
+
+for (name, disks, message), r in zip(INVALID, t.parallel(run_invalid, INVALID)):
+    t.check("%s: exit status" % name, 1, r.returncode)
+    if not t.check("%s: error message" % name, True, ("disk spec '%s' invalid: %s" % (disks, message)) in r.stdout):
+        t.log("output:\n%s" % r.stdout)
+
+# (name, first RUNCVM_DISKS, second RUNCVM_DISKS)
+CHANGED = [
+    ("added", "/disks/d,/srv/a:/srv/b,ext4,16M", "/disks/d,/srv/a:/srv/b:/home,ext4,16M"),
+    ("single-to-multi", "/disks/d,/srv/a,ext4,16M", "/disks/d,/srv/a:/srv/b,ext4,16M"),
+    ("removed", "/disks/d,/srv/a:/srv/b:/home,ext4,16M", "/disks/d,/srv/a:/home,ext4,16M"),
+]
+results = t.parallel(run_changed, CHANGED)
+for (name, first, second), (r1, r2) in zip(CHANGED, results):
+    if not t.check("%s: first Container/VM exit status" % name, 0, r1.returncode):
+        t.log("output:\n%s" % r1.stdout)
+        continue
+    if name == "removed":
+        t.check("%s: second Container/VM exit status" % name, 0, r2.returncode)
+        t.check("%s: remaining destinations mounted" % name, "/home /home\n/srv-a /srv/a", r2.stdout.strip())
+        continue
+    # A disk created with one destination holds it at its root, so has no directory for any.
+    dst, missing = ("/srv/a", "srv-a") if name == "single-to-multi" else ("/home", "home")
+    t.check("%s: second Container/VM exit status" % name, 1, r2.returncode)
+    if not t.check("%s: error message" % name, True,
+                   ("RunCVM: Error: dst '%s' cannot be mounted: its disk has no directory '%s', so was created "
+                    "without this destination; destinations cannot be added to an existing disk"
+                    % (dst, missing)) in r2.stdout):
+        t.log("output:\n%s" % r2.stdout)
+
+t.finish()

@@ -22,30 +22,124 @@ error() {
   exit 1
 }
 
+# Prints path $1 in normal form: with repeated '/' collapsed and any trailing '/' removed.
+# Fails if $1 is not absolute, is '/', or has a '.' or '..' component.
+disk_normalise_path() {
+  local path="$1"
+
+  [[ "$path" = /* ]] || return 1
+
+  while [[ "$path" = *//* ]]; do path="${path//\/\//\/}"; done
+  path="${path%/}"
+
+  [[ -n "$path" && "/$path/" != */./* && "/$path/" != */../* ]] || return 1
+
+  echo "$path"
+}
+
+# Prints the name of the top-level directory of a multi-destination disk that holds destination
+# $1, a normalised path: the path without its leading '/', with each '%', '-' and '=' encoded as
+# '%25', '%2D' and '%3D', and then each '/' replaced by '-'. For example, '/var/lib/docker' is held
+# in 'var-lib-docker', '/a/b' in 'a-b' and '/a-b' in 'a%2Db'.
+#
+# The encoding is reversible, so distinct destinations always have distinct names; and the name
+# depends only on the destination, so it is the same on every boot. The name must contain no '=',
+# because mke2fs's '-d SRC=SUBDIR' takes everything after the last '=' as SUBDIR.
+disk_subdir() {
+  local name="${1#/}"
+
+  name="${name//%/%25}"
+  name="${name//-/%2D}"
+  name="${name//=/%3D}"
+  name="${name//\//-}"
+
+  echo "$name"
+}
+
 # Argument e.g. /volume/disk1,/var/lib/docker,ext4,5G
+# or /volume/disk1,/var/lib/docker:/var/lib/containerd:/home,ext4,5G
+#
+# A disk with one destination is mounted at that destination, and holds its contents at its root.
+#
+# A disk with several destinations is mounted at /.runcvm/disks/<id>, and holds each destination's
+# contents in its own top-level directory, named by disk_subdir; each directory is bind-mounted
+# over its destination.
 do_disk() {
   local spec="$1"
   local id="$2"
-  local src dst fs size dir UUID queues
+  local src dsts dst fs size dir UUID queues i j multi=0
+  local -a dests=() subdirs=() populate=()
 
-  local IFS=','
-  read src dst fs size <<< $(echo "$spec")
+  IFS=',' read -r src dsts fs size <<< "$spec"
 
-  if [[ -z "$src" || -z "$dst" || -z "$fs" ]]; then
+  if [[ -z "$src" || -z "$dsts" || -z "$fs" ]]; then
     error "Error: disk spec '$spec' invalid: src, dst and fs must all be specified"
   fi
 
-  if [[ "$src" = "$dst" ]]; then
-    error "Error: disk spec '$spec' invalid: src '$src' cannot be same as dst"
+  IFS=':' read -r -a dests <<< "$dsts"
+  [[ "$dsts" = *:* ]] && multi=1
+
+  if [ "$multi" = "1" ]; then
+    if [[ "$dsts" = :* || "$dsts" = *: || "$dsts" = *::* ]]; then
+      error "Error: disk spec '$spec' invalid: dst must not be empty"
+    fi
+
+    for i in "${!dests[@]}"
+    do
+      dst="${dests[$i]}"
+
+      if [[ "$dst" = *[[:space:]\\]* ]]; then
+        error "Error: disk spec '$spec' invalid: dst '$dst' must not contain whitespace or '\\'"
+      fi
+
+      dests[$i]=$(disk_normalise_path "$dst") || \
+        error "Error: disk spec '$spec' invalid: dst '$dst' must be an absolute path other than '/', without '.' or '..' components"
+
+      subdirs[$i]=$(disk_subdir "${dests[$i]}")
+      if [ "${#subdirs[$i]}" -gt 255 ]; then
+        error "Error: disk spec '$spec' invalid: dst '$dst' is too long"
+      fi
+    done
+
+    # Each destination's directory is bind-mounted over the destination, so no destination may be
+    # another's ancestor: one bind mount would hide or be hidden by the other.
+    for i in "${!dests[@]}"
+    do
+      for j in "${!dests[@]}"
+      do
+        [ "$i" -lt "$j" ] || continue
+        if [[ "${dests[$i]}" = "${dests[$j]}" || "${dests[$j]}" = "${dests[$i]}"/* || "${dests[$i]}" = "${dests[$j]}"/* ]]; then
+          error "Error: disk spec '$spec' invalid: dst '${dests[$i]}' and dst '${dests[$j]}' overlap"
+        fi
+      done
+    done
   fi
+
+  for dst in "${dests[@]}"
+  do
+    if [[ -z "$dst" ]]; then
+      error "Error: disk spec '$spec' invalid: dst must not be empty"
+    fi
+
+    if [[ "$src" = "$dst" ]]; then
+      error "Error: disk spec '$spec' invalid: src '$src' cannot be same as dst"
+    fi
+
+    if [[ -e "$dst" && ! -d "$dst" ]]; then
+      error "Error: disk spec '$spec' invalid: dst '$dst' must be a directory if it exists"
+    fi
+  done
 
   if [[ -e "$src" && ! -f "$src" ]]; then
     error "Error: disk spec '$spec' invalid: src '$src' must be a plain file if it exists"
   fi
 
-  if [[ -e "$dst" && ! -d "$dst" ]]; then
-    error "Error: disk spec '$spec' invalid: dst '$dst' must be a directory if it exists"
-  fi
+  # Create each destination directory, if it doesn't already exist: it is the source from which
+  # a new disk is populated, and the mountpoint within the VM.
+  for dst in "${dests[@]}"
+  do
+    [ -d "$RUNCVM_VM_MOUNTPOINT/$dst" ] || mkdir -p "$RUNCVM_VM_MOUNTPOINT/$dst" >&2
+  done
 
   if [[ ! -f "$src" ]]; then
     
@@ -56,24 +150,42 @@ do_disk() {
     # Create directory for disk backing file, if needed.
     dir="$(busybox dirname "$src")"
     if ! [ -d "$dir" ]; then
-      mkdir -p $(busybox dirname "$src")
+      mkdir -p "$dir"
     fi
 
     # Create disk backing file.
     busybox truncate -s "$size" "$src" >&2 || error "Error: disk spec '$spec' invalid: truncate on '$src' with size '$size' failed"
 
-    # Create filesystem on disk backing file, populated with any pre-existing files from dst.
+    # Create filesystem on disk backing file, populated with any pre-existing files from each dst.
     # Use RunCVM's own mke2fs configuration, not the image's /etc/mke2fs.conf.
-    [ -d "$RUNCVM_VM_MOUNTPOINT/$dst" ]|| mkdir -p "$RUNCVM_VM_MOUNTPOINT/$dst" >&2
-    MKE2FS_CONFIG="$RUNCVM_GUEST/etc/mke2fs.conf" mke2fs -q -F -t "$fs" -d "$RUNCVM_VM_MOUNTPOINT/$dst" "$src" >&2 || error "Error: disk spec '$spec' invalid: mke2fs on '$src' with fs '$fs' failed"
+    if [ "$multi" = "1" ]; then
+      for i in "${!dests[@]}"
+      do
+        populate+=(-d "$RUNCVM_VM_MOUNTPOINT${dests[$i]}=${subdirs[$i]}")
+      done
+    else
+      populate=(-d "$RUNCVM_VM_MOUNTPOINT/$dsts")
+    fi
+
+    MKE2FS_CONFIG="$RUNCVM_GUEST/etc/mke2fs.conf" mke2fs -q -F -t "$fs" "${populate[@]}" "$src" >&2 || error "Error: disk spec '$spec' invalid: mke2fs on '$src' with fs '$fs' failed"
   fi
 
-  # Create the mountpoint, if we haven't already/it didn't already exist.
-  [ -d "$RUNCVM_VM_MOUNTPOINT/$dst" ]|| mkdir -p "$RUNCVM_VM_MOUNTPOINT/$dst" >&2
+  # Obtain the filesystem's UUID by probing the backing file directly, without the image's blkid
+  # configuration or cache, and add the disk to fstab.
+  UUID=$(blkid -p -s UUID -o value "$src") || true
+  if [ -z "$UUID" ]; then
+    error "Error: disk spec '$spec' invalid: no filesystem UUID found in src '$src'"
+  fi
 
-  # Obtain a UUID for the filesystem and add to fstab.
-  read -r UUID <<< $(blkid -o value "$src")
-  echo "UUID=$UUID $dst $fs defaults,noatime 0 0" >>/.runcvm/fstab
+  if [ "$multi" = "1" ]; then
+    echo "UUID=$UUID /.runcvm/disks/$id $fs defaults,noatime 0 0" >>/.runcvm/fstab
+    for i in "${!dests[@]}"
+    do
+      echo "/.runcvm/disks/$id/${subdirs[$i]} ${dests[$i]} none bind 0 0" >>/.runcvm/fstab
+    done
+  else
+    echo "UUID=$UUID $dsts $fs defaults,noatime 0 0" >>/.runcvm/fstab
+  fi
 
   # Add disk to QEMU command line.
 
