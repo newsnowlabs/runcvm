@@ -53,7 +53,7 @@ fi
 # - See runcvm-ctr-entrypoint for full details of how/why hasHome is needed and HOME gets set.
 
 if [ "$hasHome" != "1" ]; then
-  # Either this script needs to look up uid's HOME or else runcvm-vm-exec does; for now, we do it here.
+  # Look up uid's HOME here (runcvm-vm-exec could equally do this).
   HOME=$(getent passwd "$uid" | cut -d':' -f6)
 fi
 
