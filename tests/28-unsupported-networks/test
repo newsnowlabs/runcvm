@@ -58,12 +58,20 @@ except (OSError, TypeError):
 
 if rejects_host:
     def host_network():
+        """The host's network interfaces and IPv4 routes, each as a set of lines."""
         with open("/proc/net/route") as f:
-            return sorted(os.listdir("/sys/class/net")), f.read()
+            return set(os.listdir("/sys/class/net")), set(line.strip() for line in f)
 
     before = host_network()
     check_failure("--network=host", run("host", "--network=host"), 125, HOST_MESSAGE)
-    t.check("--network=host: host interfaces and routes unchanged", before, host_network())
+    after = host_network()
+    # Log only the differences, if any: the full lists are long and would bury the result.
+    for kind, old, new in zip(("interface", "route"), before, after):
+        for item in sorted(old - new):
+            t.log("--network=host: %s removed: %s" % (kind, item))
+        for item in sorted(new - old):
+            t.log("--network=host: %s added: %s" % (kind, item))
+    t.check("--network=host: host interfaces and routes unchanged", True, before == after)
 else:
     t.log("Not running --network=host: runtime '%s' (%s) does not reject it, so running it would "
           "reconfigure the host's network" % (t.RUNTIME, path))
