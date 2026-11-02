@@ -240,7 +240,8 @@ RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. 
 - Command-line and image-embedded options for customising the a container's VM specifications, devices, kernel
 - Intelligent kernel selection, according to the distribution used in the image being launched
 - No external dependencies, except for Docker/Podman and relevant Linux kernel modules (`kvm` and `tun`)
-- Support multiple Docker network interfaces attached to a created (but not yet running) container using `docker run --network=<network>` and `docker network connect` (excluding IPv6)
+- Support multiple Docker network interfaces attached to a created (but not yet running) container using `docker run --network=<network>` and `docker network connect`
+- Dual-stack (IPv4 and IPv6) networking, where the host and Docker are already configured to support it
 
 ## Project ambitions
 
@@ -296,6 +297,8 @@ At time of writing:
 - the Google Cloud Debian image has default `1` and `rp_filter` settings in `/etc/sysctl.d/60-gce-network-security.conf` must be modified or overridden to support RunCVM.
 
 We recommend `all/rp_filter` be set to 2, as this is the simplest change and provides a good balance of security.
+
+This requirement concerns IPv4 only. A dual-stack Container/VM's DNS requests and `docker exec` connections still use IPv4, and Linux has no IPv6 equivalent of `rp_filter`, so IPv6 needs no further host configuration.
 
 ## Installation
 
@@ -374,7 +377,9 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [-] `docker network connect` on a running container is not supported
       - [-] `--network=host` and `--network=container:name|id` are not supported (`--network=host` is rejected when the Container/VM is created)
       - [-] `--network=none`, and attaching only to `--internal` networks, are not supported: a Container/VM needs a network that provides a default route, over which `docker exec` reaches the VM
-      - [-] IPv6 is not supported
+      - [+] Dual-stack (IPv4 and IPv6) networking is supported, automatically, where the host and Docker are already configured for IPv6 (see `--env=RUNCVM_IPV6=<0|1>`)
+      - [-] IPv6-only networks (i.e. with no IPv4 connectivity at all) are not supported: a working IPv4 leg is required
+      - [-] `--dns=<IPv6 address>` is not supported: the VM's DNS requests are proxied via `dnsmasq` running in the container, whose own traffic reaches the network only over IPv4 (as with IPv4, the VM holds the container's Docker-assigned address, and the container has no IPv6 address or route of its own)
    - Execution environment
       - [+] `--user` (or `-u`) is supported
       - [?] `--workdir` (or `-w`) is supported
@@ -595,6 +600,10 @@ By default SeaBIOS is used to boot the VM. Enable OVMF EFI boot with this option
 
 Enable use of [virtio vhost-net](https://www.redhat.com/en/blog/introduction-virtio-networking-and-vhost-net) (reliant on host `vhost_net` module and `/dev/vhost-net` device) to accelerate networking.
 
+### `--env=RUNCVM_IPV6=<0|1>`
+
+By default, IPv6 is enabled in the VM automatically if a global IPv6 address was assigned to the container (i.e. the Docker network is dual-stack), and disabled otherwise. Set to `1` to force IPv6 on regardless, or `0` to force it off (e.g. to keep a container IPv4-only despite being attached to a dual-stack network).
+
 ### `--env=RUNCVM_QEMU_ACCEL=<kvm|auto|tcg>`
 
 Selects how QEMU runs the VM:
@@ -743,7 +752,7 @@ In more detail, the RunCVM runtime `create` process:
 
 The `runcvm-ctr-entrypoint`:
 - Is always launched as PID1 within the standard Docker container.
-- Saves the container's originally-intended entrypoint and command line, environment variables and network configuration to files inside `/.runcvm`.
+- Saves the container's originally-intended entrypoint and command line, environment variables and network configuration (IPv4, and IPv6 if a global IPv6 address is present) to files inside `/.runcvm`.
 - Creates a bridge (acting as a hub) for each container network interface, to join that interface to a VM tap network interface.
 - Launches `virtiofsd` to serve the container's root filesystem.
 - Configures `/etc/resolv.conf` in the container.
@@ -757,12 +766,12 @@ The `runcvm-init` process:
 
 The `runcvm-ctr-qemu` script:
 - Prepares disk backing files as specified by `--env=RUNCVM_DISKS=<disks>`
-- Prepares network configuration as saved from the container (modifying the MAC address of each container interface)
+- Prepares network configuration as saved from the container (modifying the MAC address of each container interface), and leaves IPv6 enabled in the VM's kernel only if a global IPv6 address was saved for any interface (or if forced with `--env=RUNCVM_IPV6=1`); otherwise it adds `ipv6.disable=1` to the kernel command line
 - Launches [QEMU](https://www.qemu.org/) with the required kernel, network interfaces, disks, display, and with a root filesystem mounted via virtiofs from the container and with `runcvm-vm-init` as the VM's init process.
 
 The `runcvm-vm-init` process:
 - Runs as PID1 within the VM.
-- Retrieves the container configuration - network, environment, disk and tmpfs mounts - saved by `runcvm-ctr-entrypoint` to `/.runcvm`, and reproduces it within the VM
+- Retrieves the container configuration - network (IPv4, and IPv6 if present), environment, disk and tmpfs mounts - saved by `runcvm-ctr-entrypoint` to `/.runcvm`, and reproduces it within the VM
 - Launches the container's pre-existing entrypoint, in one of two ways.
    1. If `RUNCVM_INIT` is `1` (i.e. the container was originally intended to be launched with Docker's own init process) then it configures and execs busybox `init`, which becomes the VM's PID1, to supervise `dropbear`, run `runcvm-vm-start` and `poweroff` the VM if signalled to do so.
    2. Else, it backgrounds `dropbear`, then execs (via `runcvm-init`, purely to create a controlling tty) `runcvm-vm-start`, which runs as the VM's PID1.
