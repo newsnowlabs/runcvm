@@ -48,11 +48,10 @@
  /* Copy files from source_dir to fs in alphabetical order */
  static errcode_t __populate_fs(ext2_filsys fs, ext2_ino_t parent_ino,
  			       const char *source_dir, ext2_ino_t root,
-@@ -983,6 +1017,22 @@
- 		}
+@@ -984,6 +1018,22 @@
  		if (fgetflags(name, &fl) < 0)
  			fl = 0;
-+
+ 
 +		cur_dir_path_len = target->path_len;
 +		retval = path_append(target, name);
 +		if (retval) {
@@ -68,10 +67,11 @@
 +			target->path[target->path_len] = 0;
 +			continue;
 +		}
- 
++
  		/* Check for hardlinks */
  		save_inode = 0;
-@@ -998,17 +1048,11 @@
+ 		if (!S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode) &&
+@@ -998,19 +1048,13 @@
  						"while linking %s", name);
  					goto out;
  				}
@@ -80,17 +80,19 @@
  				continue;
  			} else
  				save_inode = 1;
--		}
--
+ 		}
+ 
 -		cur_dir_path_len = target->path_len;
 -		retval = path_append(target, name);
 -		if (retval) {
 -			com_err(__func__, retval,
 -				"while appending %s", name);
 -			goto out;
- 		}
- 
+-		}
+-
  		if (fs_callbacks && fs_callbacks->create_new_inode) {
+ 			retval = fs_callbacks->create_new_inode(fs,
+ 				target->path, name, parent_ino, root,
 @@ -1102,6 +1146,9 @@
  				com_err(name, retval, 0);
  					goto out;
@@ -109,14 +111,15 @@
  
  	if ((flags & POPULATE_FS_NO_COPY_XATTRS) == 0) {
  		retval = set_inode_xattr(fs, root, source);
-@@ -1265,6 +1313,86 @@
+@@ -1265,6 +1313,79 @@
  	return populate_fs3(fs, parent_ino, source, root, 0, fs_callbacks);
  }
  
 +/*
 + * Copy the contents of directory 'source' into a new top-level directory
 + * 'subdir' of the filesystem, giving 'subdir' the ownership, mode, times and
-+ * xattrs of 'source'. Used for repeated -d SRC=SUBDIR options.
++ * xattrs of 'source'. Used for repeated -d SRC=SUBDIR options. Like
++ * populate_fs3(), this changes the working directory.
 + */
 +errcode_t populate_fs_subdir(ext2_filsys fs, const char *source,
 +			     const char *subdir, int flags,
@@ -127,7 +130,6 @@
 +	struct stat st;
 +	ext2_ino_t ino;
 +	errcode_t retval;
-+	int cwd_fd;
 +
 +	if (!*subdir || strchr(subdir, '/') || !strcmp(subdir, ".") ||
 +	    !strcmp(subdir, "..")) {
@@ -177,15 +179,8 @@
 +	link_append_flag |= (flags & POPULATE_FS_LINK_APPEND) ?
 +		EXT2FS_LINK_APPEND : 0;
 +
-+	/* __populate_fs() chdir()s; restore cwd so later relative SRCs work */
-+	cwd_fd = open(".", O_RDONLY | O_DIRECTORY);
 +	retval = __populate_fs(fs, ino, source, EXT2_ROOT_INO, &hdlinks,
 +			       &file_info, flags, fs_callbacks);
-+	if (cwd_fd >= 0) {
-+		if (fchdir(cwd_fd) < 0 && !retval)
-+			retval = errno;
-+		close(cwd_fd);
-+	}
 +
 +	free(file_info.path);
 +	free(hdlinks.hdl);
@@ -279,37 +274,68 @@
  			break;
  		case 'D':
  			direct_io = 1;
-@@ -3742,17 +3776,42 @@
- 		com_err(program_name, retval, "while creating huge files");
- 	/* Copy files from the specified directory or tarball */
- 	if (src_root) {
-+		int cwd_fd = open(".", O_RDONLY | O_DIRECTORY);
+@@ -3201,8 +3235,39 @@
+ 	return 0;
+ }
+ 
++/*
++ * Save and restore the working directory around populating the file system.
++ * An O_PATH descriptor, where available, needs no read permission on the
++ * directory.
++ */
++static int save_cwd(void)
++{
++#ifdef O_PATH
++	int fd = open(".", O_PATH | O_DIRECTORY);
++#else
++	int fd = open(".", O_RDONLY | O_DIRECTORY);
++#endif
 +
-+		if (cwd_fd < 0) {
-+			com_err(program_name, errno, "%s",
-+				_("while saving working directory"));
-+			exit(1);
-+		}
++	if (fd < 0) {
++		com_err(program_name, errno, "%s",
++			_("while saving working directory"));
++		exit(1);
++	}
++	return fd;
++}
++
++static void restore_cwd(int fd)
++{
++	if (fchdir(fd) < 0) {
++		com_err(program_name, errno, "%s",
++			_("while restoring working directory"));
++		exit(1);
++	}
++}
++
+ int main (int argc, char *argv[])
+ {
++	int		cwd_fd = -1;
+ 	errcode_t	retval = 0;
+ 	ext2_filsys	fs;
+ 	badblocks_list	bb_list = 0;
+@@ -3740,7 +3805,14 @@
+ 	retval = mk_hugefiles(fs, device_name);
+ 	if (retval)
+ 		com_err(program_name, retval, "while creating huge files");
+-	/* Copy files from the specified directory or tarball */
++	/*
++	 * Copy files from the specified directory or tarball, then from any
++	 * SRC=SUBDIR sources. Populating a file system changes the working
++	 * directory, so it is restored before each SRC=SUBDIR source, so that
++	 * relative SRCs resolve from the directory mke2fs was run in.
++	 */
++	if (src_subdirs)
++		cwd_fd = save_cwd();
+ 	if (src_root) {
  		if (!quiet)
  			printf("%s", _("Copying files into the device: "));
- 
- 		retval = populate_fs3(fs, EXT2_ROOT_INO, src_root,
- 				      EXT2_ROOT_INO, populate_flags, NULL);
-+		if (fchdir(cwd_fd) < 0) {
-+			com_err(program_name, errno, "%s",
-+				_("while restoring working directory"));
-+			close(cwd_fd);
-+			exit(1);
-+		}
-+		close(cwd_fd);
- 		if (retval) {
- 			com_err(program_name, retval, "%s",
- 				_("while populating file system"));
- 			exit(1);
+@@ -3754,6 +3826,20 @@
  		} else if (!quiet)
  			printf("%s", _("done\n"));
-+	}
+ 	}
 +	for (i = 0; i < src_subdirs; i++) {
++		restore_cwd(cwd_fd);
 +		retval = populate_fs_subdir(fs, src_subdir_src[i],
 +					    src_subdir_dst[i], populate_flags,
 +					    NULL);
@@ -319,9 +345,12 @@
 +				src_subdir_dst[i], src_subdir_src[i]);
 +			exit(1);
 +		}
- 	}
++	}
++	if (src_subdirs)
++		close(cwd_fd);
  
  	if (!quiet)
+ 		printf("%s", _("Writing superblocks and "
 --- a/misc/mke2fs.8.in
 +++ b/misc/mke2fs.8.in
 @@ -22,6 +22,15 @@
