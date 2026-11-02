@@ -288,6 +288,7 @@ COPY --from=qemu-exit /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
 RUN apk update && apk add --no-cache rsync
 
 ADD runcvm-scripts /opt/runcvm/scripts/
+ADD runcvm-etc /opt/runcvm/etc/
 
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]
