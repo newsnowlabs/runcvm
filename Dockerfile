@@ -100,8 +100,9 @@ EOF
 
 # --- BUILD STAGE ---
 # Build patched mke2fs from upstream e2fsprogs
-# that can populate a file system from several directories (repeated '-d SRC=SUBDIR'),
-# excluding paths ('-x PATTERN') and other file systems ('-X')
+# that can populate subdirectories of a file system from several directories
+# (repeated '-P SUBDIR=SRC'), excluding paths ('-x PATTERN') and other file systems
+# ('-E one_file_system')
 FROM alpine:$ALPINE_VERSION as e2fsprogs
 
 ARG E2FSPROGS_VERSION=1.47.4
