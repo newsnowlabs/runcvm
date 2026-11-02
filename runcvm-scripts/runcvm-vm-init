@@ -45,6 +45,13 @@ if ! [ -h /dev/fd ]; then
   ln -s /proc/self/fd /dev/fd
 fi
 
+# Some kernels (e.g. Alpine's) build IPv6 as a module. Unless IPv6 is disabled on the kernel command
+# line, load it now: the per-interface settings below need /proc/sys/net/ipv6, and must be made
+# before the module's defaults could apply to any interface.
+if ! [ -d /proc/sys/net/ipv6 ] && ! grep -qw 'ipv6.disable=1' /proc/cmdline; then
+  busybox modprobe ipv6 2>/dev/null || true
+fi
+
 # Disable IPv6 on every interface by default (both those that already exist,
 # and any that may appear later), before any of them are renamed or brought
 # up, so that none of them briefly performs SLAAC/DAD or joins a
