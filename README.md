@@ -545,6 +545,16 @@ When first created, the backing file will be created as a sparse file to the spe
 
 When RunCVM creates a Container/VM, fstab entries will be drafted. After the VM boots, the fstab entries will be mounted. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on.
 
+> **Warning: launch with `--init` if a disk's contents must survive the VM ending.** Data written to a disk stays in the VM's memory until the VM's kernel writes it out, so whether it reaches the backing file depends on how the VM ends:
+>
+> - With `--init`, the VM's init syncs its file systems before powering off, both when the entrypoint exits and on `docker stop`.
+> - Without `--init`, `docker stop` runs `poweroff` in the VM, which also syncs file systems first. But when the entrypoint exits by itself, the VM ends at once: the entrypoint is the VM's PID 1, and nothing runs after it. Data not yet written out is lost, and the file system needs journal recovery when next mounted.
+> - `docker kill` ends the VM at once in either mode.
+>
+> To keep a disk's data without `--init`, the workload must flush the disk before its entrypoint exits, for example with `sync -f <dst>` for each disk's `<dst>`, which flushes only that disk's file system and needs no special privileges; or, if the workload runs as root and nothing still uses the disk, with `umount <dst>`, which also leaves the disk's file system clean, needing no journal recovery. A plain `sync` also works, but flushes every file system in the VM, including the root file system that the VM shares with the container.
+>
+> A disk whose contents are thrown away after each run, such as a `/var/lib/docker` for a disposable test, needs no flushing.
+
 #### Example #1
 
 ```console
