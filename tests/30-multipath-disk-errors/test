@@ -15,7 +15,8 @@
 - Leaving destinations out of an existing disk's spec, down to one, or
   reusing a disk created with a keyed spec (whose destination contains ':'):
   the Container/VM runs, with the remaining destinations mounted.
-- Keyed specs with a repeated or unknown key, a field without '=', no dst
+- Keyed specs (whose keys include Docker's aliases 'source', 'target' and
+  'destination') with a repeated or unknown key, a field without '=', no dst
   or overlapping destinations are rejected likewise.
 """
 
@@ -69,6 +70,8 @@ INVALID = [
      "src, dst and fs must all be specified"),
     ("keyed-overlap", "src=/disks/d,dst=/srv/a,dst=/srv/a/b,fs=ext4,size=16M",
      "dst '/srv/a' and dst '/srv/a/b' overlap"),
+    ("keyed-alias-repeated", "fs=ext4,source=/disks/d,target=/srv/a,src=/disks/e,size=16M",
+     "src specified more than once"),
 ]
 
 
@@ -117,8 +120,8 @@ CHANGED = [
      "/home /home\n/srv-a /srv/a"),
     ("removed-to-one", "/disks/d,/srv/a:/home,ext4,16M", "/disks/d,/srv/a,ext4", 0,
      "/srv-a /srv/a"),
-    ("keyed", "src=/disks/d,dst=/srv/a:b,dst=/home,fs=ext4,size=16M", "src=/disks/d,dst=/home,dst=/srv/a:b,fs=ext4",
-     0, "/home /home\n/srv-a:b /srv/a:b"),
+    ("keyed", "src=/disks/d,dst=/srv/a:b,dst=/home,fs=ext4,size=16M",
+     "fs=ext4,destination=/home,source=/disks/d,target=/srv/a:b", 0, "/home /home\n/srv-a:b /srv/a:b"),
 ]
 for (name, first, second, status, expected), (r1, r2) in zip(CHANGED, t.parallel(run_changed, CHANGED)):
     if not t.check("%s: first Container/VM exit status" % name, 0, r1.returncode):

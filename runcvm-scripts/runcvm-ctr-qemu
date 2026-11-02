@@ -63,8 +63,9 @@ DISK_SUBDIRS_LABEL="runcvm-subdirs"
 # Argument, in positional form: <src>,<dst>[:<dst2>:...],<fs>[,<size>][,layout=subdirs|root]
 # e.g. /volume/disk1,/var/lib/docker:/var/lib/containerd:/home,ext4,5G
 #
-# or in keyed form, when the first field begins 'src=':
+# or in keyed form, when the first field begins with one of the keys followed by '=':
 #   src=<src>,dst=<dst>[,dst=<dst2>...],fs=<fs>[,size=<size>][,layout=subdirs|root]
+# with fields in any order, 'source' accepted for 'src', and 'target' and 'destination' for 'dst';
 # e.g. src=/volume/disk1,dst=/var/lib/docker,dst=/home,fs=ext4,size=5G
 #
 # A disk with layout 'subdirs' (the default for a new disk) holds each destination's contents in its
@@ -82,13 +83,18 @@ do_disk() {
 
   IFS=',' read -r -a fields <<< "$spec"
 
-  if [[ "${fields[0]}" = src=* ]]; then
+  if [[ "${fields[0]}" =~ ^(src|source|dst|target|destination|fs|size|layout)= ]]; then
     # Keyed form: every field is <key>=<value>, split at the first '='; only dst may be repeated.
     for field in "${fields[@]}"
     do
       [[ "$field" = *=* ]] || error "Error: disk spec '$spec' invalid: field '$field' must be of the form <key>=<value>"
       key="${field%%=*}"
       value="${field#*=}"
+
+      case "$key" in
+        source) key="src" ;;
+        target|destination) key="dst" ;;
+      esac
 
       case "$key" in
         src|fs|size|layout)

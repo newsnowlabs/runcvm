@@ -537,7 +537,7 @@ Automatically create, format, prepopulate and mount backing files as virtual dis
 Each `<diskN>` is a comma-separated list of fields, in either of two forms:
 
 - positional: `<src>,<dst>[:<dst2>:...],<filesystem>[,<size>][,layout=subdirs|root]`
-- keyed: `src=<src>,dst=<dst>[,dst=<dst2>...],fs=<filesystem>[,size=<size>][,layout=subdirs|root]`, in any order, recognised by its first field beginning `src=`
+- keyed: `src=<src>,dst=<dst>[,dst=<dst2>...],fs=<filesystem>[,size=<size>][,layout=subdirs|root]`, with the fields in any order, recognised by its first field beginning with one of these keys and `=`; as in Docker's `--mount`, `source` may be given for `src`, and `target` or `destination` for `dst`
 
 where:
 
