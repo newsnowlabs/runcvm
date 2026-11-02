@@ -379,7 +379,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [-] `--network=none`, and attaching only to `--internal` networks, are not supported: a Container/VM needs a network that provides a default route, over which `docker exec` reaches the VM
       - [+] Dual-stack (IPv4 and IPv6) networking is supported, automatically, where the host and Docker are already configured for IPv6 (see `--env=RUNCVM_IPV6=<0|1>`)
       - [-] IPv6-only networks (i.e. with no IPv4 connectivity at all) are not supported: a working IPv4 leg is required
-      - [-] `--dns=<IPv6 address>` is not supported: the VM's DNS requests are proxied via `dnsmasq` running in the container, and the container keeps no IPv6 address of its own (the VM holds it), so `dnsmasq` cannot reach an IPv6 DNS server
+      - [-] `--dns=<IPv6 address>` is not supported: the VM's DNS requests are proxied via `dnsmasq` running in the container, whose own traffic reaches the network only over IPv4 (as with IPv4, the VM holds the container's Docker-assigned address, and the container has no IPv6 address or route of its own)
    - Execution environment
       - [+] `--user` (or `-u`) is supported
       - [?] `--workdir` (or `-w`) is supported
