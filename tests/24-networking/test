@@ -10,7 +10,10 @@
   gateway.
 - --network=none: the Container/VM exits with status 1, without a message,
   before the workload runs.
-- --network=host (documented as unsupported): the Container/VM fails.
+
+--network=host is not tested: on a RunCVM that does not reject it at
+creation, the Container/VM's network set-up runs in the host's network
+namespace and reconfigures the host's own interfaces.
 
 The expected values describe current behaviour. A change to it must update
 them deliberately.
@@ -95,8 +98,7 @@ def case_network_mode(mode, expected, silent):
     return run
 
 
-CASES = [case_custom_network, case_default_bridge, case_network_mode("none", 1, True),
-         case_network_mode("host", 2, False)]
+CASES = [case_custom_network, case_default_bridge, case_network_mode("none", 1, True)]
 
 for results in t.parallel(lambda f: f(), CASES, jobs=len(CASES)):
     for desc, expected, actual in results:
