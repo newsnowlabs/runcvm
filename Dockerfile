@@ -99,6 +99,34 @@ abuild -rFf
 EOF
 
 # --- BUILD STAGE ---
+# Build patched mke2fs from upstream e2fsprogs
+# that can populate a file system from several directories (repeated '-d SRC=SUBDIR'),
+# excluding paths ('-x PATTERN') and other file systems ('-X')
+FROM alpine:$ALPINE_VERSION as e2fsprogs
+
+ARG E2FSPROGS_VERSION=1.47.4
+ARG E2FSPROGS_SHA256=fd5bf388cbdbe006a3d3b318d983b2948382440acc85a87f1e7d108653e8db0b
+
+ADD patches/e2fsprogs/mke2fs-populate.patch /root/mke2fs-populate.patch
+
+RUN <<EOF
+set -e
+apk add --no-cache build-base linux-headers util-linux-dev
+cd /root
+wget -q https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v$E2FSPROGS_VERSION/e2fsprogs-$E2FSPROGS_VERSION.tar.xz
+echo "$E2FSPROGS_SHA256  e2fsprogs-$E2FSPROGS_VERSION.tar.xz" | sha256sum -c -
+tar xf e2fsprogs-$E2FSPROGS_VERSION.tar.xz
+cd e2fsprogs-$E2FSPROGS_VERSION
+patch -p1 </root/mke2fs-populate.patch
+# Link util-linux's libblkid and libuuid, as Alpine's e2fsprogs package does;
+# e2fsprogs' own libraries are linked statically
+./configure --disable-nls --disable-libblkid --disable-libuuid --disable-uuidd --disable-fsck --disable-e2initrd-helper
+make -j$(nproc) libs
+make -j$(nproc) -C misc mke2fs
+install -D -m 755 misc/mke2fs /usr/local/sbin/mke2fs
+EOF
+
+# --- BUILD STAGE ---
 # Build dist-independent dynamic binaries and libraries
 FROM alpine:$ALPINE_VERSION as binaries
 
@@ -106,7 +134,7 @@ RUN apk update && \
     apk add --no-cache file bash qemu-system-x86_64 qemu-virtiofsd qemu-ui-curses qemu-guest-agent \
         qemu-hw-display-virtio-vga \
         ovmf \
-        jq iproute2 netcat-openbsd e2fsprogs blkid util-linux \
+        jq iproute2 netcat-openbsd blkid util-linux \
         s6 dnsmasq iptables nftables \
         ncurses coreutils \
         patchelf
@@ -118,6 +146,9 @@ RUN apk add --allow-untrusted /tmp/seabios/*.apk && cp -a /usr/share/seabios/bio
 # Install patched dnsmasq
 COPY --from=alpine-dnsmasq /root/packages/main/x86_64 /tmp/dnsmasq/
 RUN apk add --allow-untrusted /tmp/dnsmasq/dnsmasq-2*.apk /tmp/dnsmasq/dnsmasq-common*.apk
+
+# Install patched mke2fs
+COPY --from=e2fsprogs /usr/local/sbin/mke2fs /sbin/mke2fs
 
 # Install patched dropbear
 COPY --from=alpine-dropbear /root/packages/main/x86_64 /usr/local/lib/libepka_file.so /tmp/dropbear/
