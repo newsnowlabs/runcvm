@@ -585,19 +585,33 @@ KVM results (libvirt development VM, 1 November 2026):
 - Still to confirm: the A2 and A3 tests (#38, #40–#43) on KVM; they pass under TCG in a sandbox.
 - Still to confirm: `12-ipv6`, for #30. The development VM's kernel has IPv6 disabled (no `/proc/sys/net/ipv6`), so the test skips there. To be run on another bare-metal host or in L1.
 
-### Findings from A2 and A3 (current behaviour, recorded by the tests)
+### Issues found by A2 and A3
 
-- Without `--init`, data written to a `RUNCVM_DISKS` disk is lost when the entrypoint exits, unless the workload calls `sync` (`docker stop` syncs in either mode).
-- Non-root workloads cannot set the exit status (`/.runcvm` is root-only); the entrypoint's own status is never passed through.
-- On `docker stop`, the QEMU monitor's echo of `system_powerdown` appears in `docker logs`.
-- `docker logs` merges stdout and stderr with CRLF line endings (single console channel; #31 explores this).
-- `--network=none` fails silently with status 1; an unrunnable entrypoint exits 0.
-- Minimal images such as `hello-world` did not run (`runcvm-vm-init`, PID 1 under `bash -e`, used the image's `chgrp`, `mv` and `readlink`): fixed in #44, with `27-minimal-images`.
-- With the default `headless` console and the Debian kernel (the default for images without `/etc/os-release`), failures early in VM start-up produce no output at all, even with `RUNCVM_KERNEL_DEBUG=1`; the Alpine kernel shows them. `RUNCVM_DISPLAY_MODE=serial` shows everything and is the way to diagnose such failures.
-- `--cpus` below 1 gives the VM every CPU available to the container.
+The tests record current behaviour, including the issues below, so fixing one means updating the test's expected values in the same pull request.
+
+**Silent failures: all to be addressed.** Each makes a Container/VM fail, or lose data, without telling the user.
+
+| Issue | Recorded by | Direction |
+|---|---|---|
+| `--network=none`: exits with status 1, no message, before the workload runs (the entrypoint, under `bash -e`, fails reading a default route that does not exist). | `24-networking` | Support it if possible. `docker exec` reaches the VM over SSH (`dbclient`) at the VM's address on its Docker network, so without a network it would need a private link between container and VM (e.g. a dedicated tap interface on a link-local subnet, or virtio-vsock). If that proves impractical, fail at creation with an explanatory error. |
+| `--network=host` (documented as unsupported): fails with status 2 after a networking-script error. | `24-networking` | Not safe to support: the VM would have to take over the host's interfaces. Fail at creation (`runcvm-runtime`) with a clear error, as for `--network=container:`. |
+| Without `--init`, data written to a `RUNCVM_DISKS` disk is lost when the entrypoint exits, unless the workload calls `sync`. | `16-disk-persistence` | Sync filesystems before the VM ends, whatever the init mode. Overlaps with the init-process project. |
+| The entrypoint's own exit status is never passed through; an entrypoint that cannot be executed exits 0. | `14-exit-codes`, `25-images-kernels` | The init-process project. |
+| Non-root workloads cannot set the exit status (`/.runcvm` is root-only). | `14-exit-codes` | The init-process project. |
+| With the default `headless` console and the Debian kernel (the default for images without `/etc/os-release`), failures early in VM start-up produce no output at all, even with `RUNCVM_KERNEL_DEBUG=1`. | (found investigating `hello-world`) | Make the console usable earlier with this kernel (e.g. `virtio_console` built in or loaded by the initrd), or fall back to the serial console for early boot. Meanwhile, `RUNCVM_DISPLAY_MODE=serial` shows such failures. |
+
+**Fixed:**
+- Minimal images such as `hello-world` did not run: `runcvm-vm-init` used the image's `chgrp`, `mv` and `readlink`. #44, with `27-minimal-images`.
+- QEMU could start before virtiofsd's socket existed, so the Container/VM exited with status 1. #39.
+- The README gave `qemu-exit`'s host path rather than its path in the VM. #38.
+
+**Smaller issues: lower priority.**
+- `--cpus` below 1 gives the VM every CPU available to the container (rounding up to 1 seems intended).
 - The OpenWrt kernel cannot load modules (no `modules.dep`).
-- Under TCG, QEMU 8.1.5 intermittently segfaults as a short-lived VM shuts down (about one VM in 10–20; exit status 70). Candidate investigation: `-accel tcg,thread=single`, or a newer QEMU.
-- Fixed in #39: QEMU could start before virtiofsd's socket existed.
+- On `docker stop`, the QEMU monitor's echo of `system_powerdown`, with terminal escape sequences, appears in `docker logs`.
+- `docker logs` merges stdout and stderr, with CRLF line endings (single console channel; #31 explores this).
+- `RUNCVM_QEMU_DEBUG` reads `memory.events`, which exists only under cgroup v2, and its exit status is always 1 on cgroup v1.
+- Under TCG, QEMU 8.1.5 intermittently segfaults as a short-lived VM shuts down (about one VM in 10–20; exit status 70). Candidate investigation: `-accel tcg,thread=single`, or a newer QEMU. Affects test runs without KVM only.
 
 ## 5. Open decisions
 
