@@ -63,7 +63,7 @@ load_network() {
 }
 
 # Loads IPv6 addressing for interface $1 (or the default-route interface, if
-# omitted), if any was captured. Returns 1 (leaving DOCKER_IF6_* unset) for an
+# omitted), if any was captured. Returns 1 (leaving DOCKER_IF6_* empty) for an
 # interface with no IPv6 address, or when the container has no IPv6 at all,
 # i.e. /.runcvm/network/devices6 does not exist.
 load_network6() {

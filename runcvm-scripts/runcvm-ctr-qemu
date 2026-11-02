@@ -384,7 +384,7 @@ VIRTIOFS+=(
 # Enable IPv6 in the VM only if a global IPv6 address was captured for at
 # least one interface (set by do_networks(), above), unless overridden with
 # --env=RUNCVM_IPV6=<0|1>. Otherwise, disable IPv6 entirely at kernel boot
-# time, as before.
+# time.
 case "$RUNCVM_IPV6" in
   1) HAS_IPV6=1 ;;
   0) HAS_IPV6=0 ;;

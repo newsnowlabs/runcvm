@@ -109,8 +109,9 @@ ip -json route show | jq -r '.[] | select(.scope != "link" and .dst != "default"
 
 # Save non-kernel (i.e. non-connected, non-link-local) non-default IPv6 routes
 # for later restoration in the running VM. Kernel-derived on-link prefix routes
-# are handled per-interface (as DOCKER_NET6, below); fe80::/64 is link-local and
-# is recreated automatically by the kernel when the VM brings up its interface.
+# are not saved: the VM's kernel recreates each one when the VM adds the
+# interface's IPv6 address. fe80::/64 is link-local, and likewise recreated by
+# the kernel when the VM brings up its interface.
 ip -6 -json route show | jq -r '.[] | select(.protocol != "kernel" and .dst != "default" and .dst != "fe80::/64") | "\(.dst) \(.gateway) \(.dev)"' >/.runcvm/network/routes6
 
 for if in $(ip -json link show | jq -r '.[] | .ifname')
