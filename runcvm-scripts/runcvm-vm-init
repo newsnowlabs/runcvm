@@ -1,6 +1,6 @@
 #!/.runcvm/guest/bin/bash -e
 
-# Load original environment
+# Load RunCVM's own environment, saved by runcvm-ctr-entrypoint
 . /.runcvm/config
 
 # Load defaults and aliases
