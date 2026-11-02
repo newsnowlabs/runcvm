@@ -6,13 +6,16 @@
 # Load defaults and aliases
 . $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
-# Alpine initrd doesn't honour command-line rw flag
-mount -o remount,rw /
+# Alpine initrd doesn't honour command-line rw flag.
+# -i keeps mount from running any /sbin/mount.<type> helper from the image, and
+# --options-source=disable keeps the image's /etc/fstab from adding options to the remount (e.g.
+# 'errors=remount-ro', which virtiofs rejects, halting the VM as this script runs with 'bash -e').
+mount -i --options-source=disable -o remount,rw /
 
 # FIXME: Something is making /.runcvm ro, so remount it rw
 # until such time as exit code handling and dropbear key creation
 # obviate the need for this.
-mount -o remount,rw /.runcvm
+mount -i --options-source=disable -o remount,rw /.runcvm
 
 # Alpine initrd doesn't configure /dev device permissions and ownership
 # to support non-root users.
@@ -149,7 +152,7 @@ if [ -f /.runcvm/fstab ]; then
   mount -a --fstab /.runcvm/fstab -o X-mount.mkdir
 
   # Now mount our fstab over /etc/fstab
-  mount --bind /.runcvm/fstab /etc/fstab
+  mount -i --bind /.runcvm/fstab /etc/fstab
 fi
 
 # Load cgroupfs (if needed/requested):
