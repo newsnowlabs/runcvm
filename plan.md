@@ -497,7 +497,7 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 
    Small, and unblocks everything; can be done in the existing libvirt development VM.
 
-   #34 (A1) and #33 (explicit QEMU acceleration modes) are merged. Still to merge, each tested in the libvirt development VM with the runner: #30 (dual-stack IPv6; also fixes VM boot failure for containers with a second network), then #28 (ARM64, Podman, installer). All land before A3 (needs #30's fix), B2, C3/C4, E3 and E6 (which touch the same code). #33 provides the check that L2s really run under KVM: `RUNCVM_QEMU_ACCEL=kvm` fails at creation if `/dev/kvm` is absent, rather than silently falling back to TCG. Follow-ups: multi-interface and overlay-network tests in A3.
+   #34 (A1), #33 (explicit QEMU acceleration modes), A2 (#38), A3 (#40–#43) and #30 (dual-stack IPv6; also fixes VM boot failure for containers with a second network) are merged. Still to merge: #28 (ARM64, Podman, installer), deferred until it can be tested on arm64 and with Podman; it must land before B2, C3/C4, E3 and E6, or they must allow for it, as they touch the same code. #33 provides the check that L2s really run under KVM: `RUNCVM_QEMU_ACCEL=kvm` fails at creation if `/dev/kvm` is absent, rather than silently falling back to TCG. Follow-ups: multi-interface and overlay-network tests in A3.
 2. **First L1 environment**
    - B1. L1 image — dev mode, proven by manual launch on L0 and in Dockside
 3. **Side-by-side versions**, developed in L1
@@ -553,7 +553,7 @@ Branch 2 needs only the mke2fs part of branch 1. If branch 1 is not yet merged, 
 
 ### Pull requests
 
-Merged to `main` (1–2 November 2026), each squash-merged with its branch history kept in a `raw/<branch>` tag, cited by a `Raw-History:` trailer:
+Merged to `main` (1–2 November 2026). Squash-merged branches keep their history in a `raw/<branch>` tag, cited by a `Raw-History:` trailer; single-commit branches are rebase-merged:
 
 | Pull request | Contents |
 |---|---|
@@ -561,31 +561,30 @@ Merged to `main` (1–2 November 2026), each squash-merged with its branch histo
 | #32 | aports pinned to `${ALPINE_VERSION}-stable`; dropbear patch paths. `main` builds. |
 | #34 | A1 runner, helpers, self-test; tests regrouped by tier. |
 | #33 | `RUNCVM_QEMU_ACCEL` (`kvm` default, failing without `/dev/kvm`; `auto`; `tcg`); `RUNCVM_QEMU_TCG_TB_MEM_SIZE` (TCG translation cache, added to the container's memory limit); runtime errors reported through containerd's log; `tests/13-qemu-accel`; `runcvm-ctr-defaults` lists one name per line, sorted. |
+| #39 | `runcvm-ctr-qemu` waits for virtiofsd's socket before starting QEMU (start-up race on busy hosts). |
+| #44 | `runcvm-vm-init` runs minimal images such as `hello-world`; `27-minimal-images`. |
+| #46 | `--network=host` rejected at creation; a missing default route explained; `28-unsupported-networks`. |
+| #47 | `qemu-exit` waits for the ACPI power-off it requests (exit status 128 for `qemu-exit 0` on KVM). |
+| #38 | A2: `14-exit-codes`, `15-stop-kill`, `16-disk-persistence`; `parallel()` helper; progressive results and signal handling in `tests/run`. |
+| #40–#43 | A3: `17-lifecycle`, `18-isolation`, `19-config-errors`, `20-mounts`, `21-disks`, `22-resources`, `23-leaks`, `24-networking`, `25-images-kernels`, `26-docker-in-vm`. |
+| #37 | `CLAUDE.md` compliance fixes to text already on `main`. |
+| #48 | `24-networking` runs its Container/VMs with `--dns-search=.`. |
+| #30 | Dual-stack IPv6; multi-network boot fix; `ipv6` module loaded on kernels that build it as one; `tests/12-ipv6`. |
 
 Open:
 
 | Pull request | Branch | Based on | Contents |
 |---|---|---|---|
-| #30 | `claude/runcvm-ipv6-support-iwotel` | `main` | Dual-stack IPv6; multi-network boot fix; `tests/12-ipv6`. |
-| #28 | `claude/macos-docker-compatibility-InrFB` | #30 | ARM64, Podman, installer. |
-| #37 (draft) | `docs/conventions-sweep-main` | `main` | `CLAUDE.md` compliance fixes to text already on `main`. |
-| #39 | `fix/virtiofsd-socket-wait` | `main` | `runcvm-ctr-qemu` waits for virtiofsd's socket before starting QEMU (start-up race on busy hosts). |
-| #47 | `fix/qemu-exit-zero` | `main` | `qemu-exit` waits for the ACPI power-off it requests (exit status 128 for `qemu-exit 0` on KVM). |
-| #46 | `fix/reject-host-network` | `main` | Reject `--network=host` at creation; explain a missing default route; `28-unsupported-networks`. |
-| #44 | `fix/vm-init-minimal-images` | `main` | `runcvm-vm-init` runs minimal images such as `hello-world`; `27-minimal-images`. |
-| #38 | `tests/a2-exit-codes` | `main` | A2: `14-exit-codes`, `15-stop-kill`, `16-disk-persistence`; `parallel()` helper. |
-| #40 | `tests/a3-lifecycle-isolation` | #38 | A3: `17-lifecycle`, `18-isolation`, `19-config-errors`. |
-| #41 | `tests/a3-mounts-disks` | #40 | A3: `20-mounts`, `21-disks`. |
-| #42 | `tests/a3-resources` | #41 | A3: `22-resources`, `23-leaks`. |
-| #43 | `tests/a3-networking` | #42 | A3: `24-networking`, `25-images-kernels`, `26-docker-in-vm`. |
+| #28 | `claude/macos-docker-compatibility-InrFB` | `main` | ARM64, Podman, installer. Up to date with `main`; needs a compliance sweep, testing on arm64 and with Podman, and a decision on `PLAN-macos-arm64.md`. |
+| #31 | `feat/non-tty-stdio-bridge` | `main` | Separate stdout and stderr without a TTY; `RUNCVM-INIT.md`, the design for a single bespoke guest init (workload in a child namespace). Needs a compliance sweep and KVM testing. |
 
-Changes lower in a stack are merged upwards, never rebased (see `CLAUDE.md`).
+Changes lower in a stack are merged upwards, never rebased (see `CLAUDE.md`). GitHub's stack view offers "Rebase stack" and a "Rebase and merge" button, which a branch containing merge commits cannot use; "Squash and merge", in the button's menu, still works. After a merge, a branch higher in the stack may need `main` merged in before GitHub reports it mergeable.
 
 KVM results (libvirt development VM, 1 November 2026):
 - `main` with #32 and #34: self-test (with `--docker`) and `tests/run --tier all` pass: `10`, `11`, `50-http-docker-swarm` and `51-mariadb`. `docker exec` (#32's patched dropbear) works.
 - Whole stack (#28's branch, including #33 and #30): `10`, `11`, `13-qemu-accel` (default, `kvm`, `auto` and `tcg` on a KVM host), `50` and `51` pass.
 - The A2 and A3 tests (#38, #40–#43), with #39, #44 and #46, on KVM (2 November 2026): 19 of 20 pass, including `27-minimal-images` and `28-unsupported-networks`; `14-exit-codes` failed only its `qemu-exit 0` cases, which pass with #47 (confirmed on KVM).
-- Still to confirm: `12-ipv6`, for #30. The development VM's kernel has IPv6 disabled (no `/proc/sys/net/ipv6`), so the test skips there. To be run on another bare-metal host or in L1.
+- #30 on a KVM host with IPv6 enabled (Docker 29.5.2; 2 November 2026): `tests/run --tier all` passes, including every `12-ipv6` check. The development VM's kernel has IPv6 disabled, so `12-ipv6` skips there.
 
 ### Issues found by A2 and A3
 
@@ -607,6 +606,7 @@ The tests record current behaviour, including the issues below, so fixing one me
 - QEMU could start before virtiofsd's socket existed, so the Container/VM exited with status 1. #39.
 - `qemu-exit 0` gave exit status 128 on KVM: after requesting an ACPI power-off it fell through to an isa-debug-exit write, which QEMU acted on first. #47 (found by `14-exit-codes` on KVM).
 - The README gave `qemu-exit`'s host path rather than its path in the VM. #38.
+- Tests that look up container names depended on the host's DNS search domains, which Docker copies into each container: BusyBox `nslookup` never queries a bare name when `resolv.conf` has a `search` line. `12-ipv6` and `24-networking` run with `--dns-search=.`, and `12-ipv6` resolves with `getent` (#30, #48).
 
 **Smaller issues: lower priority.**
 - `--cpus` below 1 gives the VM every CPU available to the container (rounding up to 1 seems intended).
