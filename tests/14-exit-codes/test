@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Exit status of 'docker run' for a RunCVM Container/VM.
+
+Records RunCVM's exit-code contract (README, "Features and limitations"): the
+entrypoint's own exit status is not passed through; a workload sets the
+Container/VM's exit status by writing it to /.runcvm/exitcode (reduced
+modulo 256) or by calling qemu-exit (0-127), and both need root, since
+/.runcvm is root-only. Each case runs with and without --init.
+
+The expected values describe current behaviour. A change to the contract
+must update them deliberately.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+QEMU_EXIT = "/.runcvm/guest/sbin/qemu-exit"
+
+# (name, docker run options, command, expected exit status)
+CASES = [
+    ("exit-0", [], "exit 0", 0),
+    ("exit-3", [], "exit 3", 0),
+    ("exitcode-file-5", [], "echo 5 >/.runcvm/exitcode; exit 3", 5),
+    ("exitcode-file-300", [], "echo 300 >/.runcvm/exitcode", 44),
+    ("exitcode-file-minus-1", [], "echo -1 >/.runcvm/exitcode", 255),
+    ("qemu-exit-7", [], QEMU_EXIT + " 7", 7),
+    ("qemu-exit-127", [], QEMU_EXIT + " 127", 127),
+    ("qemu-exit-0", [], QEMU_EXIT + " 0; exit 3", 0),
+    ("non-root-exit-3", ["--user=1000"], "exit 3", 0),
+    ("non-root-exitcode-file", ["--user=1000"], "echo 5 >/.runcvm/exitcode; exit 3", 0),
+    ("non-root-qemu-exit", ["--user=1000"], QEMU_EXIT + " 7; exit 3", 0),
+]
+
+RUNS = [(init, case) for init in (False, True) for case in CASES]
+
+
+def run(item):
+    init, (name, opts, command, _) = item
+    container = t.unique("%s%s" % (name, "-init" if init else ""))
+    r = t.docker("run", "--rm", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 *(["--init"] if init else []), *opts, "alpine", "sh", "-c", command)
+    return r
+
+
+results = t.parallel(run, RUNS)
+
+for (init, (name, opts, command, expected)), r in zip(RUNS, results):
+    desc = "%s, %s: %s" % (name, "--init" if init else "no --init", command)
+    if not t.check(desc, expected, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+
+t.finish()

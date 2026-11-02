@@ -20,6 +20,7 @@ Usage, in a test directory's executable 'test' file:
 """
 
 import atexit
+import concurrent.futures
 import os
 import re
 import subprocess
@@ -65,6 +66,19 @@ def docker(*args, check=False, timeout=None, capture=True):
     out = subprocess.PIPE if capture else None
     return subprocess.run(("docker",) + tuple(args), stdout=out, stderr=subprocess.STDOUT if capture else None,
                           universal_newlines=True, check=check, timeout=timeout)
+
+
+def parallel(func, items, jobs=None):
+    """Return [func(item) for item in items], running up to 'jobs' calls at once.
+
+    For tests made of many independent cases, each launching its own
+    Container/VM. 'jobs' defaults to RUNCVM_TEST_JOBS, or 3. Results keep the
+    order of 'items'; record checks from the results afterwards, in this
+    thread, so that the log stays in order.
+    """
+    jobs = jobs or int(os.environ.get("RUNCVM_TEST_JOBS") or 3)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        return list(pool.map(func, items))
 
 
 def record_result(status, desc):
