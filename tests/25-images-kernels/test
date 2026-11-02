@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Kernels and images in RunCVM Container/VMs.
+
+- Each kernel installed with RunCVM (RUNCVM_KERNEL=<dist>) boots, and
+  loads kernel modules from the modules RunCVM provides (modprobe ip_vs),
+  except the OpenWrt kernel, for which no module list is provided.
+- Without RUNCVM_KERNEL, the kernel follows the image's distribution
+  (ID in /etc/os-release), or is Debian's if the image has none.
+- An image's USER and WORKDIR apply in the VM.
+- An entrypoint that cannot be executed: the error is shown, and the exit
+  status is 0, as when any entrypoint exits without setting one (see
+  tests/14-exit-codes).
+- hello-world, an image holding only a static binary: the binary does not
+  run, so there is no output.
+
+The expected values describe current behaviour. A change to it must update
+them deliberately.
+"""
+
+import atexit
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+KERNELS_DIR = "/opt/runcvm/kernels"
+TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+PROBE = 'echo "uname=$(uname -r)"; echo "id=$(id -u)"; echo "pwd=$(pwd)"; modprobe ip_vs 2>/dev/null && echo "modprobe=ok"'
+
+
+def kernel_version(dist):
+    """The version that a kernel dist's 'latest' link points to on this host, or None."""
+    try:
+        return os.path.basename(os.readlink(os.path.join(KERNELS_DIR, dist, "latest")))
+    except OSError:
+        return None
+
+
+# An image declaring a non-root USER and a WORKDIR, built locally from alpine.
+user_image = t.unique("user-image").lower()
+subprocess.run(["docker", "build", "-q", *t.labels(), "-t", user_image, "-"], check=True,
+               input="FROM alpine\nUSER 1000:1000\nWORKDIR /tmp\n", universal_newlines=True,
+               stdout=subprocess.DEVNULL)
+atexit.register(lambda: t.docker("rmi", "-f", user_image))
+
+# (name, docker run options, image and command, expected kernel dist,
+#  modprobe expected to work (None: not checked))
+CASES = [("kernel-" + k, ["--env=RUNCVM_KERNEL=" + k], ["alpine", "sh", "-c", PROBE], k, k != "openwrt")
+         for k in ("alpine", "debian", "ubuntu", "ol", "openwrt")]
+CASES += [("image-" + i.split(":")[0], [], [i, "sh", "-c", PROBE], k, None)
+          for i, k in (("alpine", "alpine"), ("debian:bookworm-slim", "debian"), ("ubuntu:24.04", "ubuntu"),
+                       ("busybox", "debian"))]
+
+
+def run(args):
+    name, opts, image_cmd = args
+    return t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
+                    *t.vm_opts(), *opts, *image_cmd, timeout=TIMEOUT)
+
+
+RUNS = [(c[0], c[1], c[2]) for c in CASES] + [
+    ("user-image", [], [user_image, "sh", "-c", PROBE]),
+    ("no-entrypoint", [], ["alpine", "/no/such/program"]),
+    ("hello-world", [], ["hello-world"]),
+]
+results = dict(zip([r[0] for r in RUNS], t.parallel(run, RUNS)))
+
+
+def field(output, key):
+    for line in output.replace("\r", "").splitlines():
+        if line.startswith(key + "="):
+            return line.split("=", 1)[1].split()[0]
+    return None
+
+
+for name, opts, image_cmd, dist, modprobe in CASES:
+    r = results[name]
+    expected = kernel_version(dist)
+    if not t.check("%s: booted" % name, 0, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+        continue
+    if expected:
+        t.check("%s: runs the %s kernel" % (name, dist), expected, field(r.stdout, "uname"))
+    if modprobe is not None:
+        t.check("%s: modprobe ip_vs works" % name, modprobe, field(r.stdout, "modprobe") == "ok")
+
+r = results["user-image"]
+t.check("image USER applies", "1000", field(r.stdout, "id"))
+t.check("image WORKDIR applies", "/tmp", field(r.stdout, "pwd"))
+
+r = results["no-entrypoint"]
+t.check("entrypoint not found: exit status", 0, r.returncode)
+t.check("entrypoint not found: error shown", True, "unable to exec /no/such/program" in r.stdout)
+
+t.check("hello-world: no output", "", results["hello-world"].stdout.strip())
+
+t.finish()
