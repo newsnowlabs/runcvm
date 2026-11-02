@@ -104,15 +104,18 @@ RUNCVM_DNS_IP=169.254.169.254
 
 mkdir -p /.runcvm/network/devices
 
+# The 'ip -N' parses below match protocols and scopes by number (protocol 2 is 'kernel'; scope 0 is
+# 'global' and 253 'link'), because their names come from /etc/iproute2, which is the image's.
+
 # Save non-link-scope non-default routes for later restoration in the running VM.
-ip -json route show | jq -r '.[] | select(.scope != "link" and .dst != "default") | "\(.dst) \(.gateway) \(.dev) \(.prefsrc)"' >/.runcvm/network/routes
+ip -N -json route show | jq -r '.[] | select(.scope != "253" and .dst != "default") | "\(.dst) \(.gateway) \(.dev) \(.prefsrc)"' >/.runcvm/network/routes
 
 # Save non-kernel (i.e. non-connected, non-link-local) non-default IPv6 routes
 # for later restoration in the running VM. Kernel-derived on-link prefix routes
 # are not saved: the VM's kernel recreates each one when the VM adds the
 # interface's IPv6 address. fe80::/64 is link-local, and likewise recreated by
 # the kernel when the VM brings up its interface.
-ip -6 -json route show | jq -r '.[] | select(.protocol != "kernel" and .dst != "default" and .dst != "fe80::/64") | "\(.dst) \(.gateway) \(.dev)"' >/.runcvm/network/routes6
+ip -N -6 -json route show | jq -r '.[] | select(.protocol != "2" and .dst != "default" and .dst != "fe80::/64") | "\(.dst) \(.gateway) \(.dev)"' >/.runcvm/network/routes6
 
 for if in $(ip -json link show | jq -r '.[] | .ifname')
 do
@@ -125,7 +128,7 @@ do
 
   # Capture the on-link (connected) route prefix for this interface, before its
   # address (and the kernel route derived from it) is flushed below.
-  DOCKER_NET=$(ip -json route show dev "$if" scope link | jq -r '.[0].dst // empty')
+  DOCKER_NET=$(ip -json route show dev "$if" scope 253 | jq -r '.[0].dst // empty')
 
   # Fall back to deriving the prefix from the interface's IPv4 address, for an
   # interface with no on-link route (otherwise 'ip route add' below would fail
@@ -143,7 +146,7 @@ do
   # case for an IPv4-only container - since the underlying jq select()
   # then produces no output at all for read to consume.)
   read -r DOCKER_IF6_IP DOCKER_IF6_IP_NETPREFIX < \
-    <(ip -json addr show "$if" | jq -r '.[0].addr_info[] | select(.family=="inet6" and .scope=="global" and ((.deprecated // false) | not)) | [.local, .prefixlen] | @tsv' | head -n 1) || true
+    <(ip -N -json addr show "$if" | jq -r '.[0].addr_info[] | select(.family=="inet6" and .scope=="0" and ((.deprecated // false) | not)) | [.local, .prefixlen] | @tsv' | head -n 1) || true
 
   # Save container network parameters
   if [ "$if" = "$DOCKER_GW_IF" ]; then
