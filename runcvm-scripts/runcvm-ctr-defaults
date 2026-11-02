@@ -113,7 +113,6 @@ create_aliases() {
     mkdir
     mke2fs
     mount
-    mountpoint
     nc
     poweroff
     ps

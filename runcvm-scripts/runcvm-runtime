@@ -94,8 +94,9 @@ load_env_from_file() {
   return 1
 }
 
+# HOME=$RUNCVM keeps jq from loading the invoking user's ~/.jq.
 jq() {
-  $RUNCVM_LD $RUNCVM_JQ "$@"
+  HOME=$RUNCVM $RUNCVM_LD $RUNCVM_JQ "$@"
 }
 
 jq_set() {
