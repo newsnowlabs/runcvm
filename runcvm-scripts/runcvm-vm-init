@@ -24,9 +24,10 @@ if [ "$(findmnt -rnu -o FSTYPE /dev)" = "devtmpfs" ]; then
   [ -h /dev/ptmx ] || ln -snf pts/ptmx /dev/ptmx
   chmod 666 /dev/null /dev/random /dev/urandom /dev/zero /dev/tty /dev/pts/ptmx
   chmod 620 /dev/tty[0-9]*
-  # Images without a 'tty' group (e.g. images with no /etc/group) get the conventional tty gid, 5:
-  # runcvm-vm-init runs with 'bash -e' as the VM's PID 1, so a failure here would halt the VM.
-  chgrp tty /dev/tty* 2>/dev/null || chgrp 5 /dev/tty*
+  # Images without a 'tty' group (e.g. images with no /etc/group) have no members to grant access
+  # to, so leave the devices' group unchanged: runcvm-vm-init runs with 'bash -e' as the VM's PID 1,
+  # so a failure here would halt the VM.
+  chgrp tty /dev/tty* 2>/dev/null || true
 fi
 
 # Unmount /run if it is a tmpfs (not a virtiofs) mounted by the initramfs
