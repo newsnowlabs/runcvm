@@ -37,14 +37,14 @@ disk_normalise_path() {
   echo "$path"
 }
 
-# Prints the name of the top-level directory of a multi-destination disk that holds destination
+# Prints the name of the top-level directory of a disk with layout 'subdirs' that holds destination
 # $1, a normalised path: the path without its leading '/', with each '%', '-' and '=' encoded as
 # '%25', '%2D' and '%3D', and then each '/' replaced by '-'. For example, '/var/lib/docker' is held
 # in 'var-lib-docker', '/a/b' in 'a-b' and '/a-b' in 'a%2Db'.
 #
 # The encoding is reversible, so distinct destinations always have distinct names; and the name
 # depends only on the destination, so it is the same on every boot. The name must contain no '=',
-# because mke2fs's '-d SRC=SUBDIR' takes everything after the last '=' as SUBDIR.
+# because mke2fs's '-P SUBDIR=SRC' ends SUBDIR at the first '='.
 disk_subdir() {
   local name="${1#/}"
 
@@ -56,34 +56,92 @@ disk_subdir() {
   echo "$name"
 }
 
-# Argument e.g. /volume/disk1,/var/lib/docker,ext4,5G
-# or /volume/disk1,/var/lib/docker:/var/lib/containerd:/home,ext4,5G
+# The filesystem label that marks a disk with layout 'subdirs'. A disk's layout is chosen when it is
+# created, and read from its label thereafter: any other label, or none, means layout 'root'.
+DISK_SUBDIRS_LABEL="runcvm-subdirs"
+
+# Argument: <src>,<dst>[:<dst2>:...],<fs>[,<size>][,layout=subdirs|root]
+# e.g. /volume/disk1,/var/lib/docker:/var/lib/containerd:/home,ext4,5G
 #
-# A disk with one destination is mounted at that destination, and holds its contents at its root.
+# A disk with layout 'subdirs' (the default for a new disk) holds each destination's contents in its
+# own top-level directory, named by disk_subdir. It is mounted at /.runcvm/disks/<id>, and each
+# directory is bind-mounted over its destination.
 #
-# A disk with several destinations is mounted at /.runcvm/disks/<id>, and holds each destination's
-# contents in its own top-level directory, named by disk_subdir; each directory is bind-mounted
-# over its destination.
+# A disk with layout 'root' has exactly one destination, holds its contents at its root, and is
+# mounted at that destination.
 do_disk() {
   local spec="$1"
   local id="$2"
-  local src dsts dst fs size dir UUID queues i j multi=0
-  local -a dests=() subdirs=() populate=()
+  local src dsts dst fs size="" layout layout_opt="" field dir UUID LABEL queues i j
+  local -a fields=() dests=() subdirs=() populate=()
 
-  IFS=',' read -r src dsts fs size <<< "$spec"
+  IFS=',' read -r -a fields <<< "$spec"
+  src="${fields[0]}"
+  dsts="${fields[1]}"
+  fs="${fields[2]}"
 
   if [[ -z "$src" || -z "$dsts" || -z "$fs" ]]; then
     error "Error: disk spec '$spec' invalid: src, dst and fs must all be specified"
   fi
 
-  IFS=':' read -r -a dests <<< "$dsts"
-  [[ "$dsts" = *:* ]] && multi=1
+  # Fields after <fs>: an optional <size>, then options of the form <key>=<value>.
+  for i in "${!fields[@]}"
+  do
+    [ "$i" -ge 3 ] || continue
+    field="${fields[$i]}"
+    case "$field" in
+      layout=subdirs|layout=root)
+        [ -z "$layout_opt" ] || error "Error: disk spec '$spec' invalid: layout specified more than once"
+        layout_opt="${field#layout=}"
+        ;;
+      layout=*)
+        error "Error: disk spec '$spec' invalid: layout must be 'subdirs' or 'root'"
+        ;;
+      *=*)
+        error "Error: disk spec '$spec' invalid: unknown option '${field%%=*}'"
+        ;;
+      *)
+        [ "$i" -eq 3 ] || error "Error: disk spec '$spec' invalid: unexpected field '$field'"
+        size="$field"
+        ;;
+    esac
+  done
 
-  if [ "$multi" = "1" ]; then
-    if [[ "$dsts" = :* || "$dsts" = *: || "$dsts" = *::* ]]; then
-      error "Error: disk spec '$spec' invalid: dst must not be empty"
+  if [[ -e "$src" && ! -f "$src" ]]; then
+    error "Error: disk spec '$spec' invalid: src '$src' must be a plain file if it exists"
+  fi
+
+  if [[ "$dsts" = :* || "$dsts" = *: || "$dsts" = *::* ]]; then
+    error "Error: disk spec '$spec' invalid: dst must not be empty"
+  fi
+
+  IFS=':' read -r -a dests <<< "$dsts"
+
+  # An existing disk keeps the layout it was created with, as recorded by its label.
+  if [[ -f "$src" ]]; then
+    LABEL=$(blkid -p -s LABEL -o value "$src") || true
+    if [ "$LABEL" = "$DISK_SUBDIRS_LABEL" ]; then
+      layout="subdirs"
+    else
+      layout="root"
     fi
 
+    if [[ -n "$layout_opt" && "$layout_opt" != "$layout" ]]; then
+      error "Error: disk spec '$spec' invalid: src '$src' exists, with layout '$layout', not '$layout_opt'"
+    fi
+
+    if [[ "$layout" = "root" && "${#dests[@]}" -gt 1 ]]; then
+      error "Error: disk spec '$spec' invalid: src '$src' exists, with layout 'root', which holds exactly one dst"
+    fi
+  else
+    layout="${layout_opt:-subdirs}"
+
+    if [[ "$layout" = "root" && "${#dests[@]}" -gt 1 ]]; then
+      error "Error: disk spec '$spec' invalid: layout 'root' holds exactly one dst"
+    fi
+  fi
+
+  if [ "$layout" = "subdirs" ]; then
     for i in "${!dests[@]}"
     do
       dst="${dests[$i]}"
@@ -117,10 +175,6 @@ do_disk() {
 
   for dst in "${dests[@]}"
   do
-    if [[ -z "$dst" ]]; then
-      error "Error: disk spec '$spec' invalid: dst must not be empty"
-    fi
-
     if [[ "$src" = "$dst" ]]; then
       error "Error: disk spec '$spec' invalid: src '$src' cannot be same as dst"
     fi
@@ -129,10 +183,6 @@ do_disk() {
       error "Error: disk spec '$spec' invalid: dst '$dst' must be a directory if it exists"
     fi
   done
-
-  if [[ -e "$src" && ! -f "$src" ]]; then
-    error "Error: disk spec '$spec' invalid: src '$src' must be a plain file if it exists"
-  fi
 
   # Create each destination directory, if it doesn't already exist: it is the source from which
   # a new disk is populated, and the mountpoint within the VM.
@@ -158,10 +208,11 @@ do_disk() {
 
     # Create filesystem on disk backing file, populated with any pre-existing files from each dst.
     # Use RunCVM's own mke2fs configuration, not the image's /etc/mke2fs.conf.
-    if [ "$multi" = "1" ]; then
+    if [ "$layout" = "subdirs" ]; then
+      populate=(-L "$DISK_SUBDIRS_LABEL")
       for i in "${!dests[@]}"
       do
-        populate+=(-d "$RUNCVM_VM_MOUNTPOINT${dests[$i]}=${subdirs[$i]}")
+        populate+=(-P "${subdirs[$i]}=$RUNCVM_VM_MOUNTPOINT${dests[$i]}")
       done
     else
       populate=(-d "$RUNCVM_VM_MOUNTPOINT/$dsts")
@@ -177,7 +228,7 @@ do_disk() {
     error "Error: disk spec '$spec' invalid: no filesystem UUID found in src '$src'"
   fi
 
-  if [ "$multi" = "1" ]; then
+  if [ "$layout" = "subdirs" ]; then
     echo "UUID=$UUID /.runcvm/disks/$id $fs defaults,noatime 0 0" >>/.runcvm/fstab
     for i in "${!dests[@]}"
     do

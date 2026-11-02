@@ -10,8 +10,9 @@
 - A backing file may be in the container's own filesystem or in a volume.
 - /disks, where backing files are usually kept, is mounted only in the
   container, not in the VM.
-- A pre-existing backing file whose filesystem has a label (made here with
-  RunCVM's own mke2fs, from /opt/runcvm) is mounted, with its contents.
+- A pre-existing backing file whose filesystem has a label of its own (made
+  here with RunCVM's own mke2fs, from /opt/runcvm) is mounted at its
+  destination, with its contents at its root.
 """
 
 import os
@@ -65,7 +66,7 @@ size_mb = int(blocks) * int(bsize) // (1024 * 1024)
 t.check("/data filesystem is over 40M of the 64M disk (got %dM)" % size_mb, True, 40 < size_mb <= 64)
 
 t.check("/etc/apk prepopulated from the image", True, "alpine" in ex("cat", "/etc/apk/repositories"))
-t.check("/data starts empty (apart from lost+found)", "lost+found", ex("ls", "/data"))
+t.check("/data starts empty", "", ex("ls", "-A", "/data"))
 t.check("/labelled holds the pre-existing disk's contents", "labelled", ex("cat", "/labelled/marker"))
 t.check("/disks is not visible in the VM", False, t.docker("exec", name, "test", "-e", "/disks/one").returncode == 0)
 t.check("backing files created in the volume", "labelled one two",
