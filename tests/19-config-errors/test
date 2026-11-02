@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Invalid RunCVM settings make 'docker run' fail with RunCVM's own message.
+
+- RUNCVM_KERNEL naming a kernel that is not installed, or not of the form
+  <dist>[/<version>]: Container/VM creation fails (exit status 125), with
+  the error from runcvm-runtime.
+- A RUNCVM_DISKS spec missing its fields: the Container/VM exits with
+  status 1 before the VM starts, with the error from the entrypoint.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+# (name, docker run options, expected exit status, expected message)
+CASES = [
+    ("kernel", ["--env=RUNCVM_KERNEL=nosuchdist/1.0"], 125,
+     "RunCVM: Error: Kernel 'nosuchdist/1.0' not found"),
+    ("kernel-format", ["--env=RUNCVM_KERNEL=Not/A/Kernel"], 125,
+     "RunCVM: Error: Kernel 'Not/A/Kernel' invalid"),
+    ("disks", ["--env=RUNCVM_DISKS=/disks/disk1"], 1,
+     "disk spec '/disks/disk1' invalid: src, dst and fs must all be specified"),
+]
+
+
+def run(case):
+    name, opts, _, _ = case
+    return t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
+                    *t.vm_opts(), *opts, "alpine", "true", timeout=600)
+
+
+for (name, opts, status, message), r in zip(CASES, t.parallel(run, CASES)):
+    t.check("%s: exit status" % opts[0], status, r.returncode)
+    if not t.check("%s: error message" % opts[0], True, message in r.stdout):
+        t.log("output:\n%s" % r.stdout)
+
+t.finish()

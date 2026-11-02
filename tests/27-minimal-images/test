@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""Minimal images run in RunCVM Container/VMs.
+
+hello-world holds only a static binary: no shell, no /etc/group, no tools.
+RunCVM's VM start-up uses only its own tools, so the binary runs and its
+output arrives, with and without --init.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+for init in (False, True):
+    mode = "--init" if init else "no --init"
+    r = t.docker("run", "--rm", "--name", t.unique("hello-world" + ("-init" if init else "")), *t.labels(),
+                 "--runtime=" + t.RUNTIME, *t.vm_opts(), *(["--init"] if init else []), "hello-world",
+                 timeout=TIMEOUT)
+    if not t.check("hello-world, %s: output arrives" % mode, True, "Hello from Docker!" in r.stdout):
+        t.log("output:\n%s" % r.stdout)
+    t.check("hello-world, %s: exit status" % mode, 0, r.returncode)
+
+t.finish()

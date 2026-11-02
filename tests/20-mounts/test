@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Volumes, bind mounts and tmpfs mounts in a RunCVM Container/VM.
+
+The VM's filesystem, including volumes and bind mounts, is served from the
+container over virtiofs:
+
+- A named volume and a bind-mounted host directory are readable and
+  writable in the VM, and files written there keep the writer's uid and
+  gid on the host.
+- A read-only bind mount (':ro') cannot be written in the VM.
+- A single file can be bind-mounted.
+- Each --tmpfs and --mount type=tmpfs mount is a tmpfs in the VM, with its
+  options.
+- Two Container/VMs sharing a volume with RUNCVM_VIRTIOFSD_CACHE=none see
+  each other's writes at once.
+
+The expected values describe current behaviour. A change to it must update
+them deliberately.
+"""
+
+import os
+import shutil
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+VM = ["--runtime=" + t.RUNTIME, *t.vm_opts()]
+
+
+def start(label, *opts, image=("alpine", "sleep", "600")):
+    name = t.unique(label)
+    t.cleanup_container(name)
+    r = t.docker("run", "-d", "--name", name, *t.labels(), *VM, *opts, *image)
+    return name if r.returncode == 0 and t.wait_for_exec(name, BOOT_TIMEOUT) else None
+
+
+def ex(name, *cmd, user=None):
+    return t.docker("exec", *(["--user", user] if user else []), name, *cmd)
+
+
+def case_volume_and_binds():
+    volume = t.unique("mounts")
+    t.volume_create(volume)
+    host = tempfile.mkdtemp(prefix="runcvm-test-")
+    os.chmod(host, 0o777)
+    with open(os.path.join(host, "from-host"), "w") as f:
+        f.write("host-data\n")
+    ro = tempfile.mkdtemp(prefix="runcvm-test-ro-")
+    single = os.path.join(host, "single-file")
+    with open(single, "w") as f:
+        f.write("single\n")
+    try:
+        name = start("mounts", "-v", volume + ":/vol", "-v", host + ":/bind", "-v", ro + ":/ro:ro",
+                     "-v", single + ":/single-file:ro", "--tmpfs", "/tmp1", "--tmpfs", "/tmp2:size=8m",
+                     "--mount", "type=tmpfs,dst=/tmp3")
+        if not name:
+            return [("mounts: Container/VM started", True, False)]
+        ex(name, "sh", "-c", "echo vm-data >/vol/f")
+        ex(name, "sh", "-c", "echo vm-data >/bind/from-vm", user="1000:1000")
+        st = os.stat(os.path.join(host, "from-vm")) if os.path.exists(os.path.join(host, "from-vm")) else None
+        return [
+            ("named volume: written in the VM, read on the host", "vm-data\n", t.volume_read(volume, "f")),
+            ("bind mount: host file readable in the VM", "host-data", ex(name, "cat", "/bind/from-host").stdout.strip()),
+            ("bind mount: file written by uid 1000 in the VM is owned by 1000:1000 on the host",
+             (1000, 1000), (st.st_uid, st.st_gid) if st else None),
+            ("read-only bind mount: write refused", False, ex(name, "touch", "/ro/x").returncode == 0),
+            ("single-file bind mount", "single", ex(name, "cat", "/single-file").stdout.strip()),
+            ("--tmpfs /tmp1: tmpfs in the VM", "tmpfs", ex(name, "stat", "-f", "-c", "%T", "/tmp1").stdout.strip()),
+            ("--tmpfs /tmp2:size=8m: tmpfs in the VM", "tmpfs", ex(name, "stat", "-f", "-c", "%T", "/tmp2").stdout.strip()),
+            ("--tmpfs /tmp2:size=8m: size option applied", "8192",
+             (ex(name, "df", "-k", "/tmp2").stdout.split() or [""] * 9)[8]),
+            ("--mount type=tmpfs /tmp3: tmpfs in the VM", "tmpfs",
+             ex(name, "stat", "-f", "-c", "%T", "/tmp3").stdout.strip()),
+        ]
+    finally:
+        shutil.rmtree(host, ignore_errors=True)
+        shutil.rmtree(ro, ignore_errors=True)
+
+
+def case_shared_volume():
+    volume = t.unique("shared")
+    t.volume_create(volume)
+    opts = ["-v", volume + ":/shared", "--env=RUNCVM_VIRTIOFSD_CACHE=none"]
+    names = t.parallel(lambda label: start(label, *opts), ["shared-a", "shared-b"], jobs=2)
+    if not all(names):
+        return [("shared volume: both Container/VMs started", True, False)]
+    a, b = names
+    results = []
+    for i in range(3):
+        ex(a, "sh", "-c", "echo round-%d >/shared/f" % i)
+        results.append(("shared volume, cache=none: write %d in one VM seen at once in the other" % i,
+                        "round-%d" % i, ex(b, "cat", "/shared/f").stdout.strip()))
+    return results
+
+
+for results in t.parallel(lambda f: f(), [case_volume_and_binds, case_shared_volume], jobs=2):
+    for desc, expected, actual in results:
+        t.check(desc, expected, actual)
+
+t.finish()

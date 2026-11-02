@@ -181,7 +181,7 @@ if [ "$NodeState" = "inactive" ] || [ "$NodeState" = "pending" ]; then
 
   # Log this trigger line last BUT before (optionally) running DIRD.
   # This is because the test script waits for this line to appear before proceeding to launch the service.
-  # We log multiple times to work around a minor bug whereby the test script sometimes fails to react to the first log line alone.
+  # Log it several times, as the test script can miss a single occurrence.
   for i in $(seq 1 5); do log "Swarm complete!"; sleep 0.25; done
   
   # Optionally run DIRD.

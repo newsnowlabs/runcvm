@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Persistence of data on a RUNCVM_DISKS disk across Container/VM shutdown.
+
+A file is written to a disk held in a Docker volume, without 'sync' unless
+stated; the Container/VM then ends, and a second Container/VM using the
+same disk reads the file back:
+
+- 'docker stop' runs busybox 'poweroff' in the VM, which syncs
+  filesystems before signalling PID 1, so the file survives in either
+  mode, whether or not the entrypoint handles SIGTERM.
+- With --init, busybox init powers the VM off cleanly when the entrypoint
+  exits, so the file survives.
+- Without --init, the entrypoint is the VM's PID 1: when it exits, the VM
+  ends at once and unwritten data is lost, unless the workload calls
+  'sync' first.
+
+'docker kill' is not included: its outcome depends on whether the kernel
+has written the data back yet.
+
+The expected values describe current behaviour. A change to it must update
+them deliberately.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+WRITE = "echo payload >/data/f"
+TRAP = "trap 'exit 0' TERM; while true; do sleep 1; done"
+
+# (name, --init?, command, ending, file expected to survive?)
+CASES = [
+    ("exit", True, WRITE, "exit", True),
+    ("exit", False, WRITE, "exit", False),
+    ("exit-sync", False, WRITE + "; sync", "exit", True),
+    ("stop", True, WRITE + "; sleep 600", "stop", True),
+    ("stop", False, WRITE + "; sleep 600", "stop", True),
+    ("stop-trap", False, WRITE + "; " + TRAP, "stop", True),
+]
+
+
+def disk_opts(volume):
+    return ["--mount", "type=volume,src=%s,dst=/disks" % volume,
+            "--env", "RUNCVM_DISKS=/disks/disk1,/data,ext4,64M"]
+
+
+def run(case):
+    name, init, command, ending, _ = case
+    label = "%s%s" % (name, "-init" if init else "")
+    volume = t.unique(label)
+    t.volume_create(volume)
+    container = t.unique(label)
+    common = [*t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(), *(["--init"] if init else []),
+              *disk_opts(volume)]
+    if ending == "exit":
+        r = t.docker("run", "--rm", "--name", container, *common, "alpine", "sh", "-c", command)
+        if r.returncode != 0:
+            return None, r.stdout
+    else:
+        t.cleanup_container(container)
+        r = t.docker("run", "-d", "--name", container, *common, "alpine", "sh", "-c", command)
+        if r.returncode != 0:
+            return None, r.stdout
+        if not t.wait_for("%s to write its file" % container, BOOT_TIMEOUT,
+                          ["docker", "exec", container, "test", "-s", "/data/f"]):
+            return None, t.docker("logs", container).stdout
+        t.docker("stop", "-t", "30", container)
+    r = t.docker("run", "--rm", "--name", container + "-read", *t.labels(), "--runtime=" + t.RUNTIME,
+                 *t.vm_opts(), *disk_opts(volume), "alpine", "sh", "-c", "cat /data/f 2>/dev/null || true")
+    return "payload" in r.stdout, r.stdout
+
+
+results = t.parallel(run, CASES)
+
+for (name, init, command, ending, expected), (survived, output) in zip(CASES, results):
+    desc = "%s, %s: file survives" % (name, "--init" if init else "no --init")
+    if survived is None:
+        t.check("%s, %s: Container/VM ran" % (name, "--init" if init else "no --init"), True, False)
+        t.log("output:\n%s" % output)
+        continue
+    t.check(desc, expected, survived)
+
+t.finish()

@@ -223,7 +223,7 @@ else
 
   # QEMU machine configuration:
   # - q35: modern Intel chipset with PCIe and UEFI support
-  # - accel=kvm: enable KVM for near-native performance (requires hardware virtualization)
+  # - accel=kvm: enable KVM for near-native performance (requires hardware virtualisation)
   # - usb=on: enable USB support (e.g., for peripherals or boot devices)
   # - sata=off: disable SATA controller if using virtio/NVMe instead
   # - vmport=off: disable VMware backdoor port for improved security/stealth
@@ -359,16 +359,16 @@ fi
 
 MEM_BACKEND=(-numa node,memdev=mem)
 if [ "$RUNCVM_HUGETLB" != "1" ]; then
-  # Tests suggests prealloc=on slows down mem-path=/dev/shm
+  # prealloc defaults to off, as it is slower with mem-path=/dev/shm
   MEM_PATH="/dev/shm" 
   MEM_BACKEND+=(-object memory-backend-file,id=mem,size=$RUNCVM_MEM_SIZE,mem-path=$MEM_PATH,share=on,prealloc=${RUNCVM_QEMU_MEM_PREALLOC:-off})
 else
-  # Fastest performance: +15% CPU/net intensive; 3.5x disk intensive.
+  # Fastest option: about 15% faster for CPU- and network-intensive workloads, and 3.5x
+  # for disk-intensive workloads, than /dev/shm.
   MEM_BACKEND+=(-object memory-backend-memfd,id=mem,size=$RUNCVM_MEM_SIZE,share=on,prealloc=${RUNCVM_QEMU_MEM_PREALLOC:-off},hugetlb=on)
 fi
 
-# 16-64 works well and is more performant than 1024 in some scenarios.
-# For now, stick with original figure.
+# Queue sizes of 16-64 can outperform 1024 in some scenarios; 1024 is the default.
 VIRTIOFS_QUEUE_SIZE=1024
 VIRTIOFS+=(
   -chardev socket,id=virtiofs,path=$QEMU_VIRTIOFSD_SOCKET
@@ -456,6 +456,14 @@ ARGS=(
   -L $RUNCVM_GUEST/usr/share/qemu
   -append "$RUNCVM_KERNEL_ROOT $INIT rw ${APPEND[*]} $RUNCVM_KERNEL_APPEND"
 )
+
+# virtiofsd is started in the background by runcvm-ctr-entrypoint, and QEMU fails at once if the
+# virtiofsd socket does not yet exist: wait up to 30s for it.
+for ((i = 0; i < 300; i++)); do
+  [ -S "$QEMU_VIRTIOFSD_SOCKET" ] && break
+  busybox sleep 0.1
+done
+[ -S "$QEMU_VIRTIOFSD_SOCKET" ] || error "RunCVM: Error: virtiofsd socket $QEMU_VIRTIOFSD_SOCKET not created within 30s (see /run/.virtiofsd.log)"
 
 if [[ "$RUNCVM_BREAK" =~ preqemu ]]; then echo "Preparing to run: '$CMD' ${ARGS[@]@Q}"; bash; fi
 
