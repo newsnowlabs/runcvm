@@ -61,8 +61,8 @@
 +			goto out;
 +		}
 +
-+		/* Excluded or on another filesystem: skip non-directories
-+		 * entirely; directories are created empty (see S_IFDIR) */
++		/* Excluded or on another file system: skip non-directories
++		 * entirely; directories are created empty (below) */
 +		if (!S_ISDIR(st.st_mode) && populate_pruned(target->path, &st, flags)) {
 +			target->path_len = cur_dir_path_len;
 +			target->path[target->path_len] = 0;
@@ -414,7 +414,7 @@
  .BI orphan_file_size= size
  Set size of the file for tracking unlinked but still open inodes and inodes
  with truncate in progress. Larger file allows for better scalability, reserving
-@@ -567,6 +582,30 @@
+@@ -567,6 +582,33 @@
  For more information about the features which can be set, please see
  the manual page \fBext4\fR(5).
  .TP
@@ -425,8 +425,11 @@
 +.I source-directory
 +into it.
 +.I subdirectory
-+takes the owner, mode, timestamps and extended attributes of
-+.IR source-directory .
++takes the owner, mode and timestamps of
++.IR source-directory ,
++and its extended attributes unless the
++.B no_copy_xattrs
++extended option is given.
 +The argument is split at its first "\fB=\fR":
 +.I subdirectory
 +must be a single path component, must not contain "\fB=\fR", and must not
@@ -445,7 +448,7 @@
  .B \-q
  Quiet execution.  Useful if \fBmke2fs\fR is run in a script.
  .TP
-@@ -656,6 +695,32 @@
+@@ -656,6 +698,36 @@
  .B \-V
  Print the version number of \fBmke2fs\fR and exit.
  .TP
@@ -467,11 +470,15 @@
 +.BR \-d ,
 +and
 +.B /*/tmp/*
-+the contents of
++the contents of every
 +.B tmp
-+in every
++directory two levels down: the one in every
 +.B \-P
-+directory. "\fB*\fR" does not match "\fB/\fR". A matching directory is
++directory, and others such as
++.B var/tmp
++copied with
++.BR \-d .
++"\fB*\fR" does not match "\fB/\fR". A matching directory is
 +still created, but its contents are not copied. This option may be given
 +more than once.
 +.TP
