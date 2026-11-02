@@ -569,13 +569,32 @@ Open:
 | #30 | `claude/runcvm-ipv6-support-iwotel` | `main` | Dual-stack IPv6; multi-network boot fix; `tests/12-ipv6`. |
 | #28 | `claude/macos-docker-compatibility-InrFB` | #30 | ARM64, Podman, installer. |
 | #37 (draft) | `docs/conventions-sweep-main` | `main` | `CLAUDE.md` compliance fixes to text already on `main`. |
+| #39 | `fix/virtiofsd-socket-wait` | `main` | `runcvm-ctr-qemu` waits for virtiofsd's socket before starting QEMU (start-up race on busy hosts). |
+| #38 | `tests/a2-exit-codes` | `main` | A2: `14-exit-codes`, `15-stop-kill`, `16-disk-persistence`; `parallel()` helper. |
+| #40 | `tests/a3-lifecycle-isolation` | #38 | A3: `17-lifecycle`, `18-isolation`, `19-config-errors`. |
+| #41 | `tests/a3-mounts-disks` | #40 | A3: `20-mounts`, `21-disks`. |
+| #42 | `tests/a3-resources` | #41 | A3: `22-resources`, `23-leaks`. |
+| #43 | `tests/a3-networking` | #42 | A3: `24-networking`, `25-images-kernels`, `26-docker-in-vm`. |
 
 Changes lower in a stack are merged upwards, never rebased (see `CLAUDE.md`).
 
 KVM results (libvirt development VM, 1 November 2026):
 - `main` with #32 and #34: self-test (with `--docker`) and `tests/run --tier all` pass: `10`, `11`, `50-http-docker-swarm` and `51-mariadb`. `docker exec` (#32's patched dropbear) works.
 - Whole stack (#28's branch, including #33 and #30): `10`, `11`, `13-qemu-accel` (default, `kvm`, `auto` and `tcg` on a KVM host), `50` and `51` pass.
+- Still to confirm: the A2 and A3 tests (#38, #40–#43) on KVM; they pass under TCG in a sandbox.
 - Still to confirm: `12-ipv6`, for #30. The development VM's kernel has IPv6 disabled (no `/proc/sys/net/ipv6`), so the test skips there. To be run on another bare-metal host or in L1.
+
+### Findings from A2 and A3 (current behaviour, recorded by the tests)
+
+- Without `--init`, data written to a `RUNCVM_DISKS` disk is lost when the entrypoint exits, unless the workload calls `sync` (`docker stop` syncs in either mode).
+- Non-root workloads cannot set the exit status (`/.runcvm` is root-only); the entrypoint's own status is never passed through.
+- On `docker stop`, the QEMU monitor's echo of `system_powerdown` appears in `docker logs`.
+- `docker logs` merges stdout and stderr with CRLF line endings (single console channel; #31 explores this).
+- `--network=none` fails silently with status 1; minimal images such as `hello-world` do not run, with exit status 0 and no output; an unrunnable entrypoint exits 0.
+- `--cpus` below 1 gives the VM every CPU available to the container.
+- The OpenWrt kernel cannot load modules (no `modules.dep`).
+- Under TCG, QEMU 8.1.5 intermittently segfaults as a short-lived VM shuts down (about one VM in 10–20; exit status 70). Candidate investigation: `-accel tcg,thread=single`, or a newer QEMU.
+- Fixed in #39: QEMU could start before virtiofsd's socket existed.
 
 ## 5. Open decisions
 
