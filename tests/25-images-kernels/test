@@ -10,8 +10,9 @@
 - An entrypoint that cannot be executed: the error is shown, and the exit
   status is 0, as when any entrypoint exits without setting one (see
   tests/14-exit-codes).
-- hello-world, an image holding only a static binary: the binary does not
-  run, so there is no output.
+- hello-world, an image holding only a static binary: no workload starts,
+  so there is no output. Even an entrypoint taken from the RunCVM package
+  (/.runcvm/guest/bin/busybox), writing to a volume, leaves nothing there.
 
 The expected values describe current behaviour. A change to it must update
 them deliberately.
@@ -60,10 +61,15 @@ def run(args):
                     *t.vm_opts(), *opts, *image_cmd, timeout=TIMEOUT)
 
 
+hello_volume = t.unique("hello-world")
+t.volume_create(hello_volume)
+
 RUNS = [(c[0], c[1], c[2]) for c in CASES] + [
     ("user-image", [], [user_image, "sh", "-c", PROBE]),
     ("no-entrypoint", [], ["alpine", "/no/such/program"]),
     ("hello-world", [], ["hello-world"]),
+    ("hello-world-volume", ["-v", hello_volume + ":/out", "--entrypoint", "/.runcvm/guest/bin/busybox"],
+     ["hello-world", "sh", "-c", "echo ran >/out/f"]),
 ]
 results = dict(zip([r[0] for r in RUNS], t.parallel(run, RUNS)))
 
@@ -95,5 +101,6 @@ t.check("entrypoint not found: exit status", 0, r.returncode)
 t.check("entrypoint not found: error shown", True, "unable to exec /no/such/program" in r.stdout)
 
 t.check("hello-world: no output", "", results["hello-world"].stdout.strip())
+t.check("hello-world: a command writing to a volume leaves nothing", None, t.volume_read(hello_volume, "f"))
 
 t.finish()
