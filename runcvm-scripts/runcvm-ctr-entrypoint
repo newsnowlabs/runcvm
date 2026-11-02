@@ -81,10 +81,18 @@ if [[ "$RUNCVM_BREAK" =~ prenet ]]; then bash; fi
 
 # SAVE NETWORKING CONFIG AND CONFIGURE BRIDGES
 
-# Identify default gateway device and IP address
+# Identify default gateway device and IP address. '|| true' keeps 'bash -e' from exiting silently
+# when there is no default route, so that the check below can explain it.
 read -r DOCKER_GW_IF DOCKER_GW_IF_IP < \
-  <(ip -json route show | jq -r '.[] | (select(.dst == "default") | [.dev, .gateway]) | @tsv')
+  <(ip -json route show | jq -r '.[] | (select(.dst == "default") | [.dev, .gateway]) | @tsv') || true
 # e.g. eth0 172.25.10.1
+
+# The VM's networking, and 'docker exec' (which reaches the VM over it), are configured from the
+# interface holding the default route.
+if [ -z "$DOCKER_GW_IF" ]; then
+  echo "RunCVM: Error: the container has no default route (as with --network=none, or only --internal networks); a RunCVM Container/VM needs a network that provides a default route" >&2
+  exit 1
+fi
 
 QEMU_BRIDGE_IP=169.254.1.1
 RUNCVM_DNS_IP=169.254.169.254
