@@ -3,8 +3,8 @@
 
 - A multi-destination spec whose destinations overlap (one is the same as,
   or an ancestor of, another), or which has an empty, relative, '..' or
-  whitespace-containing destination: the Container/VM exits with status 1
-  before the VM starts, with the error from the entrypoint.
+  whitespace-containing destination: the Container/VM exits with status 1,
+  reporting the invalid spec.
 - Adding a destination to an existing multi-destination disk, or giving an
   existing single-destination disk several destinations: the VM reports
   that the disk has no directory for the destination, and the
