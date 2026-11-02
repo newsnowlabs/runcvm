@@ -229,7 +229,7 @@ else
   clean_env
 
   # Run the qemu guest agent, needed to support future functionality
-  $RUNCVM/scripts/runcvm-vm-qemu-ga &>/dev/null &
+  $RUNCVM_GUEST/scripts/runcvm-vm-qemu-ga &>/dev/null &
 
   # Run dropbear SSH server, needed to support 'docker exec'
   dropbear -REF -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &

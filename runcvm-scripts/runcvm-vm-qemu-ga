@@ -6,7 +6,7 @@
 # Load defaults and aliases
 . $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
-OPTS=(--retry-path --statedir /.runcvm)
+OPTS=(--retry-path --statedir /.runcvm --pidfile /.runcvm/qemu-ga.pid)
 
 if [ -f "/dev/virtio-ports/org.qemu.guest_agent.0" ]; then
   DEV="/dev/virtio-ports/org.qemu.guest_agent.0"
@@ -22,4 +22,6 @@ if [ -z "$DEV" ]; then
   exit 0
 fi
 
-exec -c "$(which qemu-ga)" "${OPTS[@]}"
+# qemu-ga reads its configuration from $QGA_CONF (default /etc/qemu/qemu-ga.conf, in the image).
+# RunCVM ships no such file, and qemu-ga silently uses its defaults when the file is missing.
+exec -c "$RUNCVM_GUEST/bin/busybox" env QGA_CONF="$RUNCVM_GUEST/etc/qemu/qemu-ga.conf" "$(which qemu-ga)" "${OPTS[@]}"
