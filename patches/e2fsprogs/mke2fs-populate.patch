@@ -8,15 +8,17 @@
  #include <dirent.h> /* for scandir() and alphasort() */
  #if defined HAVE_SYS_XATTR_H
  #include <sys/xattr.h>
-@@ -935,6 +936,39 @@
+@@ -935,6 +936,40 @@
  }
  #endif
  
-+/* Exclusions (-x) and one-file-system (-X) support for populating */
++/*
++ * Exclusions (mke2fs -x) and staying on one file system
++ * (POPULATE_FS_ONE_FILE_SYSTEM) while populating
++ */
 +#define MAX_POPULATE_EXCLUDES 256
 +static const char *populate_excludes[MAX_POPULATE_EXCLUDES];
 +static int populate_num_excludes;
-+static int populate_one_fs;
 +static dev_t populate_root_dev;
 +
 +errcode_t populate_fs_add_exclude(const char *pattern)
@@ -27,17 +29,16 @@
 +	return 0;
 +}
 +
-+void populate_fs_set_one_fs(int one_fs)
-+{
-+	populate_one_fs = one_fs;
-+}
-+
-+/* path is relative to the source root, e.g. "/var/cache" */
-+static int populate_pruned(const char *path, const struct stat *st)
++/*
++ * path is the file's path in the new file system, e.g. "/var/cache"; flags
++ * are the POPULATE_FS_* flags
++ */
++static int populate_pruned(const char *path, const struct stat *st, int flags)
 +{
 +	int i;
 +
-+	if (populate_one_fs && st->st_dev != populate_root_dev)
++	if ((flags & POPULATE_FS_ONE_FILE_SYSTEM) &&
++	    st->st_dev != populate_root_dev)
 +		return 1;
 +	for (i = 0; i < populate_num_excludes; i++)
 +		if (fnmatch(populate_excludes[i], path, FNM_PATHNAME) == 0)
@@ -48,7 +49,7 @@
  /* Copy files from source_dir to fs in alphabetical order */
  static errcode_t __populate_fs(ext2_filsys fs, ext2_ino_t parent_ino,
  			       const char *source_dir, ext2_ino_t root,
-@@ -984,6 +1018,22 @@
+@@ -984,6 +1019,22 @@
  		if (fgetflags(name, &fl) < 0)
  			fl = 0;
  
@@ -62,7 +63,7 @@
 +
 +		/* Excluded or on another filesystem: skip non-directories
 +		 * entirely; directories are created empty (see S_IFDIR) */
-+		if (!S_ISDIR(st.st_mode) && populate_pruned(target->path, &st)) {
++		if (!S_ISDIR(st.st_mode) && populate_pruned(target->path, &st, flags)) {
 +			target->path_len = cur_dir_path_len;
 +			target->path[target->path_len] = 0;
 +			continue;
@@ -71,7 +72,7 @@
  		/* Check for hardlinks */
  		save_inode = 0;
  		if (!S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode) &&
-@@ -998,19 +1048,13 @@
+@@ -998,19 +1049,13 @@
  						"while linking %s", name);
  					goto out;
  				}
@@ -93,17 +94,17 @@
  		if (fs_callbacks && fs_callbacks->create_new_inode) {
  			retval = fs_callbacks->create_new_inode(fs,
  				target->path, name, parent_ino, root,
-@@ -1102,6 +1146,9 @@
+@@ -1102,6 +1147,9 @@
  				com_err(name, retval, 0);
  					goto out;
  			}
-+			/* Excluded or a mountpoint with -X: leave it empty */
-+			if (populate_pruned(target->path, &st))
++			/* Excluded, or another file system's mount point: leave it empty */
++			if (populate_pruned(target->path, &st, flags))
 +				break;
  			/* Populate the dir recursively*/
  			retval = __populate_fs(fs, ino, name, root, hdlinks,
  					       target, flags, fs_callbacks);
-@@ -1238,6 +1285,7 @@
+@@ -1238,6 +1286,7 @@
  						fs_callbacks);
  		goto out;
  	}
@@ -111,15 +112,16 @@
  
  	if ((flags & POPULATE_FS_NO_COPY_XATTRS) == 0) {
  		retval = set_inode_xattr(fs, root, source);
-@@ -1265,6 +1313,79 @@
+@@ -1265,6 +1314,92 @@
  	return populate_fs3(fs, parent_ino, source, root, 0, fs_callbacks);
  }
  
 +/*
 + * Copy the contents of directory 'source' into a new top-level directory
 + * 'subdir' of the filesystem, giving 'subdir' the ownership, mode, times and
-+ * xattrs of 'source'. Used for repeated -d SRC=SUBDIR options. Like
-+ * populate_fs3(), this changes the working directory.
++ * xattrs of 'source'. Used for mke2fs -P SUBDIR=SRC. Paths below 'subdir'
++ * start with "/subdir", as in the new file system. Like populate_fs3(), this
++ * changes the working directory.
 + */
 +errcode_t populate_fs_subdir(ext2_filsys fs, const char *source,
 +			     const char *subdir, int flags,
@@ -174,13 +176,25 @@
 +	file_info.path_len = 0;
 +	file_info.path_max_len = 255;
 +	file_info.path = calloc(file_info.path_max_len, 1);
++	if (file_info.path == NULL) {
++		free(hdlinks.hdl);
++		return EXT2_ET_NO_MEMORY;
++	}
++	retval = path_append(&file_info, subdir);
++	if (retval) {
++		free(file_info.path);
++		free(hdlinks.hdl);
++		return retval;
++	}
 +
 +	link_append_flag = EXT2FS_LINK_EXPAND;
 +	link_append_flag |= (flags & POPULATE_FS_LINK_APPEND) ?
 +		EXT2FS_LINK_APPEND : 0;
 +
-+	retval = __populate_fs(fs, ino, source, EXT2_ROOT_INO, &hdlinks,
-+			       &file_info, flags, fs_callbacks);
++	/* An excluded subdir is left empty, like any excluded directory */
++	if (!populate_pruned(file_info.path, &st, flags))
++		retval = __populate_fs(fs, ino, source, EXT2_ROOT_INO, &hdlinks,
++				       &file_info, flags, fs_callbacks);
 +
 +	free(file_info.path);
 +	free(hdlinks.hdl);
@@ -193,12 +207,19 @@
  {
 --- a/misc/create_inode.h
 +++ b/misc/create_inode.h
-@@ -69,5 +69,10 @@
+@@ -33,6 +33,7 @@
+ /* flags for populate_fs3 */
+ #define POPULATE_FS_NO_COPY_XATTRS	0x0001
+ #define POPULATE_FS_LINK_APPEND		0x0002
++#define POPULATE_FS_ONE_FILE_SYSTEM	0x0004
+ 
+ struct fs_ops_callbacks {
+ 	errcode_t (* create_new_inode)(ext2_filsys fs, const char *target_path,
+@@ -69,5 +70,9 @@
  			  ext2_ino_t ino, const char *name);
  extern errcode_t set_inode_extra(ext2_filsys fs, ext2_ino_t ino,
  				 const struct stat *st);
 +extern errcode_t populate_fs_add_exclude(const char *pattern);
-+extern void populate_fs_set_one_fs(int one_fs);
 +extern errcode_t populate_fs_subdir(ext2_filsys fs, const char *source,
 +				    const char *subdir, int flags,
 +				    struct fs_ops_callbacks *fs_callbacks);
@@ -211,7 +232,7 @@
  char **fs_types;
  const char *src_root;  /* Copy files from the specified directory or tarball */
 +#define MAX_SRC_SUBDIRS 64
-+static const char *src_subdir_src[MAX_SRC_SUBDIRS]; /* -d SRC=SUBDIR */
++static const char *src_subdir_src[MAX_SRC_SUBDIRS]; /* -P SUBDIR=SRC */
 +static const char *src_subdir_dst[MAX_SRC_SUBDIRS];
 +static int src_subdirs;
  static char *undo_file;
@@ -221,45 +242,58 @@
  	"[-J journal-options]\n"
  	"\t[-G flex-group-size] [-N number-of-inodes] "
  	"[-d root-directory|tarball]\n"
-+	"\t[-d source-directory=subdirectory] [-x pattern] [-X]\n"
++	"\t[-P subdirectory=source-directory] [-x pattern]\n"
  	"\t[-m reserved-blocks-percentage] [-o creator-os]\n"
  	"\t[-g blocks-per-group] [-L volume-label] "
  	"[-M last-mounted-directory]\n\t[-O feature[,...]] "
-@@ -1814,7 +1819,7 @@
+@@ -948,6 +953,9 @@
+ 		} else if (strcmp(token, "no_copy_xattrs") == 0) {
+ 			populate_flags |= POPULATE_FS_NO_COPY_XATTRS;
+ 			continue;
++		} else if (strcmp(token, "one_file_system") == 0) {
++			populate_flags |= POPULATE_FS_ONE_FILE_SYSTEM;
++			continue;
+ 		} else if (strcmp(token, "num_backup_sb") == 0) {
+ 			if (!arg) {
+ 				r_usage++;
+@@ -1814,7 +1822,7 @@
  	}
  
  	while ((c = getopt (argc, argv,
 -		    "b:cd:e:g:i:jl:m:no:qr:s:t:vC:DE:FG:I:J:KL:M:N:O:R:ST:U:Vz:")) != EOF) {
-+		    "b:cd:e:g:i:jl:m:no:qr:s:t:vx:C:DE:FG:I:J:KL:M:N:O:R:ST:U:VXz:")) != EOF) {
++		    "b:cd:e:g:i:jl:m:no:qr:s:t:vx:C:DE:FG:I:J:KL:M:N:O:P:R:ST:U:Vz:")) != EOF) {
  		switch (c) {
  		case 'b':
  			blocksize = parse_num_blocks2(optarg, -1);
-@@ -1848,8 +1853,37 @@
- 				exit(1);
- 			}
+@@ -1851,6 +1859,40 @@
+ 		case 'd':
+ 			src_root = optarg;
  			break;
--		case 'd':
--			src_root = optarg;
-+		case 'd': {
-+			char *eq = strrchr(optarg, '=');
++		case 'P': {
++			char *eq = strchr(optarg, '=');
 +
 +			if (!eq) {
-+				if (src_root) {
-+					com_err(program_name, 0, "%s",
-+						_("only one -d without =SUBDIR may be given"));
-+					exit(1);
-+				}
-+				src_root = optarg;
-+				break;
++				com_err(program_name, 0,
++					_("invalid -P argument \"%s\": "
++					  "expected SUBDIR=SRC"), optarg);
++				exit(1);
 +			}
 +			if (src_subdirs == MAX_SRC_SUBDIRS) {
 +				com_err(program_name, 0, "%s",
-+					_("too many -d SRC=SUBDIR options"));
++					_("too many -P options"));
 +				exit(1);
 +			}
 +			*eq = 0;
-+			src_subdir_src[src_subdirs] = optarg;
-+			src_subdir_dst[src_subdirs++] = eq + 1;
++			if (!*optarg || strchr(optarg, '/') ||
++			    !strcmp(optarg, ".") || !strcmp(optarg, "..")) {
++				com_err(program_name, 0,
++					_("invalid -P subdirectory \"%s\": "
++					  "must be a single path component"),
++					optarg);
++				exit(1);
++			}
++			src_subdir_dst[src_subdirs] = optarg;
++			src_subdir_src[src_subdirs++] = eq + 1;
 +			break;
 +		}
 +		case 'x':
@@ -269,12 +303,10 @@
 +				exit(1);
 +			}
 +			break;
-+		case 'X':
-+			populate_fs_set_one_fs(1);
- 			break;
  		case 'D':
  			direct_io = 1;
-@@ -3201,8 +3235,39 @@
+ 			break;
+@@ -3201,8 +3243,39 @@
  	return 0;
  }
  
@@ -314,23 +346,23 @@
  	errcode_t	retval = 0;
  	ext2_filsys	fs;
  	badblocks_list	bb_list = 0;
-@@ -3740,7 +3805,14 @@
+@@ -3740,7 +3813,14 @@
  	retval = mk_hugefiles(fs, device_name);
  	if (retval)
  		com_err(program_name, retval, "while creating huge files");
 -	/* Copy files from the specified directory or tarball */
 +	/*
 +	 * Copy files from the specified directory or tarball, then from any
-+	 * SRC=SUBDIR sources. Populating a file system changes the working
-+	 * directory, so it is restored before each SRC=SUBDIR source, so that
-+	 * relative SRCs resolve from the directory mke2fs was run in.
++	 * -P sources. Populating a file system changes the working directory,
++	 * so it is restored before each -P source, so that relative SRCs
++	 * resolve from the directory mke2fs was run in.
 +	 */
 +	if (src_subdirs)
 +		cwd_fd = save_cwd();
  	if (src_root) {
  		if (!quiet)
  			printf("%s", _("Copying files into the device: "));
-@@ -3754,6 +3826,20 @@
+@@ -3754,6 +3834,20 @@
  		} else if (!quiet)
  			printf("%s", _("done\n"));
  	}
@@ -353,58 +385,96 @@
  		printf("%s", _("Writing superblocks and "
 --- a/misc/mke2fs.8.in
 +++ b/misc/mke2fs.8.in
-@@ -22,6 +22,15 @@
+@@ -22,6 +22,12 @@
  .B \-d\fR \fIroot-directory\fR|\fItarball\fR|\fI-\fR
  ]
  [
-+.B \-d\fR \fIsource-directory\fR=\fIsubdirectory\fR
++.B \-P\fR \fIsubdirectory\fR=\fIsource-directory\fR
 +]
 +[
 +.BI \-x " pattern"
-+]
-+[
-+.B \-X
 +]
 +[
  .B \-D
  ]
  [
-@@ -185,6 +194,38 @@
- libarchive support enabled and if the libarchive shared library is available
- at run-time. The special value "\fB-\fR" will read a tarball from standard input.
+@@ -290,6 +296,15 @@
+ Create the file system at an offset from the beginning of the device or
+ file.  This can be useful when creating disk images for virtual machines.
  .TP
-+.B \-d\fR \fIsource-directory\fR=\fIsubdirectory\fR
-+Copy the contents of
-+.I source-directory
-+into a new directory
++.B one_file_system
++When copying from a directory with the
++.B \-d
++or
++.B \-P
++options, do not copy files on file systems other than the one holding the
++directory being copied. Mount points are created as empty directories, and
++other files on other file systems (such as bind-mounted files) are not copied.
++.TP
+ .BI orphan_file_size= size
+ Set size of the file for tracking unlinked but still open inodes and inodes
+ with truncate in progress. Larger file allows for better scalability, reserving
+@@ -567,6 +582,30 @@
+ For more information about the features which can be set, please see
+ the manual page \fBext4\fR(5).
+ .TP
++.B \-P\fR \fIsubdirectory\fR=\fIsource-directory\fR
++Create a new directory
 +.I subdirectory
-+in the root directory of the file system.
++in the root directory of the file system, and copy the contents of
++.I source-directory
++into it.
 +.I subdirectory
 +takes the owner, mode, timestamps and extended attributes of
 +.IR source-directory .
-+It must be a single path component, and must be different for each use of
-+this form. This form may be given more than once, and may be combined with one
-+use of the form above. An argument containing "\fB=\fR" is always taken to be
-+of this form; the last "\fB=\fR" separates the two names.
++The argument is split at its first "\fB=\fR":
++.I subdirectory
++must be a single path component, must not contain "\fB=\fR", and must not
++already exist in the file system;
++.I source-directory
++is the rest of the argument, which may contain "\fB=\fR".
++This option may be given more than once, with a different
++.I subdirectory
++each time, and may be combined with
++.BR \-d .
++The directories are copied in the order given, after the contents of any
++.B \-d
++directory or tarball. Hard links are preserved within each directory copied,
++but not between them.
 +.TP
+ .B \-q
+ Quiet execution.  Useful if \fBmke2fs\fR is run in a script.
+ .TP
+@@ -656,6 +695,32 @@
+ .B \-V
+ Print the version number of \fBmke2fs\fR and exit.
+ .TP
 +.BI \-x " pattern"
 +When copying from a directory with
-+.BR \-d ,
-+do not copy files whose path matches the shell wildcard
++.B \-d
++or
++.BR \-P ,
++do not copy files whose path in the new file system matches the shell
++wildcard
 +.IR pattern .
-+Paths are relative to the directory being copied and begin with "\fB/\fR",
-+for example
-+.BR /var/cache .
-+"\fB*\fR" does not match "\fB/\fR". A matching directory is still created,
-+but its contents are not copied. This option may be given more than once.
-+.TP
-+.B \-X
-+When copying from a directory with
++Paths begin with "\fB/\fR"; those copied with
++.B \-P
++begin with "\fB/\fIsubdirectory\fR". For example,
++.B /var/cache/*
++excludes the contents of
++.B var/cache
++copied with
 +.BR \-d ,
-+do not copy files on file systems other than the one holding the directory
-+being copied. Mount points are created as empty directories, and other files
-+on other file systems (such as bind-mounted files) are not copied.
++and
++.B /*/tmp/*
++the contents of
++.B tmp
++in every
++.B \-P
++directory. "\fB*\fR" does not match "\fB/\fR". A matching directory is
++still created, but its contents are not copied. This option may be given
++more than once.
 +.TP
- .B \-D
- Use direct I/O when writing to the disk.  This avoids \fBmke2fs\fR dirtying a
- lot of buffer cache memory, which may impact other applications running
+ .BI \-z " undo_file"
+ Before overwriting a file system block, write the old contents of the block to
+ an undo file.  This undo file can be used with \fBe2undo\fR(8) to restore the old
