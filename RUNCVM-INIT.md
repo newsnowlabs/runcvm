@@ -64,6 +64,67 @@ Important distinctions when evaluating replacements:
 - Preserve child signal dispositions/masks and descriptor inheritance correctly.
   Do not treat service readiness as equivalent to a successful fork.
 
+## Guest process structure: the workload in a child namespace
+
+The guest-side requirements converge on one RunCVM process as guest PID 1:
+the stdio bridge's completion authority, exact exit status, syncing and powering
+off the VM, `docker stop` handling, and supervising Dropbear and qemu-ga. In the
+current structure that is not possible for every workload. When an image's own
+init (systemd, OpenWrt's procd) or the entrypoint itself must be PID 1, it is the
+guest's real PID 1, and RunCVM's guest processes run only before it or alongside
+it, unsupervised.
+
+Linux namespaces remove that conflict. RunCVM's init remains guest PID 1 in the
+initial namespaces, and starts the workload as PID 1 of a new PID namespace,
+with its own mount namespace. The workload, native init or entrypoint alike, is
+then a container-namespace PID 1 inside the guest: it may exit to end its
+namespace, while RunCVM's init alone arranges guest shutdown. No user namespace
+is involved, so the workload's root remains real root in the guest, and kernel
+modules, sysctls and devices work as before.
+
+| Goal | How the structure provides it |
+| --- | --- |
+| Exact exit status | RunCVM's init reaps the child namespace's PID 1 and reports its status, whatever user the workload runs as, without `/.runcvm/exitcode` or `qemu-exit`; an entrypoint that is not found can report 127, and one that cannot be executed 126, as runc does |
+| Data integrity at exit | Syncing and unmounting filesystems precede poweroff in every mode, including when the entrypoint exits without `--init` |
+| Signal semantics | The entrypoint has container PID 1 semantics, as under runc, rather than guest PID 1 semantics (its exit panicking the kernel) |
+| `docker stop` | RunCVM's init sends the stop signal suited to the workload (SIGRTMIN+4 for systemd, SIGTERM otherwise), then powers off after a deadline |
+| Reboot | `reboot(2)` in the child namespace ends that namespace instead of rebooting the guest: its PID 1 is terminated by SIGHUP for a restart or SIGINT for a poweroff, which RunCVM's init sees when reaping it, and so chooses between restarting the workload and powering off |
+| Stdio bridge | The bridge, application status and output draining belong to one process, which also performs the final poweroff |
+| Supporting services | Dropbear, qemu-ga or a future execution agent run in the initial namespaces, supervised by RunCVM's init and invisible to the workload |
+| Hiding `/.runcvm` | The child mount namespace omits `/.runcvm`, or covers it with an empty read-only tmpfs, once RunCVM has configured the guest; RunCVM's processes keep their view |
+
+Hiding `/.runcvm` relies on the PID namespace as well as the mount namespace:
+with RunCVM's processes visible, root in the workload could rejoin their mount
+namespace through `/proc/<pid>/ns/mnt`. The VM remains the security boundary;
+hiding `/.runcvm` protects RunCVM's state from accidental use, and removes its
+files from the workload's view of the filesystem.
+
+Costs and risks:
+
+- systemd may detect a container, through markers such as `/run/systemd/container`
+  or `container=` in PID 1's environment, and then skip units conditioned on
+  `ConditionVirtualization=!container`. RunCVM already renames `/.dockerenv` for
+  this reason. Test with real systemd images, and keep such markers absent.
+- Some workloads may require the guest's real PID 1, for example ones that read
+  `/proc/1` expecting themselves, or OpenWrt's procd. Check each case.
+- `docker exec` must enter the workload's PID and mount namespaces. Dropbear
+  would need an `nsenter` step; an execution agent can call `setns()` itself,
+  forking after joining the PID namespace, since only the caller's children
+  enter it.
+- The console, controlling terminal and foreground process group must be passed
+  to the child namespace's PID 1 under the session rules above.
+- Exit status, signal and `/.runcvm` behaviour change for existing users, so the
+  structure starts as an option, alongside the current one.
+
+The current structure remains available for workloads that must be the guest's
+real PID 1. The namespace structure is a mode of the guest init rather than a
+separate implementation, and a prototype needs no new tools: RunCVM's BusyBox
+includes `unshare` and `nsenter`, so an inittab entry running the workload under
+`unshare -f --pid --mount-proc` (`--mount-proc` implies a mount namespace) can
+exercise it before any init replacement. The integration tests that record
+current exit-status, shutdown and disk-persistence behaviour serve as its
+acceptance tests, run in each mode with the expected values for that mode.
+
 ## Possible benefit of replacing BusyBox init
 
 A richer guest supervisor could offer:
