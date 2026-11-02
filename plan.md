@@ -570,6 +570,7 @@ Open:
 | #28 | `claude/macos-docker-compatibility-InrFB` | #30 | ARM64, Podman, installer. |
 | #37 (draft) | `docs/conventions-sweep-main` | `main` | `CLAUDE.md` compliance fixes to text already on `main`. |
 | #39 | `fix/virtiofsd-socket-wait` | `main` | `runcvm-ctr-qemu` waits for virtiofsd's socket before starting QEMU (start-up race on busy hosts). |
+| #47 | `fix/qemu-exit-zero` | `main` | `qemu-exit` waits for the ACPI power-off it requests (exit status 128 for `qemu-exit 0` on KVM). |
 | #46 | `fix/reject-host-network` | `main` | Reject `--network=host` at creation; explain a missing default route; `28-unsupported-networks`. |
 | #44 | `fix/vm-init-minimal-images` | `main` | `runcvm-vm-init` runs minimal images such as `hello-world`; `27-minimal-images`. |
 | #38 | `tests/a2-exit-codes` | `main` | A2: `14-exit-codes`, `15-stop-kill`, `16-disk-persistence`; `parallel()` helper. |
@@ -583,7 +584,7 @@ Changes lower in a stack are merged upwards, never rebased (see `CLAUDE.md`).
 KVM results (libvirt development VM, 1 November 2026):
 - `main` with #32 and #34: self-test (with `--docker`) and `tests/run --tier all` pass: `10`, `11`, `50-http-docker-swarm` and `51-mariadb`. `docker exec` (#32's patched dropbear) works.
 - Whole stack (#28's branch, including #33 and #30): `10`, `11`, `13-qemu-accel` (default, `kvm`, `auto` and `tcg` on a KVM host), `50` and `51` pass.
-- Still to confirm: the A2 and A3 tests (#38, #40–#43) on KVM; they pass under TCG in a sandbox.
+- The A2 and A3 tests (#38, #40–#43), with #39, #44 and #46, on KVM (2 November 2026): 19 of 20 pass, including `27-minimal-images` and `28-unsupported-networks`; `14-exit-codes` fails only its `qemu-exit 0` cases, fixed by #47 (to confirm).
 - Still to confirm: `12-ipv6`, for #30. The development VM's kernel has IPv6 disabled (no `/proc/sys/net/ipv6`), so the test skips there. To be run on another bare-metal host or in L1.
 
 ### Issues found by A2 and A3
@@ -604,6 +605,7 @@ The tests record current behaviour, including the issues below, so fixing one me
 **Fixed:**
 - Minimal images such as `hello-world` did not run: `runcvm-vm-init` used the image's `chgrp`, `mv` and `readlink`. #44, with `27-minimal-images`.
 - QEMU could start before virtiofsd's socket existed, so the Container/VM exited with status 1. #39.
+- `qemu-exit 0` gave exit status 128 on KVM: after requesting an ACPI power-off it fell through to an isa-debug-exit write, which QEMU acted on first. #47 (found by `14-exit-codes` on KVM).
 - The README gave `qemu-exit`'s host path rather than its path in the VM. #38.
 
 **Smaller issues: lower priority.**
