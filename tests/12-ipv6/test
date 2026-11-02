@@ -72,14 +72,19 @@ EXPECTED_GW6=$(echo "$GATEWAYS" | grep ':' || true)
 VM_GW6=$(docker exec $NODE-a sh -c "ip -6 route show default | awk '{print \$3}'" 2>/dev/null || true)
 check "VM has IPv6 default route via network gateway" "$EXPECTED_GW6" "$VM_GW6" || true
 
-# Node A reaches node B by container name over IPv6. This exercises Docker DNS
-# returning an AAAA record (resolved via the existing IPv4-only helper channel:
-# dnsmasq in the container) and the IPv6 datapath across the container<->VM hub
-# bridge on both ends.
-docker exec -d $NODE-b sh -c "nc -6 -l -p 12345 >/tmp/nc-listen.out 2>&1"
-wait_for "listener on $NODE-b" 10 docker exec $NODE-b sh -c "netstat -ltn 2>/dev/null | grep -q ':12345 '" || true
-check_cmd "IPv6 connectivity from '$NODE-a' to '$NODE-b' by container name" \
-  docker exec $NODE-a sh -c "echo hello | nc -6 -w 3 $NODE-b 12345" || true
+# IPv6 between containers. Node B's name resolves, in node A, to B's IPv6 address: Docker's DNS
+# returns the AAAA record via the IPv4-only helper channel (dnsmasq in the container). A TCP
+# connection to that address then carries data across the container<->VM bridge at both ends.
+# BusyBox nc has no -6 option: binding the listener to the IPv6 address (-s) makes it an IPv6
+# listener.
+B6=$(docker exec $NODE-b sh -c "ip -6 -o addr show dev eth0 scope global | awk '{print \$4}' | cut -d/ -f1 | head -n 1")
+check_cmd "'$NODE-b' resolves to its IPv6 address ($B6) in '$NODE-a'" \
+  docker exec $NODE-a sh -c "[ -n '$B6' ] && nslookup -type=AAAA $NODE-b | grep -qF '$B6'" || true
+docker exec -d $NODE-b sh -c "nc -l -s $B6 -p 12345 >/tmp/nc-listen.out 2>&1"
+wait_for "IPv6 listener on $NODE-b" 10 docker exec $NODE-b sh -c "netstat -ltn 2>/dev/null | grep -q ':12345 '" || true
+docker exec $NODE-a sh -c "echo hello-over-ipv6 | nc -w 3 $B6 12345" || true
+check "IPv6 TCP connection from '$NODE-a' to '$NODE-b' ($B6) carries data" "hello-over-ipv6" \
+  "$(docker exec $NODE-b cat /tmp/nc-listen.out 2>/dev/null)" || true
 
 # Final output
 finish
