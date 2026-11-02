@@ -534,30 +534,35 @@ Any custom kernel command line options e.g. `apparmor=0` or `systemd.unified_cgr
 
 Automatically create, format, prepopulate and mount backing files as virtual disks on the VM.
 
-Each `<diskN>` should be a comma-separated list of values of the form: `<src>,<dst>[:<dst2>:...],<filesystem>[,<size>]`.
+Each `<diskN>` should be a comma-separated list of values of the form: `<src>,<dst>[:<dst2>:...],<filesystem>[,<size>][,layout=subdirs|root]`.
 
 - `<src>` is the path _within the container_ where the virtual disk backing file should be located. This may be in the container's overlayfs or within a volume (mounted using `--mount=type=volume`).
-- `<dst>` is both (a) the path within the VM where the virtual disk should be mounted; and (b) the location of the directory with which contents the disk should be prepopulated. Several destinations, separated by `:`, may share one disk (see [Multi-destination disks](#multi-destination-disks) below).
+- `<dst>` is both (a) the path within the VM where the disk's files should appear; and (b) the location of the directory with which contents the disk should be prepopulated. Several destinations, separated by `:`, may share one disk.
 - `<filesystem>` is the filesystem with which the backing disk should be formatted when first created.
 - `<size>` is the size of the backing file (in `truncate` format), and must be specified if `<src>` does not exist.
+- `layout=subdirs` or `layout=root` chooses the disk's layout (see [Disk layouts](#disk-layouts) below). It applies when the disk is created, and defaults to `subdirs`.
 
-When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs` and prepopulated with any files preexisting at `<dst>`.
+When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs` and prepopulated with any files preexisting at each `<dst>`, with their ownership, modes, timestamps, extended attributes and hard links. (`trusted.*` extended attributes are copied only if the container has `CAP_SYS_ADMIN`, e.g. with `--cap-add=SYS_ADMIN`, because `mke2fs` runs in the container.)
 
 RunCVM formats disks with its own bundled `mke2fs` and `mke2fs.conf`, ignoring any `/etc/mke2fs.conf` in the container's image, so a disk is formatted the same way whatever the image. For `ext4`, the configuration leaves out the `orphan_file` and `metadata_csum_seed` features, as Debian's and Ubuntu's do, so that the disk can also be checked, resized and tuned with e2fsprogs older than 1.47.
 
 When RunCVM creates a Container/VM, fstab entries will be drafted, identifying each disk by its filesystem's UUID. After the VM boots, the fstab entries will be mounted, in order. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on. RunCVM finds each disk with its own bundled `blkid.conf`, which scans the VM's block devices and keeps no cache, ignoring any `/etc/blkid.conf` in the image.
 
-#### Multi-destination disks
+#### Disk layouts
 
-A disk with several destinations, e.g. `/disks/data,/var/lib/docker:/var/lib/containerd:/home,ext4,40G`, holds one filesystem, with a top-level directory for each destination. When first created, each directory is prepopulated with any files preexisting at its destination, with their ownership, modes, timestamps, extended attributes and hard links. (As for any disk, `trusted.*` extended attributes are copied only if the container has `CAP_SYS_ADMIN`, e.g. with `--cap-add=SYS_ADMIN`, because `mke2fs` runs in the container.) On every boot, the disk is mounted at a hidden mountpoint, `/.runcvm/disks/<n>` (where `<n>` counts disks from 0 in `RUNCVM_DISKS` order), and each directory is bind-mounted over its destination.
+A disk with layout `subdirs`, the default, holds a top-level directory for each destination, prepopulated from it. On every boot, the disk is mounted at a hidden mountpoint, `/.runcvm/disks/<n>` (where `<n>` counts disks from 0 in `RUNCVM_DISKS` order), and each directory is bind-mounted over its destination. Such a disk is created with the filesystem label `runcvm-subdirs`, by which RunCVM recognises its layout thereafter; relabelling the disk would change how it is mounted.
 
 Each directory is named after its destination: the path without its leading `/`, with each `%`, `-` and `=` encoded as `%25`, `%2D` and `%3D`, and then each `/` replaced by `-`. For example, `/var/lib/docker` is held in `var-lib-docker`, `/a/b` in `a-b`, and `/a-b` in `a%2Db`. The name depends only on the destination, so it is the same on every boot, and distinct destinations always have distinct names.
 
-The destinations of a multi-destination disk:
+The destinations of a disk with layout `subdirs`:
 - must be absolute paths other than `/`, without `.` or `..` components, whitespace or `\`;
 - must not overlap: no destination may be the same as, or an ancestor of, another (e.g. `/var/lib` and `/var/lib/docker` are rejected).
 
-A destination may be left out of the spec of an existing multi-destination disk, leaving its directory on the disk unmounted, but destinations cannot be added: when a destination has no directory on an existing disk, the VM reports the error and powers off with exit status 1. Likewise, a disk created with a single destination cannot later be given several, and a disk created with several destinations should not later be given only one, which would mount the disk's top-level directories at that destination.
+Destinations may be left out of an existing disk's spec, leaving their directories on the disk unmounted, so long as at least one remains; but destinations cannot be added: when a destination has no directory on an existing disk, the VM reports the error and powers off with exit status 1.
+
+A disk with layout `root` has exactly one destination, holds its files at its root, and is mounted directly at the destination. Any existing disk without the label `runcvm-subdirs`, including any disk created by an earlier RunCVM release, has layout `root`.
+
+An existing disk keeps its layout: a spec giving a different `layout`, or several destinations for a disk with layout `root`, is rejected.
 
 #### Example #1
 
@@ -565,7 +570,7 @@ A destination may be left out of the spec of an existing multi-destination disk,
 docker run -it --runtime=runcvm --env=RUNCVM_DISKS=/disk1,/home,ext4,5G <docker-image>
 ```
 
-In this example, RunCVM will check for existence of a file at `/disk1` within `<docker-image>`, and if not found create a 5G backing file (in the container's filesystem, typically overlay2) with an ext4 filesystem prepopulated with any preexisting contents of `/home`, then add the disk to `/etc/fstab` and mount it within the VM at `/home`.
+In this example, RunCVM will check for existence of a file at `/disk1` within `<docker-image>`, and if not found create a 5G backing file (in the container's filesystem, typically overlay2) with an ext4 filesystem holding a directory `home` prepopulated with any preexisting contents of `/home`, then add the disk to `/etc/fstab`, mount it within the VM, and bind-mount its `home` directory at `/home`. With `--env=RUNCVM_DISKS=/disk1,/home,ext4,5G,layout=root`, the disk would instead hold the contents of `/home` at its root, and be mounted directly at `/home`.
 
 #### Example #2
 

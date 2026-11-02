@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""RUNCVM_DISKS: invalid multi-destination disk specs, and disks whose spec changes.
+"""RUNCVM_DISKS: invalid disk specs, and disks whose spec changes.
 
-- A multi-destination spec whose destinations overlap (one is the same as,
-  or an ancestor of, another), or which has an empty, relative, '..' or
-  whitespace-containing destination: the Container/VM exits with status 1,
-  reporting the invalid spec.
-- Adding a destination to an existing multi-destination disk, or giving an
-  existing single-destination disk several destinations: the VM reports
-  that the disk has no directory for the destination, and the
+- A spec with layout 'subdirs' whose destinations overlap (one is the same
+  as, or an ancestor of, another), or which has an empty, relative, '..'
+  or whitespace-containing destination; layout 'root' with several
+  destinations; or an unknown or repeated option: the Container/VM exits
+  with status 1, reporting the invalid spec.
+- An existing disk keeps the layout it was created with: a spec giving the
+  other layout, or several destinations for a disk with layout 'root', is
+  rejected in the same way.
+- Adding a destination to an existing disk with layout 'subdirs': the VM
+  reports that the disk has no directory for the destination, and the
   Container/VM exits with status 1.
-- Leaving a destination out of an existing multi-destination disk's spec:
-  the Container/VM runs, with the remaining destinations mounted.
+- Leaving destinations out of an existing disk's spec, down to one: the
+  Container/VM runs, with the remaining destinations mounted.
 """
 
 import os
@@ -43,6 +46,16 @@ INVALID = [
      "dst '/' must be an absolute path other than '/', without '.' or '..' components"),
     ("whitespace", "/disks/d,/srv/a b:/home,ext4,16M",
      "dst '/srv/a b' must not contain whitespace or '\\'"),
+    ("root-several", "/disks/d,/srv/a:/srv/b,ext4,16M,layout=root",
+     "layout 'root' holds exactly one dst"),
+    ("bad-layout", "/disks/d,/srv/a,ext4,16M,layout=flat",
+     "layout must be 'subdirs' or 'root'"),
+    ("repeated-layout", "/disks/d,/srv/a,ext4,16M,layout=root,layout=root",
+     "layout specified more than once"),
+    ("unknown-option", "/disks/d,/srv/a,ext4,16M,colour=blue",
+     "unknown option 'colour'"),
+    ("extra-field", "/disks/d,/srv/a,ext4,16M,32M",
+     "unexpected field '32M'"),
 ]
 
 
@@ -54,7 +67,7 @@ def run_invalid(case):
 
 def run_changed(case):
     """Create a disk with spec 'first', then use it with spec 'second'; return both runs' results."""
-    name, first, second = case
+    name, first, second = case[:3]
     volume = t.unique("changed-" + name)
     t.volume_create(volume)
     results = []
@@ -72,28 +85,34 @@ for (name, disks, message), r in zip(INVALID, t.parallel(run_invalid, INVALID)):
     if not t.check("%s: error message" % name, True, ("disk spec '%s' invalid: %s" % (disks, message)) in r.stdout):
         t.log("output:\n%s" % r.stdout)
 
-# (name, first RUNCVM_DISKS, second RUNCVM_DISKS)
+# (name, first RUNCVM_DISKS, second RUNCVM_DISKS, expected second exit status, expected message or
+# remaining mounts)
 CHANGED = [
-    ("added", "/disks/d,/srv/a:/srv/b,ext4,16M", "/disks/d,/srv/a:/srv/b:/home,ext4,16M"),
-    ("single-to-multi", "/disks/d,/srv/a,ext4,16M", "/disks/d,/srv/a:/srv/b,ext4,16M"),
-    ("removed", "/disks/d,/srv/a:/srv/b:/home,ext4,16M", "/disks/d,/srv/a:/home,ext4,16M"),
+    ("added", "/disks/d,/srv/a:/srv/b,ext4,16M", "/disks/d,/srv/a:/srv/b:/home,ext4,16M", 1,
+     "RunCVM: Error: dst '/home' cannot be mounted: its disk has no directory 'home', so was created "
+     "without this destination; destinations cannot be added to an existing disk"),
+    ("root-to-several", "/disks/d,/srv/a,ext4,16M,layout=root", "/disks/d,/srv/a:/srv/b,ext4,16M", 1,
+     "disk spec '/disks/d,/srv/a:/srv/b,ext4,16M' invalid: src '/disks/d' exists, with layout 'root', "
+     "which holds exactly one dst"),
+    ("root-to-subdirs", "/disks/d,/srv/a,ext4,16M,layout=root", "/disks/d,/srv/a,ext4,16M,layout=subdirs", 1,
+     "disk spec '/disks/d,/srv/a,ext4,16M,layout=subdirs' invalid: src '/disks/d' exists, with layout 'root', "
+     "not 'subdirs'"),
+    ("subdirs-to-root", "/disks/d,/srv/a:/srv/b,ext4,16M", "/disks/d,/srv/a,ext4,layout=root", 1,
+     "disk spec '/disks/d,/srv/a,ext4,layout=root' invalid: src '/disks/d' exists, with layout 'subdirs', "
+     "not 'root'"),
+    ("removed", "/disks/d,/srv/a:/srv/b:/home,ext4,16M", "/disks/d,/srv/a:/home,ext4,16M", 0,
+     "/home /home\n/srv-a /srv/a"),
+    ("removed-to-one", "/disks/d,/srv/a:/home,ext4,16M", "/disks/d,/srv/a,ext4", 0,
+     "/srv-a /srv/a"),
 ]
-results = t.parallel(run_changed, CHANGED)
-for (name, first, second), (r1, r2) in zip(CHANGED, results):
+for (name, first, second, status, expected), (r1, r2) in zip(CHANGED, t.parallel(run_changed, CHANGED)):
     if not t.check("%s: first Container/VM exit status" % name, 0, r1.returncode):
         t.log("output:\n%s" % r1.stdout)
         continue
-    if name == "removed":
-        t.check("%s: second Container/VM exit status" % name, 0, r2.returncode)
-        t.check("%s: remaining destinations mounted" % name, "/home /home\n/srv-a /srv/a", r2.stdout.strip())
-        continue
-    # A disk created with one destination holds it at its root, so has no directory for any.
-    dst, missing = ("/srv/a", "srv-a") if name == "single-to-multi" else ("/home", "home")
-    t.check("%s: second Container/VM exit status" % name, 1, r2.returncode)
-    if not t.check("%s: error message" % name, True,
-                   ("RunCVM: Error: dst '%s' cannot be mounted: its disk has no directory '%s', so was created "
-                    "without this destination; destinations cannot be added to an existing disk"
-                    % (dst, missing)) in r2.stdout):
+    t.check("%s: second Container/VM exit status" % name, status, r2.returncode)
+    if status == 0:
+        t.check("%s: remaining destinations mounted" % name, expected, r2.stdout.strip())
+    elif not t.check("%s: error message" % name, True, expected in r2.stdout):
         t.log("output:\n%s" % r2.stdout)
 
 t.finish()
