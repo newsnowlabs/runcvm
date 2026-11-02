@@ -570,6 +570,7 @@ Open:
 | #28 | `claude/macos-docker-compatibility-InrFB` | #30 | ARM64, Podman, installer. |
 | #37 (draft) | `docs/conventions-sweep-main` | `main` | `CLAUDE.md` compliance fixes to text already on `main`. |
 | #39 | `fix/virtiofsd-socket-wait` | `main` | `runcvm-ctr-qemu` waits for virtiofsd's socket before starting QEMU (start-up race on busy hosts). |
+| #46 | `fix/reject-host-network` | `main` | Reject `--network=host` at creation; explain a missing default route; `28-unsupported-networks`. |
 | #44 | `fix/vm-init-minimal-images` | `main` | `runcvm-vm-init` runs minimal images such as `hello-world`; `27-minimal-images`. |
 | #38 | `tests/a2-exit-codes` | `main` | A2: `14-exit-codes`, `15-stop-kill`, `16-disk-persistence`; `parallel()` helper. |
 | #40 | `tests/a3-lifecycle-isolation` | #38 | A3: `17-lifecycle`, `18-isolation`, `19-config-errors`. |
@@ -593,8 +594,8 @@ The tests record current behaviour, including the issues below, so fixing one me
 
 | Issue | Recorded by | Direction |
 |---|---|---|
-| `--network=none`: exits with status 1, no message, before the workload runs (the entrypoint, under `bash -e`, fails reading a default route that does not exist). | `24-networking` | Support it if possible. `docker exec` reaches the VM over SSH (`dbclient`) at the VM's address on its Docker network, so without a network it would need a private link between container and VM (e.g. a dedicated tap interface on a link-local subnet, or virtio-vsock). If that proves impractical, fail at creation with an explanatory error. #31's stretch goal, an execution agent over virtio-serial or vsock replacing Dropbear, would provide such a link. |
-| `--network=host` (documented as unsupported): fails with status 2 after a networking-script error. | `24-networking` | Not safe to support: the VM would have to take over the host's interfaces. Fail at creation (`runcvm-runtime`) with a clear error, as for `--network=container:`. |
+| `--network=none`, and only `--internal` networks: exited with status 1, no message, before the workload runs (no default route). #46 makes them fail with an explanation. | `28-unsupported-networks` (#46) | Support it if possible. `docker exec` reaches the VM over SSH (`dbclient`) at the VM's address on its Docker network, so without a network it would need a private link between container and VM (e.g. a dedicated tap interface on a link-local subnet, or virtio-vsock). If that proves impractical, fail at creation with an explanatory error. #31's stretch goal, an execution agent over virtio-serial or vsock replacing Dropbear, would provide such a link. |
+| `--network=host` (documented as unsupported) ran RunCVM's network set-up in the host's network namespace and reconfigured the host's interfaces (it cut a test VM off its network). | (found running the suite) | Fixed in #46: rejected at creation. `--network=container:` is not yet detected. |
 | Without `--init`, data written to a `RUNCVM_DISKS` disk is lost when the entrypoint exits, unless the workload calls `sync`. | `16-disk-persistence` | Sync filesystems before the VM ends, whatever the init mode. The init-process work in #31 (`RUNCVM-INIT.md`): with the workload in a child PID and mount namespace, RunCVM's init remains guest PID 1 and syncs before poweroff in every mode. |
 | The entrypoint's own exit status is never passed through; an entrypoint that cannot be executed exits 0. | `14-exit-codes`, `25-images-kernels` | The init-process work in #31: in the child-namespace structure, RunCVM's init reaps the workload's PID 1 and reports its status. |
 | Non-root workloads cannot set the exit status (`/.runcvm` is root-only). | `14-exit-codes` | As above: no `/.runcvm/exitcode` is needed when RunCVM's init reports the status. |
