@@ -45,6 +45,10 @@ import framework as t  # noqa: E402
 BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
 TIMEOUT = 600 if t.ACCEL == "tcg" else 120
 VM = ["--runtime=" + t.RUNTIME, *t.vm_opts()]
+# '--dns-search=.' gives each Container/VM no DNS search domains, and '--dns-opt=ndots:1' a fixed
+# ndots in place of Docker's 'ndots:0', whatever the host's resolv.conf holds, so that lookups of
+# container names behave the same on every host.
+DNS = ["--dns-search=.", "--dns-opt=ndots:1"]
 TRAP = "trap 'echo 9 >/.runcvm/exitcode; exit 0' TERM; while true; do sleep 1; done"
 
 
@@ -77,7 +81,7 @@ def case_live(init):
 
     try:
         t.cleanup_container(name)
-        r = t.docker("run", "-d", "--name", name, "--hostname", "wholeroot", "--network", network,
+        r = t.docker("run", "-d", "--name", name, "--hostname", "wholeroot", "--network", network, *DNS,
                      *t.labels(), *VM, *init_opts, *disk_opts, "-v", data + ":/data", "-v", host + ":/bind",
                      "alpine", "sh", "-c", TRAP)
         if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
@@ -102,7 +106,8 @@ def case_live(init):
 
         r = ex(name, "sh", "-c", "grep -c wholeroot /etc/hosts; hostname")
         result("/etc/hosts names the container, and hostname is set", "1\nwholeroot", r.stdout.strip())
-        r = ex(name, "nslookup", name)
+        # The trailing '.' makes the name absolute, so no search domain applies to it.
+        r = ex(name, "nslookup", name + ".")
         result("container's name resolves through Docker's DNS", True, r.returncode == 0)
 
         r = t.docker("diff", name)
