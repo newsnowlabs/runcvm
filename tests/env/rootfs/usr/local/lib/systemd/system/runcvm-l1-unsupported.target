@@ -1,0 +1,6 @@
+[Unit]
+Description=RunCVM L1: unsupported mode (powers off)
+Documentation=file:/usr/local/share/doc/runcvm-l1/README.md
+Requires=basic.target runcvm-l1-unsupported.service
+After=basic.target runcvm-l1-unsupported.service
+AllowIsolate=yes
