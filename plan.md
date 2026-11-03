@@ -136,7 +136,7 @@ A Dockerfile in the repository (e.g. `tests/env/Dockerfile`), based on the READM
 - Mode chosen from the saved arguments:
   - **Dev mode** (no arguments): long-lived. For interactive use, Dockside, and Claude Code.
   - **Batch mode** (`selftest <ref> [tier|tests…]`): a systemd unit runs `runcvm-selftest` (B2), then powers off (`SuccessAction=`/`FailureAction=poweroff`). See F2.
-- Optional Claude Code CLI installation for dev mode. API keys supplied via a file on a `/disks` volume or Dockside's secrets mechanism rather than `--env`, which is visible in `docker inspect` on L0.
+- Optional Claude Code CLI installation for dev mode. API keys supplied via a file on a separate read-only volume or bind mount (e.g. at `/secrets`; not on `/disks`, which is mounted only in the container, not the VM) or Dockside's secrets mechanism rather than `--env`, which is visible in `docker inspect` on L0.
 
 Done when: the image launches in dev mode on L0 and in Dockside, and `docker run --runtime=runcvm hello-world` works inside it with the stock RunCVM preinstalled.
 
