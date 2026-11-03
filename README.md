@@ -572,6 +572,35 @@ A disk with layout `root` has exactly one destination, holds its files at its ro
 
 An existing disk keeps its layout: a spec giving a different `layout`, or several destinations for a disk with layout `root`, is rejected.
 
+#### Whole-root disks
+
+A disk with destination `/` is a _whole-root disk_: it holds the VM's whole root filesystem. For example:
+
+```console
+docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env=RUNCVM_DISKS=/disks/root,/,ext4,40G <docker-image>
+```
+
+A whole-root disk must have `/` as its only destination, filesystem `ext4` and layout `root` (`layout=root` may be given, but need not be). Only one disk may have destination `/`; other disks in `RUNCVM_DISKS` are mounted onto it as usual.
+
+When first created, a whole-root disk is prepopulated with a copy of the container's filesystem: the image and any changes made to it in the container. The copy leaves out everything that must stay live, as it is mounted from the container: `/.runcvm`, volumes, bind mounts, the files Docker mounts such as `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf`, and the kernel modules. Each mountpoint that is a directory is left as an empty directory. The copy also leaves out every disk's backing file, so that a backing file in the container's own filesystem is not copied into the disk, and the image's files at other disks' destinations, which those disks hold instead, leaving an empty directory at each.
+
+The VM still boots from the container's filesystem over virtiofs. Early in boot, before setting up the network, mounting the other disks or starting the entrypoint, `runcvm-vm-init` mounts the whole-root disk, binds everything that must stay live onto it, and switches to it as the root filesystem with `pivot_root`. Everything after that, including the entrypoint and `docker exec`, sees the disk as `/`.
+
+The disk is populated only when it is created. While it exists, later changes to the image, or to the container's own filesystem, are not seen in the VM; and changes the VM makes outside volumes are made to the disk, not the container's filesystem, so `docker diff`, `docker cp`, `docker commit` and `docker export` do not see them. To start afresh from the image, remove the disk's backing file.
+
+Every write outside volumes goes to the disk, so the advice on preserving data on disks applies to all of them. With `--init`, or an image whose entrypoint is its own init (such as systemd), the VM syncs its filesystems when it powers off. Without either, a workload whose data must survive should run `sync -f /` before it exits. This flushes the whole-root disk only.
+
+Compared with disks whose destinations are other paths, such as `/var/lib/docker` or `/home` (here called multi-path disks):
+
+| | Multi-path disk | Whole-root disk |
+|---|---|---|
+| What must be specified | Each path that needs the disk | Only the disk and its size |
+| I/O on the block device | The listed paths | Everything except volumes, bind mounts and other live mounts |
+| Creation cost | Copying the listed paths' contents | Copying the whole image plus the container's changes |
+| Host space | The listed paths' contents | The whole image's contents, duplicated |
+| `docker diff`, `docker cp`, `docker commit`, `docker export` | Unaffected, except for the listed paths | Do not see changes made in the VM outside volumes |
+| If the disk outlives the image | The listed paths are stale | The whole root is stale: image updates are not seen |
+
 #### Example #1
 
 ```console
@@ -806,12 +835,13 @@ The `runcvm-init` process:
 - Waits for its child (QEMU) to exit. When it does, execs `runcvm-ctr-exit` to retrieve any saved exit code (written by the application to `/.runcvm/exitcode`) and exit with this code.
 
 The `runcvm-ctr-qemu` script:
-- Prepares disk backing files as specified by `--env=RUNCVM_DISKS=<disks>`
+- Prepares disk backing files as specified by `--env=RUNCVM_DISKS=<disks>`, populating a new whole-root disk last, so that it can leave out every other disk
 - Prepares network configuration as saved from the container (modifying the MAC address of each container interface), and leaves IPv6 enabled in the VM's kernel only if a global IPv6 address was saved for any interface (or if forced with `--env=RUNCVM_IPV6=1`); otherwise it adds `ipv6.disable=1` to the kernel command line
 - Launches [QEMU](https://www.qemu.org/) with the required kernel, network interfaces, disks, display, and with a root filesystem mounted via virtiofs from the container and with `runcvm-vm-init` as the VM's init process.
 
 The `runcvm-vm-init` process:
 - Runs as PID1 within the VM.
+- Switches the root filesystem to a whole-root disk, if `RUNCVM_DISKS` defines one, with `pivot_root`, binding onto it the mounts that must stay live, before anything else uses the root
 - Retrieves the container configuration - network (IPv4, and IPv6 if present), environment, disk and tmpfs mounts - saved by `runcvm-ctr-entrypoint` to `/.runcvm`, and reproduces it within the VM
 - Launches the container's pre-existing entrypoint, in one of two ways.
    1. If `RUNCVM_INIT` is `1` (i.e. the container was originally intended to be launched with Docker's own init process) then it configures and execs busybox `init`, which becomes the VM's PID1, to supervise `dropbear`, run `runcvm-vm-start` and `poweroff` the VM if signalled to do so.
