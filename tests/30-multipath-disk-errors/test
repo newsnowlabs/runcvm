@@ -13,6 +13,11 @@
 - Adding a destination to an existing disk with layout 'subdirs': the VM
   reports that the disk has no directory for the destination, and the
   Container/VM exits with status 1.
+- An existing disk with layout 'subdirs' whose file system cannot be mounted
+  (zeroed from the end of its superblock to 64KiB, so including its block
+  group descriptors): the VM reports the disk's mountpoint and its
+  destination as left unmounted, not a missing directory, and the
+  Container/VM exits with status 1.
 - Leaving destinations out of an existing disk's spec, down to one, or
   reusing a disk created with a keyed spec (whose destination contains ':'):
   the Container/VM runs, with the remaining destinations mounted.
@@ -128,6 +133,26 @@ CHANGED = [
     ("keyed", "src=/disks/d,dst=/srv/a:b,dst=/home,fs=ext4,size=16M",
      "fs=ext4,destination=/home,source=/disks/d,target=/srv/a:b", 0, "/home /home\n/srv-a:b /srv/a:b"),
 ]
+
+
+def run_unmountable():
+    """Create a disk, zero it after its superblock, then use it again; return all three results."""
+    volume = t.unique("unmountable")
+    t.volume_create(volume)
+    mount = ["--mount", "type=volume,src=%s,dst=/disks" % volume]
+    disks = ["--env", "RUNCVM_DISKS=/disks/d,/srv/a,ext4,16M"]
+    first = t.docker("run", "--rm", "--name", t.unique("unmountable"), *t.labels(), "--runtime=" + t.RUNTIME,
+                     *t.vm_opts(), *mount, *disks, "alpine", "true", timeout=TIMEOUT)
+    # The superblock occupies bytes 1024-2047, and the group descriptors follow it, from block 1
+    # (with 4096-byte blocks) or block 2 (with 1024-byte blocks): zeroing from byte 2048 to 64KiB
+    # leaves the UUID and label readable, but the file system unmountable.
+    corrupt = t.docker("run", "--rm", *t.labels(), *mount, "alpine",
+                       "dd", "if=/dev/zero", "of=/disks/d", "bs=1024", "seek=2", "count=62", "conv=notrunc")
+    second = t.docker("run", "--rm", "--name", t.unique("unmountable"), *t.labels(), "--runtime=" + t.RUNTIME,
+                      *t.vm_opts(), *mount, *disks, "alpine", "true", timeout=TIMEOUT)
+    return first, corrupt, second
+
+
 for (name, first, second, status, expected), (r1, r2) in zip(CHANGED, t.parallel(run_changed, CHANGED)):
     if not t.check("%s: first Container/VM exit status" % name, 0, r1.returncode):
         t.log("output:\n%s" % r1.stdout)
@@ -137,5 +162,16 @@ for (name, first, second, status, expected), (r1, r2) in zip(CHANGED, t.parallel
         t.check("%s: remaining destinations mounted" % name, expected, r2.stdout.strip())
     elif not t.check("%s: error message" % name, True, expected in r2.stdout):
         t.log("output:\n%s" % r2.stdout)
+
+first, corrupt, second = run_unmountable()
+if t.check("unmountable: first Container/VM exit status", 0, first.returncode) and \
+        t.check("unmountable: disk corrupted", 0, corrupt.returncode):
+    t.check("unmountable: second Container/VM exit status", 1, second.returncode)
+    reported = t.check("unmountable: error names what was left unmounted", True,
+                       "RunCVM: Error: mounting the filesystems in /.runcvm/fstab failed, leaving unmounted: "
+                       "/.runcvm/disks/0 /srv/a" in second.stdout)
+    if not t.check("unmountable: error claims no missing directory", False,
+                   "has no directory" in second.stdout) or not reported:
+        t.log("output:\n%s" % second.stdout)
 
 t.finish()
