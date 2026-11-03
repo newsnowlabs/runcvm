@@ -541,7 +541,7 @@ do_networks() {
       HAS_IPV6=1
     fi
 
-    mac=$(busybox sed -r 's/^..:..:../52:54:00/' <<<$DOCKER_IF_MAC)
+    mac=$(vm_mac "$DOCKER_IF_MAC")
 
     if [ "$RUNCVM_QEMU_NET_VHOST" = "1" ]; then
       vhost="on"
