@@ -61,14 +61,15 @@ RUN echo '/dev/vda / ext4 errors=remount-ro 0 1' >/etc/fstab \
 
 # Adds a key to the image's /root/.ssh/authorized_keys, then logs in to the VM's dropbear with it,
 # using RunCVM's own dropbearkey and dbclient. dbclient reports 'No auth methods could be used'
-# when dropbear refuses the key; the command prints 'granted' if it accepts it.
-AUTHORIZED_KEYS_LOGIN = r"""
-G=/.runcvm/guest/usr/bin
-$G/dropbearkey -t ed25519 -f /tmp/k >/dev/null 2>&1 || exit 1
-$G/dropbearkey -y -f /tmp/k | grep '^ssh-' >/root/.ssh/authorized_keys
-chmod 600 /root/.ssh/authorized_keys
-HOME=/tmp $G/dbclient -y -y -i /tmp/k -p 22222 root@127.0.0.1 echo granted </dev/null 2>&1
-"""
+# when dropbear refuses the key; the command prints 'granted' if it accepts it. The script is
+# one line, as 'docker exec' under RunCVM splits an argument at each newline.
+AUTHORIZED_KEYS_LOGIN = "; ".join([
+    "G=/.runcvm/guest/usr/bin",
+    "$G/dropbearkey -t ed25519 -f /tmp/k >/dev/null 2>&1 || exit 1",
+    "$G/dropbearkey -y -f /tmp/k | grep '^ssh-' >/root/.ssh/authorized_keys",
+    "chmod 600 /root/.ssh/authorized_keys",
+    "HOME=/tmp $G/dbclient -y -y -i /tmp/k -p 22222 root@127.0.0.1 echo granted </dev/null 2>&1",
+])
 
 MARKERS = ["/dev/qga-conf-marker", "/dev/mount-helper-marker", "/dev/image-qemu-ga-marker"]
 
