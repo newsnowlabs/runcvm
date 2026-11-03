@@ -47,8 +47,6 @@ INVALID = [
      "dst 'home' must be an absolute path other than '/', without '.' or '..' components"),
     ("dotdot", "/disks/d,/srv/../home:/srv,ext4,16M",
      "dst '/srv/../home' must be an absolute path other than '/', without '.' or '..' components"),
-    ("root", "/disks/d,/:/srv,ext4,16M",
-     "dst '/' must be an absolute path other than '/', without '.' or '..' components"),
     ("whitespace", "/disks/d,/srv/a b:/home,ext4,16M",
      "dst '/srv/a b' must not contain whitespace or '\\'"),
     ("root-several", "/disks/d,/srv/a:/srv/b,ext4,16M,layout=root",

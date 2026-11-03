@@ -90,6 +90,63 @@ disk_subdir() {
 # created, and read from its label thereafter: any other label, or none, means layout 'root'.
 DISK_SUBDIRS_LABEL="runcvm-subdirs"
 
+# Prints path $1 with each character special to mke2fs's '-x PATTERN' wildcards ('\', '*', '?'
+# and '[') escaped, so that the pattern matches only that path.
+disk_glob_escape() {
+  local path="$1"
+
+  path="${path//\\/\\\\}"
+  path="${path//\*/\\*}"
+  path="${path//\?/\\?}"
+  path="${path//\[/\\[}"
+
+  echo "$path"
+}
+
+# Prints, one per line, each mountpoint directly below $RUNCVM_VM_MOUNTPOINT, other than /.runcvm,
+# as its path in the VM: Docker's volumes, bind mounts and files such as /etc/hosts, and the
+# kernel modules.
+disk_vm_mounts() {
+  local id parent mnt vm_id="" rest
+  local IFS=$' \t\n'
+
+  while read -r id parent _ _ mnt rest
+  do
+    if [ "$mnt" = "$RUNCVM_VM_MOUNTPOINT" ]; then
+      vm_id="$id"
+    fi
+  done </proc/self/mountinfo
+
+  while read -r id parent _ _ mnt rest
+  do
+    [ "$parent" = "$vm_id" ] || continue
+
+    # Decode mountinfo's octal escapes (e.g. '\040' for a space).
+    mnt=$(printf '%b' "$mnt")
+    mnt="${mnt#"$RUNCVM_VM_MOUNTPOINT"}"
+
+    [ "$mnt" = "/.runcvm" ] || echo "$mnt"
+  done </proc/self/mountinfo
+}
+
+# Creates disk backing file $2, of size $3, for disk spec $1, if it does not already exist.
+disk_create_file() {
+  local spec="$1" src="$2" size="$3" dir
+
+  if [[ -z "$size" ]]; then
+    error "Error: disk spec '$spec' invalid: size must be specified if src '$src' does not exist"
+  fi
+
+  # Create directory for disk backing file, if needed.
+  dir="$(busybox dirname "$src")"
+  if ! [ -d "$dir" ]; then
+    mkdir -p "$dir"
+  fi
+
+  # Create disk backing file.
+  busybox truncate -s "$size" "$src" >&2 || error "Error: disk spec '$spec' invalid: truncate on '$src' with size '$size' failed"
+}
+
 # Argument, in positional form: <src>,<dst>[:<dst2>:...],<fs>[,<size>][,layout=subdirs|root]
 # e.g. /volume/disk1,/var/lib/docker:/var/lib/containerd:/home,ext4,5G
 #
@@ -104,10 +161,15 @@ DISK_SUBDIRS_LABEL="runcvm-subdirs"
 #
 # A disk with layout 'root' has exactly one destination, holds its contents at its root, and is
 # mounted at that destination.
+#
+# A disk with destination '/' (a whole-root disk) holds the VM's whole root filesystem: see
+# do_root_disk. It must be the disk's only destination, have fs 'ext4' and layout 'root', and be the
+# only such disk.
 do_disk() {
   local spec="$1"
   local id="$2"
-  local src="" dsts dst fs="" size="" layout layout_opt="" field key value dir UUID LABEL queues i j
+  local src="" dsts dst fs="" size="" layout layout_opt="" field key value UUID LABEL i j path
+  local whole_root=0
   local -a fields=() dests=() subdirs=() resolved=() populate=()
   local -A seen=()
 
@@ -216,6 +278,43 @@ do_disk() {
     fi
   fi
 
+  for dst in "${dests[@]}"
+  do
+    if [[ "$dst" =~ ^/+$ ]]; then
+      whole_root=1
+    fi
+  done
+
+  if [ "$whole_root" = "1" ]; then
+    if [ "${#dests[@]}" -gt 1 ]; then
+      error "Error: disk spec '$spec' invalid: dst '/' must be the disk's only dst"
+    fi
+
+    if [ "$fs" != "ext4" ]; then
+      error "Error: disk spec '$spec' invalid: a disk with dst '/' must have fs 'ext4'"
+    fi
+
+    if [ "$layout_opt" = "subdirs" ]; then
+      error "Error: disk spec '$spec' invalid: a disk with dst '/' must have layout 'root'"
+    fi
+
+    if [[ -f "$src" && "$layout" = "subdirs" ]]; then
+      error "Error: disk spec '$spec' invalid: src '$src' exists, with layout 'subdirs', not 'root' as dst '/' requires"
+    fi
+
+    if [ -n "$ROOT_DISK_SPEC" ]; then
+      error "Error: disk spec '$spec' invalid: only one disk may have dst '/'"
+    fi
+
+    # Populating a new whole-root disk excludes every other disk, so it waits until do_disks has
+    # handled them all.
+    ROOT_DISK_SPEC="$spec"
+    ROOT_DISK_SRC="$src"
+    ROOT_DISK_SIZE="$size"
+    ROOT_DISK_ID="$id"
+    return 0
+  fi
+
   if [ "$layout" = "subdirs" ]; then
     for i in "${!dests[@]}"
     do
@@ -281,19 +380,7 @@ do_disk() {
   done
 
   if [[ ! -f "$src" ]]; then
-    
-    if [[ -z "$size" ]]; then
-      error "Error: disk spec '$spec' invalid: size must be specified if src '$src' does not exist"
-    fi
-
-    # Create directory for disk backing file, if needed.
-    dir="$(busybox dirname "$src")"
-    if ! [ -d "$dir" ]; then
-      mkdir -p "$dir"
-    fi
-
-    # Create disk backing file.
-    busybox truncate -s "$size" "$src" >&2 || error "Error: disk spec '$spec' invalid: truncate on '$src' with size '$size' failed"
+    disk_create_file "$spec" "$src" "$size"
 
     # Create filesystem on disk backing file, populated with any pre-existing files from each dst.
     # Use RunCVM's own mke2fs configuration, not the image's /etc/mke2fs.conf.
@@ -327,7 +414,60 @@ do_disk() {
     echo "UUID=$UUID ${dests[0]} $fs defaults,noatime 0 0" >>/.runcvm/fstab
   fi
 
-  # Add disk to QEMU command line.
+  # A whole-root disk leaves out this disk's backing file, and the contents of its destinations,
+  # which this disk holds instead: each as its path in the image's filesystem, with symbolic links
+  # resolved.
+  DISK_EXCLUDES+=("$(busybox realpath "$src")")
+  for dst in "${dests[@]}"
+  do
+    path=$(disk_normalise_path "$dst") && path=$(disk_resolve_path "$path") || path="$dst"
+    DISK_EXCLUDES+=("$path")
+  done
+
+  disk_add_device "$src" "$id"
+}
+
+# Creates and populates a new whole-root disk, and records it for runcvm-vm-init, which switches the
+# VM's root filesystem to it with pivot_root, before anything else uses the root.
+#
+# The disk is populated from the image's filesystem below $RUNCVM_VM_MOUNTPOINT, without crossing
+# into other filesystems, so it leaves out everything that must stay live: /.runcvm, Docker's
+# volumes, bind mounts and files such as /etc/hosts, and the kernel modules, leaving an empty
+# directory at each mountpoint that is a directory. It also leaves out each disk's backing file,
+# and the contents of every other disk's destinations. A disk is populated only when it is created:
+# it does not see later changes to the image or the container's filesystem.
+#
+# /.runcvm/rootdisk holds the disk's filesystem UUID; /.runcvm/rootdisk-mounts lists the paths
+# runcvm-vm-init carries from the image's filesystem onto the disk.
+do_root_disk() {
+  local spec="$ROOT_DISK_SPEC" src="$ROOT_DISK_SRC" path UUID
+  local -a excludes=()
+
+  if [[ ! -f "$src" ]]; then
+    disk_create_file "$spec" "$src" "$ROOT_DISK_SIZE"
+
+    for path in "${DISK_EXCLUDES[@]}" "$(busybox realpath "$src")"
+    do
+      excludes+=(-x "$(disk_glob_escape "$path")")
+    done
+
+    MKE2FS_CONFIG="$RUNCVM_GUEST/etc/mke2fs.conf" mke2fs -q -F -t ext4 -d "$RUNCVM_VM_MOUNTPOINT" -E one_file_system "${excludes[@]}" "$src" >&2 || error "Error: disk spec '$spec' invalid: mke2fs on '$src' with fs 'ext4' failed"
+  fi
+
+  UUID=$(blkid -p -s UUID -o value "$src") || true
+  if [ -z "$UUID" ]; then
+    error "Error: disk spec '$spec' invalid: no filesystem UUID found in src '$src'"
+  fi
+
+  echo "$UUID" >/.runcvm/rootdisk
+  disk_vm_mounts >/.runcvm/rootdisk-mounts
+
+  disk_add_device "$src" "$ROOT_DISK_ID"
+}
+
+# Adds disk backing file $1 to the QEMU command line, as disk number $2.
+disk_add_device() {
+  local src="$1" id="$2" queues
 
   if [ "${RUNCVM_CPUS:-1}" -gt 8 ]; then
     queues=8
@@ -367,11 +507,18 @@ do_disks() {
   local IFS=';'
   local disk
   local id=0
+  ROOT_DISK_SPEC=""
+  DISK_EXCLUDES=()
+
   for disk in $1
   do
     do_disk "$disk" "$id"
     id=$((id+1))
   done
+
+  if [ -n "$ROOT_DISK_SPEC" ]; then
+    do_root_disk
+  fi
 }
 
 do_networks() {
