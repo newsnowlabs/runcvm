@@ -32,7 +32,7 @@ the runtime or the scripts.
   exercises RunCVM itself, so it suits sandboxes and CI hosts without nested virtualisation.
   The integration tests need a Docker daemon with the `runcvm` runtime registered. Check what
   the current environment has before choosing what to test, and say plainly in any report what
-  could not be tested there (e.g. "not tested on KVM", "not tested on arm64").
+  could not be tested there (e.g. "not tested on KVM", "not tested with Podman").
 
 ## Integration tests
 
@@ -159,6 +159,14 @@ behaviour stated explicitly.
 Pull request descriptions, unlike commit messages, are not hard-wrapped: write each paragraph
 and list item as a single line. GitHub renders a line break within a paragraph or list item in
 a description as a visible break, so wrapped text displays as ragged, broken lines.
+
+A pull request's test steps go in one `bash` code block, which can be copied and run as a
+whole. Announce each step with `echo`, and after each command whose outcome matters, `echo`
+its exit status alongside the status expected, e.g.
+`echo "=== second run exit status: $? (expect 1)"`, so that the output makes sense when pasted
+back. Don't use `set -e`, so that a failing step is reported and the steps after it still run.
+Where steps differ between KVM and TCG hosts, set the difference in a variable on the block's
+first line.
 
 ## Merging to `main`
 
