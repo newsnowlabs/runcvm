@@ -829,11 +829,12 @@ In more detail, the RunCVM runtime `create` process:
    - Set `/dev/shm` to the size desired for the VM's memory, set `RUNCVM_MEM_SIZE` env var accordingly, and set the container memory limit to the size plus 256Mb (a contingency for QEMU itself, along with virtiofsd, dnsmasq and other container contents)
    - Add necessary capabilities, if not already present (`NET_ADMIN`, `NET_RAW`, `MKNOD`, `AUDIT_WRITE`).
    - Only if requested by `--env=SYS_ADMIN=1`, add the `SYS_ADMIN` capability.
+   - Pass the container's environment variables (as given by Docker or Podman) to `runcvm-ctr-entrypoint` as arguments: a count, then one `NAME=VALUE` argument per variable, ahead of the original entrypoint and command line. Then reduce the container's environment to RunCVM's own: its `RUNCVM_*` variables, `TERM` (if set), a `PATH` of RunCVM's own tool directories, and `HOME=/.runcvm`. So RunCVM's scripts and tools are unaffected by the workload's environment (e.g. `LD_LIBRARY_PATH`, `BASH_ENV`, `UID`), which only the workload receives.
 - Executes the standard container runtime `runc` with the modified `config.json`.
 
 The `runcvm-ctr-entrypoint`:
 - Is always launched as PID1 within the standard Docker container.
-- Saves the container's originally-intended entrypoint and command line, environment variables and network configuration (IPv4, and IPv6 if a global IPv6 address is present) to files inside `/.runcvm`.
+- Saves the container's originally-intended entrypoint and command line, the workload's environment variables (the container's, without RunCVM's own `RUNCVM_*` settings), RunCVM's own environment and network configuration (IPv4, and IPv6 if a global IPv6 address is present) to files inside `/.runcvm`.
 - Creates a bridge (acting as a hub) for each container network interface, to join that interface to a VM tap network interface.
 - Launches `virtiofsd` to serve the container's root filesystem.
 - Configures `/etc/resolv.conf` in the container.
@@ -859,7 +860,7 @@ The `runcvm-vm-init` process:
    2. Else, it backgrounds `dropbear`, then execs (via `runcvm-init`, purely to create a controlling tty) `runcvm-vm-start`, which runs as the VM's PID1.
 
 The `runcvm-vm-start` script:
-- Restores the container's originally-intended environment variables, `<uid>`, `<gid>`, `<additionalGids>` and `<cwd>`, and execs that entrypoint.
+- Execs the container's originally-intended entrypoint with the workload's environment variables alone, and with its `<uid>`, `<gid>`, `<additionalGids>` and `<cwd>`.
 
 #### `runcvm-runtime` - `exec` command
 
@@ -868,11 +869,12 @@ The RunCVM runtime `exec` process:
 - Modifies the `process.json` file to:
    - Retrieve the intended `<uid>`, `<gid>`, `<additionalGids>`, `<terminal>` and `<cwd>` for the command, as well as <hasHome> indicating the existence of a HOME environment variable.
    - Resets both the `<uid>` and `<gid>` to `0` and the `<cwd>` to `/`.
-   - Prepend `runcvm-ctr-exec '<uid>:<gid>:<additionalGids>' '<cwd>' '<hasHome>' '<terminal>'` to the originally intended command.
+   - Prepend `runcvm-ctr-exec '<uid>:<gid>:<additionalGids>' '<cwd>' '<hasHome>' '<terminal>' '<N>'`, followed by the command's `<N>` environment variables as `NAME=VALUE` arguments, to the originally intended command.
+   - Reduce the environment to RunCVM's own, as for `create`.
 - Executes the standard container runtime `runc` with the modified `process.json`.
 
 The `runcvm-ctr-exec` script:
-- Uses the Dropbear `dbclient` SSH client to execute the intended command, with the intended arguments within the VM, via the `runcvm-vm-exec` process, propagate the returned stdout and stderr and return the command's exit code.
+- Uses the Dropbear `dbclient` SSH client to execute the intended command, with the intended arguments and environment variables (without RunCVM's own `RUNCVM_*` settings) within the VM, via the `runcvm-vm-exec` process, propagate the returned stdout and stderr and return the command's exit code.
 
 ## Building
 
