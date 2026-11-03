@@ -555,6 +555,17 @@ RunCVM formats disks with its own bundled `mke2fs` and `mke2fs.conf`, ignoring a
 
 When RunCVM creates a Container/VM, fstab entries will be drafted, identifying each disk by its filesystem's UUID. After the VM boots, the fstab entries will be mounted, in order. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on. RunCVM finds each disk with its own bundled `blkid.conf`, which scans the VM's block devices and keeps no cache, ignoring any `/etc/blkid.conf` in the image.
 
+> **Warning: launch with `--init` if a disk's contents must survive the VM ending.** Data written to a disk stays in the VM's memory until the VM's kernel writes it out, so whether it reaches the backing file depends on how the VM ends:
+>
+> - With `--init`, the VM's init syncs its file systems before powering off, both when the entrypoint exits and on `docker stop`.
+> - Without `--init`, `docker stop` runs `poweroff` in the VM, which also syncs file systems first. But when the entrypoint exits by itself, the VM ends at once: the entrypoint is the VM's PID 1, and nothing runs after it. Data not yet written out is lost, and the file system needs journal recovery when next mounted.
+> - `docker kill` ends the VM at once in either mode.
+> - Launch an image whose entrypoint is its own init, such as systemd, without `--init`, which would displace it as the VM's PID 1. Such an init normally runs until `docker stop`, which syncs file systems as above.
+>
+> To keep a disk's data without `--init`, the workload must flush the disk before its entrypoint exits, with `sync -f <dst>` for one `<dst>` of each disk, which flushes only that disk's file system and needs no special privileges. A workload running as root may instead unmount the disk once nothing still uses it, which also leaves the disk's file system clean, needing no journal recovery. That means unmounting the disk's own mount: `umount <dst>` does so only where the disk is mounted directly at `<dst>`. Where `<dst>` is a bind mount from the disk, `umount <dst>` removes only the bind mount and leaves the disk mounted, unflushed. A plain `sync` also works, but flushes every file system in the VM, including its root file system, whether that is shared with the container or is a whole-root disk.
+>
+> A disk whose contents are thrown away after each run, such as a `/var/lib/docker` for a disposable test, needs no flushing.
+
 #### Disk layouts
 
 A disk with layout `subdirs`, the default, holds a top-level directory for each destination, prepopulated from it. On every boot, the disk is mounted at a hidden mountpoint, `/.runcvm/disks/<n>` (where `<n>` counts disks from 0 in `RUNCVM_DISKS` order), and each directory is bind-mounted over its destination. Such a disk is created with the filesystem label `runcvm-subdirs`, by which RunCVM recognises its layout thereafter; relabelling the disk would change how it is mounted.
@@ -588,7 +599,7 @@ The VM still boots from the container's filesystem over virtiofs. Early in boot,
 
 The disk is populated only when it is created. While it exists, later changes to the image, or to the container's own filesystem, are not seen in the VM; and changes the VM makes outside volumes are made to the disk, not the container's filesystem, so `docker diff`, `docker cp`, `docker commit` and `docker export` do not see them. To start afresh from the image, remove the disk's backing file.
 
-Every write outside volumes goes to the disk, so the advice on preserving data on disks applies to all of them. With `--init`, or an image whose entrypoint is its own init (such as systemd), the VM syncs its filesystems when it powers off. Without either, a workload whose data must survive should run `sync -f /` before it exits. This flushes the whole-root disk only.
+Every write outside volumes goes to the disk, so the warning above on keeping a disk's data applies to all of them. With `--init`, or an image whose entrypoint is its own init (such as systemd), the VM syncs its filesystems when it powers off. Without either, a workload whose data must survive should run `sync -f /` before it exits. This flushes the whole-root disk only.
 
 Compared with disks whose destinations are other paths, such as `/var/lib/docker` or `/home` (here called multi-path disks):
 
@@ -600,17 +611,6 @@ Compared with disks whose destinations are other paths, such as `/var/lib/docker
 | Host space | The listed paths' contents | The whole image's contents, duplicated |
 | `docker diff`, `docker cp`, `docker commit`, `docker export` | Unaffected, except for the listed paths | Do not see changes made in the VM outside volumes |
 | If the disk outlives the image | The listed paths are stale | The whole root is stale: image updates are not seen |
-
-> **Warning: launch with `--init` if a disk's contents must survive the VM ending.** Data written to a disk stays in the VM's memory until the VM's kernel writes it out, so whether it reaches the backing file depends on how the VM ends:
->
-> - With `--init`, the VM's init syncs its file systems before powering off, both when the entrypoint exits and on `docker stop`.
-> - Without `--init`, `docker stop` runs `poweroff` in the VM, which also syncs file systems first. But when the entrypoint exits by itself, the VM ends at once: the entrypoint is the VM's PID 1, and nothing runs after it. Data not yet written out is lost, and the file system needs journal recovery when next mounted.
-> - `docker kill` ends the VM at once in either mode.
-> - Launch an image whose entrypoint is its own init, such as systemd, without `--init`, which would displace it as the VM's PID 1. Such an init normally runs until `docker stop`, which syncs file systems as above.
->
-> To keep a disk's data without `--init`, the workload must flush the disk before its entrypoint exits, with `sync -f <dst>` for one `<dst>` of each disk, which flushes only that disk's file system and needs no special privileges. A workload running as root may instead unmount the disk once nothing still uses it, which also leaves the disk's file system clean, needing no journal recovery. That means unmounting the disk's own mount: `umount <dst>` does so only where the disk is mounted directly at `<dst>`. Where `<dst>` is a bind mount from the disk, `umount <dst>` removes only the bind mount and leaves the disk mounted, unflushed. A plain `sync` also works, but flushes every file system in the VM, including the root file system that the VM shares with the container.
->
-> A disk whose contents are thrown away after each run, such as a `/var/lib/docker` for a disposable test, needs no flushing.
 
 #### Example #1
 
