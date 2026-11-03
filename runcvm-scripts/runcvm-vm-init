@@ -222,8 +222,9 @@ if [ -f /.runcvm/fstab ]; then
   busybox modprobe ext4
 
   # Resolve UUID= with RunCVM's own libblkid configuration, which scans devices and keeps no
-  # cache, not with the image's /etc/blkid.conf and /run/blkid cache.
-  if ! BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null mount -a --fstab /.runcvm/fstab -o X-mount.mkdir; then
+  # cache, not with the image's /etc/blkid.conf and /run/blkid cache. -i keeps mount from running
+  # any /sbin/mount.<type> helper from the image.
+  if ! BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null mount -i -a --fstab /.runcvm/fstab -o X-mount.mkdir; then
     # A bind mount from a disk with layout 'subdirs' fails if the disk has no directory for its
     # destination: a destination added to the disk's spec after the disk was created.
     while read -r dir dst _
