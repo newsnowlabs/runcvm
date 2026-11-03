@@ -414,9 +414,9 @@ do_disk() {
     echo "UUID=$UUID ${dests[0]} $fs defaults,noatime 0 0" >>/.runcvm/fstab
   fi
 
-  # A whole-root disk leaves out this disk's backing file, and the contents of its destinations,
-  # which this disk holds instead: each as its path in the image's filesystem, with symbolic links
-  # resolved.
+  # Record this disk's backing file, and each of its destinations, for do_root_disk: a whole-root
+  # disk leaves them out, as this disk holds the destinations' contents. Each is recorded as its
+  # path in the image's filesystem, with symbolic links resolved.
   DISK_EXCLUDES+=("$(busybox realpath "$src")")
   for dst in "${dests[@]}"
   do

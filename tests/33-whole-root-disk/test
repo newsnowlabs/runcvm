@@ -22,9 +22,13 @@ switches early in boot. In both --init modes:
   image's contents at another disk's destination, which that disk holds
   instead.
 
-A second disk with destination '/', or one with another destination as
-well, another filesystem than ext4 or layout 'subdirs', is rejected: the
-Container/VM exits with status 1, reporting the invalid spec.
+These disk specs are rejected, the Container/VM exiting with status 1 and
+reporting the invalid spec:
+
+- a second disk with destination '/';
+- a disk with destination '/' and another destination;
+- a disk with destination '/' and a filesystem other than ext4;
+- a disk with destination '/' and layout 'subdirs'.
 
 The expected values describe current behaviour. A change to it must update
 them deliberately.

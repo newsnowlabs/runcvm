@@ -590,7 +590,7 @@ The disk is populated only when it is created. While it exists, later changes to
 
 Every write outside volumes goes to the disk, so the advice on preserving data on disks applies to all of them. With `--init`, or an image whose entrypoint is its own init (such as systemd), the VM syncs its filesystems when it powers off. Without either, a workload whose data must survive should run `sync -f /` before it exits. This flushes the whole-root disk only.
 
-Compared with disks holding a list of paths (multi-path disks):
+Compared with disks whose destinations are other paths, such as `/var/lib/docker` or `/home` (here called multi-path disks):
 
 | | Multi-path disk | Whole-root disk |
 |---|---|---|
