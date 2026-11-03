@@ -274,7 +274,20 @@ For a deep dive into RunCVM's internals, see the section on [Developing RunCVM](
 
 RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM.
 
-RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and the `kvm` and `tun` kernel modules. RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
+RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) the `kvm` and `tun` kernel modules, and the `br_netfilter` kernel module (see below). RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
+
+### br_netfilter kernel module
+
+A Container/VM on a user-defined Docker network resolves names, including other containers' names, through Docker's embedded DNS server, which RunCVM's `dnsmasq` in the container forwards to. The VM's DNS requests reach `dnsmasq` only if the host has the `br_netfilter` kernel module loaded. Without it, the requests go to the network's gateway instead, and names Docker's embedded server would answer (such as other containers' names) do not resolve. A Container/VM on the default bridge network queries the host's DNS servers directly, and does not need it.
+
+Docker loads `br_netfilter` on some hosts, but not all. To load it now, and at every boot:
+
+```console
+sudo modprobe br_netfilter
+echo br_netfilter | sudo tee /etc/modules-load.d/runcvm.conf
+```
+
+`docker exec` into a Container/VM does not need `br_netfilter`.
 
 RunCVM is tested on Debian Bullseye and [GitHub Codespaces](https://github.com/codespaces/new?hide_repo_select=true&ref=main&repo=514606231).
 
