@@ -274,20 +274,7 @@ For a deep dive into RunCVM's internals, see the section on [Developing RunCVM](
 
 RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM.
 
-RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) the `kvm` and `tun` kernel modules, and the `br_netfilter` kernel module (see below). RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
-
-### br_netfilter kernel module
-
-A Container/VM on a user-defined Docker network resolves names, including other containers' names, through Docker's embedded DNS server, which RunCVM's `dnsmasq` in the container forwards to. The VM's DNS requests reach `dnsmasq` only if the host has the `br_netfilter` kernel module loaded. Without it, the requests go to the network's gateway instead, and names Docker's embedded server would answer (such as other containers' names) do not resolve. A Container/VM on the default bridge network queries the host's DNS servers directly, and does not need it.
-
-Docker loads `br_netfilter` on some hosts, but not all. To load it now, and at every boot:
-
-```console
-sudo modprobe br_netfilter
-echo br_netfilter | sudo tee /etc/modules-load.d/runcvm.conf
-```
-
-`docker exec` into a Container/VM does not need `br_netfilter`.
+RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and the `kvm` and `tun` kernel modules. RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
 RunCVM is tested on Debian Bullseye and [GitHub Codespaces](https://github.com/codespaces/new?hide_repo_select=true&ref=main&repo=514606231).
 
@@ -853,7 +840,8 @@ The `runcvm-ctr-entrypoint`:
 - Creates a bridge (acting as a hub) for each container network interface, to join that interface to a VM tap network interface.
 - Launches `virtiofsd` to serve the container's root filesystem.
 - Configures `/etc/resolv.conf` in the container.
-- Adds container firewall rules, launches `dnsmasq` and modifies `/vm/etc/resolv.conf` to proxy DNS requests from the VM to Docker's DNS.
+- Adds container firewall rules and launches `dnsmasq`. Where the container's DNS server is Docker's embedded one (`127.0.0.11`, on user-defined networks), which only the container can reach, it adds `169.254.1.2` to the bridge and points `/vm/etc/resolv.conf` at it, so that `dnsmasq` forwards the VM's DNS requests to Docker's DNS. Elsewhere (e.g. on the default bridge network), the VM uses the container's DNS servers directly.
+- Records the bridge's MAC address and its own address, `169.254.1.1`, the source of `docker exec`'s connections to the VM. The VM reaches both of the bridge's addresses on its own link, with routes and permanent neighbour entries, so that DNS and `docker exec` need no `br_netfilter` on the host. RunCVM does not use `169.254.169.254`, which cloud platforms use for their instance-metadata service, and leaves it to the VM's network.
 - Execs RunCVM's own `runcvm-init` init process to supervise `runcvm-ctr-qemu` to launch the VM.
 
 The `runcvm-init` process:

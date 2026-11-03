@@ -185,14 +185,22 @@ do
   fi
 done
 
-# The container's bridge address, the source of 'docker exec' connections, is on the VM's own
-# link, at the bridge's MAC address. The route keeps replies to it off the Docker network's
-# gateway, and the permanent neighbour entry keeps the VM from asking for it by ARP, which every
-# RunCVM container on the same Docker network would answer.
+# The container's bridge addresses (the source of 'docker exec' connections, and dnsmasq, if it is
+# the VM's DNS server) are on the VM's own link, at the bridge's MAC address. The routes keep
+# traffic to them off the Docker network's gateway, and the permanent neighbour entries keep the
+# VM from asking for them by ARP, which every RunCVM container on the same Docker network would
+# answer.
 if [ -s /.runcvm/network/bridge ]; then
   read -r BRIDGE_IF BRIDGE_MAC BRIDGE_IP </.runcvm/network/bridge
-  ip route add "$BRIDGE_IP/32" dev "$BRIDGE_IF"
-  ip neigh replace "$BRIDGE_IP" lladdr "$BRIDGE_MAC" dev "$BRIDGE_IF" nud permanent
+  BRIDGE_IPS=("$BRIDGE_IP")
+  if [ -s /.runcvm/network/dns ]; then
+    read -r DNS_IP </.runcvm/network/dns
+    BRIDGE_IPS+=("$DNS_IP")
+  fi
+  for addr in "${BRIDGE_IPS[@]}"; do
+    ip route add "$addr/32" dev "$BRIDGE_IF"
+    ip neigh replace "$addr" lladdr "$BRIDGE_MAC" dev "$BRIDGE_IF" nud permanent
+  done
 fi
 
 # Read and install any supplementary routes.

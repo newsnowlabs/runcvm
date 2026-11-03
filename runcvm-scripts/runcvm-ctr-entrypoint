@@ -108,11 +108,13 @@ read -r DOCKER_GW_IF6 DOCKER_GW_IF6_IP < \
   <(ip -6 -json route show default | jq -r '.[0] | [.dev, .gateway] | @tsv')
 # e.g. eth0 fd00:1::1
 
-# QEMU_BRIDGE_IP, on the default gateway interface's bridge, is the source of 'docker exec'
-# connections to the VM, which reaches it on its own link (see runcvm-vm-init), never through the
-# Docker network's gateway.
+# Link-local addresses on the default gateway interface's bridge, which the VM reaches on its own
+# link (see runcvm-vm-init), never through the Docker network's gateway:
+# - QEMU_BRIDGE_IP: the source of 'docker exec' connections to the VM;
+# - RUNCVM_DNS_IP: the VM's DNS server (dnsmasq, in the container), when the container's DNS
+#   server is Docker's embedded one, 127.0.0.11, which only the container can reach.
 QEMU_BRIDGE_IP=169.254.1.1
-RUNCVM_DNS_IP=169.254.169.254
+RUNCVM_DNS_IP=169.254.1.2
 
 mkdir -p /.runcvm/network/devices
 
@@ -223,9 +225,6 @@ do
     # Restore default gateway route via this bridge.
     ip route add default via "$DOCKER_GW_IF_IP" dev "$QEMU_BRIDGE"
 
-    # Accept DNS requests for $RUNCVM_DNS_IP; these will be passed to dnsmasq
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -d "$RUNCVM_DNS_IP/32" -p udp -m udp --dport 53 -j REDIRECT
-
     # Accept VNC requests on published port (5900 + display number)
     if [[ "$RUNCVM_DISPLAY_MODE" = "vnc" ]] || is_natural_int "$RUNCVM_QEMU_VNC_DISPLAY"; then
       XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -p tcp -m tcp --dport $((RUNCVM_QEMU_VNC_DISPLAY+5900)) -j REDIRECT
@@ -242,12 +241,24 @@ done
 
 # FIXME: Bind-mount /etc/resolv.conf as well as /vm/etc/resolv.conf to prevent them showing in 'docker diff'
 cat /vm/etc/resolv.conf >/etc/resolv.conf
-RESOLV_CONF_NEW=$(busybox sed -r "s/127.0.0.11/$RUNCVM_DNS_IP/" /vm/etc/resolv.conf)
-echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
+
+# Docker's embedded DNS server, 127.0.0.11, is reachable only in the container, so the VM uses
+# dnsmasq instead, at $RUNCVM_DNS_IP on the bridge, which forwards to 127.0.0.11. Other DNS
+# servers (e.g. on the default bridge network) the VM queries directly. $RUNCVM_DNS_IP is added
+# to the bridge only here: a container whose DNS server is $RUNCVM_DNS_IP itself, inherited from
+# a RunCVM VM in which Docker runs, must reach that server through the gateway, not its own
+# dnsmasq, whose upstream it would then be.
+if busybox grep -qE '^nameserver[[:space:]]+127\.0\.0\.11([[:space:]]|$)' /vm/etc/resolv.conf && [ -s /.runcvm/network/bridge ]; then
+  read -r gw_if _ _ </.runcvm/network/bridge
+  ip addr add "$RUNCVM_DNS_IP" dev "br-$gw_if"
+  echo "$RUNCVM_DNS_IP" >/.runcvm/network/dns
+  RESOLV_CONF_NEW=$(busybox sed -r "s/127.0.0.11/$RUNCVM_DNS_IP/" /vm/etc/resolv.conf)
+  echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
+fi
 
 # LAUNCH DNSMASQ
 # It will receive local DNS requests (within the container, on 127.0.0.1)
-# and requests redirected locally (via the iptables PREROUTING REDIRECT rule) for $RUNCVM_DNS_IP.
+# and the VM's, on $RUNCVM_DNS_IP.
 # '-C /dev/null' keeps it from reading the image's /etc/dnsmasq.conf (and any conf-dir it names).
 dnsmasq -C /dev/null -u root --no-hosts
 
