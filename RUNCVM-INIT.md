@@ -135,8 +135,9 @@ A richer guest supervisor could offer:
   behavior, readiness notifications, and bounded ordered shutdown.
 - Explicit coordination with bridge output completion and application status,
   rather than using respawn plus a once-marker convention.
-- Private generated configuration/state under `/.runcvm`, avoiding overwriting
-  the image's `/etc/inittab` merely to configure RunCVM services.
+- Generated configuration/state under `/.runcvm` (root-only, and private to
+  RunCVM if hidden from the workload: see below), avoiding overwriting the
+  image's `/etc/inittab` merely to configure RunCVM services.
 
 Those are benefits to demonstrate, not claims that BusyBox cannot be used to
 build a working bridge. Supporting Dropbear/qemu-ga until replacements exist,
@@ -167,7 +168,7 @@ service manager is not automatically a substitute for that launcher.
 | Tini | Single primary child, reaping and optional subreaping; child process group/terminal foreground handling; no multi-service restart/dependency policy |
 | Upstream dumb-init / current fork | Single-primary-child forwarding and session/job-control handling; current RunCVM hooks/no-fork extension are additional requirements; multi-service policy would be a substantial extension |
 | Catatonit | Small container init with subreaping, signal forwarding, and descriptor-based signal handling; no general multi-service policy |
-| s6 | Mature supervision, restart/finish actions, readiness and service controls; directory/state model fits private tmpfs; full PID 1 boot/shutdown integration still needs arranging |
+| s6 | Mature supervision, restart/finish actions, readiness and service controls; directory/state model fits `/run` (container) or `/.runcvm` (guest), subject to the constraints below; full PID 1 boot/shutdown integration still needs arranging |
 | runit | Established service-directory supervision; boot/shutdown and application completion need integration |
 | Dinit | Integrated dependencies, restart limits/policies and console-service choices; evaluate footprint, guest/container modes, and shutdown integration |
 | multirun | Multiple commands from argv without service directories, but intentionally uniform stop-on-child-exit behavior and no restarts; insufficient by itself for distinct RunCVM service policies |
@@ -185,16 +186,31 @@ Sources: [Tini](https://github.com/krallin/tini),
 [Dinit](https://github.com/davmac314/dinit),
 [multirun](https://github.com/nicolas-van/multirun).
 
-The original no-filesystem-footprint constraint concerned unexpected image-layer
-files and `docker commit`, not a ban on runtime files in private mounts. RunCVM
-already provides `/.runcvm` tmpfs. Ordinary supervisor configuration and state
-can live there, so neither argv-only configuration nor a custom supervisor is a
-requirement. Keep application-layer writes out of both startup and shutdown;
-deleting generated files later does not protect a commit taken while running.
-For reuse in Dockside, supply equivalent private runtime storage or evaluate
-the writable-layer consequences separately.
+Supervisor configuration and state must not appear in the workload's filesystem.
+The container's root filesystem is the VM's root filesystem: virtiofsd serves it,
+and `/.runcvm` with it. So anything the container-side supervisor (of virtiofsd,
+dnsmasq and QEMU) writes outside `/run` is visible to the workload while it runs,
+as well as to `docker diff` and `docker commit`. Its configuration and state
+therefore belong in the container-only `/run` tmpfs, which the runtime mounts
+after the `/vm` bind so that it is not carried into the VM. A supervisor such as
+s6 can keep its scan directory there, given two properties of that mount:
 
-With that constraint relaxed, prototype an established supervisor (s6 first,
+- It is `noexec`, so service `run` scripts must be executed from the RunCVM
+  package, e.g. as symlinks into `/.runcvm/guest` (the kernel applies `noexec`
+  to the file a symlink resolves to), unless `noexec` is dropped from `/run`.
+- It is 1 MB, shared with virtiofsd's log, which has no size limit; supervisor
+  state writes fail once `/run` is full. Enlarge `/run`, or bound or move the
+  log.
+
+A guest-side supervisor can keep state in `/.runcvm`, which is root-only; it is
+private to RunCVM only if `/.runcvm` is hidden from the workload (see "Hiding
+`/.runcvm`"). On either side, keep writes out of the image's own filesystem
+during both startup and shutdown; deleting generated files later does not
+protect a commit taken while running. For reuse in Dockside, supply equivalent
+private runtime storage or evaluate the writable-layer consequences separately.
+
+So neither argv-only configuration nor a custom supervisor is a requirement.
+Within these constraints, prototype an established supervisor (s6 first,
 with Dinit a useful comparison) before deciding a bespoke implementation is
 worth its maintenance. Do not embed general service supervision into the stdio
 bridge or execution agent merely to avoid evaluating an existing tool.
@@ -227,8 +243,8 @@ with an established tool may be simpler than unifying them.
 1. Validate the primary stdio bridge on KVM/TUN hardware with existing inits.
 2. Record required policies, signal/session behavior and shutdown/status paths
    for both roles; distinguish requirements from incidental current behavior.
-3. Prototype guest and container supervisor replacements separately, using
-   private runtime configuration. Measure readiness, failure recovery, shutdown,
+3. Prototype guest and container supervisor replacements separately, with
+   configuration and state in `/.runcvm` and `/run` respectively. Measure readiness, failure recovery, shutdown,
    startup cost, binary/dependency footprint, and process-tree changes.
 4. Test primary completion, supporting-daemon crashes, rapid restart loops,
    stuck shutdown, console job control, exact status, output draining, and
