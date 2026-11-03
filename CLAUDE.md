@@ -168,6 +168,10 @@ back. Don't use `set -e`, so that a failing step is reported and the steps after
 Where steps differ between KVM and TCG hosts, set the difference in a variable on the block's
 first line.
 
+A pull request may be raised while its tests are still running. Its description then says which
+results are pending; as they come in, record them there, and push any fixes they call for to
+the branch.
+
 ## Merging to `main`
 
 `main` takes only clean commits. How a pull request lands depends on its branch:
@@ -183,6 +187,16 @@ first line.
   Raw-History: raw/<branch> (<original-tip-short-hash>)
   ```
   A single-commit branch needs no tag or trailer.
+
+Once the changes in a pull request whose branch has more than one commit are complete (its
+tests may still be running), its description ends with a "Squash commit message" section, for
+use if it is squash-merged; a clean branch may still be rebase-merged instead. The section
+holds the subject and body in a fenced block, which keeps the body's 72-column wrapping. They
+follow the rules in "Commit messages", with the subject ending in the pull request's number
+(e.g. `(#60)`) as GitHub's own squash subjects do, and the body ending with the
+`Raw-History:` trailer for the branch's tip and any `Co-Authored-By:` trailers. The message
+describes the pull request's final diff against its base, not the branch's commits one by
+one, and is updated whenever the branch changes.
 
 ### Stacked pull requests
 
