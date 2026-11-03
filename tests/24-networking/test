@@ -27,9 +27,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import framework as t  # noqa: E402
 
 BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
-# '--dns-search=.' gives each Container/VM no DNS search domains, whatever the host's resolv.conf
-# holds, so that lookups of container names behave the same on every host.
-VM = ["--runtime=" + t.RUNTIME, *t.vm_opts(), "--dns-search=."]
+# '--dns-search=.' gives each Container/VM no DNS search domains, and '--dns-opt=ndots:1' a fixed
+# ndots in place of Docker's 'ndots:0', whatever the host's resolv.conf holds, so that lookups of
+# container names behave the same on every host.
+VM = ["--runtime=" + t.RUNTIME, *t.vm_opts(), "--dns-search=.", "--dns-opt=ndots:1"]
 
 # A server answering 'hello' on port 80, logging each connection's source to /tmp/conns.
 SERVER = "echo hello >/hello; while true; do nc -l -v -p 80 </hello 2>>/tmp/conns; done"
