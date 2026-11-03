@@ -143,10 +143,36 @@ done </.runcvm/network/routes6
 # Setup hostname
 hostname -F /etc/hostname
 
+# Reports error $1 on the console device, which the container's output is connected to, and powers
+# the VM off with exit status 1.
+vm_init_error() {
+  local console
+
+  read -r console </.runcvm/console
+  echo "RunCVM: Error: $1" >"/dev/$console"
+  echo 1 >/.runcvm/exitcode
+  poweroff -f
+  exit 1
+}
+
 # Mount filesystems defined in /etc/fstab OR as defined in RUNCVM_DISKS
 if [ -f /.runcvm/fstab ]; then
   busybox modprobe ext4
-  mount -a --fstab /.runcvm/fstab -o X-mount.mkdir
+
+  # Resolve UUID= with RunCVM's own libblkid configuration, which scans devices and keeps no
+  # cache, not with the image's /etc/blkid.conf and /run/blkid cache.
+  if ! BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null mount -a --fstab /.runcvm/fstab -o X-mount.mkdir; then
+    # A bind mount from a disk with layout 'subdirs' fails if the disk has no directory for its
+    # destination: a destination added to the disk's spec after the disk was created.
+    while read -r dir dst _
+    do
+      if [[ "$dir" = /.runcvm/disks/* ]] && ! [ -d "$dir" ]; then
+        vm_init_error "dst '$dst' cannot be mounted: its disk has no directory '${dir##*/}', so was created without this destination; destinations cannot be added to an existing disk"
+      fi
+    done </.runcvm/fstab
+
+    vm_init_error "mounting the filesystems in /.runcvm/fstab failed"
+  fi
 
   # Now mount our fstab over /etc/fstab
   mount --bind /.runcvm/fstab /etc/fstab

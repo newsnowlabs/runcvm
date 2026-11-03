@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""RUNCVM_DISKS: disk layouts 'subdirs' and 'root'.
+
+One disk, with the default layout 'subdirs', serves /mp/one, held in the
+image, and /mp/two, a Docker volume whose tree carries trusted.* xattrs
+(which image layers do not keep); a second, also 'subdirs' and given in
+the keyed form, serves only /default; a third, with 'layout=root', serves only /single. The trees in
+the image and the volume are built by trees.py, with assorted ownership,
+modes, times, hard links, symlinks, a FIFO and xattrs (user.*, trusted.*,
+security.capability).
+
+- Each destination's tree on the disk matches its source: ownership, modes,
+  times, contents, hard links, symlink targets and xattrs. The Container/VM
+  runs with --cap-add=SYS_ADMIN, without which mke2fs, running in the
+  container, cannot read trusted.* xattrs.
+- The 'subdirs' disks are mounted at /.runcvm/disks/0 and
+  /.runcvm/disks/1; /mp/one, /mp/two and /default are bind mounts of their
+  directories 'mp-one', 'mp-two' and 'default'.
+- The 'root' disk holds its tree at its root, and is mounted directly at
+  /single.
+- Files written to every destination survive a Container/VM restart.
+
+Run with and without --init.
+"""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+IMAGE = "python:3.13-alpine"
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "trees.py")) as f:
+    TREES = f.read()
+DISKS = ("/disks/multi,/mp/one:/mp/two,ext4,64M;src=/disks/default,dst=/default,fs=ext4,size=32M;"
+         "/disks/single,/single,ext4,32M,layout=root")
+DSTS = ("/mp/one", "/mp/two", "/default", "/single")
+MOUNTS = ("/.runcvm/disks/0", "/.runcvm/disks/1", "/.runcvm/disks/2") + DSTS
+
+# The workload image: IMAGE with sample trees at /mp/one, /default and /single.
+image = t.unique("multipath-disks").lower()
+builder = t.unique("multipath-disks-build")
+t.cleanup_container(builder)
+t.docker("pull", "-q", IMAGE)
+t.docker("run", "-i", "--name", builder, *t.labels(), "--runtime=runc", "--network=none", IMAGE,
+         "python3", "-", "build", "/mp/one", "/default", "/single", input=TREES, check=True)
+t.docker("commit", *["--change=LABEL " + label for label in t.labels()[1::2]], builder, image, check=True)
+t.cleanup_image(image)
+
+
+def describe(*cmd):
+    """Run trees.py's 'describe' with docker CMD..., e.g. ['exec', container], and parse its output."""
+    r = t.docker(*cmd, input=TREES)
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        t.log("describe failed:\n%s" % r.stdout)
+        return None
+
+
+def mountinfo(container):
+    """Map each mount point in the VM to its (device, root within the device)."""
+    mounts = {}
+    for line in t.docker("exec", container, "cat", "/proc/self/mountinfo").stdout.splitlines():
+        f = line.split()
+        if len(f) > 4:
+            mounts[f[4]] = (f[2], f[3])
+    return mounts
+
+
+def run(init):
+    label = "init" if init else "noinit"
+    volume = t.unique("multipath-disks-" + label)
+    t.volume_create(volume)
+    two = t.unique("multipath-disks-two-" + label)
+    t.volume_create(two)
+    results = {}
+
+    # Build /mp/two's tree in its volume, with CAP_SYS_ADMIN for trusted.* xattrs.
+    t.docker("run", "-i", "--rm", *t.labels(), "--runtime=runc", "--network=none", "--cap-add=SYS_ADMIN",
+             "-v", two + ":/two", IMAGE, "python3", "-", "build", "/two", input=TREES, check=True)
+    results["source"] = {
+        "/mp/one": describe("run", "-i", "--rm", *t.labels(), "--runtime=runc", "--network=none",
+                            image, "python3", "-", "describe", "/mp/one"),
+        "/mp/two": describe("run", "-i", "--rm", *t.labels(), "--runtime=runc", "--network=none",
+                            "--cap-add=SYS_ADMIN", "-v", two + ":/two", IMAGE, "python3", "-", "describe", "/two"),
+        "/default": describe("run", "-i", "--rm", *t.labels(), "--runtime=runc", "--network=none",
+                             image, "python3", "-", "describe", "/default"),
+        "/single": describe("run", "-i", "--rm", *t.labels(), "--runtime=runc", "--network=none",
+                            image, "python3", "-", "describe", "/single"),
+    }
+
+    name = t.unique("multipath-disks-" + label)
+    t.cleanup_container(name)
+    r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 *(["--init"] if init else []), "--cap-add=SYS_ADMIN", "--mount", "type=volume,src=%s,dst=/disks" % volume,
+                 "--mount", "type=volume,src=%s,dst=/mp/two" % two, "--env", "RUNCVM_DISKS=" + DISKS,
+                 image, "sleep", "infinity")
+    if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
+        results["error"] = r.stdout + t.docker("logs", name).stdout
+        return results
+
+    results["disk"] = {dst: describe("exec", "-i", name, "python3", "-", "describe", dst)
+                       for dst in DSTS}
+    results["mounts"] = mountinfo(name)
+    results["fstab"] = t.docker("exec", name, "cat", "/etc/fstab").stdout
+
+    for dst in DSTS:
+        t.docker("exec", name, "sh", "-c", "echo %s >%s/written" % (label, dst))
+    t.docker("exec", name, "sync")
+    t.docker("stop", "-t", "30", name)
+    t.docker("start", name)
+    if not t.wait_for_exec(name, BOOT_TIMEOUT):
+        results["restart-error"] = t.docker("logs", name).stdout
+        return results
+    results["after-restart"] = {
+        dst: t.docker("exec", name, "cat", dst + "/written").stdout.strip() for dst in DSTS
+    }
+    results["mounts-after-restart"] = mountinfo(name)
+    return results
+
+
+def compare(desc, source, disk):
+    if source is None or disk is None:
+        t.check("%s: described" % desc, True, False)
+        return
+    if not t.check(desc, True, source == disk):
+        src = {e["path"]: e for e in source}
+        dst = {e["path"]: e for e in disk}
+        for path in sorted(set(src) | set(dst)):
+            if src.get(path) != dst.get(path):
+                t.log("  %s: source %s, disk %s" % (path, src.get(path), dst.get(path)))
+
+
+for init, results in zip((False, True), t.parallel(run, (False, True))):
+    mode = "--init" if init else "no --init"
+    t.param("init", "yes" if init else "no")
+
+    source = results["source"]
+    t.check("%s: /mp/two's source has trusted.* xattrs" % mode, True,
+            any(k.startswith("trusted.") for e in source["/mp/two"] or [] for k in e.get("xattrs", {})))
+    t.check("%s: /mp/one's source has security.capability" % mode, True,
+            any("security.capability" in e.get("xattrs", {}) for e in source["/mp/one"] or []))
+
+    if "error" in results:
+        t.check("%s: Container/VM started" % mode, True, False)
+        t.log(results["error"])
+        continue
+
+    for dst in DSTS:
+        compare("%s: %s on the disk matches its source" % (mode, dst), source[dst], results["disk"][dst])
+
+    mounts = results["mounts"]
+    disk0 = mounts.get("/.runcvm/disks/0", (None, None))
+    t.check("%s: two-destination disk mounted at /.runcvm/disks/0" % mode, "/", disk0[1])
+    t.check("%s: /mp/one is the disk's directory mp-one" % mode, (disk0[0], "/mp-one"), mounts.get("/mp/one"))
+    t.check("%s: /mp/two is the disk's directory mp-two" % mode, (disk0[0], "/mp-two"), mounts.get("/mp/two"))
+    disk1 = mounts.get("/.runcvm/disks/1", (None, None))
+    t.check("%s: one-destination 'subdirs' disk mounted at /.runcvm/disks/1" % mode, "/", disk1[1])
+    t.check("%s: /default is the second disk's directory default" % mode, (disk1[0], "/default"), mounts.get("/default"))
+    t.check("%s: no /.runcvm/disks/2 for the 'root' disk" % mode, None, mounts.get("/.runcvm/disks/2"))
+    single = mounts.get("/single", (None, None))
+    t.check("%s: /single is mounted from the root of its own disk" % mode, "/", single[1])
+    t.check("%s: /single's disk is a third disk" % mode, True, single[0] not in (disk0[0], disk1[0], None))
+    fstab = results["fstab"].splitlines()
+    t.check("%s: fstab binds /mp/one and /mp/two" % mode, True,
+            "/.runcvm/disks/0/mp-one /mp/one none bind 0 0" in fstab
+            and "/.runcvm/disks/0/mp-two /mp/two none bind 0 0" in fstab
+            and "/.runcvm/disks/1/default /default none bind 0 0" in fstab)
+
+    if "restart-error" in results:
+        t.check("%s: Container/VM restarted" % mode, True, False)
+        t.log(results["restart-error"])
+        continue
+    label = "init" if init else "noinit"
+    t.check("%s: files written survive a restart" % mode, {d: label for d in DSTS},
+            results["after-restart"])
+    t.check("%s: same mounts after a restart" % mode,
+            {k: mounts.get(k) for k in MOUNTS}, {k: results["mounts-after-restart"].get(k) for k in MOUNTS})
+
+t.finish()
