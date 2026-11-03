@@ -23,7 +23,7 @@
  
 --- a/default_options.h
 +++ b/default_options.h
-@@ -21,10 +21,10 @@
+@@ -21,10 +21,16 @@
  /* Default hostkey paths - these can be specified on the command line.
   * Homedir is prepended if path begins with ~/
   */
@@ -35,10 +35,16 @@
 +#define RSA_PRIV_FILENAME "/.runcvm/dropbear/dropbear_rsa_host_key"
 +#define ECDSA_PRIV_FILENAME "/.runcvm/dropbear/dropbear_ecdsa_host_key"
 +#define ED25519_PRIV_FILENAME "/.runcvm/dropbear/dropbear_ed25519_host_key"
++
++/* The only user the server accepts, and the shell it runs commands with.
++ * Neither depends on the image: the user needs no entry in /etc/passwd, and
++ * the shell need not be listed in /etc/shells. */
++#define RUNCVM_USER "root"
++#define RUNCVM_SHELL "/.runcvm/guest/bin/bash"
  
  /* Set NON_INETD_MODE if you require daemon functionality (ie Dropbear listens
   * on chosen ports and keeps accepting connections. This is the default.
-@@ -218,7 +218,7 @@
+@@ -218,12 +224,12 @@
  #define DO_HOST_LOOKUP 0
  
  /* Whether to print the message of the day (MOTD). */
@@ -47,3 +53,131 @@
  #define MOTD_FILENAME "/etc/motd"
  
  /* Authentication Types - at least one required.
+    RFC Draft requires pubkey auth, and recommends password */
+-#define DROPBEAR_SVR_PASSWORD_AUTH 1
++#define DROPBEAR_SVR_PASSWORD_AUTH 0
+ 
+ /* Note: PAM auth is quite simple and only works for PAM modules which just do
+  * a simple "Login: " "Password: " (you can edit the strings in svr-authpam.c).
+--- a/svr-auth.c
++++ b/svr-auth.c
+@@ -226,12 +226,26 @@
+ }
+ #endif
+ 
++/* Fill in the authstate for RUNCVM_USER, the only user the server accepts.
++ * The image's /etc/passwd and /etc/shadow are not read: they may be absent, or
++ * give the user a home directory that does not exist or a shell that cannot
++ * run commands. The user's password is locked. */
++static void fill_runcvm_user(const char* username) {
++	if (strcmp(username, RUNCVM_USER) != 0) {
++		return;
++	}
++	ses.authstate.pw_uid = 0;
++	ses.authstate.pw_gid = 0;
++	ses.authstate.pw_name = m_strdup(RUNCVM_USER);
++	ses.authstate.pw_dir = m_strdup("/");
++	ses.authstate.pw_shell = m_strdup(RUNCVM_SHELL);
++	ses.authstate.pw_passwd = m_strdup("!!");
++}
++
+ /* Check that the username exists and isn't disallowed (root), and has a valid shell.
+  * returns DROPBEAR_SUCCESS on valid username, DROPBEAR_FAILURE on failure */
+ static int checkusername(const char *username, unsigned int userlen) {
+ 
+-	char* listshell = NULL;
+-	char* usershell = NULL;
+ 	uid_t uid;
+ 
+ 	TRACE(("enter checkusername"))
+@@ -245,7 +259,7 @@
+ 
+ 	if (ses.authstate.username == NULL) {
+ 		/* first request */
+-		fill_passwd(username);
++		fill_runcvm_user(username);
+ 		ses.authstate.username = m_strdup(username);
+ 	} else {
+ 		/* check username hasn't changed */
+@@ -303,38 +317,9 @@
+ 	}
+ #endif /* HAVE_GETGROUPLIST */
+ 
++	/* The shell is RUNCVM_SHELL, which the image's /etc/shells need not list. */
+ 	TRACE(("shell is %s", ses.authstate.pw_shell))
+ 
+-	/* check that the shell is set */
+-	usershell = ses.authstate.pw_shell;
+-	if (usershell[0] == '\0') {
+-		/* empty shell in /etc/passwd means /bin/sh according to passwd(5) */
+-		usershell = "/bin/sh";
+-	}
+-
+-	/* check the shell is valid. If /etc/shells doesn't exist, getusershell()
+-	 * should return some standard shells like "/bin/sh" and "/bin/csh" (this
+-	 * is platform-specific) */
+-	setusershell();
+-	while ((listshell = getusershell()) != NULL) {
+-		TRACE(("test shell is '%s'", listshell))
+-		if (strcmp(listshell, usershell) == 0) {
+-			/* have a match */
+-			goto goodshell;
+-		}
+-	}
+-	/* no matching shell */
+-	endusershell();
+-	TRACE(("no matching shell"))
+-	ses.authstate.checkusername_failed = 1;
+-	dropbear_log(LOG_WARNING, "User '%s' has invalid shell, rejected",
+-				ses.authstate.pw_name);
+-	return DROPBEAR_FAILURE;
+-	
+-goodshell:
+-	endusershell();
+-	TRACE(("matching shell"))
+-
+ 	TRACE(("uid = %d", ses.authstate.pw_uid))
+ 	TRACE(("leave checkusername"))
+ 	return DROPBEAR_SUCCESS;
+--- a/svr-authpubkey.c
++++ b/svr-authpubkey.c
+@@ -72,7 +72,7 @@
+ #define MAX_AUTHKEYS_LINE 4200 /* max length of a line in authkeys */
+ 
+ static int checkpubkey(const char* keyalgo, unsigned int keyalgolen,
+-		const unsigned char* keyblob, unsigned int keybloblen);
++		const unsigned char* keyblob, unsigned int keybloblen) __attribute__((unused));
+ static int checkpubkeyperms(void);
+ static void send_msg_userauth_pk_ok(const char* sigalgo, unsigned int sigalgolen,
+ 		const unsigned char* keyblob, unsigned int keybloblen);
+@@ -158,10 +158,8 @@
+             }
+         }
+ #endif
+-	/* check if the key is valid */
+-        if (auth_failure) {
+-            auth_failure = checkpubkey(keyalgo, keyalgolen, keyblob, keybloblen) == DROPBEAR_FAILURE;
+-        }
++	/* Only the plugin's keys are accepted: a key the plugin rejects is not
++	 * looked up in the image's ~/.ssh/authorized_keys. */
+ 
+         if (auth_failure) {
+ 		send_msg_userauth_failure(0, 0);
+--- a/svr-chansession.c
++++ b/svr-chansession.c
+@@ -611,9 +611,12 @@
+ 		dropbear_exit("Out of memory"); /* TODO disconnect */
+ 	}
+ 
+-	pw = getpwnam(ses.authstate.pw_name);
+-	if (!pw)
+-		dropbear_exit("getpwnam failed after succeeding previously");
++	/* The user is the authstate's, not an entry in the image's /etc/passwd */
++	pw = &(struct passwd){
++		.pw_name = ses.authstate.pw_name,
++		.pw_uid = ses.authstate.pw_uid,
++		.pw_gid = ses.authstate.pw_gid,
++	};
+ 	pty_setowner(pw, chansess->tty);
+ 
+ 	/* Set up the rows/col counts */

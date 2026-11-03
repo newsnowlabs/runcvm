@@ -56,8 +56,9 @@ abuild -rFf
 EOF
 
 # --- BUILD STAGE ---
-# Build patched dropbear with epka plugin
-# that does not require /etc/passwd or PAM to run
+# Build patched dropbear with epka plugin, which accepts only the plugin's keys
+# and runs commands with RunCVM's bash, without reading the image's /etc/passwd,
+# /etc/shadow, /etc/shells or authorized_keys
 FROM alpine-sdk as alpine-dropbear
 
 ADD patches/dropbear/runcvm.patch /root/aports/main/dropbear/runcvm.patch
