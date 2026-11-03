@@ -534,16 +534,72 @@ Any custom kernel command line options e.g. `apparmor=0` or `systemd.unified_cgr
 
 Automatically create, format, prepopulate and mount backing files as virtual disks on the VM.
 
-Each `<diskN>` should be a comma-separated list of values of the form: `<src>,<dst>,<filesystem>[,<size>]`.
+Each `<diskN>` is a comma-separated list of fields, in either of two forms:
+
+- positional: `<src>,<dst>[:<dst2>:...],<filesystem>[,<size>][,layout=subdirs|root]`
+- keyed: `src=<src>,dst=<dst>[,dst=<dst2>...],fs=<filesystem>[,size=<size>][,layout=subdirs|root]`, with the fields in any order, recognised by its first field beginning with one of these keys and `=`; as in Docker's `--mount`, `source` may be given for `src`, and `target` or `destination` for `dst`
+
+where:
 
 - `<src>` is the path _within the container_ where the virtual disk backing file should be located. This may be in the container's overlayfs or within a volume (mounted using `--mount=type=volume`).
-- `<dst>` is both (a) the path within the VM where the virtual disk should be mounted; and (b) the location of the directory with which contents the disk should be prepopulated.
+- `<dst>` is both (a) the path within the VM where the disk's files should appear; and (b) the location of the directory with which contents the disk should be prepopulated. Several destinations may share one disk: separated by `:` in the positional form, or each given by its own `dst=` in the keyed form, where a destination may also contain `:`.
 - `<filesystem>` is the filesystem with which the backing disk should be formatted when first created.
 - `<size>` is the size of the backing file (in `truncate` format), and must be specified if `<src>` does not exist.
+- `layout=subdirs` or `layout=root` chooses the disk's layout (see [Disk layouts](#disk-layouts) below). It applies when the disk is created, and defaults to `subdirs`.
 
-When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs` and prepopulated with any files preexisting at `<dst>`.
+In the keyed form, each field is split at its first `=`, so values may contain `=`; only `dst` may be given more than once. In either form, no value may contain `,` or `;`, and an unknown or repeated option is rejected.
 
-When RunCVM creates a Container/VM, fstab entries will be drafted. After the VM boots, the fstab entries will be mounted. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on.
+When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs` and prepopulated with any files preexisting at each `<dst>`, with their ownership, modes, timestamps, extended attributes and hard links. (`trusted.*` extended attributes are copied only if the container has `CAP_SYS_ADMIN`, e.g. with `--cap-add=SYS_ADMIN`, because `mke2fs` runs in the container.)
+
+RunCVM formats disks with its own bundled `mke2fs` and `mke2fs.conf`, ignoring any `/etc/mke2fs.conf` in the container's image, so a disk is formatted the same way whatever the image. For `ext4`, the configuration leaves out the `orphan_file` and `metadata_csum_seed` features, as Debian's and Ubuntu's do, so that the disk can also be checked, resized and tuned with older versions of e2fsprogs: `orphan_file` needs e2fsprogs 1.47 or later, and `metadata_csum_seed` 1.43 or later.
+
+When RunCVM creates a Container/VM, fstab entries will be drafted, identifying each disk by its filesystem's UUID. After the VM boots, the fstab entries will be mounted, in order. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on. RunCVM finds each disk with its own bundled `blkid.conf`, which scans the VM's block devices and keeps no cache, ignoring any `/etc/blkid.conf` in the image.
+
+#### Disk layouts
+
+A disk with layout `subdirs`, the default, holds a top-level directory for each destination, prepopulated from it. On every boot, the disk is mounted at a hidden mountpoint, `/.runcvm/disks/<n>` (where `<n>` counts disks from 0 in `RUNCVM_DISKS` order), and each directory is bind-mounted over its destination. Such a disk is created with the filesystem label `runcvm-subdirs`, by which RunCVM recognises its layout thereafter; relabelling the disk would change how it is mounted.
+
+Each directory is named after its destination: the path without its leading `/`, with each `%`, `-` and `=` encoded as `%25`, `%2D` and `%3D`, and then each `/` replaced by `-`. For example, `/var/lib/docker` is held in `var-lib-docker`, `/a/b` in `a-b`, and `/a-b` in `a%2Db`. The name depends only on the destination, so it is the same on every boot, and distinct destinations always have distinct names.
+
+The destinations of a disk with layout `subdirs`:
+- must be absolute paths other than `/`, without `.` or `..` components, whitespace or `\`;
+- must not overlap: no destination may be the same as, or an ancestor of, another, once any symbolic links in the image are resolved (e.g. `/var/lib` and `/var/lib/docker` are rejected, as are `/var/run` and `/run` in an image where `/var/run` links to `/run`);
+- must not be `/lost+found`, whose directory name would clash with the `lost+found` that `mke2fs` creates in every filesystem's root (use `layout=root` for it).
+
+Destinations may be left out of an existing disk's spec, leaving their directories on the disk unmounted, so long as at least one remains; but destinations cannot be added: when a destination has no directory on an existing disk, the VM reports the error and powers off with exit status 1.
+
+A disk with layout `root` has exactly one destination, holds its files at its root, and is mounted directly at the destination. Any existing disk without the label `runcvm-subdirs`, including any disk created by an earlier RunCVM release, has layout `root`.
+
+An existing disk keeps its layout: a spec giving a different `layout`, or several destinations for a disk with layout `root`, is rejected.
+
+#### Whole-root disks
+
+A disk with destination `/` is a _whole-root disk_: it holds the VM's whole root filesystem. For example:
+
+```console
+docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env=RUNCVM_DISKS=/disks/root,/,ext4,40G <docker-image>
+```
+
+A whole-root disk must have `/` as its only destination, filesystem `ext4` and layout `root` (`layout=root` may be given, but need not be). Only one disk may have destination `/`; other disks in `RUNCVM_DISKS` are mounted onto it as usual.
+
+When first created, a whole-root disk is prepopulated with a copy of the container's filesystem: the image and any changes made to it in the container. The copy leaves out everything that must stay live, as it is mounted from the container: `/.runcvm`, volumes, bind mounts, the files Docker mounts such as `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf`, and the kernel modules. Each mountpoint that is a directory is left as an empty directory. The copy also leaves out every disk's backing file, so that a backing file in the container's own filesystem is not copied into the disk, and the image's files at other disks' destinations, which those disks hold instead, leaving an empty directory at each.
+
+The VM still boots from the container's filesystem over virtiofs. Early in boot, before setting up the network, mounting the other disks or starting the entrypoint, `runcvm-vm-init` mounts the whole-root disk, binds everything that must stay live onto it, and switches to it as the root filesystem with `pivot_root`. Everything after that, including the entrypoint and `docker exec`, sees the disk as `/`.
+
+The disk is populated only when it is created. While it exists, later changes to the image, or to the container's own filesystem, are not seen in the VM; and changes the VM makes outside volumes are made to the disk, not the container's filesystem, so `docker diff`, `docker cp`, `docker commit` and `docker export` do not see them. To start afresh from the image, remove the disk's backing file.
+
+Every write outside volumes goes to the disk, so the advice on preserving data on disks applies to all of them. With `--init`, or an image whose entrypoint is its own init (such as systemd), the VM syncs its filesystems when it powers off. Without either, a workload whose data must survive should run `sync -f /` before it exits. This flushes the whole-root disk only.
+
+Compared with disks whose destinations are other paths, such as `/var/lib/docker` or `/home` (here called multi-path disks):
+
+| | Multi-path disk | Whole-root disk |
+|---|---|---|
+| What must be specified | Each path that needs the disk | Only the disk and its size |
+| I/O on the block device | The listed paths | Everything except volumes, bind mounts and other live mounts |
+| Creation cost | Copying the listed paths' contents | Copying the whole image plus the container's changes |
+| Host space | The listed paths' contents | The whole image's contents, duplicated |
+| `docker diff`, `docker cp`, `docker commit`, `docker export` | Unaffected, except for the listed paths | Do not see changes made in the VM outside volumes |
+| If the disk outlives the image | The listed paths are stale | The whole root is stale: image updates are not seen |
 
 > **Warning: launch with `--init` if a disk's contents must survive the VM ending.** Data written to a disk stays in the VM's memory until the VM's kernel writes it out, so whether it reaches the backing file depends on how the VM ends:
 >
@@ -562,7 +618,7 @@ When RunCVM creates a Container/VM, fstab entries will be drafted. After the VM 
 docker run -it --runtime=runcvm --init --env=RUNCVM_DISKS=/disk1,/home,ext4,5G <docker-image>
 ```
 
-In this example, RunCVM will check for existence of a file at `/disk1` within `<docker-image>`, and if not found create a 5G backing file (in the container's filesystem, typically overlay2) with an ext4 filesystem prepopulated with any preexisting contents of `/home`, then add the disk to `/etc/fstab` and mount it within the VM at `/home`.
+In this example, RunCVM will check for existence of a file at `/disk1` within `<docker-image>`, and if not found create a 5G backing file (in the container's filesystem, typically overlay2) with an ext4 filesystem holding a directory `home` prepopulated with any preexisting contents of `/home`, then add the disk to `/etc/fstab`, mount it within the VM, and bind-mount its `home` directory at `/home`. With `--env=RUNCVM_DISKS=/disk1,/home,ext4,5G,layout=root`, the disk would instead hold the contents of `/home` at its root, and be mounted directly at `/home`.
 
 #### Example #2
 
@@ -571,6 +627,20 @@ docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=
 ```
 
 This example behaves similarly, except that the `runcvm-disks` persistent Docker volume is first mounted at `/disks` within the container's filesystem, and therefore the backing files at `/disks/disk1` and `/disks/disk2` (mounted in the VM at `/home` and `/opt` respectively) are stored in the _persistent volume_ (typically stored in `/var/lib/docker` on the host, bypassing overlay2).
+
+#### Example #3
+
+```console
+docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=/disks/data,/var/lib/docker:/var/lib/containerd:/home,ext4,40G' <docker-image>
+```
+
+In this example, a single 40G backing file at `/disks/data`, in the `runcvm-disks` volume, holds `/var/lib/docker`, `/var/lib/containerd` and `/home`, in its directories `var-lib-docker`, `var-lib-containerd` and `home`.
+
+The same disk, in the keyed form:
+
+```console
+docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=src=/disks/data,dst=/var/lib/docker,dst=/var/lib/containerd,dst=/home,fs=ext4,size=40G' <docker-image>
+```
 
 > N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints, these are *NOT* mounted into the VM but only into the container, and are therefore suitable for use for mounting VM disks from backing files that cannot be accessed within the VM's filesystem.
 
@@ -776,12 +846,13 @@ The `runcvm-init` process:
 - Waits for its child (QEMU) to exit. When it does, execs `runcvm-ctr-exit` to retrieve any saved exit code (written by the application to `/.runcvm/exitcode`) and exit with this code.
 
 The `runcvm-ctr-qemu` script:
-- Prepares disk backing files as specified by `--env=RUNCVM_DISKS=<disks>`
+- Prepares disk backing files as specified by `--env=RUNCVM_DISKS=<disks>`, populating a new whole-root disk last, so that it can leave out every other disk
 - Prepares network configuration as saved from the container (modifying the MAC address of each container interface), and leaves IPv6 enabled in the VM's kernel only if a global IPv6 address was saved for any interface (or if forced with `--env=RUNCVM_IPV6=1`); otherwise it adds `ipv6.disable=1` to the kernel command line
 - Launches [QEMU](https://www.qemu.org/) with the required kernel, network interfaces, disks, display, and with a root filesystem mounted via virtiofs from the container and with `runcvm-vm-init` as the VM's init process.
 
 The `runcvm-vm-init` process:
 - Runs as PID1 within the VM.
+- Switches the root filesystem to a whole-root disk, if `RUNCVM_DISKS` defines one, with `pivot_root`, binding onto it the mounts that must stay live, before anything else uses the root
 - Retrieves the container configuration - network (IPv4, and IPv6 if present), environment, disk and tmpfs mounts - saved by `runcvm-ctr-entrypoint` to `/.runcvm`, and reproduces it within the VM
 - Launches the container's pre-existing entrypoint, in one of two ways.
    1. If `RUNCVM_INIT` is `1` (i.e. the container was originally intended to be launched with Docker's own init process) then it configures and execs busybox `init`, which becomes the VM's PID1, to supervise `dropbear`, run `runcvm-vm-start` and `poweroff` the VM if signalled to do so.

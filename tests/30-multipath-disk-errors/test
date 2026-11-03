@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""RUNCVM_DISKS: invalid disk specs, and disks whose spec changes.
+
+- A spec with layout 'subdirs' whose destinations overlap (one is the same
+  as, or an ancestor of, another, including through the image's symbolic
+  links /var/run and /var/lock), or which has an empty, relative, '..',
+  whitespace-containing or /lost+found destination; layout 'root' with several
+  destinations; or an unknown or repeated option: the Container/VM exits
+  with status 1, reporting the invalid spec.
+- An existing disk keeps the layout it was created with: a spec giving the
+  other layout, or several destinations for a disk with layout 'root', is
+  rejected in the same way.
+- Adding a destination to an existing disk with layout 'subdirs': the VM
+  reports that the disk has no directory for the destination, and the
+  Container/VM exits with status 1.
+- Leaving destinations out of an existing disk's spec, down to one, or
+  reusing a disk created with a keyed spec (whose destination contains ':'):
+  the Container/VM runs, with the remaining destinations mounted.
+- Keyed specs (whose keys include Docker's aliases 'source', 'target' and
+  'destination') with a repeated or unknown key, a field without '=', no dst
+  or overlapping destinations are rejected likewise.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+# (name, RUNCVM_DISKS, expected message)
+INVALID = [
+    ("ancestor", "/disks/d,/var/lib:/var/lib/docker,ext4,16M",
+     "dst '/var/lib' and dst '/var/lib/docker' overlap"),
+    ("descendant", "/disks/d,/srv/a/b:/home:/srv/a,ext4,16M",
+     "dst '/srv/a/b' and dst '/srv/a' overlap"),
+    ("same", "/disks/d,/home:/home/,ext4,16M",
+     "dst '/home' and dst '/home' overlap"),
+    ("same-unnormalised", "/disks/d,/srv//a:/srv/a/,ext4,16M",
+     "dst '/srv/a' and dst '/srv/a' overlap"),
+    ("empty", "/disks/d,/home::/srv,ext4,16M",
+     "dst must not be empty"),
+    ("trailing-colon", "/disks/d,/home:,ext4,16M",
+     "dst must not be empty"),
+    ("relative", "/disks/d,home:/srv,ext4,16M",
+     "dst 'home' must be an absolute path other than '/', without '.' or '..' components"),
+    ("dotdot", "/disks/d,/srv/../home:/srv,ext4,16M",
+     "dst '/srv/../home' must be an absolute path other than '/', without '.' or '..' components"),
+    ("whitespace", "/disks/d,/srv/a b:/home,ext4,16M",
+     "dst '/srv/a b' must not contain whitespace or '\\'"),
+    ("root-several", "/disks/d,/srv/a:/srv/b,ext4,16M,layout=root",
+     "layout 'root' holds exactly one dst"),
+    ("bad-layout", "/disks/d,/srv/a,ext4,16M,layout=flat",
+     "layout must be 'subdirs' or 'root'"),
+    ("repeated-layout", "/disks/d,/srv/a,ext4,16M,layout=root,layout=root",
+     "layout specified more than once"),
+    ("unknown-option", "/disks/d,/srv/a,ext4,16M,colour=blue",
+     "unknown option 'colour'"),
+    ("extra-field", "/disks/d,/srv/a,ext4,16M,32M",
+     "unexpected field '32M'"),
+    ("keyed-repeated", "src=/disks/d,dst=/srv/a,fs=ext4,fs=xfs,size=16M",
+     "fs specified more than once"),
+    ("keyed-unkeyed-field", "src=/disks/d,dst=/srv/a,/srv/b,fs=ext4,size=16M",
+     "field '/srv/b' must be of the form <key>=<value>"),
+    ("keyed-unknown", "src=/disks/d,dst=/srv/a,fs=ext4,size=16M,colour=blue",
+     "unknown option 'colour'"),
+    ("keyed-no-dst", "src=/disks/d,fs=ext4,size=16M",
+     "src, dst and fs must all be specified"),
+    ("keyed-overlap", "src=/disks/d,dst=/srv/a,dst=/srv/a/b,fs=ext4,size=16M",
+     "dst '/srv/a' and dst '/srv/a/b' overlap"),
+    ("symlink-same", "/disks/d,/var/run:/run,ext4,16M",
+     "dst '/var/run' and dst '/run' overlap, as '/run' and '/run'"),
+    ("symlink-ancestor", "/disks/d,/run:/var/lock,ext4,16M",
+     "dst '/run' and dst '/var/lock' overlap, as '/run' and '/run/lock'"),
+    ("lost+found", "/disks/d,/lost+found:/home,ext4,16M",
+     "dst '/lost+found' requires layout 'root'"),
+    ("keyed-alias-repeated", "fs=ext4,source=/disks/d,target=/srv/a,src=/disks/e,size=16M",
+     "src specified more than once"),
+]
+
+
+def run_invalid(case):
+    name, disks, _ = case
+    return t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
+                    *t.vm_opts(), "--env", "RUNCVM_DISKS=" + disks, "alpine", "true", timeout=TIMEOUT)
+
+
+def run_changed(case):
+    """Create a disk with spec 'first', then use it with spec 'second'; return both runs' results."""
+    name, first, second = case[:3]
+    volume = t.unique("changed-" + name)
+    t.volume_create(volume)
+    results = []
+    for disks in (first, second):
+        results.append(t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
+                                *t.vm_opts(), "--mount", "type=volume,src=%s,dst=/disks" % volume,
+                                "--env", "RUNCVM_DISKS=" + disks, "alpine", "sh", "-c",
+                                "awk '$5 ~ \"^/(srv|home)\" { print $4, $5 }' /proc/self/mountinfo | sort",
+                                timeout=TIMEOUT))
+    return results
+
+
+for (name, disks, message), r in zip(INVALID, t.parallel(run_invalid, INVALID)):
+    t.check("%s: exit status" % name, 1, r.returncode)
+    if not t.check("%s: error message" % name, True, ("disk spec '%s' invalid: %s" % (disks, message)) in r.stdout):
+        t.log("output:\n%s" % r.stdout)
+
+# (name, first RUNCVM_DISKS, second RUNCVM_DISKS, expected second exit status, expected message or
+# remaining mounts)
+CHANGED = [
+    ("added", "/disks/d,/srv/a:/srv/b,ext4,16M", "/disks/d,/srv/a:/srv/b:/home,ext4,16M", 1,
+     "RunCVM: Error: dst '/home' cannot be mounted: its disk has no directory 'home', so was created "
+     "without this destination; destinations cannot be added to an existing disk"),
+    ("root-to-several", "/disks/d,/srv/a,ext4,16M,layout=root", "/disks/d,/srv/a:/srv/b,ext4,16M", 1,
+     "disk spec '/disks/d,/srv/a:/srv/b,ext4,16M' invalid: src '/disks/d' exists, with layout 'root', "
+     "which holds exactly one dst"),
+    ("root-to-subdirs", "/disks/d,/srv/a,ext4,16M,layout=root", "/disks/d,/srv/a,ext4,16M,layout=subdirs", 1,
+     "disk spec '/disks/d,/srv/a,ext4,16M,layout=subdirs' invalid: src '/disks/d' exists, with layout 'root', "
+     "not 'subdirs'"),
+    ("subdirs-to-root", "/disks/d,/srv/a:/srv/b,ext4,16M", "/disks/d,/srv/a,ext4,layout=root", 1,
+     "disk spec '/disks/d,/srv/a,ext4,layout=root' invalid: src '/disks/d' exists, with layout 'subdirs', "
+     "not 'root'"),
+    ("removed", "/disks/d,/srv/a:/srv/b:/home,ext4,16M", "/disks/d,/srv/a:/home,ext4,16M", 0,
+     "/home /home\n/srv-a /srv/a"),
+    ("removed-to-one", "/disks/d,/srv/a:/home,ext4,16M", "/disks/d,/srv/a,ext4", 0,
+     "/srv-a /srv/a"),
+    ("keyed", "src=/disks/d,dst=/srv/a:b,dst=/home,fs=ext4,size=16M",
+     "fs=ext4,destination=/home,source=/disks/d,target=/srv/a:b", 0, "/home /home\n/srv-a:b /srv/a:b"),
+]
+for (name, first, second, status, expected), (r1, r2) in zip(CHANGED, t.parallel(run_changed, CHANGED)):
+    if not t.check("%s: first Container/VM exit status" % name, 0, r1.returncode):
+        t.log("output:\n%s" % r1.stdout)
+        continue
+    t.check("%s: second Container/VM exit status" % name, status, r2.returncode)
+    if status == 0:
+        t.check("%s: remaining destinations mounted" % name, expected, r2.stdout.strip())
+    elif not t.check("%s: error message" % name, True, expected in r2.stdout):
+        t.log("output:\n%s" % r2.stdout)
+
+t.finish()
