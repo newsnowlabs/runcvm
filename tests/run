@@ -242,25 +242,40 @@ def read_pairs(path):
 _terminal_ok = True
 
 
+def terminal_gone():
+    """Stop writing to the terminal, and point stdout at /dev/null.
+
+    A failed write can leave bytes in sys.stdout's buffer, and Python flushes it once more at exit:
+    if that flush fails, Python exits with status 120 in place of the run's own. With stdout on
+    /dev/null, the flush succeeds and the bytes are discarded.
+    """
+    global _terminal_ok
+    _terminal_ok = False
+    try:
+        fd = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(fd, sys.stdout.fileno())
+        os.close(fd)
+    except (OSError, ValueError):
+        pass
+
+
 def say(text="", end="\n"):
     """Print to the terminal; once that fails (e.g. the terminal has gone away), stop trying."""
-    global _terminal_ok
     if _terminal_ok:
         try:
             sys.stdout.write(text + end)
             sys.stdout.flush()
         except OSError:
-            _terminal_ok = False
+            terminal_gone()
 
 
 def say_bytes(data):
-    global _terminal_ok
     if _terminal_ok:
         try:
             sys.stdout.buffer.write(data)
             sys.stdout.buffer.flush()
         except OSError:
-            _terminal_ok = False
+            terminal_gone()
 
 
 def signal_group(pgid, sig):
