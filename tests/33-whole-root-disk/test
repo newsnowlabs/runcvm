@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""RUNCVM_DISKS: a whole-root disk (destination '/').
+
+A disk with destination '/' holds the VM's whole root filesystem: a copy of
+the image's filesystem, made when the disk is created, to which the VM
+switches early in boot. In both --init modes:
+
+- The Container/VM boots and runs its entrypoint, with / on the disk, an
+  ext4 filesystem.
+- Volumes, bind mounts and Docker's /etc/hosts and /etc/resolv.conf stay
+  live: a file written to a volume or a bind-mounted directory in the VM
+  appears on the host; /etc/hosts names the container; the container's own
+  name resolves through Docker's DNS on a user-defined network; and
+  'docker exec' works.
+- A file written outside volumes goes to the disk, not to the container's
+  filesystem ('docker diff' does not show it), and persists into a later
+  Container/VM using the same disk.
+- 'docker stop' of an entrypoint that traps SIGTERM and writes
+  /.runcvm/exitcode reports that status.
+- The disk holds no copy of its own backing file when that is in the
+  container's own filesystem, nor of another disk's backing file, nor of the
+  image's contents at another disk's destination, which that disk holds
+  instead.
+
+A second disk with destination '/', or one with another destination as
+well, another filesystem than ext4 or layout 'subdirs', is rejected: the
+Container/VM exits with status 1, reporting the invalid spec.
+
+The expected values describe current behaviour. A change to it must update
+them deliberately.
+"""
+
+import os
+import shutil
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+VM = ["--runtime=" + t.RUNTIME, *t.vm_opts()]
+TRAP = "trap 'echo 9 >/.runcvm/exitcode; exit 0' TERM; while true; do sleep 1; done"
+
+
+def ex(name, *cmd):
+    return t.docker("exec", name, *cmd)
+
+
+def case_live(init):
+    """Boot a whole-root Container/VM; check its mounts, then stop it and read its disk again."""
+    mode = "init" if init else "no-init"
+    disks = t.unique("disks-" + mode)
+    data = t.unique("data-" + mode)
+    network = t.unique("net-" + mode)
+    name = t.unique("live-" + mode)
+    for volume in (disks, data):
+        t.volume_create(volume)
+    t.docker("network", "create", *t.labels(), network, check=True)
+    t.cleanup_network(network)
+    host = tempfile.mkdtemp(prefix="runcvm-test-")
+    os.chmod(host, 0o777)
+    with open(os.path.join(host, "from-host"), "w") as f:
+        f.write("host-data\n")
+
+    init_opts = ["--init"] if init else []
+    disk_opts = ["-v", disks + ":/disks", "--env", "RUNCVM_DISKS=/disks/root,/,ext4,1G"]
+    results = []
+
+    def result(desc, expected, actual):
+        results.append(("%s: %s" % (mode, desc), expected, actual))
+
+    try:
+        t.cleanup_container(name)
+        r = t.docker("run", "-d", "--name", name, "--hostname", "wholeroot", "--network", network,
+                     *t.labels(), *VM, *init_opts, *disk_opts, "-v", data + ":/data", "-v", host + ":/bind",
+                     "alpine", "sh", "-c", TRAP)
+        if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
+            result("Container/VM started", True, False)
+            t.log("output:\n%s%s" % (r.stdout, t.docker("logs", name).stdout))
+            return results
+
+        # The filesystem type follows the '-' that ends mountinfo's optional fields.
+        r = ex(name, "awk", '$5 == "/" { for (i = 7; $i != "-"; i++); print $(i+1) }', "/proc/self/mountinfo")
+        result("/ is an ext4 filesystem", "ext4", r.stdout.strip())
+
+        ex(name, "sh", "-c", "echo vm-data >/data/from-vm; echo vm-bind >/bind/from-vm; echo on-disk >/on-disk")
+        result("file written to a volume appears on the host", "vm-data\n", t.volume_read(data, "from-vm"))
+        try:
+            with open(os.path.join(host, "from-vm")) as f:
+                bind = f.read()
+        except OSError:
+            bind = None
+        result("file written to a bind mount appears on the host", "vm-bind\n", bind)
+        result("bind-mounted host file readable", "host-data",
+               ex(name, "cat", "/bind/from-host").stdout.strip())
+
+        r = ex(name, "sh", "-c", "grep -c wholeroot /etc/hosts; hostname")
+        result("/etc/hosts names the container, and hostname is set", "1\nwholeroot", r.stdout.strip())
+        r = ex(name, "nslookup", name)
+        result("container's name resolves through Docker's DNS", True, r.returncode == 0)
+
+        r = t.docker("diff", name)
+        result("'docker diff' does not show a file written outside volumes", False, "/on-disk" in r.stdout)
+
+        t.docker("stop", "-t", "30", name)
+        r = t.docker("inspect", "-f", "{{.State.ExitCode}}", name)
+        result("'docker stop' exit status", "9", r.stdout.strip())
+
+        r = t.docker("run", "--rm", "--name", name + "-again", *t.labels(), *VM, *init_opts, *disk_opts,
+                     "alpine", "cat", "/on-disk", timeout=TIMEOUT)
+        result("file written outside volumes persists on the disk", "on-disk", r.stdout.strip())
+    finally:
+        shutil.rmtree(host, ignore_errors=True)
+    return results
+
+
+def case_excludes(init):
+    """A disk whose backing file is in the container's own filesystem, alongside another disk."""
+    mode = "init" if init else "no-init"
+    # The second disk's destination, /etc/apk, holds files in the image.
+    disks = "/images/root,/,ext4,1G;/images/apk,/etc/apk,ext4,16M"
+    # A non-recursive bind mount of / shows the disk's own files, without the mounts over them.
+    script = ("mkdir -p /mnt/root && mount --bind / /mnt/root && "
+              "echo images: $(ls -A /mnt/root/images); echo apk: $(ls -A /mnt/root/etc/apk); "
+              "echo mounted-apk: $(ls /etc/apk | grep -c .)")
+    r = t.docker("run", "--rm", "--name", t.unique("excludes-" + mode), *t.labels(), *VM,
+                 *(["--init"] if init else []), "--env", "RUNCVM_DISKS=" + disks, "alpine", "sh", "-c", script,
+                 timeout=TIMEOUT)
+    lines = r.stdout.strip().splitlines()
+    return [("%s: Container/VM exit status" % mode, 0, r.returncode),
+            ("%s: disk holds neither backing file" % mode, True, "images:" in lines),
+            ("%s: disk holds nothing at the other disk's destination" % mode, True, "apk:" in lines),
+            ("%s: other disk holds the image's files at its destination" % mode, True,
+             "mounted-apk: 0" not in lines and any(line.startswith("mounted-apk: ") for line in lines))], r.stdout
+
+
+# (name, RUNCVM_DISKS, invalid disk spec, expected message)
+INVALID = [
+    ("second-root", "/disks/a,/,ext4,1G;/disks/b,//,ext4,1G", "/disks/b,//,ext4,1G",
+     "only one disk may have dst '/'"),
+    ("several-dsts", "/disks/a,/:/srv,ext4,1G", "/disks/a,/:/srv,ext4,1G", "dst '/' must be the disk's only dst"),
+    ("not-ext4", "/disks/a,/,ext3,1G", "/disks/a,/,ext3,1G", "a disk with dst '/' must have fs 'ext4'"),
+    ("subdirs", "/disks/a,/,ext4,1G,layout=subdirs", "/disks/a,/,ext4,1G,layout=subdirs",
+     "a disk with dst '/' must have layout 'root'"),
+]
+
+
+def run_invalid(case):
+    name, disks = case[:2]
+    return t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), *VM, "--env", "RUNCVM_DISKS=" + disks,
+                    "alpine", "true", timeout=TIMEOUT)
+
+
+MODES = [False, True]
+live = t.parallel(case_live, MODES)
+excludes = t.parallel(case_excludes, MODES)
+invalid = t.parallel(run_invalid, INVALID)
+
+for init, results in zip(MODES, live):
+    t.param("init", "yes" if init else "no")
+    for desc, expected, actual in results:
+        t.check(desc, expected, actual)
+
+for init, (results, output) in zip(MODES, excludes):
+    t.param("init", "yes" if init else "no")
+    failed = [desc for desc, expected, actual in results if not t.check(desc, expected, actual)]
+    if failed:
+        t.log("output:\n%s" % output)
+
+for (name, disks, spec, message), r in zip(INVALID, invalid):
+    t.check("%s: exit status" % name, 1, r.returncode)
+    if not t.check("%s: error message" % name, True, ("disk spec '%s' invalid: %s" % (spec, message)) in r.stdout):
+        t.log("output:\n%s" % r.stdout)
+
+t.finish()
