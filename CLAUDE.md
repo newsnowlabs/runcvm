@@ -164,9 +164,10 @@ A pull request's test steps go in one `bash` code block, which can be copied and
 whole. Announce each step with `echo`, and after each command whose outcome matters, `echo`
 its exit status alongside the status expected, e.g.
 `echo "=== second run exit status: $? (expect 1)"`, so that the output makes sense when pasted
-back. Don't use `set -e`, so that a failing step is reported and the steps after it still run.
-Where steps differ between KVM and TCG hosts, set the difference in a variable on the block's
-first line.
+back. Don't use `set -e`: chain with `&&` each step that is meaningless or unsafe after an
+earlier one fails (e.g. a test run after its setup), and leave independent steps unchained, so
+they run regardless. Where steps differ between KVM and TCG hosts, set the difference in a
+variable on the block's first line.
 
 A pull request may be raised while its tests are still running. Its description then says which
 results are pending; as they come in, record them there, and push any fixes they call for to
