@@ -841,7 +841,7 @@ The `runcvm-ctr-entrypoint`:
 - Launches `virtiofsd` to serve the container's root filesystem.
 - Configures `/etc/resolv.conf` in the container.
 - Adds container firewall rules and launches `dnsmasq`. Where the container's DNS server is Docker's embedded one (`127.0.0.11`, on user-defined networks), which only the container can reach, it adds `169.254.1.2` to the bridge and points `/vm/etc/resolv.conf` at it, so that `dnsmasq` forwards the VM's DNS requests to Docker's DNS. Elsewhere (e.g. on the default bridge network), the VM uses the container's DNS servers directly.
-- Records the bridge's MAC address and its own address, `169.254.1.1`, the source of `docker exec`'s connections to the VM. The VM reaches both of the bridge's addresses on its own link, with routes and permanent neighbour entries, so that DNS and `docker exec` need no `br_netfilter` on the host. RunCVM does not use `169.254.169.254`, which cloud platforms use for their instance-metadata service, and leaves it to the VM's network.
+- Records, in `/.runcvm/network/bridge`, the default gateway interface, its bridge's MAC address and the bridge's address `169.254.1.1`, the source of `docker exec`'s connections to the VM; and, in `/.runcvm/network/dns`, the DNS address `169.254.1.2`, where it added it. The VM reaches each recorded address on its own link, with a route and a permanent neighbour entry, so that DNS and `docker exec` need no `br_netfilter` on the host. The VM's traffic to any other address, such as `169.254.169.254` (the instance-metadata address on cloud platforms), takes the VM's default route.
 - Execs RunCVM's own `runcvm-init` init process to supervise `runcvm-ctr-qemu` to launch the VM.
 
 The `runcvm-init` process:
