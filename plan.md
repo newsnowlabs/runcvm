@@ -125,7 +125,7 @@ Done when: the swarm test passes N consecutive runs in L1 (N to be agreed) and f
 A Dockerfile in the repository (e.g. `tests/env/Dockerfile`), based on the README "Testing" image, usable in three ways: plain `docker run`, Dockside, and CI.
 
 - Self-configuring: defaults baked in with `ENV`/`VOLUME`, so `docker run --runtime=runcvm <image>` or a Dockside profile works without extra flags:
-  - `RUNCVM_DISKS` for `/var/lib/docker`, `/var/lib/containerd` and `/opt/runcvm` (avoids overlay-on-virtiofs and nested virtiofs), plus an optional build-cache disk; once E is available, a single shared data disk covering these and `/home`;
+  - `RUNCVM_DISKS` for `/var/lib/docker`, `/var/lib/containerd` and `/opt/runcvm` (avoids overlay-on-virtiofs and nested virtiofs), plus an optional build-cache disk: with E merged, a single shared data disk covering these and `/home` (multi-destination disk, #52), or a whole-root disk (#56), whichever B4's measurements favour;
   - `VOLUME /disks`.
 - Docker CE, systemd, non-root dev user with sudo and docker group, git and build prerequisites.
 - KVM module selection by CPU vendor (`kvm_intel`/`kvm_amd`), replacing the hardcoded `kvm_intel` in the README images, or removed if shown to be unnecessary.
@@ -307,21 +307,26 @@ RUNCVM_DISKS=/disks/data,/var/lib/docker:/var/lib/containerd:/home:/opt/runcvm,e
 - A spec with several destinations creates one filesystem with a subdirectory per destination (e.g. `var-lib-docker`, `home`), mounts the disk at a hidden mountpoint (e.g. `/.runcvm/disks/<n>`) and bind-mounts each subdirectory over its destination on every boot. Changes are confined to `do_disk` in `runcvm-ctr-qemu` and the fstab handling in `runcvm-vm-init` (`:105`).
 - Overlapping destinations within one spec (e.g. `/var/lib` and `/var/lib/docker`) are rejected.
 
-Two flavours, both using the E2/E6 mke2fs patch:
+Status: done; merged as #52. Each disk has a layout: `subdirs` (the default for a new disk; one top-level directory per destination, populated with `mke2fs -P`, labelled `runcvm-subdirs`, mounted at `/.runcvm/disks/<n>` and bind-mounted over each destination) or `root` (one destination at the disk's root, populated with `mke2fs -d`, as before; `layout=root`). An existing disk keeps the layout its label gives. Specs also have a keyed form (`src=…,dst=…,dst=…,fs=…,size=…,layout=…`, with Docker's `--mount` aliases), so a destination may contain `:`. Directory names encode the destination reversibly (`/var/lib/docker` → `var-lib-docker`, `/a-b` → `a%2Db`). Overlap is checked after resolving the image's symbolic links. The README documents both forms and layouts. The exclusion-list flavour below was not implemented: the whole-root disk (E6) covers the same need.
+
+Two flavours were proposed, both using the E2/E6 mke2fs patch:
 - **Listed destinations** (as above): the disk holds one subdirectory per listed path (`-d SRC=SUBDIR`).
 - **Exclusion list**: the disk holds a copy of the whole root minus exclusions (`-d /vm -X -x …`), laid out as in `/`, and every non-excluded top-level directory on the disk is bind-mounted over its counterpart in the virtiofs root. Nothing about the contents of `/` needs specifying. Live mounts beneath a bind-mounted directory (e.g. Docker's `/etc/hosts`, volumes under `/home`, kernel modules under `/lib/modules`) must be re-attached on top after binding (moved or re-bound from their original locations). The root itself stays virtiofs, so no `pivot_root`.
 
-#### E2. Populating a multi-path disk in one pass: repeated `-d SRC=SUBDIR`
+#### E2. Populating a multi-path disk in one pass: `mke2fs -P SUBDIR=SRC`
 
-The container side cannot mount the image (no `CAP_SYS_ADMIN`, so no loop or FUSE mounts), and `mke2fs -d <dir>` takes a single source directory. A small patch to mke2fs makes `-d` repeatable, with each `-d SRC=SUBDIR` copying directory SRC into a new top-level directory SUBDIR using the existing directory-mode code (`__populate_fs()`). SUBDIR takes SRC's own owner, mode, times and xattrs. A plain `-d SRC` (no `=`) behaves exactly as today and may be given at most once.
+The container side cannot mount the image (no `CAP_SYS_ADMIN`, so no loop or FUSE mounts), and `mke2fs -d <dir>` takes a single source directory. `patches/e2fsprogs/mke2fs-populate.patch` adds to mke2fs, leaving `-d` exactly as upstream:
+- `-P SUBDIR=SRC` (repeatable): creates SUBDIR in the root of the new file system and copies directory SRC into it with the existing directory-mode code (`__populate_fs()`). The argument is split at its first `=`, so SRC may contain `=`; SUBDIR must be a single path component without `=` and must not already exist, and an invalid one is rejected before anything is written. SUBDIR takes SRC's owner, mode and timestamps, and its xattrs unless `-E no_copy_xattrs` is given. `-P` directories are copied in order, after any `-d` source; a relative SRC resolves from mke2fs's working directory.
+- `-x PATTERN` (repeatable): excludes paths matching PATTERN in the new file system (`fnmatch`, `FNM_PATHNAME`), for `-d` and `-P` sources alike. A matching directory is created, empty.
+- `-E one_file_system`: copies only files on the same file system as each directory being copied (see E6).
 
 ```sh
-mke2fs -q -F -t ext4 -d /vm/var/lib/docker=var-lib-docker -d /vm/home=home "$src"
+mke2fs -q -F -t ext4 -P var-lib-docker=/vm/var/lib/docker -P home=/vm/home "$src"
 ```
 
-Prototype: `patches/e2fsprogs/mke2fs-populate.patch`, against e2fsprogs v1.47.2 (about 170 lines in `misc/create_inode.c` and `misc/mke2fs.c`; also adds `-x`/`-X`, see E6). Not yet wired into the build, and the man page is not yet updated. SUBDIR must be a single path component; duplicate SUBDIRs are rejected. The patch restores the working directory between sources, because `__populate_fs()` calls `chdir()`.
+Status: done; merged as #49 (with E3), against e2fsprogs 1.47.4, with man page and usage text. The option names follow mke2fs's conventions: `-d`'s pair `-D` is taken, modifiers of `-d` are `-E` extended options (as `no_copy_xattrs`), and `-X` is left free for a possible exclude-from-file option. The final patch passed 53 checks under musl (#49's description lists them).
 
-Tested in a development sandbox (patched e2fsprogs 1.47.2, glibc):
+Prototype results (an earlier repeated `-d SRC=SUBDIR` form, e2fsprogs 1.47.2, glibc):
 
 | Check | Result |
 |---|---|
@@ -338,7 +343,7 @@ Tested in a development sandbox (patched e2fsprogs 1.47.2, glibc):
 
 Full xattr fidelity matters for pre-populated Docker storage: overlay2 relies on `trusted.overlay.*` xattrs (e.g. opaque directories), so an image shipping a pre-loaded `/var/lib/docker` or `/var/lib/containerd` must keep them.
 
-Upstreaming: propose the change to e2fsprogs. Until accepted, RunCVM carries the patch (E3).
+Upstreaming: propose the change to e2fsprogs (not yet done). Until accepted, RunCVM carries the patch (E3).
 
 **Alternative considered: tarball into `mke2fs -d -`.** e2fsprogs ≥ 1.47.1 built with libarchive accepts a tarball, so all destinations can be streamed, renamed with GNU tar `--transform`, with no patch. Rejected as the primary method because, as tested:
 - it drops all xattrs except `security.capability` and `gnu.translator` (`set_inode_xattr_tar` in `misc/create_inode_libarchive.c`; unchanged on e2fsprogs master as of September 2026), which would silently corrupt pre-populated overlay2 storage;
@@ -351,6 +356,8 @@ Upstreaming: propose the change to e2fsprogs. Until accepted, RunCVM carries the
 - Build e2fsprogs in its own Dockerfile stage with `patches/e2fsprogs/mke2fs-populate.patch` applied, as is done for SeaBIOS and dnsmasq, and bundle the resulting `mke2fs` in place of Alpine's. No libarchive, tar or locale requirements.
 - Confirm the patched build under musl/Alpine.
 
+Status: done; merged as #49. The `e2fsprogs` stage builds mke2fs from the upstream e2fsprogs 1.47.4 tarball (SHA-256 checked) rather than aports, so it is independent of the Alpine release (3.19 ships 1.47.0, to which the patch does not apply). The patched mke2fs replaces Alpine's `e2fsprogs` package at `/sbin/mke2fs`. RunCVM runs it with `MKE2FS_CONFIG` pointing at its own `runcvm-etc/mke2fs.conf` (upstream's default minus `orphan_file` and `metadata_csum_seed`, as Debian and Ubuntu), so the image's `/etc/mke2fs.conf` does not change how disks are formatted.
+
 #### E4. Adding a destination to an existing disk
 
 mke2fs only populates a disk when it is created. For a destination added to an existing multi-path disk, the VM populates it on boot, before bind-mounting:
@@ -361,6 +368,8 @@ mke2fs only populates a disk when it is created. For a destination added to an e
 
 The rename makes `<sub>`'s existence the completion marker; an interrupted copy is discarded and retried. GNU coreutils is already bundled and virtiofsd runs with `-o xattr` (`runcvm-ctr-virtiofsd:11`), so `cp -a` preserves all xattrs. This can be deferred: initially, adding a destination later may simply be unsupported.
 
+Status: deferred. With #52, a `subdirs` disk's spec may leave out some of its destinations; a destination with no directory on the disk is reported on the console, and the VM powers off with exit status 1 (tested by `30-multipath-disk-errors`).
+
 #### E5. Tests
 
 - Core: a multi-path disk with sample trees; compare ownership, modes, hard links, symlinks and xattrs (`security.capability`, `user.*`, `trusted.*`) between source and disk.
@@ -369,6 +378,8 @@ The rename makes `<sub>`'s existence the completion marker; an interrupted copy 
 - Single-destination specs behave exactly as before.
 
 Done when: the L1 image (B1) uses one data disk for `/var/lib/docker`, `/var/lib/containerd`, `/opt/runcvm` and `/home`, and E5 passes.
+
+Status: tests merged with #52: `29-multipath-disks` (fidelity of a two-destination disk, a keyed one-destination disk and a `layout=root` disk, and persistence, in both `--init` modes), `30-multipath-disk-errors` (rejected specs, layout changes, adding and removing destinations) and `31-docker-multipath-disk` (Docker in the VM with `/var/lib/docker` and `/var/lib/containerd` on one disk); `21-disks` gains a labelled pre-existing disk. Still open: Docker with a `/var/lib/docker` pre-populated in the image, and both image stores; and B1's adoption.
 
 #### E6. Optional whole-root disk
 
@@ -412,6 +423,12 @@ Recommendation: whole-root is a candidate for long-lived L1s in both dev and bat
 
 Tests: a whole-root L2 boots and runs its entrypoint; volumes, bind mounts, `/etc/hosts` and `docker exec` work; `docker stop` shuts down cleanly; writes outside volumes land on the disk; a backing file inside the container's filesystem is not copied into itself.
 
+Status: done; merged as #56 (`RUNCVM_DISKS=/disks/root,/,ext4,40G`: one disk, ext4, layout `root`, destination `/` only). The final design differs from the proposal above in two ways:
+- Populating uses `-E one_file_system` (not `-X`), and `-x` leaves out every disk's backing file and the contents of other disks' destinations. `runcvm-ctr-qemu` records the disk's UUID in `/.runcvm/rootdisk` and each mountpoint directly below `/vm` in `/.runcvm/rootdisk-mounts`, because a volume's virtiofs submount appears in the VM only once accessed, and a bind-mounted file never appears as a mount there.
+- `runcvm-vm-init` binds `/.runcvm` and `/.runcvm/guest` onto the disk and rbinds each mount and recorded mountpoint (creating an empty file or directory where needed), rather than moving them, then `pivot_root`s, stays PID 1, and detaches the image's file system. Everything is carried before the switch because RunCVM's tools find their libraries through `/proc/self/exe`.
+
+The README has a "Whole-root disks" subsection. Test: `34-whole-root-disk`, in both `--init` modes.
+
 ---
 
 ### F. Communication and control between levels
@@ -423,7 +440,7 @@ How each level is launched, reports results and is controlled. L0↔L1 and L1↔
 | Channel | How RunCVM implements it | systemd as PID 1 | `--init` (busybox init as PID 1) | No init (entrypoint as PID 1) |
 |---|---|---|---|---|
 | Command line | Saved to `/.runcvm/entrypoint`; exec'd in the VM | Arguments go to systemd, not to us; use an entrypoint wrapper (B1) | Passed to the entrypoint | Passed to the entrypoint |
-| Environment | Saved to `/.runcvm/config`; restored for the entrypoint | Not inherited by services; wrapper saves an `EnvironmentFile` | Passed | Passed |
+| Environment | Passed by `runcvm-runtime` as arguments, saved to `/.runcvm/env` and given to the entrypoint alone (`busybox env -i`); RunCVM's own processes have a fixed environment (#54) | Not inherited by services; wrapper saves an `EnvironmentFile` | Passed | Passed |
 | stdin/stdout | VM console (`hvc0`/`ttyS0`) is QEMU's stdio | Owned by systemd: status output, possibly a getty; not usable for stdin | Console with controlling tty | Console |
 | Exit code | `runcvm-ctr-exit` reads `/.runcvm/exitcode` after QEMU exits, else derives one from QEMU's status; `qemu-exit` exits QEMU immediately | Only if a unit writes `/.runcvm/exitcode` before power-off | Status discarded; clean power-off | Status lost; kernel panic, no clean shutdown |
 | `docker exec` | dropbear in the VM, reached via `dbclient`; exit codes and separate stdout/stderr preserved | Works | Works; dropbear respawned | Works |
@@ -486,7 +503,7 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 - A1 is small and unblocks everything; it can be done in the existing libvirt development VM.
 - C needs only B1 in dev mode, so it can proceed alongside A3/A4 and B2/B3.
 - D needs B3 and enough of A3 to be meaningful.
-- E can start at any time; E3 (patched e2fsprogs build) comes first. B1 can use per-path disks until E lands.
+- E has landed (#49, #52, #56), so B1 can use a multi-destination or whole-root disk from the start.
 
 ## 4. Suggested sequence (for prioritisation)
 
@@ -497,7 +514,7 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 
    Small, and unblocks everything; can be done in the existing libvirt development VM.
 
-   #34 (A1), #33 (explicit QEMU acceleration modes), A2 (#38), A3 (#40–#43) and #30 (dual-stack IPv6; also fixes VM boot failure for containers with a second network) are merged. Still to merge: #28 (ARM64, Podman, installer), deferred until it can be tested on arm64 and with Podman; it must land before B2, C3/C4, E3 and E6, or they must allow for it, as they touch the same code. #33 provides the check that L2s really run under KVM: `RUNCVM_QEMU_ACCEL=kvm` fails at creation if `/dev/kvm` is absent, rather than silently falling back to TCG. Follow-ups: multi-interface and overlay-network tests in A3.
+   #34 (A1), #33 (explicit QEMU acceleration modes), A2 (#38), A3 (#40–#43) and #30 (dual-stack IPv6; also fixes VM boot failure for containers with a second network) are merged. Still to merge: #28 (ARM64, Podman, installer), deferred until it can be tested on arm64 and with Podman. E (#49, #52, #56) landed first, so #28 must now take in `main` and allow for it (the Dockerfile's `e2fsprogs` stage, `runcvm-ctr-qemu` and `runcvm-vm-init`); B2 and C3/C4 must allow for #28, or wait for it, as they touch the same code. #33 provides the check that L2s really run under KVM: `RUNCVM_QEMU_ACCEL=kvm` fails at creation if `/dev/kvm` is absent, rather than silently falling back to TCG. Follow-ups: multi-interface and overlay-network tests in A3.
 2. **First L1 environment**
    - B1. L1 image — dev mode, proven by manual launch on L0 and in Dockside
 3. **Side-by-side versions**, developed in L1
@@ -526,13 +543,13 @@ E3 ──► E1/E2 ──► E5 ──► B1 (shared data disk in the L1 image)
 8. **CI hardening and wider triggers**
    - D3. Hardening
    - D4. Workflows — pushes, then pull requests
-9. **Faster VM storage**, alongside steps 2–6, on its own branches (section 4a)
-   - E3. Build and bundling changes (patched mke2fs) — first
-   - E1. Multi-path disk specs (both flavours)
-   - E2. Populating a multi-path disk in one pass: repeated `-d SRC=SUBDIR`
-   - E4. Adding a destination to an existing disk — if wanted
-   - E5. Tests
-   - E6. Optional whole-root disk — second branch
+9. **Faster VM storage**, alongside steps 2–6, on its own branches (section 4a) — done except E4
+   - E3. Build and bundling changes (patched mke2fs) — done (#49)
+   - E1. Multi-path disk specs — done (#52; the exclusion-list flavour is superseded by E6)
+   - E2. Populating a multi-path disk in one pass: `mke2fs -P SUBDIR=SRC` — done (#49)
+   - E4. Adding a destination to an existing disk — deferred; reported, VM powers off (#52)
+   - E5. Tests — done (#52), apart from the pre-populated `/var/lib/docker` and both image stores
+   - E6. Optional whole-root disk — done (#56)
 
    B1 adopts whichever layout B4's measurements favour.
 10. **As needed**
@@ -546,14 +563,15 @@ Implementation is split into independent branches, each with its own pull reques
 
 | Branch (pull request) | Contents | Depends on |
 |---|---|---|
-| 1. Patched mke2fs and multi-path disks | E3 (e2fsprogs build stage with `patches/e2fsprogs/mke2fs-populate.patch`), E1 (both flavours: listed destinations and exclusion list), E2, E4 if wanted, E5 | A1 for the tests |
-| 2. Whole-root disk | E6: `RUNCVM_DISKS` destination `/`, `pivot_root` in `runcvm-vm-init`, tests | The patched mke2fs from branch 1 |
+| 1a. Patched mke2fs | E3, E2: e2fsprogs build stage, `patches/e2fsprogs/mke2fs-populate.patch` (`-P`, `-x`, `-E one_file_system`), RunCVM's own `mke2fs.conf` | — (merged as #49) |
+| 1b. Multi-path disks | E1 (listed destinations, as the `subdirs` layout; keyed specs), E5 | 1a (merged as #52) |
+| 2. Whole-root disk | E6: `RUNCVM_DISKS` destination `/`, `pivot_root` in `runcvm-vm-init`, tests | 1a and 1b (merged as #56) |
 
-Branch 2 needs only the mke2fs part of branch 1. If branch 1 is not yet merged, branch 2 is based on it (or the mke2fs build stage is split into a small first pull request that both build on). Other deliverables (A, B, C, D, F) get their own branches as they are started.
+The mke2fs stage was split into its own pull request (#49), on which 1b and 2 were stacked. Other deliverables (A, B, C, D, F) get their own branches as they are started.
 
 ### Pull requests
 
-Merged to `main` (1–2 November 2026). Squash-merged branches keep their history in a `raw/<branch>` tag, cited by a `Raw-History:` trailer; single-commit branches are rebase-merged:
+Merged to `main` (1–3 November 2026). Squash-merged branches keep their history in a `raw/<branch>` tag, cited by a `Raw-History:` trailer; single-commit branches are rebase-merged:
 
 | Pull request | Contents |
 |---|---|
@@ -570,13 +588,23 @@ Merged to `main` (1–2 November 2026). Squash-merged branches keep their histor
 | #37 | `CLAUDE.md` compliance fixes to text already on `main`. |
 | #48 | `24-networking` runs its Container/VMs with `--dns-search=.`. |
 | #30 | Dual-stack IPv6; multi-network boot fix; `ipv6` module loaded on kernels that build it as one; `tests/12-ipv6`. |
+| #50 | `28-unsupported-networks` logs only changes to the host's interfaces and routes. |
+| — | `CLAUDE.md`: pull request descriptions are not hard-wrapped (committed directly to `main`). |
+| #57 | `12-ipv6` and `24-networking` also run with `--dns-opt=ndots:1`. |
+| #58 | `tests/run` keeps the run's exit status when its terminal goes away. |
+| #49 | E3, E2: mke2fs built from upstream e2fsprogs 1.47.4 with the populate patch (`-P`, `-x`, `-E one_file_system`); RunCVM's own `mke2fs.conf`. |
+| #52 | E1, E5: multi-destination disks, `subdirs` and `root` layouts, keyed specs; `29-multipath-disks`, `30-multipath-disk-errors`, `31-docker-multipath-disk`. |
+| #56 | E6: whole-root disk (destination `/`, `pivot_root`); `34-whole-root-disk`. |
+| #55 | README: how `RUNCVM_DISKS` data is kept when the VM ends (warning, `--init` recommended, `sync -f <dst>`); examples launched with `--init`. |
+| #54 | RunCVM's own processes get a fixed environment; the workload's travels as arguments and reaches only the workload (`/.runcvm/env`); matches runc for `docker exec -e` and `USER`; `33-hostile-env`. |
+| #51 | Bundled tools read no configuration, helpers or plugins from the image (mount, qemu-ga, dropbear, dnsmasq, ip, tput, tr, sleep, jq); qemu-ga runs in both modes; `32-hostile-image`. |
 
 Open:
 
 | Pull request | Branch | Based on | Contents |
 |---|---|---|---|
-| #28 | `claude/macos-docker-compatibility-InrFB` | `main` | ARM64, Podman, installer. Up to date with `main`; needs a compliance sweep, testing on arm64 and with Podman, and a decision on `PLAN-macos-arm64.md`. |
-| #31 | `feat/non-tty-stdio-bridge` | `main` | Separate stdout and stderr without a TTY; `RUNCVM-INIT.md`, the design for a single bespoke guest init (workload in a child namespace). Needs a compliance sweep and KVM testing. |
+| #28 | `claude/macos-docker-compatibility-InrFB` | `main` | ARM64, Podman, installer. Needs `main` merged in (#49–#58 touch the Dockerfile and the scripts it changes), a compliance sweep, testing on arm64 and with Podman, and a decision on `PLAN-macos-arm64.md`. |
+| #31 | `feat/non-tty-stdio-bridge` | `main` | Separate stdout and stderr without a TTY; `RUNCVM-INIT.md`, the design for a single bespoke guest init (workload in a child namespace). Needs `main` merged in (#54 changes how the workload's environment reaches the VM), a compliance sweep and KVM testing. |
 
 Changes lower in a stack are merged upwards, never rebased (see `CLAUDE.md`). GitHub's stack view offers "Rebase stack" and a "Rebase and merge" button, which a branch containing merge commits cannot use; "Squash and merge", in the button's menu, still works. After a merge, a branch higher in the stack may need `main` merged in before GitHub reports it mergeable.
 
@@ -596,7 +624,7 @@ The tests record current behaviour, including the issues below, so fixing one me
 |---|---|---|
 | `--network=none`, and only `--internal` networks: exited with status 1, no message, before the workload runs (no default route). #46 makes them fail with an explanation. | `28-unsupported-networks` (#46) | Support it if possible. `docker exec` reaches the VM over SSH (`dbclient`) at the VM's address on its Docker network, so without a network it would need a private link between container and VM (e.g. a dedicated tap interface on a link-local subnet, or virtio-vsock). If that proves impractical, fail at creation with an explanatory error. #31's stretch goal, an execution agent over virtio-serial or vsock replacing Dropbear, would provide such a link. |
 | `--network=host` (documented as unsupported) ran RunCVM's network set-up in the host's network namespace and reconfigured the host's interfaces (it cut a test VM off its network). | (found running the suite) | Fixed in #46: rejected at creation. `--network=container:` is not yet detected. |
-| Without `--init`, data written to a `RUNCVM_DISKS` disk is lost when the entrypoint exits, unless the workload calls `sync`. | `16-disk-persistence` | Sync filesystems before the VM ends, whatever the init mode. The init-process work in #31 (`RUNCVM-INIT.md`): with the workload in a child PID and mount namespace, RunCVM's init remains guest PID 1 and syncs before poweroff in every mode. |
+| Without `--init`, data written to a `RUNCVM_DISKS` disk is lost when the entrypoint exits, unless the workload calls `sync`. With a whole-root disk (#56), that is every write outside volumes. | `16-disk-persistence` | Documented by #55: the README warns, recommends `--init` (except for images whose entrypoint is their own init), and says how a workload keeps a disk's data (`sync -f <dst>`, or unmounting the disk). A global `sync()` on exit is ruled out, as it also flushes the virtiofs root, which virtiofsd passes on as a syncfs of the host's Docker storage. The fix remains the init-process work in #31 (`RUNCVM-INIT.md`): with the workload in a child PID and mount namespace, RunCVM's init remains guest PID 1 and can flush each disk (only the VM's own disks) before poweroff in every mode. |
 | The entrypoint's own exit status is never passed through; an entrypoint that cannot be executed exits 0. | `14-exit-codes`, `25-images-kernels` | The init-process work in #31: in the child-namespace structure, RunCVM's init reaps the workload's PID 1 and reports its status. |
 | Non-root workloads cannot set the exit status (`/.runcvm` is root-only). | `14-exit-codes` | As above: no `/.runcvm/exitcode` is needed when RunCVM's init reports the status. |
 | With the default `headless` console and the Debian kernel (the default for images without `/etc/os-release`), failures early in VM start-up produce no output at all, even with `RUNCVM_KERNEL_DEBUG=1`. | (found investigating `hello-world`) | Make the console usable earlier with this kernel (e.g. `virtio_console` built in or loaded by the initrd), or fall back to the serial console for early boot. Meanwhile, `RUNCVM_DISPLAY_MODE=serial` shows such failures. |
@@ -606,7 +634,10 @@ The tests record current behaviour, including the issues below, so fixing one me
 - QEMU could start before virtiofsd's socket existed, so the Container/VM exited with status 1. #39.
 - `qemu-exit 0` gave exit status 128 on KVM: after requesting an ACPI power-off it fell through to an isa-debug-exit write, which QEMU acted on first. #47 (found by `14-exit-codes` on KVM).
 - The README gave `qemu-exit`'s host path rather than its path in the VM. #38.
-- Tests that look up container names depended on the host's DNS search domains, which Docker copies into each container: BusyBox `nslookup` never queries a bare name when `resolv.conf` has a `search` line. `12-ipv6` and `24-networking` run with `--dns-search=.`, and `12-ipv6` resolves with `getent` (#30, #48).
+- Tests that look up container names depended on the host's DNS search domains, which Docker copies into each container: BusyBox `nslookup` never queries a bare name when `resolv.conf` has a `search` line. `12-ipv6` and `24-networking` run with `--dns-search=.` and `--dns-opt=ndots:1`, and `12-ipv6` resolves with `getent` (#30, #48, #57).
+- RunCVM's scripts and bundled tools ran with the workload's environment, saved and re-sourced as `declare -x` lines: `LD_PRELOAD`/`LD_LIBRARY_PATH` naming glibc libraries broke every bundled binary, and `docker run -e UID=1000` stopped the VM booting (bash's read-only `UID`, sourced by the VM's PID 1 under `bash -e`). #54, with `33-hostile-env`.
+- Bundled tools read configuration, helpers and plugins from the image: an `/etc/fstab` entry for `/` with `errors=remount-ro` stopped the VM booting, `/etc/dnsmasq.conf` could disable DNS, and `/etc/mke2fs.conf` changed how disks were formatted. Also, without `--init`, qemu-ga was started from an undefined path (`$RUNCVM/scripts/…`), and dropbear accepted password logins against the image's `/etc/shadow`. #49 (mke2fs), #51 (the rest), with `32-hostile-image`.
+- blkid's `-o value` printed a labelled disk's label before its UUID, so the fstab entry for a labelled pre-existing disk was wrong. #52 (`blkid -p`), with `21-disks`.
 
 **Smaller issues: lower priority.**
 - `--cpus` below 1 gives the VM every CPU available to the container (rounding up to 1 seems intended).
@@ -625,10 +656,10 @@ The tests record current behaviour, including the issues below, so fixing one me
 - Socket variant with D2 controls only, or go straight to D3.
 - Registry for prebuilt images (if any), or always build inside L1.
 - Whether people should also be required to use the launcher on L0, or only CI.
-- Syntax for repeated `-d` (`SRC=SUBDIR`) and for `-x`/`-X`; whether to propose them upstream before or after RunCVM adopts them (E2, E6).
+- ~~Syntax for repeated `-d` (`SRC=SUBDIR`) and for `-x`/`-X`.~~ `-P SUBDIR=SRC`, `-x PATTERN` and `-E one_file_system` (#49). Still open: when to propose the patch upstream.
 - Default disk layout for L1 (per-path, multi-path or whole-root), from B4's measurements.
-- Whether the mke2fs build stage is a separate small pull request shared by branches 1 and 2 (section 4a).
-- Whether adding a destination to an existing multi-path disk (E4) is supported initially.
+- ~~Whether the mke2fs build stage is a separate small pull request shared by branches 1 and 2.~~ Yes (#49).
+- ~~Whether adding a destination to an existing multi-path disk (E4) is supported initially.~~ Not initially: reported, and the VM powers off (#52).
 
 ## 6. Risks and unproven areas
 
@@ -642,4 +673,5 @@ The tests record current behaviour, including the issues below, so fixing one me
 - Runner security depends on controls outside workflow files (D2/D3); misconfiguration exposes L0.
 - QEMU 8.1.5 under TCG occasionally segfaults (exit 139, reported as container exit code 70), seen only in full-suite runs; recorded in #33. KVM runs are unaffected; a QEMU upgrade may fix it.
 - `RUNCVM_QEMU_DEBUG` reads `memory.events`, which exists only under cgroup v2.
-- RunCVM carries an e2fsprogs patch (E2) until accepted upstream; tested on glibc only so far, musl/Alpine build to be confirmed.
+- RunCVM carries an e2fsprogs patch (E2) until accepted upstream; built and tested under musl (Alpine 3.19) in #49. Upstream may choose different option names.
+- Without `--init`, a workload that exits by itself loses unflushed `RUNCVM_DISKS` data (all writes outside volumes, with a whole-root disk) until the init-process work lands; L1 runs systemd, so it is not affected.
