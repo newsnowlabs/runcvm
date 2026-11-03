@@ -61,13 +61,18 @@ network = t.unique("net")
 t.docker("network", "create", *t.labels(), network, check=True)
 t.cleanup_network(network)
 
+# '--dns-search=.' gives each Container/VM no DNS search domains, and '--dns-opt=ndots:1' a fixed
+# ndots in place of Docker's 'ndots:0', whatever the host's resolv.conf holds, so that lookups of
+# container names behave the same on every host.
+DNS = ["--dns-search=.", "--dns-opt=ndots:1"]
+
 
 def case(init):
     mode = "--init" if init else "no --init"
     name = t.unique("hostile" + ("-init" if init else ""))
     t.cleanup_container(name)
     r = t.docker("run", "-d", "--name", name, "--hostname", name, *t.labels(), "--runtime=" + t.RUNTIME,
-                 *t.vm_opts(), "--network", network, *(["--init"] if init else []), image,
+                 *t.vm_opts(), "--network", network, *DNS, *(["--init"] if init else []), image,
                  "sh", "-c", "echo entrypoint-ran >/dev/entrypoint-marker; exec busybox sleep 3600")
     if r.returncode != 0:
         return [("%s: Container/VM created" % mode, 0, r.returncode)]
@@ -93,12 +98,14 @@ def case(init):
         return t.docker("exec", name, *cmd).stdout.strip()
 
     ex("busybox", "sleep", "3")  # Allow qemu-ga time to start.
+    # The trailing '.' makes the name absolute, so no search domain applies to it.
+    lookup = ex("nslookup", name + ".")
     results += [
         ("%s: Container/VM boots and 'docker exec' works" % mode, True, True),
         ("%s: entrypoint ran" % mode, "entrypoint-ran", ex("cat", "/dev/entrypoint-marker")),
         ("%s: 'docker exec' passes arguments intact" % mode, "a b  'c'", ex("echo", "a b  'c'")),
         ("%s: DNS resolves the container's own name" % mode, True,
-         "Address" in ex("nslookup", name) and "NXDOMAIN" not in ex("nslookup", name)),
+         "Address" in lookup and "NXDOMAIN" not in lookup),
         ("%s: qemu-ga runs" % mode, True, "qemu-ga" in ex("ps", "-o", "comm").split()),
         ("%s: qemu-ga writes no pidfile to the image" % mode, "absent",
          ex("sh", "-c", "[ -e /var/run/qemu-ga.pid ] && echo present || echo absent")),
