@@ -74,7 +74,7 @@ do
   if [ $retries -gt 0 ]; then
     retries=$((retries-1))
     delay=1
-    sleep 0.5
+    busybox sleep 0.5
     continue
   fi
 
@@ -84,7 +84,7 @@ done
 
 # If startup was detected, wait a few extra seconds for dropbear sshd to be ready
 if [ "$delay" -ne 0 ]; then
-  sleep 2
+  busybox sleep 2
 fi
 
 exec $RUNCVM_GUEST/usr/bin/dbclient "${opts[@]}" -p $SSHD_PORT -y -y -i /.runcvm/dropbear/key root@$DOCKER_IF_IP "$command '$uidgid' '$(echo -n $cwd | to_bin)' '$args_bin' '$env_bin'"

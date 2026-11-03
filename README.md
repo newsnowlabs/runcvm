@@ -798,6 +798,8 @@ docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docke
 
 The following deep dive should help explain the inner workings of RunCVM, and which files to modify to implement fixes, improvements and extensions.
 
+RunCVM's scripts run in the container and in the VM, and in both the root filesystem is the image's. So the scripts use RunCVM's own bundled tools, and invoke them so that they read no configuration files, helpers, plugins or caches from the image, and behave the same in any image. For example, `dnsmasq` runs with `-C /dev/null`, `mount` with `-i` (no `/sbin/mount.<type>` helpers), `ip` with `IP_LIB_DIR` naming a directory that does not exist, and `qemu-ga` with `QGA_CONF` likewise. Any new use of a bundled tool should follow the same rule.
+
 ### runcvm-runtime
 
 RunCVM's 'wrapper' runtime, `runcvm-runtime`, intercepts container `create` and `exec` commands and their specifications in JSON format (`config.json` and `process.json` respectively) that are normally provided (by `docker` `run`/`create` and `docker exec` respectively) to a standard container runtime like `runc`.
@@ -858,6 +860,7 @@ The `runcvm-vm-init` process:
 - Launches the container's pre-existing entrypoint, in one of two ways.
    1. If `RUNCVM_INIT` is `1` (i.e. the container was originally intended to be launched with Docker's own init process) then it configures and execs busybox `init`, which becomes the VM's PID1, to supervise `dropbear`, run `runcvm-vm-start` and `poweroff` the VM if signalled to do so.
    2. Else, it backgrounds `dropbear`, then execs (via `runcvm-init`, purely to create a controlling tty) `runcvm-vm-start`, which runs as the VM's PID1.
+- In both cases, `dropbear` accepts only RunCVM's own key (used by `docker exec`), with password logins and port forwarding disabled.
 
 The `runcvm-vm-start` script:
 - Execs the container's originally-intended entrypoint with the workload's environment variables alone, and with its `<uid>`, `<gid>`, `<additionalGids>` and `<cwd>`.

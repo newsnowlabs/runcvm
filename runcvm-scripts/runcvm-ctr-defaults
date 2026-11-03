@@ -131,14 +131,12 @@ create_aliases() {
     head
     hostname
     init
-    ip
     jq
     ln
     ls
     mkdir
     mke2fs
     mount
-    mountpoint
     nc
     poweroff
     ps
@@ -150,7 +148,6 @@ create_aliases() {
     sh
     sysctl
     touch
-    tput
     tr
     xtables-legacy-multi
     xtables-nft-multi
@@ -161,6 +158,13 @@ create_aliases() {
   do
     eval "$cmd() { $(which $cmd) \"\$@\"; }"
   done
+
+  # Commands that also need their own environment, so that they use nothing from the image:
+  # - ip would load link-type plugins (e.g. for 'type bridge') from the image's /usr/lib/ip;
+  #   RunCVM ships no plugins, so IP_LIB_DIR names a directory that does not exist.
+  # - tput would use the image's terminfo database.
+  eval "ip() { IP_LIB_DIR=$RUNCVM_GUEST/usr/lib/ip $(which ip) \"\$@\"; }"
+  eval "tput() { TERMINFO=$RUNCVM_GUEST/usr/share/terminfo $(which tput) \"\$@\"; }"
 }
 
 create_aliases

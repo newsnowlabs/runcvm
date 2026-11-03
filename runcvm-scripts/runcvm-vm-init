@@ -6,13 +6,16 @@
 # Load defaults and aliases
 . $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
-# Alpine initrd doesn't honour command-line rw flag
-mount -o remount,rw /
+# Alpine initrd doesn't honour command-line rw flag.
+# -i keeps mount from running any /sbin/mount.<type> helper from the image, and
+# --options-source=disable keeps the image's /etc/fstab from adding options to the remount (e.g.
+# 'errors=remount-ro', which virtiofs rejects, halting the VM as this script runs with 'bash -e').
+mount -i --options-source=disable -o remount,rw /
 
 # FIXME: Something is making /.runcvm ro, so remount it rw
 # until such time as exit code handling and dropbear key creation
 # obviate the need for this.
-mount -o remount,rw /.runcvm
+mount -i --options-source=disable -o remount,rw /.runcvm
 
 # Alpine initrd doesn't configure /dev device permissions and ownership
 # to support non-root users.
@@ -234,7 +237,7 @@ if [ -f /.runcvm/fstab ]; then
   fi
 
   # Now mount our fstab over /etc/fstab
-  mount --bind /.runcvm/fstab /etc/fstab
+  mount -i --bind /.runcvm/fstab /etc/fstab
 fi
 
 # Load cgroupfs (if needed/requested):
@@ -293,7 +296,7 @@ if [ "$RUNCVM_INIT" = "1" ]; then
   cat >/etc/inittab <<_EOE_
 $CONSOLE_DEVICE::respawn:-$RUNCVM_GUEST/scripts/runcvm-vm-start-wrapper
 null::respawn:$RUNCVM_GUEST/scripts/runcvm-vm-qemu-ga
-null::respawn:$RUNCVM_GUEST/usr/sbin/dropbear -REF -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
+null::respawn:$RUNCVM_GUEST/usr/sbin/dropbear -REF -s -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
 null::ctrlaltdel:$RUNCVM_GUEST/bin/poweroff
 null::restart:$RUNCVM_GUEST/bin/poweroff
 null::shutdown:$RUNCVM_GUEST/bin/poweroff
@@ -311,10 +314,12 @@ else
   clean_env
 
   # Run the qemu guest agent, needed to support future functionality
-  $RUNCVM/scripts/runcvm-vm-qemu-ga &>/dev/null &
+  $RUNCVM_GUEST/scripts/runcvm-vm-qemu-ga &>/dev/null &
 
-  # Run dropbear SSH server, needed to support 'docker exec'
-  dropbear -REF -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
+  # Run dropbear SSH server, needed to support 'docker exec'.
+  # It accepts only RunCVM's own key (via the EPKA plugin): -s disables password logins, which would
+  # otherwise be checked against the image's /etc/shadow, and -j and -k disable port forwarding.
+  dropbear -REF -s -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
 
   # Run init from the image
   # Pipe input/output from/to console device
