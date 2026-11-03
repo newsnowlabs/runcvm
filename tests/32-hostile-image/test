@@ -10,8 +10,8 @@ them:
   of its virtiofs root would reject;
 - /etc/dnsmasq.conf sets 'port=0', which would disable the DNS forwarder;
 - /etc/qemu/qemu-ga.conf names a log file, /dev/qga-conf-marker;
-- /sbin/mount.<type> helpers for virtiofs, tmpfs, cgroup and cgroup2 write
-  markers to /dev;
+- /sbin/mount.<type> helpers for virtiofs, tmpfs, cgroup, cgroup2, ext4 and
+  none write markers to /dev;
 - /scripts/runcvm-vm-qemu-ga writes a marker, and must not be run in place of
   RunCVM's own;
 - /usr/lib/ip/link_bridge.so is not a valid library;
@@ -19,8 +19,10 @@ them:
 - there is no 'tr' and no 'sleep'.
 
 With and without --init, the Container/VM must boot and run its entrypoint,
-resolve a container name over DNS, run 'docker exec' (also as soon as it
-starts), and run qemu-ga, and no marker may appear.
+mount a RUNCVM_DISKS disk (an ext4 mount and a bind mount from it) and a
+RUNCVM_TMPFS file system, resolve a container name over DNS, run
+'docker exec' (also as soon as it starts), and run qemu-ga, and no marker may
+appear.
 """
 
 import atexit
@@ -37,14 +39,14 @@ DOCKERFILE = r"""
 FROM alpine
 RUN echo '/dev/vda / ext4 errors=remount-ro 0 1' >/etc/fstab \
  && echo 'port=0' >/etc/dnsmasq.conf \
- && mkdir -p /etc/qemu /etc/iproute2 /usr/lib/ip /scripts \
+ && mkdir -p /etc/qemu /etc/iproute2 /usr/lib/ip /scripts /data \
  && printf '[general]\nlogfile=/dev/qga-conf-marker\nverbose=true\n' >/etc/qemu/qemu-ga.conf \
  && printf '2\tkern\n' >/etc/iproute2/rt_protos \
  && printf '0\tglob\n253\tlnk\n' >/etc/iproute2/rt_scopes \
  && echo 'not a library' >/usr/lib/ip/link_bridge.so \
  && printf '#!/bin/sh\necho "$0 $*" >>/dev/mount-helper-marker\nexit 1\n' >/sbin/mount.virtiofs \
  && chmod 755 /sbin/mount.virtiofs \
- && for t in tmpfs cgroup cgroup2; do ln -s mount.virtiofs /sbin/mount.$t; done \
+ && for t in tmpfs cgroup cgroup2 ext4 none; do ln -s mount.virtiofs /sbin/mount.$t; done \
  && printf '#!/bin/sh\ntouch /dev/image-qemu-ga-marker\n' >/scripts/runcvm-vm-qemu-ga \
  && chmod 755 /scripts/runcvm-vm-qemu-ga \
  && rm /usr/bin/tr /bin/sleep
@@ -66,13 +68,19 @@ t.cleanup_network(network)
 # container names behave the same on every host.
 DNS = ["--dns-search=.", "--dns-opt=ndots:1"]
 
+# A disk with the default layout 'subdirs' is mounted at /.runcvm/disks/0 (ext4), and /data is
+# bind-mounted from it; RUNCVM_TMPFS adds a tmpfs at /scratch. All three are mounted from
+# /.runcvm/fstab, so would run the image's mount.ext4, mount.none and mount.tmpfs helpers.
+MOUNTS = ["--env=RUNCVM_DISKS=/disks/d,/data,ext4,16M",
+          "--env=RUNCVM_TMPFS=tmpfs /scratch tmpfs defaults 0 0"]
+
 
 def case(init):
     mode = "--init" if init else "no --init"
     name = t.unique("hostile" + ("-init" if init else ""))
     t.cleanup_container(name)
     r = t.docker("run", "-d", "--name", name, "--hostname", name, *t.labels(), "--runtime=" + t.RUNTIME,
-                 *t.vm_opts(), "--network", network, *DNS, *(["--init"] if init else []), image,
+                 *t.vm_opts(), "--network", network, *DNS, *MOUNTS, *(["--init"] if init else []), image,
                  "sh", "-c", "echo entrypoint-ran >/dev/entrypoint-marker; exec busybox sleep 3600")
     if r.returncode != 0:
         return [("%s: Container/VM created" % mode, 0, r.returncode)]
@@ -104,6 +112,9 @@ def case(init):
         ("%s: Container/VM boots and 'docker exec' works" % mode, True, True),
         ("%s: entrypoint ran" % mode, "entrypoint-ran", ex("cat", "/dev/entrypoint-marker")),
         ("%s: 'docker exec' passes arguments intact" % mode, "a b  'c'", ex("echo", "a b  'c'")),
+        ("%s: disk and tmpfs mounted" % mode, "/data ext4 /scratch tmpfs",
+         " ".join(ex("awk", '$2 == "/data" || $2 == "/scratch" { print $2, $3 }',
+                     "/proc/mounts").split())),
         ("%s: DNS resolves the container's own name" % mode, True,
          "Address" in lookup and "NXDOMAIN" not in lookup),
         ("%s: qemu-ga runs" % mode, True, "qemu-ga" in ex("ps", "-o", "comm").split()),
