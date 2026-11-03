@@ -156,6 +156,10 @@ Format: a subject line of at most about 72 characters, in the imperative or as a
 wrapped at 72 columns explaining what the change does and why, with user-visible options and
 behaviour stated explicitly.
 
+Pull request descriptions, unlike commit messages, are not hard-wrapped: write each paragraph
+and list item as a single line. GitHub renders a line break within a paragraph or list item in
+a description as a visible break, so wrapped text displays as ragged, broken lines.
+
 ## Merging to `main`
 
 `main` takes only clean commits. How a pull request lands depends on its branch:
