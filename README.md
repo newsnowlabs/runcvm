@@ -894,48 +894,14 @@ Now follow the main [installation instructions](#installation) to install your b
 
 ## Testing
 
-Test RunCVM using nested RunCVM. You can do this using a Docker image capable of installing RunCVM, or an image built with a version of RunCVM preinstalled.
+Test RunCVM using nested RunCVM: in a Container/VM, launched with RunCVM, that runs systemd and Docker and has a RunCVM of its own installed. [`tests/env/`](tests/env/README.md) builds the image for such a Container/VM, with RunCVM preinstalled from a RunCVM image chosen at build time. Its README describes the image, the build arguments, and what the Container/VM configures and why.
 
-Build a suitable image as follows:
-
-```sh
-cat <<EOF | docker build --tag=ubuntu-docker-runcvm -
-FROM ubuntu:jammy
-
-# Install needed packages and create and configure 'runcvm' user account
-RUN apt update && \
-    apt -y install \
-        apt-utils kmod wget iproute2 systemd \
-        ca-certificates curl gnupg udev dbus sudo psmisc && \
-    curl -fsSL https://get.docker.com | bash && \
-    echo kvm_intel >>/etc/modules && \
-    useradd --create-home --shell /bin/bash --groups sudo,docker runcvm && \
-    echo runcvm:runcvm | chpasswd && \
-    echo 'runcvm ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/runcvm
-
-WORKDIR /home/runcvm
-ENTRYPOINT ["/lib/systemd/systemd"]
-VOLUME /disks
-
-# Mount formatted backing files at:
-# - /var/lib/docker for speed and overlay2 support
-# - /opt/runcvm to avoid nested virtiofs, which works, but can't be great for speed
-ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,2G;/disks/runcvm,/opt/runcvm,ext4,2G'
-
-# # Uncomment this block to preinstall RunCVM from the specified image
-#
-# COPY --from=newsnowlabs/runcvm:latest /opt /opt/
-# RUN rm -f /etc/init.d/docker && \
-#     bash /opt/runcvm/scripts/runcvm-install-runtime.sh --no-dockerd
-EOF
-```
-
-(Uncomment the final block to build an image with RunCVM preinstalled, or leave the block commented to test RunCVM installation).
-
-To launch, run:
+Build and launch it, then obtain a command prompt in it, as follows:
 
 ```sh
-docker run -d --runtime=runcvm -m 2g --name=ubuntu-docker-runcvm ubuntu-docker-runcvm
+docker build -t runcvm-l1 tests/env
+docker run -d --runtime=runcvm -m 4g --cpus=4 --stop-timeout=120 --name=runcvm-l1 runcvm-l1
+docker exec -it -u runcvm runcvm-l1 bash
 ```
 
 > Optionally modify this `docker run` command by:
@@ -943,9 +909,13 @@ docker run -d --runtime=runcvm -m 2g --name=ubuntu-docker-runcvm ubuntu-docker-r
 > - removing `-d` and adding `--env=RUNCVM_KERNEL_DEBUG=1` - to see kernel and systemd boot logs
 > - removing `-d` and adding `-it` - to provide a console
 
-Then `docker exec -it -u runcvm ubuntu-docker-runcvm bash` to obtain a command prompt and perform testing.
+Launch it without `--init`, so that systemd is the VM's PID 1. `docker exec runcvm-l1 runcvm-l1-check` checks that it is working.
 
-Run `docker rm -fv ubuntu-docker-runcvm` to clean up after testing.
+The image preinstalls the RunCVM release named by its `RUNCVM_IMAGE` build argument. To run the integration tests below inside it, preinstall the RunCVM they were written for, e.g. one built by `./build/build.sh`: `docker build -t runcvm-l1 --build-arg RUNCVM_IMAGE=newsnowlabs/runcvm:latest tests/env`.
+
+To test RunCVM's installer, run `runcvm-scripts/runcvm-install-runtime.sh` from a clone of this repository inside it.
+
+Run `docker rm -fv runcvm-l1` to clean up after testing.
 
 ### Running the integration tests
 
