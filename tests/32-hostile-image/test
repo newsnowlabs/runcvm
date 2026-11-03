@@ -17,8 +17,8 @@ them:
 - /usr/lib/ip/link_bridge.so is not a valid library;
 - /etc/iproute2/rt_protos and rt_scopes rename 'kernel', 'link' and 'global';
 - root's login shell is /sbin/nologin, and there is no /etc/shells;
-- root's ~/.ssh/authorized_keys holds a key (added once the VM runs), which
-  the VM's dropbear must refuse;
+- root has a ~/.ssh directory; once the VM runs, the test adds a key to its
+  authorized_keys, which the VM's dropbear must refuse;
 - there is no 'tr' and no 'sleep'.
 
 With and without --init, the Container/VM must boot and run its entrypoint,

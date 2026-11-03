@@ -327,8 +327,9 @@ else
 
   # Run dropbear SSH server, needed to support 'docker exec'.
   # It accepts only RunCVM's own key (via the EPKA plugin), and has no password logins; -j and -k
-  # disable port forwarding. It runs commands with RunCVM's bash, so starts with an empty
-  # environment: variables from the image, such as BASH_ENV, would otherwise reach that bash.
+  # disable port forwarding. It runs commands with RunCVM's bash, and its sessions inherit its
+  # environment, so it starts with an empty one: variables from the image, such as BASH_ENV,
+  # would otherwise reach that bash.
   busybox env -i $RUNCVM_GUEST/usr/sbin/dropbear -REF -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
 
   # Run init from the image

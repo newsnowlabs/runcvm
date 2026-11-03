@@ -65,6 +65,7 @@
  }
  #endif
  
+-/* Check that the username exists and isn't disallowed (root), and has a valid shell.
 +/* Fill in the authstate for RUNCVM_USER, the only user the server accepts.
 + * The image's /etc/passwd and /etc/shadow are not read: they may be absent, or
 + * give the user a home directory that does not exist or a shell that cannot
@@ -81,7 +82,7 @@
 +	ses.authstate.pw_passwd = m_strdup("!!");
 +}
 +
- /* Check that the username exists and isn't disallowed (root), and has a valid shell.
++/* Check that the username exists and isn't disallowed (root).
   * returns DROPBEAR_SUCCESS on valid username, DROPBEAR_FAILURE on failure */
  static int checkusername(const char *username, unsigned int userlen) {
  
@@ -158,8 +159,8 @@
 -        if (auth_failure) {
 -            auth_failure = checkpubkey(keyalgo, keyalgolen, keyblob, keybloblen) == DROPBEAR_FAILURE;
 -        }
-+	/* Only the plugin's keys are accepted: a key the plugin rejects is not
-+	 * looked up in the image's ~/.ssh/authorized_keys. */
++	/* Keys are accepted only through the EPKA plugin: the image's
++	 * ~/.ssh/authorized_keys is never read. */
  
          if (auth_failure) {
  		send_msg_userauth_failure(0, 0);
@@ -172,7 +173,7 @@
 -	pw = getpwnam(ses.authstate.pw_name);
 -	if (!pw)
 -		dropbear_exit("getpwnam failed after succeeding previously");
-+	/* The user is the authstate's, not an entry in the image's /etc/passwd */
++	/* The user comes from ses.authstate, not from the image's /etc/passwd */
 +	pw = &(struct passwd){
 +		.pw_name = ses.authstate.pw_name,
 +		.pw_uid = ses.authstate.pw_uid,
