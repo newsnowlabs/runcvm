@@ -9,6 +9,22 @@ QEMU_MONITOR_SOCKET=/run/.qemu-monitor-socket
 
 SSHD_PORT=22222
 
+# The address of the container's bridge for its default gateway interface: the source of
+# 'docker exec' connections to the VM. The VM reaches it on its own link (see runcvm-vm-init),
+# never through the Docker network's gateway.
+QEMU_BRIDGE_IP=169.254.1.1
+
+# vm_mac and bridge_mac: the MAC addresses of the VM's interface and of the container's bridge for
+# it, derived from the container interface's MAC address, $1, so that the container and the VM
+# both know them, and they are distinct on the Docker network.
+vm_mac() {
+  echo "52:54:00:${1:9}"
+}
+
+bridge_mac() {
+  echo "52:55:00:${1:9}"
+}
+
 # Variables used only by RunCVM: removed from the workload's environment (by workload_env),
 # and from the environment of RunCVM's own long-running processes in the VM (by clean_env).
 # One per line, sorted, so that changes merge cleanly.

@@ -108,12 +108,9 @@ read -r DOCKER_GW_IF6 DOCKER_GW_IF6_IP < \
   <(ip -6 -json route show default | jq -r '.[0] | [.dev, .gateway] | @tsv')
 # e.g. eth0 fd00:1::1
 
-# Link-local addresses on the default gateway interface's bridge, which the VM reaches on its own
-# link (see runcvm-vm-init), never through the Docker network's gateway:
-# - QEMU_BRIDGE_IP: the source of 'docker exec' connections to the VM;
-# - RUNCVM_DNS_IP: the VM's DNS server (dnsmasq, in the container), when the container's DNS
-#   server is Docker's embedded one, 127.0.0.11, which only the container can reach.
-QEMU_BRIDGE_IP=169.254.1.1
+# The VM's DNS server, when the container's DNS server is Docker's embedded one, 127.0.0.11,
+# which only the container can reach: dnsmasq, in the container, at this address on the bridge for
+# the default gateway interface, which the VM reaches on its own link (see runcvm-vm-init).
 RUNCVM_DNS_IP=169.254.1.2
 
 mkdir -p /.runcvm/network/devices
@@ -193,14 +190,10 @@ do
 
   QEMU_BRIDGE="br-$if"
 
-  # The bridge's MAC address is fixed, rather than taken from a port, so that the VM can be told
-  # it. It is derived from the interface's, as the VM's is (52:54:00:...), so that it is
-  # distinct on the Docker network.
-  QEMU_BRIDGE_MAC="52:55:00:${DOCKER_IF_MAC:9}"
-
-  # Create the container bridge
+  # Create the container bridge, with a fixed MAC address (rather than one taken from a port),
+  # which the VM derives too (see bridge_mac).
   # See https://bugs.launchpad.net/neutron/+bug/1738659
-  ip link add "$QEMU_BRIDGE" address "$QEMU_BRIDGE_MAC" type bridge forward_delay 0 ageing 0
+  ip link add "$QEMU_BRIDGE" address "$(bridge_mac "$DOCKER_IF_MAC")" type bridge forward_delay 0 ageing 0
 
   # Add the original container interface to the bridge and bring it up.
   ip link set dev "$if" master "$QEMU_BRIDGE"
@@ -218,9 +211,6 @@ do
     # Add a private IP to this bridge.
     # We need it so the bridge can receive traffic, but the IP won't ever see the light of day.
     ip addr add "$QEMU_BRIDGE_IP" dev "$QEMU_BRIDGE"
-
-    # The VM reaches the bridge's address on its own link, at this MAC address.
-    echo "$if $QEMU_BRIDGE_MAC $QEMU_BRIDGE_IP" >/.runcvm/network/bridge
 
     # Restore default gateway route via this bridge.
     ip route add default via "$DOCKER_GW_IF_IP" dev "$QEMU_BRIDGE"
@@ -248,9 +238,8 @@ cat /vm/etc/resolv.conf >/etc/resolv.conf
 # to the bridge only here: a container whose DNS server is $RUNCVM_DNS_IP itself, inherited from
 # a RunCVM VM in which Docker runs, must reach that server through the gateway, not its own
 # dnsmasq, whose upstream it would then be.
-if busybox grep -qE '^nameserver[[:space:]]+127\.0\.0\.11([[:space:]]|$)' /vm/etc/resolv.conf && [ -s /.runcvm/network/bridge ]; then
-  read -r gw_if _ _ </.runcvm/network/bridge
-  ip addr add "$RUNCVM_DNS_IP" dev "br-$gw_if"
+if busybox grep -qE '^nameserver[[:space:]]+127\.0\.0\.11([[:space:]]|$)' /vm/etc/resolv.conf && [ -n "$DOCKER_GW_IF" ]; then
+  ip addr add "$RUNCVM_DNS_IP" dev "br-$DOCKER_GW_IF"
   echo "$RUNCVM_DNS_IP" >/.runcvm/network/dns
   RESOLV_CONF_NEW=$(busybox sed -r "s/127.0.0.11/$RUNCVM_DNS_IP/" /vm/etc/resolv.conf)
   echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
