@@ -224,8 +224,9 @@ done
 cat /vm/etc/resolv.conf >/etc/resolv.conf
 
 # Docker's embedded DNS server, 127.0.0.11, is reachable only in the container, so where it is the
-# container's DNS server, the VM's is $RUNCVM_DNS_IP instead, which dnsmasq answers, forwarding to
-# 127.0.0.11. Other DNS servers (e.g. on the default bridge network), the VM queries directly.
+# container's DNS server, it is rewritten in the VM's resolv.conf to $RUNCVM_DNS_IP, which dnsmasq
+# answers, forwarding to 127.0.0.11. Other DNS servers (e.g. on the default bridge network), the
+# VM queries directly.
 if busybox grep -qE '^nameserver[[:space:]]+127\.0\.0\.11([[:space:]]|$)' /vm/etc/resolv.conf; then
   RUNCVM_DNS=1
   RESOLV_CONF_NEW=$(busybox sed -r "s/127.0.0.11/$RUNCVM_DNS_IP/" /vm/etc/resolv.conf)
@@ -243,9 +244,9 @@ fi
 #
 # - 'docker exec': dbclient connects from the bridge's address, which is source-NATed to
 #   $RUNCVM_DNS_IP; the VM's replies, which it sends towards the gateway, are diverted.
-# - DNS: the VM's requests to $RUNCVM_DNS_IP (only where it is the VM's DNS server, as an address
-#   inherited from an outer RunCVM VM must reach that VM's dnsmasq through the gateway) are diverted
-#   and redirected to dnsmasq.
+# - DNS: the VM's UDP requests to $RUNCVM_DNS_IP (only where it is the VM's DNS server, as an
+#   address inherited from an outer RunCVM VM must reach that VM's dnsmasq through the gateway) are
+#   diverted and redirected to dnsmasq.
 # - VNC: connections to the VM's address on the VNC port (5900 + display number), published from
 #   the host, are diverted and redirected to QEMU's VNC server.
 divert() {
@@ -285,7 +286,7 @@ table ip runcvm {
 }
 _EOF_
 then
-  echo "RunCVM: Error: could not install RunCVM's firewall rules in the container; the host's kernel needs nf_tables with bridge support (and nft_meta_bridge, where the kernel builds it as a module)" >&2
+  echo "RunCVM: Error: could not install RunCVM's firewall rules in the container (nft's error is above); RunCVM needs nf_tables with bridge and NAT support in the host's kernel (and nft_meta_bridge, where the kernel builds it as a module)" >&2
   exit 1
 fi
 
