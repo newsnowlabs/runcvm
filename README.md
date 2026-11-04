@@ -209,6 +209,7 @@ RunCVM features:
 - [Applications for RunCVM](#applications-for-runcvm)
 - [How RunCVM works](#how-runcvm-works)
 - [System requirements](#system-requirements)
+- [Supported distributions](#supported-distributions)
 - [Installation](#installation)
 - [Upgrading](#upgrading)
 - [Features and Limitations](#features-and-limitations)
@@ -299,6 +300,24 @@ At time of writing:
 We recommend `all/rp_filter` be set to 2, as this is the simplest change and provides a good balance of security.
 
 This requirement concerns IPv4 only. A dual-stack Container/VM's DNS requests and `docker exec` connections still use IPv4, and Linux has no IPv6 equivalent of `rp_filter`, so IPv6 needs no further host configuration.
+
+## Supported distributions
+
+RunCVM aims to support each distribution's latest release and the two before it (for Ubuntu, its LTS releases), as the image a Container/VM runs. It bundles a kernel for each of these distributions, built from the release shown, which a Container/VM boots unless its image has a kernel of its own (see [Kernel auto-detection](#kernel-auto-detection)):
+
+| Distribution | Image releases RunCVM targets | RunCVM's kernel (`RUNCVM_KERNEL`) | Kernel built from | Kernel series | Module compression | Image releases whose own `modprobe` can load the kernel's modules |
+|---|---|---|---|---|---|---|
+| Debian | 13 (Trixie), 12 (Bookworm), 11 (Bullseye) | `debian` | Debian 12 (Bookworm) | 6.1 | none | all |
+| Ubuntu | 26.04 LTS (Resolute Raccoon), 24.04 LTS (Noble Numbat), 22.04 LTS (Jammy Jellyfish) | `ubuntu` | Ubuntu 22.04 LTS (Jammy Jellyfish) | 5.15 | none | all |
+| Oracle Linux | 10, 9, 8 | `ol` | Oracle Linux 9 | 5.14 | xz | 7 and later (9 and 10 once `kmod` is installed) |
+| Alpine Linux | 3.24, 3.23, 3.22 | `alpine` | Alpine Linux 3.19 (`linux-virt`) | 6.6 | gzip | all |
+| OpenWrt | (not targeted by release) | `openwrt` | Alpine Linux 3.19 (`linux-virt`) | 6.6 | none | all |
+
+Each kernel is the latest that its release provides when RunCVM is built (e.g. Debian 12's current 6.1 kernel).
+
+The last column concerns the workload's own module loading, e.g. `modprobe`, or `dockerd` loading `overlay` or `br_netfilter`, in the VM. It reflects which compressed formats each release's `kmod` (or, for Alpine Linux, BusyBox) can read: for example, Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) and Ubuntu 18.04 LTS (Bionic Beaver) read only uncompressed modules, Debian 10 (Buster), Debian 11 (Bullseye) and Ubuntu 20.04 LTS (Focal Fossa) also read xz, and later releases also read zstd. Oracle Linux 9 and 10 images include no `kmod` until it is installed. RunCVM itself loads the modules it needs, while the VM boots, with its own bundled BusyBox `modprobe`, which reads uncompressed, gzip and xz modules, whatever the image.
+
+Other releases of these distributions may work, but are not targeted.
 
 ## Installation
 
@@ -492,8 +511,10 @@ When creating a container, RunCVM will examine the image being launched to try t
       - Debian: `/vmlinuz` and `/initrd.img`
       - Ubuntu: `/boot/vmlinuz` and `/boot/initrd.img`
       - Alpine: `/boot/vmlinuz-virt` `/boot/initramfs-virt`
-   2. Otherwise, if found in the RunCVM package, select the latest kernel compatible with the distro
-   3. Finally, use the Debian kernel from the RunCVM package
+   2. Otherwise, select the latest RunCVM kernel for the distro: `debian`, `ubuntu`, `ol` (Oracle Linux), `alpine` or `openwrt`
+   3. If the image has no `/etc/os-release`, or it gives no `ID`, use the Debian kernel from the RunCVM package
+
+An image whose `/etc/os-release` `ID` is none of `debian`, `ubuntu`, `ol`, `alpine` and `openwrt` (e.g. Fedora) cannot be launched without `--env=RUNCVM_KERNEL=<dist>`, even if it has a kernel of its own.
 
 ## Option reference
 
