@@ -2,10 +2,10 @@
 """'docker exec' passes arguments, environment values and the working directory intact.
 
 Each may hold any character but NUL: here newlines (including a trailing
-one), tabs, runs of spaces, quotes, backslashes, an empty value and
-non-ASCII UTF-8 (whose bytes include 0x80 to 0x85). 'docker exec' into a
-RunCVM Container/VM must give the command exactly what it gives under
-runc, with and without --init.
+one), tabs, runs of spaces, quotes, backslashes, shell metacharacters, an
+empty value and non-ASCII UTF-8 (including the bytes 0x80, 0x82 and 0x85).
+'docker exec' into a RunCVM Container/VM must give the command exactly what
+it gives under runc, with and without --init.
 """
 
 import os
