@@ -86,10 +86,6 @@ disk_subdir() {
   echo "$name"
 }
 
-# The filesystem label that marks a disk with layout 'subdirs'. A disk's layout is chosen when it is
-# created, and read from its label thereafter: any other label, or none, means layout 'root'.
-DISK_SUBDIRS_LABEL="runcvm-subdirs"
-
 # Prints path $1 with each character special to mke2fs's '-x PATTERN' wildcards ('\', '*', '?'
 # and '[') escaped, so that the pattern matches only that path.
 disk_glob_escape() {
@@ -155,6 +151,12 @@ disk_create_file() {
 # with fields in any order, 'source' accepted for 'src', and 'target' and 'destination' for 'dst';
 # e.g. src=/volume/disk1,dst=/var/lib/docker,dst=/home,fs=ext4,size=5G
 #
+# <fs> must be listed in $RUNCVM_GUEST/etc/disk-filesystems, which gives the mkfs command that
+# formats a new disk, and the label that marks layout 'subdirs'. A disk's layout is chosen when it
+# is created, and read from its label thereafter: any other label, or none, means layout 'root'.
+# mke2fs populates a new disk from its destinations; any other mkfs command formats it empty, and
+# the disk is recorded in /.runcvm/disks-populate, for runcvm-vm-init to populate.
+#
 # A disk with layout 'subdirs' (the default for a new disk) holds each destination's contents in its
 # own top-level directory, named by disk_subdir. It is mounted at /.runcvm/disks/<id>, and each
 # directory is bind-mounted over its destination.
@@ -168,9 +170,9 @@ disk_create_file() {
 do_disk() {
   local spec="$1"
   local id="$2"
-  local src="" dsts dst fs="" size="" layout layout_opt="" field key value UUID LABEL i j path
-  local whole_root=0
-  local -a fields=() dests=() subdirs=() resolved=() populate=()
+  local src="" dsts dst fs="" size="" layout layout_opt="" field key value UUID LABEL TYPE i j path
+  local whole_root=0 created=0
+  local -a fields=() dests=() subdirs=() resolved=() populate=() fss=()
   local -A seen=()
 
   IFS=',' read -r -a fields <<< "$spec"
@@ -250,14 +252,24 @@ do_disk() {
     error "Error: disk spec '$spec' invalid: layout must be 'subdirs' or 'root'"
   fi
 
+  if ! disk_fs "$fs"; then
+    mapfile -t fss < <(disk_fs_list 1)
+    error "Error: disk spec '$spec' invalid: fs '$fs' unsupported; fs must be one of: ${fss[*]}"
+  fi
+
   if [[ -e "$src" && ! -f "$src" ]]; then
     error "Error: disk spec '$spec' invalid: src '$src' must be a plain file if it exists"
   fi
 
   # An existing disk keeps the layout it was created with, as recorded by its label.
   if [[ -f "$src" ]]; then
+    TYPE=$(blkid -p -s TYPE -o value "$src") || true
+    if [[ -n "$TYPE" && "$TYPE" != "$fs" ]]; then
+      error "Error: disk spec '$spec' invalid: src '$src' exists, with fs '$TYPE', not '$fs'"
+    fi
+
     LABEL=$(blkid -p -s LABEL -o value "$src") || true
-    if [ "$LABEL" = "$DISK_SUBDIRS_LABEL" ]; then
+    if [[ -n "$LABEL" ]] && disk_fs_list 5 | grep -qxF -- "$LABEL"; then
       layout="subdirs"
     else
       layout="root"
@@ -332,8 +344,8 @@ do_disk() {
         error "Error: disk spec '$spec' invalid: dst '$dst' is too long"
       fi
 
-      # mke2fs creates lost+found in the root of every filesystem, so no destination's directory may
-      # take that name.
+      # mke2fs creates lost+found in the root of every filesystem, as some other filesystems' fsck
+      # tools do, so no destination's directory may take that name.
       if [ "${subdirs[$i]}" = "lost+found" ]; then
         error "Error: disk spec '$spec' invalid: dst '$dst' requires layout 'root'"
       fi
@@ -381,20 +393,30 @@ do_disk() {
 
   if [[ ! -f "$src" ]]; then
     disk_create_file "$spec" "$src" "$size"
+    created=1
 
-    # Create filesystem on disk backing file, populated with any pre-existing files from each dst.
-    # Use RunCVM's own mke2fs configuration, not the image's /etc/mke2fs.conf.
     if [ "$layout" = "subdirs" ]; then
-      populate=(-L "$DISK_SUBDIRS_LABEL")
-      for i in "${!dests[@]}"
-      do
-        populate+=(-P "${subdirs[$i]}=$RUNCVM_VM_MOUNTPOINT${dests[$i]}")
-      done
-    else
-      populate=(-d "$RUNCVM_VM_MOUNTPOINT/${dests[0]}")
+      populate=("$DISK_FS_LABEL_OPT" "$DISK_FS_SUBDIRS_LABEL")
     fi
 
-    MKE2FS_CONFIG="$RUNCVM_GUEST/etc/mke2fs.conf" mke2fs -q -F -t "$fs" "${populate[@]}" "$src" >&2 || error "Error: disk spec '$spec' invalid: mke2fs on '$src' with fs '$fs' failed"
+    # mke2fs populates the disk with any pre-existing files from each dst.
+    if [ "${DISK_FS_MKFS[0]}" = "mke2fs" ]; then
+      if [ "$layout" = "subdirs" ]; then
+        for i in "${!dests[@]}"
+        do
+          populate+=(-P "${subdirs[$i]}=$RUNCVM_VM_MOUNTPOINT${dests[$i]}")
+        done
+      else
+        populate+=(-d "$RUNCVM_VM_MOUNTPOINT/${dests[0]}")
+      fi
+    fi
+
+    # Run the mkfs command from RunCVM's own tools, with RunCVM's own mke2fs and libblkid
+    # configuration, not the image's /etc/mke2fs.conf and /etc/blkid.conf.
+    path=$(which "${DISK_FS_MKFS[0]}") || error "Error: disk spec '$spec' invalid: fs '$fs' needs '${DISK_FS_MKFS[0]}', which RunCVM lacks"
+    MKE2FS_CONFIG="$RUNCVM_GUEST/etc/mke2fs.conf" BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null \
+      "$path" "${DISK_FS_MKFS[@]:1}" "${populate[@]}" "$src" >&2 || \
+      error "Error: disk spec '$spec' invalid: ${DISK_FS_MKFS[0]} on '$src' with fs '$fs' failed"
   fi
 
   # Obtain the filesystem's UUID by probing the backing file directly, without the image's blkid
@@ -402,6 +424,16 @@ do_disk() {
   UUID=$(blkid -p -s UUID -o value "$src") || true
   if [ -z "$UUID" ]; then
     error "Error: disk spec '$spec' invalid: no filesystem UUID found in src '$src'"
+  fi
+
+  # A new disk that its mkfs command left empty is populated from its destinations by
+  # runcvm-vm-init, which reads one line per destination: <id> <UUID> <fs> <directory> <dst>, where
+  # <directory> is the destination's directory on the disk, or '.' for its root.
+  if [[ "$created" = "1" && "${DISK_FS_MKFS[0]}" != "mke2fs" ]]; then
+    for i in "${!dests[@]}"
+    do
+      echo "$id $UUID $fs ${subdirs[$i]:-.} ${dests[$i]}" >>/.runcvm/disks-populate
+    done
   fi
 
   if [ "$layout" = "subdirs" ]; then

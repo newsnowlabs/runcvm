@@ -150,7 +150,7 @@ INVALID = [
     ("second-root", "/disks/a,/,ext4,1G;/disks/b,//,ext4,1G", "/disks/b,//,ext4,1G",
      "only one disk may have dst '/'"),
     ("several-dsts", "/disks/a,/:/srv,ext4,1G", "/disks/a,/:/srv,ext4,1G", "dst '/' must be the disk's only dst"),
-    ("not-ext4", "/disks/a,/,ext3,1G", "/disks/a,/,ext3,1G", "a disk with dst '/' must have fs 'ext4'"),
+    ("not-ext4", "/disks/a,/,xfs,1G", "/disks/a,/,xfs,1G", "a disk with dst '/' must have fs 'ext4'"),
     ("subdirs", "/disks/a,/,ext4,1G,layout=subdirs", "/disks/a,/,ext4,1G,layout=subdirs",
      "a disk with dst '/' must have layout 'root'"),
 ]

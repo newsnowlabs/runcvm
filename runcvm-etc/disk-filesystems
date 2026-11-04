@@ -1,0 +1,27 @@
+# The filesystems that disks in RUNCVM_DISKS may have, one per line, and what each needs.
+#
+# The build installs each filesystem's packages and bundles its mkfs command; runcvm-ctr-qemu
+# accepts only the filesystems listed here, and formats each new disk with its mkfs command;
+# runcvm-vm-init loads its kernel modules before mounting the disks. To support another filesystem,
+# add a line here and rebuild: nothing else names the filesystems. The VM's kernel must also
+# provide the modules (or have the filesystem built in).
+#
+# Fields, separated by whitespace:
+#
+#   <fs>             The name given as the fs of a disk in RUNCVM_DISKS, and to mount -t.
+#   <modules>        The kernel modules to load, separated by ','; their dependencies load too.
+#   <packages>       The Alpine packages that provide the mkfs command, separated by ','; '-' if
+#                    none (mke2fs is built by RunCVM's own Dockerfile stage).
+#   <label option>   The mkfs command's option that sets the filesystem label.
+#   <subdirs label>  The label that marks a disk with layout 'subdirs' (it must fit the
+#                    filesystem's label length limit: XFS allows 12 characters).
+#   <mkfs command>   The rest of the line: the command, with its options, that formats a new disk
+#                    whose backing file is appended. mke2fs also populates the disk, from each
+#                    destination's contents; any other command must format an empty disk, which
+#                    runcvm-vm-init populates when the VM first boots with it.
+#
+# A whole-root disk (destination '/') must be ext4.
+
+ext4   ext4   -            -L  runcvm-subdirs  mke2fs -q -F -t ext4
+xfs    xfs    xfsprogs     -L  rcvm-subdirs    mkfs.xfs -q -f
+btrfs  btrfs  btrfs-progs  -L  runcvm-subdirs  mkfs.btrfs -q -f

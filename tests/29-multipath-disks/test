@@ -20,7 +20,10 @@ security.capability).
   /single.
 - Files written to every destination survive a Container/VM restart.
 
-Run with and without --init.
+Run for each filesystem RunCVM supports by default (ext4, xfs and btrfs),
+with and without --init. mke2fs populates an ext4 disk itself; an xfs or
+btrfs disk is formatted empty and populated in the VM when it first boots,
+and must match its sources just the same.
 """
 
 import json
@@ -34,8 +37,18 @@ BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
 IMAGE = "python:3.13-alpine"
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "trees.py")) as f:
     TREES = f.read()
-DISKS = ("/disks/multi,/mp/one:/mp/two,ext4,64M;src=/disks/default,dst=/default,fs=ext4,size=32M;"
-         "/disks/single,/single,ext4,32M,layout=root")
+FILESYSTEMS = ("ext4", "xfs", "btrfs")
+# XFS needs at least 300M; the backing files are sparse.
+SIZES = {"ext4": ("64M", "32M", "32M"), "xfs": ("400M", "400M", "400M"), "btrfs": ("400M", "400M", "400M")}
+
+
+def disks(fs):
+    multi, default, single = SIZES[fs]
+    return ("/disks/multi,/mp/one:/mp/two,{fs},{multi};src=/disks/default,dst=/default,fs={fs},size={default};"
+            "/disks/single,/single,{fs},{single},layout=root").format(fs=fs, multi=multi, default=default,
+                                                                      single=single)
+
+
 DSTS = ("/mp/one", "/mp/two", "/default", "/single")
 MOUNTS = ("/.runcvm/disks/0", "/.runcvm/disks/1", "/.runcvm/disks/2") + DSTS
 
@@ -70,8 +83,9 @@ def mountinfo(container):
     return mounts
 
 
-def run(init):
-    label = "init" if init else "noinit"
+def run(item):
+    fs, init = item
+    label = "%s-%s" % (fs, "init" if init else "noinit")
     volume = t.unique("multipath-disks-" + label)
     t.volume_create(volume)
     two = t.unique("multipath-disks-two-" + label)
@@ -96,7 +110,7 @@ def run(init):
     t.cleanup_container(name)
     r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
                  *(["--init"] if init else []), "--cap-add=SYS_ADMIN", "--mount", "type=volume,src=%s,dst=/disks" % volume,
-                 "--mount", "type=volume,src=%s,dst=/mp/two" % two, "--env", "RUNCVM_DISKS=" + DISKS,
+                 "--mount", "type=volume,src=%s,dst=/mp/two" % two, "--env", "RUNCVM_DISKS=" + disks(fs),
                  image, "sleep", "infinity")
     if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
         results["error"] = r.stdout + t.docker("logs", name).stdout
@@ -134,9 +148,11 @@ def compare(desc, source, disk):
                 t.log("  %s: source %s, disk %s" % (path, src.get(path), dst.get(path)))
 
 
-for init, results in zip((False, True), t.parallel(run, (False, True))):
-    mode = "--init" if init else "no --init"
-    t.param("init", "yes" if init else "no")
+items = [(fs, init) for fs in FILESYSTEMS for init in (False, True)]
+t.param("fs", ", ".join(FILESYSTEMS))
+t.param("init", "no, yes")
+for (fs, init), results in zip(items, t.parallel(run, items)):
+    mode = "%s, %s" % (fs, "--init" if init else "no --init")
 
     source = results["source"]
     t.check("%s: /mp/two's source has trusted.* xattrs" % mode, True,
@@ -174,7 +190,7 @@ for init, results in zip((False, True), t.parallel(run, (False, True))):
         t.check("%s: Container/VM restarted" % mode, True, False)
         t.log(results["restart-error"])
         continue
-    label = "init" if init else "noinit"
+    label = "%s-%s" % (fs, "init" if init else "noinit")
     t.check("%s: files written survive a restart" % mode, {d: label for d in DSTS},
             results["after-restart"])
     t.check("%s: same mounts after a restart" % mode,
