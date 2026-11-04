@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""'docker exec' passes arguments, environment values and the working directory intact.
+
+Each may hold any character but NUL: here newlines (including a trailing
+one), tabs, runs of spaces, quotes, backslashes, an empty value and
+non-ASCII UTF-8 (whose bytes include 0x80 to 0x85). 'docker exec' into a
+RunCVM Container/VM must give the command exactly what it gives under
+runc, with and without --init.
+"""
+
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+VALUES = ["a\nb", "trailing newline\n", "tab\there", "two  spaces", "'single'", '"double"',
+          "back\\slash", "", "€ é ü", "\u0080\u0085", "$HOME `true` $(true) *"]
+
+# Prints each argument between angle brackets, one per line.
+PRINT_ARGS = ["sh", "-c", 'for a in "$@"; do printf "<%s>\\n" "$a"; done', "sh"]
+
+# A multi-line script, as 'sh -c' receives it.
+SCRIPT = "echo line1\necho line2"
+
+# A working directory whose name holds a newline, a tab and non-ASCII characters.
+WORKDIR = "/tmp/dir with\nnewline\tand €"
+
+
+def expected_args(values):
+    return "".join("<%s>\n" % v for v in values)
+
+
+def case(item):
+    runtime, init = item
+    mode = "%s, %s" % (runtime, "--init" if init else "no --init")
+    name = t.unique("exec-args-%s%s" % (runtime, "-init" if init else ""))
+    t.cleanup_container(name)
+    opts = ["--runtime=" + runtime, *(t.vm_opts() if runtime == t.RUNTIME else [])]
+    r = t.docker("run", "-d", "--name", name, *t.labels(), *opts, *(["--init"] if init else []),
+                 "alpine", "sleep", "3600")
+    if r.returncode != 0:
+        return mode, None
+    if not t.wait_for_exec(name, BOOT_TIMEOUT):
+        return mode, None
+
+    # Output is decoded leniently, so that corrupted text is reported as a failure.
+    def ex(*args):
+        r = subprocess.run(["docker", "exec", *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out = r.stdout.decode("utf-8", "backslashreplace")
+        return out if r.returncode == 0 else "exit status %d: %s" % (r.returncode, out)
+
+    env = ["V%d=%s" % (i, v) for i, v in enumerate(VALUES)]
+    env_opts = [o for e in env for o in ("-e", e)]
+    print_env = ["sh", "-c", 'for i in %s; do eval "printf \\"<%%s>\\\\n\\" \\"\\$V$i\\""; done'
+                 % " ".join(str(i) for i in range(len(VALUES)))]
+    ex(name, "mkdir", "-p", WORKDIR)
+    return mode, {
+        "arguments": ex(name, *PRINT_ARGS, *VALUES),
+        "multi-line 'sh -c' script": ex(name, "sh", "-c", SCRIPT),
+        "environment values": ex(*env_opts, name, *print_env),
+        "working directory": ex("-w", WORKDIR, name, "pwd"),
+    }
+
+
+EXPECTED = {
+    "arguments": expected_args(VALUES),
+    "multi-line 'sh -c' script": "line1\nline2\n",
+    "environment values": expected_args(VALUES),
+    "working directory": WORKDIR + "\n",
+}
+
+runtimes = [t.RUNTIME] if t.RUNTIME == "runc" else [t.RUNTIME, "runc"]
+items = [(runtime, init) for runtime in runtimes for init in (False, True)]
+t.param("init", "no, yes")
+for mode, results in t.parallel(case, items, jobs=4):
+    if results is None:
+        t.check("%s: Container/VM boots and 'docker exec' works" % mode, True, False)
+        continue
+    for desc, expected in EXPECTED.items():
+        t.check("%s: %s" % (mode, desc), expected, results[desc])
+
+t.finish()

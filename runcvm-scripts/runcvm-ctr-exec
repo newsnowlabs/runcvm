@@ -8,9 +8,11 @@
 # Load defaults and aliases
 . $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
-to_bin() {
-  # tab, LF, space, ', ", \
-  tr "\011\012\040\047\042\134" '\200\201\202\203\204\205'
+# Encodes its arguments for dbclient's command line, for runcvm-vm-exec to decode: each is
+# NUL-terminated, so may hold any byte but NUL (as an argument, environment entry or path can),
+# and the whole is base64, whose characters are safe inside the line's single quotes.
+encode() {
+  printf '%s\0' "$@" | busybox base64 -w 0
 }
 
 # Expects:
@@ -42,7 +44,7 @@ IFS=':' read -r uid gid additionalGids <<< "$uidgid"
 args=("$@")
 
 if [ ${#args[@]} -gt 0 ]; then
-  args_bin=$(printf '%s\n' "${args[@]}" | to_bin)
+  args_enc=$(encode "${args[@]}")
 fi
 
 # If the HOME env var was not set either in the image, or via docker run, or via docker exec,
@@ -59,7 +61,7 @@ if [ "$hasHome" != "1" ]; then
 fi
 
 if [ ${#env[@]} -gt 0 ]; then
-  env_bin=$(printf '%s\n' "${env[@]}" | to_bin)
+  env_enc=$(encode "${env[@]}")
 fi
 
 if [ "$wantsTerminal" = "true" ]; then
@@ -87,4 +89,4 @@ if [ "$delay" -ne 0 ]; then
   busybox sleep 2
 fi
 
-exec $RUNCVM_GUEST/usr/bin/dbclient "${opts[@]}" -p $SSHD_PORT -y -y -i /.runcvm/dropbear/key root@$DOCKER_IF_IP "$command '$uidgid' '$(echo -n $cwd | to_bin)' '$args_bin' '$env_bin'"
+exec $RUNCVM_GUEST/usr/bin/dbclient "${opts[@]}" -p $SSHD_PORT -y -y -i /.runcvm/dropbear/key root@$DOCKER_IF_IP "$command '$uidgid' '$(encode "$cwd")' '$args_enc' '$env_enc'"
