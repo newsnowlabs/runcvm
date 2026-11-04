@@ -523,7 +523,7 @@ ol/6.12.0-211.72.1.el10_2.x86_64
 ol/latest
 ```
 
-RunCVM bundles the kernels of Debian 13 (trixie), Ubuntu 26.04 (resolute), Oracle Linux 10 and Alpine (`linux-virt`, also used for OpenWrt images), each at the version its distribution provides when the RunCVM image is built. The Alpine kernel's release is set by the build argument `ALPINE_KERNEL_VERSION` (by default `3.24`), separately from `ALPINE_VERSION` (by default `3.19`), the release RunCVM's own binaries and libraries are built from, e.g. `DOCKER_BUILDKIT=1 docker build --build-arg ALPINE_KERNEL_VERSION=3.23 -t newsnowlabs/runcvm .`.
+RunCVM bundles the kernels of Debian 13 (trixie), Ubuntu 26.04 (resolute, with its modules recompressed from zstd to xz, which busybox `modprobe` reads), Oracle Linux 10 and Alpine (`linux-virt`, also used for OpenWrt images), each at the version its distribution provides when the RunCVM image is built. The Alpine kernel's release is set by the build argument `ALPINE_KERNEL_VERSION` (by default `3.24`), separately from `ALPINE_VERSION` (by default `3.19`), the release RunCVM's own binaries and libraries are built from, e.g. `DOCKER_BUILDKIT=1 docker build --build-arg ALPINE_KERNEL_VERSION=3.23 -t newsnowlabs/runcvm .`.
 
 Example:
 

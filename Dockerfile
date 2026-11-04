@@ -273,15 +273,17 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
 FROM amd64/ubuntu:resolute as ubuntu-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
-RUN apt update && apt install -y linux-generic:amd64 zstd && \
+RUN apt update && apt install -y linux-generic:amd64 zstd xz-utils && \
     echo 'virtiofs' >>/etc/initramfs-tools/modules && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
 # Ubuntu compresses its kernel modules with zstd, which busybox modprobe (used by runcvm-vm-init,
-# and by busybox-based images) cannot read, so decompress them.
+# and by busybox-based images) cannot read, so recompress them with xz, which it can, as Debian's
+# and Oracle Linux's modules are compressed, with the options the kernel's own build uses for xz.
 RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
-    find /lib/modules/$BASENAME -name '*.ko.zst' -exec zstd -q -d --rm {} + && \
+    find /lib/modules/$BASENAME -name '*.ko.zst' -print0 | \
+      xargs -0 -r -n 64 -P "$(nproc)" sh -ec 'for f; do zstd -q -d --rm "$f"; xz -q --check=crc32 --lzma2=dict=1MiB "${f%.zst}"; done' sh && \
     depmod $BASENAME && \
     mkdir -p /opt/runcvm/kernels/ubuntu/$BASENAME && \
     cp -aL /boot/vmlinuz-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/vmlinuz && \
