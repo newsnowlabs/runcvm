@@ -4,8 +4,16 @@
 - Each kernel installed with RunCVM (RUNCVM_KERNEL=<dist>) boots, and
   loads kernel modules from the modules RunCVM provides (modprobe ip_vs),
   except the OpenWrt kernel, for which no module list is provided.
-- Without RUNCVM_KERNEL, the kernel follows the image's distribution
-  (ID in /etc/os-release), or is Debian's if the image has none.
+- Without RUNCVM_KERNEL, the kernel follows the image's distribution: the
+  first, among its os-release ID and then each word of its ID_LIKE, that
+  RunCVM has a kernel for. RHEL-family distributions (Rocky Linux,
+  AlmaLinux, Fedora, Amazon Linux) take the Oracle Linux kernel, and Kali
+  Linux (ID_LIKE=debian) the Debian kernel.
+- An image with no os-release gets Debian's kernel silently. An image of any
+  other distribution (openSUSE, Arch Linux, Wolfi) gets Debian's kernel and
+  shows the fallback-kernel warning; no other image shows it.
+- /etc/os-release is read within the image: an absolute symbolic link names
+  a file in the image, not the host's.
 - An image's USER and WORKDIR apply in the VM.
 - An entrypoint that cannot be executed: the error is shown, and the exit
   status is 0, as when any entrypoint exits without setting one (see
@@ -43,13 +51,31 @@ subprocess.run(["docker", "build", "-q", *t.labels(), "-t", user_image, "-"], ch
                stdout=subprocess.DEVNULL)
 atexit.register(lambda: t.docker("rmi", "-f", user_image))
 
+# An alpine image whose /etc/os-release is an absolute symbolic link to /usr/lib/os-release.
+link_image = t.unique("os-release-link").lower()
+subprocess.run(["docker", "build", "-q", *t.labels(), "-t", link_image, "-"], check=True,
+               input="FROM alpine\nRUN mv /etc/os-release /usr/lib/os-release && "
+                     "ln -s /usr/lib/os-release /etc/os-release\n",
+               universal_newlines=True, stdout=subprocess.DEVNULL)
+atexit.register(lambda: t.docker("rmi", "-f", link_image))
+
+FALLBACK_WARNING = "RunCVM has no kernel for the image's distribution"
+
 # (name, docker run options, image and command, expected kernel dist,
 #  modprobe expected to work (None: not checked))
 CASES = [("kernel-" + k, ["--env=RUNCVM_KERNEL=" + k], ["alpine", "sh", "-c", PROBE], k, k != "openwrt")
          for k in ("alpine", "debian", "ubuntu", "ol", "openwrt")]
-CASES += [("image-" + i.split(":")[0], [], [i, "sh", "-c", PROBE], k, None)
+CASES += [("image-" + i.split(":")[0].replace("/", "-"), [], [i, "sh", "-c", PROBE], k, None)
           for i, k in (("alpine", "alpine"), ("debian:bookworm-slim", "debian"), ("ubuntu:24.04", "ubuntu"),
-                       ("busybox", "debian"))]
+                       ("busybox", "debian"), ("oraclelinux:9", "ol"),
+                       ("rockylinux:9", "ol"), ("almalinux:9", "ol"), ("fedora", "ol"),
+                       ("amazonlinux:2023", "ol"), ("kalilinux/kali-rolling", "debian"),
+                       ("opensuse/leap", "debian"), ("archlinux", "debian"),
+                       ("cgr.dev/chainguard/wolfi-base", "debian"))]
+CASES += [("image-os-release-link", [], [link_image, "sh", "-c", PROBE], "alpine", None)]
+
+# The cases whose image's distribution has no RunCVM kernel, so whose output shows the warning.
+FALLBACK_CASES = {"image-opensuse-leap", "image-archlinux", "image-cgr.dev-chainguard-wolfi-base"}
 
 
 def run(args):
@@ -82,6 +108,8 @@ for name, opts, image_cmd, dist, modprobe in CASES:
         t.check("%s: runs the %s kernel" % (name, dist), expected, field(r.stdout, "uname"))
     if modprobe is not None:
         t.check("%s: modprobe ip_vs works" % name, modprobe, field(r.stdout, "modprobe") == "ok")
+    t.check("%s: %s the fallback-kernel warning" % (name, "shows" if name in FALLBACK_CASES else "does not show"),
+            name in FALLBACK_CASES, FALLBACK_WARNING in r.stdout)
 
 r = results["user-image"]
 t.check("image USER applies", "1000", field(r.stdout, "id"))
