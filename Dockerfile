@@ -9,11 +9,12 @@ ARG ALPINE_VERSION=3.19
 # runcvm-vm-init uses.
 ARG ALPINE_KERNEL_VERSION=3.24
 
-# Compression of the Debian, Ubuntu and Oracle Linux kernels' modules: 'xz' (the default), which
-# busybox modprobe (used by runcvm-vm-init) and the kmod of Debian 10 (Buster), Ubuntu 20.04 LTS
-# (Focal Fossa), Oracle Linux 7 and their later releases read; or 'none', for images whose own
-# modprobe reads only uncompressed modules, such as Debian 9 (Stretch) and Ubuntu 18.04 LTS
-# (Bionic Beaver). The Alpine and OpenWrt kernels' modules are unaffected.
+# Compression of the Debian, Ubuntu, AlmaLinux, Fedora and openSUSE kernels' modules: 'xz' (the
+# default), which busybox modprobe (used by runcvm-vm-init) and the kmod of Debian 10 (Buster),
+# Ubuntu 20.04 LTS (Focal Fossa), the RHEL family's releases 7 and later, and current Fedora and
+# openSUSE releases read; or 'none', for images whose own modprobe reads only uncompressed
+# modules, such as Debian 9 (Stretch) and Ubuntu 18.04 LTS (Bionic Beaver). The Alpine and
+# OpenWrt kernels' modules are unaffected.
 ARG KERNEL_MODULE_COMPRESSION=xz
 
 # --- BUILD STAGE ---
@@ -299,7 +300,7 @@ RUN apt update && apt install -y linux-generic:amd64 initramfs-tools zstd xz-uti
     update-initramfs -u
 # Ubuntu compresses its kernel modules with zstd, which busybox modprobe (used by runcvm-vm-init,
 # and by busybox-based images) cannot read, so decompress them, and for 'xz' recompress them with
-# xz, which it can, as Debian's and Oracle Linux's modules are compressed, with the options the
+# xz, which it can, as Debian's, AlmaLinux's and Fedora's modules are compressed, with the options the
 # kernel's own build uses for xz.
 RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
     case "$KERNEL_MODULE_COMPRESSION" in \
@@ -317,27 +318,88 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/ubuntu
 
 # --- BUILD STAGE ---
-# Build Oracle Linux kernel and initramfs with virtiofs module
-FROM oraclelinux:10 as oracle-kernel
+# Build AlmaLinux 10 kernel and initramfs with virtiofs module: the kernel for images of the RHEL
+# family (see RUNCVM_KERNEL_RHEL_FAMILY in runcvm-runtime)
+FROM almalinux:10 as almalinux-kernel
 
 ARG KERNEL_MODULE_COMPRESSION
-RUN dnf install -y kernel xz
-ADD ./kernels/oraclelinux/addvirtiofs.conf /etc/dracut.conf.d/addvirtiofs.conf
-ADD ./kernels/oraclelinux/95virtiofs /usr/lib/dracut/modules.d/95virtiofs
-RUN dracut --force --kver $(basename /lib/modules/*) --kmoddir /lib/modules/*
-# Oracle Linux compresses its kernel modules with xz.
+# The almalinux image has no /boot, where the kernel package and dracut install the kernel and
+# initramfs. kernel-modules-extra provides br_netfilter, which workloads such as dockerd load.
+RUN mkdir -p /boot && dnf install -y kernel kernel-modules-extra xz
+ADD ./kernels/dracut/addvirtiofs.conf /etc/dracut.conf.d/addvirtiofs.conf
+ADD ./kernels/dracut/95virtiofs /usr/lib/dracut/modules.d/95virtiofs
+# AlmaLinux's dracut builds host-only initramfses by default, so build a generic one: the build
+# container's host is not the VM.
+RUN dracut --force --no-hostonly --no-hostonly-cmdline --kver $(basename /lib/modules/*) --kmoddir /lib/modules/*
+# AlmaLinux compresses its kernel modules with xz.
 RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
     case "$KERNEL_MODULE_COMPRESSION" in \
       xz) ;; \
       none) find /lib/modules/$BASENAME -name '*.ko.xz' -print0 | xargs -0 -r -n 64 -P "$(nproc)" xz -q -d && \
             depmod $BASENAME ;; \
       *) echo "KERNEL_MODULE_COMPRESSION must be 'xz' or 'none'" >&2; exit 1 ;; \
-    esac
-RUN mkdir -p /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*)) && \
-    mv /lib/modules/*/vmlinuz /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
-    cp -aL /boot/initramfs* /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*))/initrd && \
-    cp -a /lib/modules/ /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*))/ && \
-    chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/ol
+    esac && \
+    mkdir -p /opt/runcvm/kernels/almalinux/$BASENAME && \
+    mv /lib/modules/$BASENAME/vmlinuz /opt/runcvm/kernels/almalinux/$BASENAME/vmlinuz && \
+    cp -aL /boot/initramfs-$BASENAME.img /opt/runcvm/kernels/almalinux/$BASENAME/initrd && \
+    cp -a /lib/modules/ /opt/runcvm/kernels/almalinux/$BASENAME/ && \
+    chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/almalinux
+
+# --- BUILD STAGE ---
+# Build Fedora 45 kernel and initramfs with virtiofs module
+FROM fedora:45 as fedora-kernel
+
+ARG KERNEL_MODULE_COMPRESSION
+RUN dnf install -y kernel xz
+# Fedora's dracut has a virtiofs module of its own (74virtiofs), which takes precedence over
+# RunCVM's (kernels/dracut/95virtiofs), so it is used instead.
+ADD ./kernels/dracut/addvirtiofs.conf /etc/dracut.conf.d/addvirtiofs.conf
+# Fedora's dracut builds host-only initramfses by default, so build a generic one: the build
+# container's host is not the VM.
+RUN dracut --force --no-hostonly --no-hostonly-cmdline --kver $(basename /lib/modules/*) --kmoddir /lib/modules/*
+# Fedora compresses its kernel modules with xz.
+RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
+    case "$KERNEL_MODULE_COMPRESSION" in \
+      xz) ;; \
+      none) find /lib/modules/$BASENAME -name '*.ko.xz' -print0 | xargs -0 -r -n 64 -P "$(nproc)" xz -q -d && \
+            depmod $BASENAME ;; \
+      *) echo "KERNEL_MODULE_COMPRESSION must be 'xz' or 'none'" >&2; exit 1 ;; \
+    esac && \
+    mkdir -p /opt/runcvm/kernels/fedora/$BASENAME && \
+    mv /lib/modules/$BASENAME/vmlinuz /opt/runcvm/kernels/fedora/$BASENAME/vmlinuz && \
+    cp -aL /boot/initramfs-$BASENAME.img /opt/runcvm/kernels/fedora/$BASENAME/initrd && \
+    cp -a /lib/modules/ /opt/runcvm/kernels/fedora/$BASENAME/ && \
+    chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/fedora
+
+# --- BUILD STAGE ---
+# Build openSUSE Leap 16.1 kernel and initramfs with virtiofs module: the kernel for images of the
+# SUSE family (see RUNCVM_KERNEL_SUSE_FAMILY in runcvm-runtime)
+FROM opensuse/leap:16.1 as opensuse-kernel
+
+ARG KERNEL_MODULE_COMPRESSION
+RUN zypper -n install kernel-default dracut xz zstd
+ADD ./kernels/dracut/addvirtiofs.conf /etc/dracut.conf.d/addvirtiofs.conf
+ADD ./kernels/dracut/95virtiofs /usr/lib/dracut/modules.d/95virtiofs
+# openSUSE's dracut builds host-only initramfses by default, so build a generic one: the build
+# container's host is not the VM.
+RUN dracut --force --no-hostonly --no-hostonly-cmdline --kver $(basename /lib/modules/*) --kmoddir /lib/modules/*
+# openSUSE compresses its kernel modules with zstd, which busybox modprobe (used by
+# runcvm-vm-init) cannot read, so decompress them, and for 'xz' recompress them with xz, as the
+# Ubuntu stage does.
+RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
+    case "$KERNEL_MODULE_COMPRESSION" in \
+      xz|none) ;; \
+      *) echo "KERNEL_MODULE_COMPRESSION must be 'xz' or 'none'" >&2; exit 1 ;; \
+    esac && \
+    find /lib/modules/$BASENAME -name '*.ko.zst' -print0 | \
+      xargs -0 -r -n 64 -P "$(nproc)" sh -ec 'm=$1; shift; for f; do zstd -q -d --rm "$f"; [ "$m" = none ] || xz -q --check=crc32 --lzma2=dict=1MiB "${f%.zst}"; done' sh "$KERNEL_MODULE_COMPRESSION" && \
+    depmod $BASENAME && \
+    mkdir -p /opt/runcvm/kernels/opensuse/$BASENAME && \
+    mv /lib/modules/$BASENAME/vmlinuz /opt/runcvm/kernels/opensuse/$BASENAME/vmlinuz && \
+    rm -f /lib/modules/$BASENAME/vmlinux.xz && \
+    cp -aL /boot/initrd-$BASENAME /opt/runcvm/kernels/opensuse/$BASENAME/initrd && \
+    cp -a /lib/modules/ /opt/runcvm/kernels/opensuse/$BASENAME/ && \
+    chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/opensuse
 
 # --- BUILD STAGE ---
 # Build RunCVM installer
@@ -361,7 +423,9 @@ COPY --from=alpine-kernel /opt/runcvm/kernels/alpine /opt/runcvm/kernels/alpine
 COPY --from=debian-kernel /opt/runcvm/kernels/debian /opt/runcvm/kernels/debian
 COPY --from=openwrt-kernel /opt/runcvm/kernels/openwrt /opt/runcvm/kernels/openwrt
 COPY --from=ubuntu-kernel /opt/runcvm/kernels/ubuntu /opt/runcvm/kernels/ubuntu
-COPY --from=oracle-kernel /opt/runcvm/kernels/ol     /opt/runcvm/kernels/ol
+COPY --from=almalinux-kernel /opt/runcvm/kernels/almalinux /opt/runcvm/kernels/almalinux
+COPY --from=fedora-kernel /opt/runcvm/kernels/fedora /opt/runcvm/kernels/fedora
+COPY --from=opensuse-kernel /opt/runcvm/kernels/opensuse /opt/runcvm/kernels/opensuse
 
 # Add 'latest' symlinks for available kernels
 RUN for d in /opt/runcvm/kernels/*; do \

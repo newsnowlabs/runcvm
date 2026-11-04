@@ -30,6 +30,11 @@ RUNCVM_EXEC="$RUNCVM_GUEST/scripts/runcvm-ctr-exec"
 RUNCVM_KERNELS=$RUNCVM/kernels
 RUNCVM_GUEST_KERNELS=$RUNCVM_GUEST/kernels
 RUNCVM_KERNEL_DEFAULT=debian
+
+# The kernels (directories under $RUNCVM_KERNELS) for images of the RHEL and SUSE families of
+# distributions, each of which RunCVM bundles one kernel for: see kernel_for_distro.
+RUNCVM_KERNEL_RHEL_FAMILY=almalinux
+RUNCVM_KERNEL_SUSE_FAMILY=opensuse
 RUNCVM_MEM_SIZE_DEFAULT="512" # Default VM memory size (Mb) if not specified in container config
 RUNCVM_CONTAINER_MEM_OVERHEAD="256" # Memory (Mb) overhead to allow for QEMU, virtiofsd, dnsmasq and other container memory footprint: 128Mb minimum, 256Mb recommended
 RUNCVM_QEMU_TCG_TB_MEM_SIZE_DEFAULT="128" # Memory (Mb) for QEMU's translated-code cache under software emulation (TCG), added to the container's memory limit
@@ -81,6 +86,79 @@ error() {
   fi
 
   exit -1
+}
+
+# Prints path $1 in the image with each symbolic link resolved within the image's filesystem (below
+# $ROOT), as the image itself would resolve it: an absolute link names a path in the image, and '..'
+# stops at the image's root, so the result never names a file outside the image. Fails after 40
+# links, as the kernel does.
+image_resolve_path() {
+  local rest="${1#/}" resolved="" comp target links=0
+
+  while [ -n "$rest" ]
+  do
+    comp="${rest%%/*}"
+    if [[ "$rest" = */* ]]; then rest="${rest#*/}"; else rest=""; fi
+
+    case "$comp" in
+      ""|.) continue ;;
+      ..) resolved="${resolved%/*}"; continue ;;
+    esac
+
+    if [ -L "$ROOT$resolved/$comp" ]; then
+      links=$((links+1))
+      [ "$links" -le 40 ] || return 1
+      target=$(readlink "$ROOT$resolved/$comp") || return 1
+      [[ "$target" = /* ]] && resolved=""
+      rest="${target#/}${rest:+/$rest}"
+    else
+      resolved="$resolved/$comp"
+    fi
+  done
+
+  echo "${resolved:-/}"
+}
+
+# Prints the path (on the host) of the image's os-release file: /etc/os-release, or else
+# /usr/lib/os-release, each resolved within the image by image_resolve_path. Prints nothing if the
+# image has neither.
+image_os_release() {
+  local path
+
+  for path in /etc/os-release /usr/lib/os-release
+  do
+    path=$(image_resolve_path "$path") || continue
+    if [ -f "$ROOT$path" ]; then
+      echo "$ROOT$path"
+      return 0
+    fi
+  done
+
+  return 0
+}
+
+# Prints the kernel (a directory under $RUNCVM_KERNELS) for distribution $1, an os-release ID:
+# the distribution's own, if RunCVM bundles one; else, for a distribution of the RHEL family,
+# $RUNCVM_KERNEL_RHEL_FAMILY, or of the SUSE family, $RUNCVM_KERNEL_SUSE_FAMILY. Returns 1 if
+# there is none.
+kernel_for_distro() {
+  local distro="$1" family
+
+  [[ "$distro" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || return 1
+
+  if [ -d "$RUNCVM_KERNELS/$distro" ]; then
+    echo "$distro"
+    return 0
+  fi
+
+  case "$distro" in
+    almalinux|amzn|centos|fedora|ol|rhel|rocky) family="$RUNCVM_KERNEL_RHEL_FAMILY" ;;
+    opensuse|opensuse-*|sl-micro|sle-micro|sled|sles|sles_sap|suse) family="$RUNCVM_KERNEL_SUSE_FAMILY" ;;
+    *) return 1 ;;
+  esac
+
+  [ -d "$RUNCVM_KERNELS/$family" ] || return 1
+  echo "$family"
 }
 
 load_env_from_file() {
@@ -351,11 +429,18 @@ if [ "$COMMAND" = "create" ]; then
   #    - <dist> or <dist>/latest - use latest RUNCVM kernel available for this dist *and* ARGS
   #    - <dist>/<version> - use specific RUNCVM kernel version for this dist *and* ARGS
   # 2. Else, check /etc/os-release and:
-  #    a. Use builtin kernel for this dist (if present in the expected location) *and* ARGS
-  #    b. Use latest RUNCVM kernel available for the dist:
-  #      - ID=alpine, VERSION_ID=3.16.0 => alpine/latest
-  #      - ID=debian, VERSION_ID=11     => debian/latest
-  #      - ID=ubuntu, VERSION_ID=22.04  => ubuntu/latest
+  #    a. Use builtin kernel for this dist (if present in the expected location) *and* ARGS, if
+  #       RunCVM bundles a kernel for the image's own ID
+  #    b. Use latest RUNCVM kernel available for the first of ID, then each word of ID_LIKE, that
+  #       kernel_for_distro finds a kernel for:
+  #      - ID=alpine, VERSION_ID=3.16.0              => alpine/latest
+  #      - ID=debian, VERSION_ID=11                  => debian/latest
+  #      - ID=rocky, ID_LIKE="rhel centos fedora"    => almalinux/latest
+  #      - ID=sles, ID_LIKE=suse                     => opensuse/latest
+  #      - ID=kali, ID_LIKE=debian                   => debian/latest
+  #    c. Else use $RUNCVM_KERNEL_DEFAULT (Debian's kernel): silently if the image gives no ID, and
+  #       otherwise with a warning (RUNCVM_KERNEL_FALLBACK, '<ID> <kernel>', which
+  #       runcvm-ctr-qemu reports)
   
   # Look for RUNCVM_KERNEL env var
   RUNCVM_KERNEL=$(get_config_env 'RUNCVM_KERNEL')
@@ -368,6 +453,13 @@ if [ "$COMMAND" = "create" ]; then
   if [ -n "$RUNCVM_KERNEL" ]; then
     # If found, validate
   
+    # A distribution name with no kernel of its own names its family's kernel (e.g. 'ol' names
+    # AlmaLinux's), as for an image of that distribution.
+    if [[ "$RUNCVM_KERNEL" =~ ^[a-z]+$ ]] && ! [ -d "$RUNCVM_KERNELS/$RUNCVM_KERNEL" ] && \
+       family=$(kernel_for_distro "$RUNCVM_KERNEL"); then
+      RUNCVM_KERNEL="$family"
+    fi
+
     if [[ "$RUNCVM_KERNEL" =~ \.\. ]]; then
       error "Kernel '$RUNCVM_KERNEL' invalid (contains '..')"
     fi
@@ -390,16 +482,31 @@ if [ "$COMMAND" = "create" ]; then
     RUNCVM_KERNEL_ID=$(dirname "$RUNCVM_KERNEL_IDVER") # Returns e.g. alpine, debian, ubuntu
 
   else
-    # If not found, look for value from /etc/os-release in the container image
-    
-    RUNCVM_KERNEL_ID=$(load_env_from_file "$ROOT/etc/os-release" "ID")
+    # If not found, look for ID and ID_LIKE in the container image's os-release
+    os_release="" os_id="" os_id_like=""
+    os_release=$(image_os_release)
+    if [ -n "$os_release" ]; then
+      os_id=$(load_env_from_file "$os_release" "ID")
+      os_id_like=$(load_env_from_file "$os_release" "ID_LIKE")
+    fi
 
-    # Currently unused
-    # RUNCVM_KERNEL_OS_VERSION_ID=$(load_var_from_env "$ROOT/etc/os-release" "VERSION_ID")
+    RUNCVM_KERNEL_ID=""
+    for distro in $os_id $os_id_like
+    do
+      RUNCVM_KERNEL_ID=$(kernel_for_distro "$distro") && break
+    done
+
+    # An in-image kernel is looked for only where the image's own ID is the name of the chosen
+    # kernel: the case below gives that distribution's in-image kernel and initramfs paths, and its
+    # kernel arguments.
+    [ -n "$os_id" ] && [ "$RUNCVM_KERNEL_ID" = "$os_id" ] && RUNCVM_KERNEL_IMAGE_DISTRO=1
 
     # If still not found, assign a default
     if [ -z "$RUNCVM_KERNEL_ID" ]; then
       RUNCVM_KERNEL_ID="${RUNCVM_KERNEL_DEFAULT:-debian}"
+      if [ -n "$os_id" ]; then
+        set_config_env "RUNCVM_KERNEL_FALLBACK" "$os_id $RUNCVM_KERNEL_ID"
+      fi
     fi
 
     RUNCVM_KERNEL_IDVER="$RUNCVM_KERNEL_ID/latest"
@@ -419,8 +526,12 @@ if [ "$COMMAND" = "create" ]; then
                   RUNCVM_KERNEL_OS_INITRAMFS_PATH="/boot/initrd.img"
                   RUNCVM_KERNEL_ROOT="rootfstype=virtiofs root=runcvmfs noresume net.ifnames=1"
                   ;;
-              ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
+almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
                   RUNCVM_KERNEL_OS_INITRAMFS_PATH="/boot/initramfs"
+                  RUNCVM_KERNEL_ROOT="root=virtiofs:runcvmfs noresume net.ifnames=1"
+                  ;;
+        opensuse) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
+                  RUNCVM_KERNEL_OS_INITRAMFS_PATH="/boot/initrd"
                   RUNCVM_KERNEL_ROOT="root=virtiofs:runcvmfs noresume net.ifnames=1"
                   ;;
   alpine|openwrt) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz-virt"
@@ -432,7 +543,7 @@ if [ "$COMMAND" = "create" ]; then
   esac
   
   # If no RUNCVM_KERNEL specified, look for a kernel and initramfs at the expected paths in the container image.
-  if [[ -z "$RUNCVM_KERNEL" && -f "$ROOT/$RUNCVM_KERNEL_OS_KERNEL_PATH" && -f "$ROOT/$RUNCVM_KERNEL_OS_INITRAMFS_PATH" ]]; then
+  if [[ -z "$RUNCVM_KERNEL" && "$RUNCVM_KERNEL_IMAGE_DISTRO" = "1" && -f "$ROOT/$RUNCVM_KERNEL_OS_KERNEL_PATH" && -f "$ROOT/$RUNCVM_KERNEL_OS_INITRAMFS_PATH" ]]; then
     RUNCVM_KERNEL_PATH="$RUNCVM_KERNEL_OS_KERNEL_PATH"
     RUNCVM_KERNEL_INITRAMFS_PATH="$RUNCVM_KERNEL_OS_INITRAMFS_PATH"
   else
