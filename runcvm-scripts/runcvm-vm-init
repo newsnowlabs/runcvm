@@ -249,9 +249,9 @@ if [ -f /.runcvm/fstab ]; then
   mount -i --bind /.runcvm/fstab /etc/fstab
 fi
 
-# Load cgroupfs (if needed/requested):
-# - If entrypoint is systemd-like () then call cgroupfs_mount "${RUNCVM_CGROUPFS:-none}"
-# - Else call cgroupfs_mount "${RUNCVM_CGROUPFS:-hybrid}"
+# Mount cgroupfs as RUNCVM_CGROUPFS requests, by default:
+# - nothing, if the entrypoint is systemd (which mounts its own);
+# - else cgroup2 alone, on /sys/fs/cgroup.
 
 # Load cgroupfs functions first.
 . $RUNCVM_GUEST/scripts/functions/cgroupfs
@@ -269,7 +269,7 @@ fi
 if [[ "$ARGS_INIT" =~ /systemd$ ]]; then
   cgroupfs_mount "${RUNCVM_CGROUPFS:-none}"
 else
-  cgroupfs_mount "${RUNCVM_CGROUPFS:-hybrid}"
+  cgroupfs_mount "${RUNCVM_CGROUPFS:-2}"
 fi
 
 # Make directory for dropbear host keys and public/private keypair

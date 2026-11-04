@@ -746,17 +746,20 @@ Specifies the cache policy passed to `virtiofsd` via `-o cache=<value>`. The def
 Configures cgroupfs mountpoints in the VM, which may be needed to run applications like Docker if systemd is not running. Acceptable values are:
 
 - `none`/`systemd` - do nothing; leave to the application or to systemd (if running)
-- `1`/`cgroup1` - mount only cgroup v1 filesystems supported by the running kernel to subdirectories of `/sys/fs/cgroup`
 - `2`/`cgroup2` - mount only cgroup v2 filesystem to `/sys/fs/cgroup`
+- `1`/`cgroup1` - mount only cgroup v1 filesystems supported by the running kernel to subdirectories of `/sys/fs/cgroup`
 - `hybrid`/`mixed` - mount cgroup v1 filesystems and mount cgroup v2 filesystem to `/sys/fs/cgroup/unified`
 
-Please note that if `RUNCVM_CGROUPFS` is left undefined or set to an empty string, then RunCVM selects an appropriate
-default behaviour according to these rules:
+If `RUNCVM_CGROUPFS` is left undefined or set to an empty string, RunCVM chooses:
 
-- If specified entrypoint (or, if a symlink, its target) matches the regex `/systemd$` then assume a default value of `none`;
-- Else, assume a default value of `hybrid`.
+- `none`, if the specified entrypoint (or, if a symlink, its target) matches the regex `/systemd$`;
+- else `2`.
 
-These rules work well in the cases of running Docker in (a) stock Alpine/Debian/Ubuntu distributions in which Docker has been installed but Systemd is not running; and (b) distributions in which Systemd is running. Of course you should set `RUNCVM_CGROUPFS` if you need to override the default behaviour.
+These defaults suit running Docker in (a) stock Alpine/Debian/Ubuntu distributions in which Docker has been installed but systemd is not running; and (b) distributions in which systemd is running. Set `RUNCVM_CGROUPFS` to override them.
+
+Use `1` or `hybrid` only for software that requires cgroup v1. A kernel built without `CONFIG_MEMCG_V1` and `CONFIG_CPUSETS_V1`, as are recent distributions' kernels, has no v1 `memory` or `cpuset` controller, so under `1` or `hybrid` software that uses cgroup v1, such as Docker, cannot apply memory or CPU-set limits: Docker discards them, with a warning. Docker supports cgroup v2 from version 20.10.
+
+If cgroup2 is already mounted on `/sys/fs/cgroup` when the VM starts, as the systemd-based initramfs of some distributions (such as Oracle Linux) leaves it, RunCVM mounts nothing more, whatever the value.
 
 Please also note that in the case your distribution is running Systemd you may instead set `--env=RUNCVM_KERNEL_APPEND='systemd.unified_cgroup_hierarchy=<boolean>'` (where `<boolean>` is `0` or `1`) to request Systemd to create either hybrid or cgroup2-only cgroup filesystem(s) itself.
 
