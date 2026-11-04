@@ -6,12 +6,15 @@
   except the OpenWrt kernel, for which no module list is provided.
 - Without RUNCVM_KERNEL, the kernel follows the image's distribution: the
   first, among its os-release ID and then each word of its ID_LIKE, that
-  RunCVM has a kernel for. RHEL-family distributions (Rocky Linux,
-  AlmaLinux, Fedora, Amazon Linux) take the Oracle Linux kernel, and Kali
-  Linux (ID_LIKE=debian) the Debian kernel.
+  RunCVM has a kernel for. Other RHEL-family distributions (Oracle Linux,
+  Rocky Linux, Amazon Linux) take the AlmaLinux kernel, openSUSE
+  Tumbleweed (like Leap) the openSUSE kernel, and Kali Linux
+  (ID_LIKE=debian) the Debian kernel.
+- RUNCVM_KERNEL naming a distribution of a family (ol) boots the family's
+  kernel.
 - An image with no os-release gets Debian's kernel silently. An image of any
-  other distribution (openSUSE, Arch Linux, Wolfi) gets Debian's kernel and
-  shows the fallback-kernel warning; no other image shows it.
+  other distribution (Arch Linux, Wolfi) gets Debian's kernel and shows the
+  fallback-kernel warning; no other image shows it.
 - /etc/os-release is read within the image: an absolute symbolic link names
   a file in the image, not the host's.
 - An image's USER and WORKDIR apply in the VM.
@@ -65,18 +68,20 @@ FALLBACK_WARNING = "RunCVM has no kernel for the image's distribution"
 # (name, docker run options, image and command, expected kernel dist,
 #  modprobe expected to work (None: not checked))
 CASES = [("kernel-" + k, ["--env=RUNCVM_KERNEL=" + k], ["alpine", "sh", "-c", PROBE], k, k != "openwrt")
-         for k in ("alpine", "debian", "ubuntu", "ol", "openwrt")]
+         for k in ("alpine", "debian", "ubuntu", "almalinux", "fedora", "opensuse", "openwrt")]
+CASES += [("kernel-ol", ["--env=RUNCVM_KERNEL=ol"], ["alpine", "sh", "-c", PROBE], "almalinux", True)]
 CASES += [("image-" + i.split(":")[0].replace("/", "-"), [], [i, "sh", "-c", PROBE], k, None)
           for i, k in (("alpine", "alpine"), ("debian:bookworm-slim", "debian"), ("ubuntu:24.04", "ubuntu"),
-                       ("busybox", "debian"), ("oraclelinux:9", "ol"),
-                       ("rockylinux:9", "ol"), ("almalinux:9", "ol"), ("fedora", "ol"),
-                       ("amazonlinux:2023", "ol"), ("kalilinux/kali-rolling", "debian"),
-                       ("opensuse/leap", "debian"), ("archlinux", "debian"),
+                       ("busybox", "debian"), ("oraclelinux:9", "almalinux"),
+                       ("rockylinux:9", "almalinux"), ("almalinux:9", "almalinux"), ("fedora", "fedora"),
+                       ("amazonlinux:2023", "almalinux"), ("kalilinux/kali-rolling", "debian"),
+                       ("opensuse/leap", "opensuse"), ("opensuse/tumbleweed", "opensuse"),
+                       ("archlinux", "debian"),
                        ("cgr.dev/chainguard/wolfi-base", "debian"))]
 CASES += [("image-os-release-link", [], [link_image, "sh", "-c", PROBE], "alpine", None)]
 
 # The cases whose image's distribution has no RunCVM kernel, so whose output shows the warning.
-FALLBACK_CASES = {"image-opensuse-leap", "image-archlinux", "image-cgr.dev-chainguard-wolfi-base"}
+FALLBACK_CASES = {"image-archlinux", "image-cgr.dev-chainguard-wolfi-base"}
 
 
 def run(args):

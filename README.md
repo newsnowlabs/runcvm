@@ -309,38 +309,39 @@ RunCVM aims to support each distribution's latest release and the two before it 
 |---|---|---|---|---|---|---|
 | Debian | 13 (Trixie), 12 (Bookworm), 11 (Bullseye) | `debian` | Debian 13 (Trixie) | 6.12 | xz | 10 (Buster) and later |
 | Ubuntu | 26.04 LTS (Resolute Raccoon), 24.04 LTS (Noble Numbat), 22.04 LTS (Jammy Jellyfish) | `ubuntu` | Ubuntu 26.04 LTS (Resolute Raccoon) | 7.0 | xz (recompressed from Ubuntu's zstd) | 20.04 LTS (Focal Fossa) and later |
-| Oracle Linux | 10, 9, 8 | `ol` | Oracle Linux 10 | 6.12 | xz | 7 and later (9 and 10 once `kmod` is installed) |
+| AlmaLinux, and the RHEL family (see [Other distributions](#other-distributions)) | 10, 9, 8 | `almalinux` | AlmaLinux 10 | 6.12 | xz | all, once `kmod` is installed |
+| Fedora | 45, 44, 43 | `fedora` | Fedora 45 | 7.2 | xz | all, once `kmod` is installed |
+| openSUSE Leap, openSUSE Tumbleweed | Leap 16.1, 16.0; Tumbleweed | `opensuse` | openSUSE Leap 16.1 | 6.12 | xz (recompressed from openSUSE's zstd) | all, once `kmod` is installed |
 | Alpine Linux | 3.24, 3.23, 3.22 | `alpine` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | gzip | all |
 | OpenWrt | (not targeted by release) | `openwrt` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | none | all |
 
 Each kernel is the latest that its release provides when RunCVM is built (e.g. Debian 13's current 6.12 kernel).
 
-The Debian, Ubuntu and Oracle Linux kernels' modules are xz-compressed by default, which the targeted releases all read. For an image whose own `modprobe` reads only uncompressed modules, such as Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) or Ubuntu 18.04 LTS (Bionic Beaver), build RunCVM with the build argument `KERNEL_MODULE_COMPRESSION=none`, which leaves those kernels' modules uncompressed, at the cost of a larger RunCVM image (the Debian and Ubuntu kernels' modules together take of the order of 1 GB uncompressed, and roughly a quarter of that compressed), e.g. `DOCKER_BUILDKIT=1 docker build --build-arg KERNEL_MODULE_COMPRESSION=none -t newsnowlabs/runcvm .`.
+The Debian, Ubuntu, AlmaLinux, Fedora and openSUSE kernels' modules are xz-compressed by default, which the targeted releases all read. For an image whose own `modprobe` reads only uncompressed modules, such as Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) or Ubuntu 18.04 LTS (Bionic Beaver), build RunCVM with the build argument `KERNEL_MODULE_COMPRESSION=none`, which leaves those kernels' modules uncompressed, at the cost of a larger RunCVM image (the Debian and Ubuntu kernels' modules together take of the order of 1 GB uncompressed, and roughly a quarter of that compressed), e.g. `DOCKER_BUILDKIT=1 docker build --build-arg KERNEL_MODULE_COMPRESSION=none -t newsnowlabs/runcvm .`.
 
-The last column concerns the workload's own module loading, e.g. `modprobe`, or `dockerd` loading `overlay` or `br_netfilter`, in the VM. It reflects which compressed formats each release's `kmod` (or, for Alpine Linux, BusyBox) can read: for example, Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) and Ubuntu 18.04 LTS (Bionic Beaver) read only uncompressed modules, Debian 10 (Buster), Debian 11 (Bullseye) and Ubuntu 20.04 LTS (Focal Fossa) also read xz, and later releases also read zstd. Oracle Linux 9 and 10 images include no `kmod` until it is installed. RunCVM itself loads the modules it needs, while the VM boots, with its own bundled BusyBox `modprobe`, which reads uncompressed, gzip and xz modules, whatever the image.
+The last column concerns the workload's own module loading, e.g. `modprobe`, or `dockerd` loading `overlay` or `br_netfilter`, in the VM. It reflects which compressed formats each release's `kmod` (or, for Alpine Linux, BusyBox) can read: for example, Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) and Ubuntu 18.04 LTS (Bionic Beaver) read only uncompressed modules, Debian 10 (Buster), Debian 11 (Bullseye) and Ubuntu 20.04 LTS (Focal Fossa) also read xz, and later releases also read zstd. The AlmaLinux, Rocky Linux, Oracle Linux, Fedora and openSUSE images include no `kmod` until it is installed; their own releases' `kmod` reads xz (AlmaLinux 8's, for example, reads xz and gzip, and later releases' also zstd). RunCVM itself loads the modules it needs, while the VM boots, with its own bundled BusyBox `modprobe`, which reads uncompressed, gzip and xz modules, whatever the image.
 
 Other releases of these distributions may work, but are not targeted.
 
 ### Other distributions
 
-RunCVM bundles no kernel for other distributions. It looks at the distributions an image's `/etc/os-release` names, first as `ID`, then in `ID_LIKE`, and boots the kernel of the first that RunCVM has a kernel for, counting the RHEL family (`rhel`, `centos`, `fedora`, `rocky`, `almalinux`, `amzn`, `ol`) as Oracle Linux's. An image whose `ID` names a distribution of any other kind boots the Debian kernel, with a warning in the Container/VM's output. How RunCVM treats some popular distributions:
+RunCVM bundles no kernel for other distributions. It looks at the distributions an image's `/etc/os-release` names, first as `ID`, then in `ID_LIKE`, and boots the kernel of the first that RunCVM has a kernel for, counting the RHEL family (`rhel`, `centos`, `rocky`, `amzn`, `ol`) as AlmaLinux's and the SUSE family (`sles`, `sled`, `sles_sap`, `sle-micro`, `sl-micro`, `suse`, and `opensuse` and `opensuse-*`) as openSUSE's. An image whose `ID` names a distribution of any other kind boots the Debian kernel, with a warning in the Container/VM's output. How RunCVM treats some popular distributions:
 
 | Distribution | `ID` | `ID_LIKE` | Kernel |
 |---|---|---|---|
-| Rocky Linux | `rocky` | `rhel centos fedora` | Oracle Linux's (RHEL family) |
-| AlmaLinux | `almalinux` | `rhel centos fedora` | Oracle Linux's (RHEL family) |
-| CentOS Stream | `centos` | `rhel fedora` | Oracle Linux's (RHEL family) |
-| Red Hat Universal Base Image (UBI) | `rhel` | `fedora` | Oracle Linux's (RHEL family) |
-| Amazon Linux | `amzn` | `fedora` | Oracle Linux's (RHEL family) |
-| Fedora | `fedora` | | Oracle Linux's (RHEL family) |
+| Oracle Linux (including the `mysql` image) | `ol` | `fedora` | AlmaLinux's (RHEL family) |
+| Rocky Linux | `rocky` | `rhel centos fedora` | AlmaLinux's (RHEL family) |
+| CentOS Stream | `centos` | `rhel fedora` | AlmaLinux's (RHEL family) |
+| Red Hat Universal Base Image (UBI) | `rhel` | `fedora` | AlmaLinux's (RHEL family) |
+| Amazon Linux | `amzn` | `fedora` | AlmaLinux's (RHEL family) |
+| SUSE Linux Enterprise (SLE BCI) | `sles` | `suse` | openSUSE's (SUSE family) |
 | Kali Linux | `kali` | `debian` | Debian's |
 | Distroless (Debian-based, e.g. `gcr.io/distroless/base-debian12`) | `debian` | | Debian's |
 | BusyBox, and images built `FROM scratch` | (no `/etc/os-release`) | | Debian's |
-| openSUSE Leap, openSUSE Tumbleweed | `opensuse-leap`, `opensuse-tumbleweed` | `suse opensuse` | Debian's, with a warning |
 | Arch Linux | `arch` | | Debian's, with a warning |
 | Wolfi (Chainguard) | `wolfi` | | Debian's, with a warning |
 
-A Container/VM launched with `RUNCVM_KERNEL` boots the named kernel, whatever the image.
+A Container/VM launched with `RUNCVM_KERNEL` boots the named kernel, whatever the image. A distribution of either family may be named in place of its family's kernel, e.g. `RUNCVM_KERNEL=ol` boots AlmaLinux's.
 
 ## Installation
 
@@ -534,8 +535,9 @@ When creating a container, RunCVM will examine the image being launched to try t
       - Debian: `/vmlinuz` and `/initrd.img`
       - Ubuntu: `/boot/vmlinuz` and `/boot/initrd.img`
       - Alpine: `/boot/vmlinuz-virt` `/boot/initramfs-virt`
-      - Oracle Linux: `/boot/vmlinuz` and `/boot/initramfs`
-   2. Otherwise, select the latest RunCVM kernel for the first distro named by `ID`, then by each word of `ID_LIKE`, for which RunCVM has a kernel (`debian`, `ubuntu`, `ol` (Oracle Linux), `alpine` or `openwrt`), counting the RHEL family as Oracle Linux's (see [Other distributions](#other-distributions))
+      - AlmaLinux, Fedora: `/boot/vmlinuz` and `/boot/initramfs`
+      - openSUSE images, whose `ID` is e.g. `opensuse-leap`, never `opensuse`, always boot RunCVM's kernel
+   2. Otherwise, select the latest RunCVM kernel for the first distro named by `ID`, then by each word of `ID_LIKE`, for which RunCVM has a kernel (`debian`, `ubuntu`, `almalinux`, `fedora`, `opensuse`, `alpine` or `openwrt`), counting the RHEL family as AlmaLinux's and the SUSE family as openSUSE's (see [Other distributions](#other-distributions))
    3. If the image has no `/etc/os-release`, or it gives no `ID`, use the Debian kernel from the RunCVM package; if it gives an `ID`, but names no distro RunCVM has a kernel for, use the Debian kernel, with a warning in the Container/VM's output
 
 RunCVM reads `/etc/os-release`, or else `/usr/lib/os-release`, resolving any symbolic links within the image's own filesystem, never the host's.
@@ -563,17 +565,23 @@ openwrt/6.18.60-0-virt
 ubuntu
 ubuntu/latest
 ubuntu/7.0.0-14-generic
-ol
-ol/6.12.0-211.72.1.el10_2.x86_64
-ol/latest
+almalinux
+almalinux/6.12.0-211.73.1.el10_2.x86_64
+almalinux/latest
+fedora
+fedora/7.2.15-300.fc45.x86_64
+fedora/latest
+opensuse
+opensuse/6.12.0-160100.8-default
+opensuse/latest
 ```
 
-RunCVM bundles the kernels of Debian 13 (trixie), Ubuntu 26.04 (resolute), Oracle Linux 10 and Alpine (`linux-virt`, also used for OpenWrt images), each at the version its distribution provides when the RunCVM image is built. The Alpine kernel's release is set by the build argument `ALPINE_KERNEL_VERSION` (by default `3.24`), separately from `ALPINE_VERSION` (by default `3.19`), the release RunCVM's own binaries and libraries are built from, e.g. `DOCKER_BUILDKIT=1 docker build --build-arg ALPINE_KERNEL_VERSION=3.23 -t newsnowlabs/runcvm .`.
+RunCVM bundles the kernels of Debian 13 (trixie), Ubuntu 26.04 (resolute), AlmaLinux 10, Fedora 45, openSUSE Leap 16.1 and Alpine (`linux-virt`, also used for OpenWrt images), each at the version its distribution provides when the RunCVM image is built. The Alpine kernel's release is set by the build argument `ALPINE_KERNEL_VERSION` (by default `3.24`), separately from `ALPINE_VERSION` (by default `3.19`), the release RunCVM's own binaries and libraries are built from, e.g. `DOCKER_BUILDKIT=1 docker build --build-arg ALPINE_KERNEL_VERSION=3.23 -t newsnowlabs/runcvm .`.
 
 Example:
 
 ```console
-docker run --rm --runtime=runcvm --env=RUNCVM_KERNEL=ol hello-world
+docker run --rm --runtime=runcvm --env=RUNCVM_KERNEL=almalinux hello-world
 ```
 
 ### `--env=RUNCVM_KERNEL_APPEND=1`
