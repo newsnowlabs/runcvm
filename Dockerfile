@@ -289,7 +289,10 @@ FROM amd64/ubuntu:resolute as ubuntu-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG KERNEL_MODULE_COMPRESSION
-RUN apt update && apt install -y linux-generic:amd64 zstd xz-utils && \
+# The initrd must be built by initramfs-tools, not dracut (Ubuntu's default initrd generator), as
+# runcvm-runtime boots the Ubuntu kernel with initramfs-tools' arguments for a virtiofs root
+# (rootfstype=virtiofs root=runcvmfs).
+RUN apt update && apt install -y linux-generic:amd64 initramfs-tools zstd xz-utils && \
     echo 'virtiofs' >>/etc/initramfs-tools/modules && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
