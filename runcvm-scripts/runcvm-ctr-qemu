@@ -261,7 +261,8 @@ do_disk() {
     error "Error: disk spec '$spec' invalid: src '$src' must be a plain file if it exists"
   fi
 
-  # An existing disk keeps the layout it was created with, as recorded by its label.
+  # An existing disk keeps the filesystem it was created with, and the layout, as recorded by its
+  # label.
   if [[ -f "$src" ]]; then
     TYPE=$(blkid -p -s TYPE -o value "$src") || true
     if [[ -n "$TYPE" && "$TYPE" != "$fs" ]]; then
@@ -344,8 +345,9 @@ do_disk() {
         error "Error: disk spec '$spec' invalid: dst '$dst' is too long"
       fi
 
-      # mke2fs creates lost+found in the root of every filesystem, as some other filesystems' fsck
-      # tools do, so no destination's directory may take that name.
+      # mke2fs creates lost+found in the root of each filesystem it formats, and other filesystems'
+      # repair tools (e.g. xfs_repair) may create it, so no destination's directory may take that
+      # name.
       if [ "${subdirs[$i]}" = "lost+found" ]; then
         error "Error: disk spec '$spec' invalid: dst '$dst' requires layout 'root'"
       fi

@@ -3,8 +3,9 @@
 # The build installs each filesystem's packages and bundles its mkfs command; runcvm-ctr-qemu
 # accepts only the filesystems listed here, and formats each new disk with its mkfs command;
 # runcvm-vm-init loads its kernel modules before mounting the disks. To support another filesystem,
-# add a line here and rebuild: nothing else names the filesystems. The VM's kernel must also
-# provide the modules (or have the filesystem built in).
+# add a line here and rebuild. The VM's kernel must also provide the modules (or have the
+# filesystem built in). Beyond this list, RunCVM's scripts name only ext4, which a whole-root disk
+# must have, and mke2fs, which alone populates the disk it formats.
 #
 # Fields, separated by whitespace:
 #
