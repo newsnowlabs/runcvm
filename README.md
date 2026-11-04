@@ -810,6 +810,8 @@ The modifications to `create` are designed to make the created container launch 
 
 The modifications to `exec` are designed to run commands within the VM instead of the container.
 
+`runcvm-runtime` passes every command, modified or not, to `runc`: the first `runc` in its caller's `PATH` (as Docker itself finds `runc`), or else in `/usr/bin`, `/usr/sbin`, `/usr/local/bin`, `/usr/local/sbin`, `/bin` or `/sbin`. So it finds both Docker's own packages' `/usr/bin/runc` and Debian's and Ubuntu's `/usr/sbin/runc` (from their `runc` package, on which `docker.io` depends). If it finds none, the command fails with an error naming the places searched.
+
 #### `runcvm-runtime` - `create` command
 
 In more detail, the RunCVM runtime `create` process:
