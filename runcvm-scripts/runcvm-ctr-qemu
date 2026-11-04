@@ -742,7 +742,7 @@ if [ "$NOMODESET" = "1" ]; then
 fi
 
 if [ "$RUNCVM_BIOS_DEBUG" != "1" ] && [ "$RUNCVM_QEMU_ARCH" != "arm64" ]; then
-  # Disable SeaBIOS serial console (x86_64 only — SeaBIOS is not used on ARM64).
+  # Disable SeaBIOS serial console (on every architecture but ARM64, which uses no SeaBIOS).
   # This fw_cfg path is modified from the SeaBIOS default (to avoid an otherwise-inevitable QEMU
   # warning being emitted) and so requires patched bios.bin file(s) (see Dockerfile)
   OPTS+=(-fw_cfg opt/org.seabios/etc/sercon-port,string=0)

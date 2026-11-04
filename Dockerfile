@@ -3,13 +3,12 @@
 # Alpine version to build with
 ARG ALPINE_VERSION=3.19
 
-# Platform args (TARGETARCH, TARGETPLATFORM) are referenced directly in FROM
-# expansions below without an ARG declaration here. BuildKit auto-populates these
-# for any FROM reference that doesn't shadow them; declaring them at global scope
-# (with or without a default) freezes them at that default instead, since an
-# explicit ARG overrides BuildKit's implicit value. Each stage that needs
-# $TARGETARCH in a RUN re-declares ARG TARGETARCH locally after its own FROM
-# (see the "binaries" stage), which is unaffected by this.
+# BuildKit predefines the platform args (TARGETARCH, TARGETPLATFORM) in the
+# global scope, so the FROM lines below use them without an ARG declaration
+# here. They are not visible inside a stage unless declared there: each stage
+# that needs $TARGETARCH in a RUN declares ARG TARGETARCH after its own FROM
+# (see the "binaries" stage). Giving either a default here would override the
+# predefined value.
 
 # --- BUILD STAGE ---
 # Build base alpine-sdk image for later build stages
@@ -32,7 +31,7 @@ RUN apk update && apk add --no-cache alpine-sdk coreutils && \
     git sparse-checkout set main/seabios main/dnsmasq main/dropbear main/mkinitfs
 
 # --- BUILD STAGE ---
-# Build patched SeaBIOS packages (x86_64 only — SeaBIOS uses ISA bus, not available on ARM64)
+# Build patched SeaBIOS packages (x86_64 only: SeaBIOS uses the ISA bus, which ARM64 lacks)
 # to allow disabling of BIOS output by QEMU
 # (without triggering QEMU warnings)
 FROM alpine-sdk as alpine-seabios-amd64
@@ -158,7 +157,7 @@ RUN apk update && \
         ncurses coreutils \
         patchelf
 
-# Install patched SeaBIOS (x86_64 only — SeaBIOS is x86-specific)
+# Install patched SeaBIOS (x86_64 only: SeaBIOS is x86-specific)
 COPY --from=alpine-seabios /root/packages/main /tmp/seabios-pkgs/
 RUN ALPINE_ARCH=$(uname -m) && \
     if [ "$ALPINE_ARCH" = "x86_64" ]; then \

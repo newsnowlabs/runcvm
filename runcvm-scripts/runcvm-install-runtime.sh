@@ -168,7 +168,7 @@ log "- Detected runtime: $RUNTIME"
 if ls /etc/lima* >/dev/null 2>&1 || [ -n "$LIMA_HOME" ]; then
   log "- Note: Lima environment detected"
   log "  - Ensure nested virtualisation is enabled for your VM:"
-  log "    limactl stop <vm> && limactl set --name=<vm> .nestedVirtualization=true && limactl start <vm>"
+  log "    limactl stop <vm> && limactl edit <vm> --set '.nestedVirtualization=true' && limactl start <vm>"
   log "  - Verify /dev/kvm is accessible before proceeding"
 fi
 
@@ -270,7 +270,7 @@ elif [ "$RUNTIME" = "podman" ]; then
     else
       printf '\n[engine.runtimes]\nruncvm = ["/opt/runcvm/scripts/runcvm-runtime"]\n' >>"$CONTAINERS_CONF"
     fi
-    log "  - Done (Podman is socket-activated; no restart needed)"
+    log "  - Done (podman reads $CONTAINERS_CONF on each run; restart any running 'podman system service' for it to do so)"
   fi
 
   log "  - Note: if SELinux is enforcing (Fedora CoreOS / Podman Desktop), add"
