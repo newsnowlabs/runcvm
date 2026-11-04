@@ -136,7 +136,7 @@ RUN apk update && \
         qemu-hw-display-virtio-vga \
         ovmf \
         jq iproute2 netcat-openbsd blkid util-linux \
-        s6 dnsmasq iptables nftables \
+        s6 dnsmasq nftables \
         ncurses coreutils \
         patchelf
 
@@ -157,9 +157,8 @@ RUN apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/drop
 
 # Patch the binaries and set up symlinks
 COPY build-utils/make-bundelf-bundle.sh /usr/local/bin/make-bundelf-bundle.sh
-ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey"
-ENV BUNDELF_EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so"
-ENV BUNDELF_EXTRA_SYSTEM_LIB_PATHS="/usr/lib/xtables"
+ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey"
+ENV BUNDELF_EXTRA_LIBS="/usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so"
 ENV BUNDELF_CODE_PATH="/opt/runcvm"
 ENV BUNDELF_EXEC_PATH="/.runcvm/guest"
 
