@@ -323,22 +323,22 @@ Other releases of these distributions may work, but are not targeted.
 
 ### Other distributions
 
-RunCVM bundles no kernel for other distributions. How it treats some popular ones, as named by their images' `/etc/os-release`:
+RunCVM bundles no kernel for other distributions. It looks at the distributions an image's `/etc/os-release` names, first as `ID`, then in `ID_LIKE`, and boots the kernel of the first that RunCVM has a kernel for, counting the RHEL family (`rhel`, `centos`, `fedora`, `rocky`, `almalinux`, `amzn`, `ol`) as Oracle Linux's. An image whose `ID` names a distribution of any other kind boots the Debian kernel, with a warning in the Container/VM's output. How RunCVM treats some popular distributions:
 
-| Distribution | `ID` | `ID_LIKE` | Status |
+| Distribution | `ID` | `ID_LIKE` | Kernel |
 |---|---|---|---|
-| Rocky Linux | `rocky` | `rhel centos fedora` | Refused, unless launched with `--env=RUNCVM_KERNEL=<dist>` (e.g. `ol`) |
-| AlmaLinux | `almalinux` | `rhel centos fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
-| CentOS Stream | `centos` | `rhel fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
-| Red Hat Universal Base Image (UBI) | `rhel` | `fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
-| Amazon Linux | `amzn` | `fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
-| Fedora | `fedora` | | Refused, unless launched with `RUNCVM_KERNEL` |
-| openSUSE Leap, openSUSE Tumbleweed | `opensuse-leap`, `opensuse-tumbleweed` | `suse opensuse` | Refused, unless launched with `RUNCVM_KERNEL` |
-| Arch Linux | `arch` | | Refused, unless launched with `RUNCVM_KERNEL` |
-| Kali Linux | `kali` | `debian` | Refused, unless launched with `RUNCVM_KERNEL` (e.g. `debian`) |
-| Wolfi (Chainguard) | `wolfi` | | Refused, unless launched with `RUNCVM_KERNEL` |
-| Distroless (Debian-based, e.g. `gcr.io/distroless/base-debian12`) | `debian` | | Debian's kernel, as for Debian |
-| BusyBox, and images built `FROM scratch` | (no `/etc/os-release`) | | Debian's kernel |
+| Rocky Linux | `rocky` | `rhel centos fedora` | Oracle Linux's (RHEL family) |
+| AlmaLinux | `almalinux` | `rhel centos fedora` | Oracle Linux's (RHEL family) |
+| CentOS Stream | `centos` | `rhel fedora` | Oracle Linux's (RHEL family) |
+| Red Hat Universal Base Image (UBI) | `rhel` | `fedora` | Oracle Linux's (RHEL family) |
+| Amazon Linux | `amzn` | `fedora` | Oracle Linux's (RHEL family) |
+| Fedora | `fedora` | | Oracle Linux's (RHEL family) |
+| Kali Linux | `kali` | `debian` | Debian's |
+| Distroless (Debian-based, e.g. `gcr.io/distroless/base-debian12`) | `debian` | | Debian's |
+| BusyBox, and images built `FROM scratch` | (no `/etc/os-release`) | | Debian's |
+| openSUSE Leap, openSUSE Tumbleweed | `opensuse-leap`, `opensuse-tumbleweed` | `suse opensuse` | Debian's, with a warning |
+| Arch Linux | `arch` | | Debian's, with a warning |
+| Wolfi (Chainguard) | `wolfi` | | Debian's, with a warning |
 
 A Container/VM launched with `RUNCVM_KERNEL` boots the named kernel, whatever the image.
 
@@ -530,14 +530,15 @@ When creating a container, RunCVM will examine the image being launched to try t
 
 1. If `--env=RUNCVM_KERNEL=<dist>[/<version>]` specified, use the indicated kernel
 2. Otherwise, identify distro from `/etc/os-release`
-   1. If one is found in the appropriate distro-specific location in the image, select an in-image kernel. The locations are:
+   1. If RunCVM bundles a kernel for the image's own distribution (its `ID`), and one is found in the appropriate distro-specific location in the image, select an in-image kernel. The locations are:
       - Debian: `/vmlinuz` and `/initrd.img`
       - Ubuntu: `/boot/vmlinuz` and `/boot/initrd.img`
       - Alpine: `/boot/vmlinuz-virt` `/boot/initramfs-virt`
-   2. Otherwise, select the latest RunCVM kernel for the distro: `debian`, `ubuntu`, `ol` (Oracle Linux), `alpine` or `openwrt`
-   3. If the image has no `/etc/os-release`, or it gives no `ID`, use the Debian kernel from the RunCVM package
+      - Oracle Linux: `/boot/vmlinuz` and `/boot/initramfs`
+   2. Otherwise, select the latest RunCVM kernel for the first distro named by `ID`, then by each word of `ID_LIKE`, for which RunCVM has a kernel (`debian`, `ubuntu`, `ol` (Oracle Linux), `alpine` or `openwrt`), counting the RHEL family as Oracle Linux's (see [Other distributions](#other-distributions))
+   3. If the image has no `/etc/os-release`, or it gives no `ID`, use the Debian kernel from the RunCVM package; if it gives an `ID`, but names no distro RunCVM has a kernel for, use the Debian kernel, with a warning in the Container/VM's output
 
-An image whose `/etc/os-release` `ID` is none of `debian`, `ubuntu`, `ol`, `alpine` and `openwrt` (e.g. Fedora) cannot be launched without `--env=RUNCVM_KERNEL=<dist>`, even if it has a kernel of its own.
+RunCVM reads `/etc/os-release`, or else `/usr/lib/os-release`, resolving any symbolic links within the image's own filesystem, never the host's.
 
 ## Option reference
 
