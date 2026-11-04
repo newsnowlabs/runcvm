@@ -3,9 +3,10 @@
 # Alpine version to build RunCVM's own binaries and libraries with
 ARG ALPINE_VERSION=3.19
 
-# Alpine version whose kernel (linux-virt) and mkinitfs to bundle, as the Alpine and OpenWrt
-# kernels. It may differ from ALPINE_VERSION, but the kernel's modules must stay loadable by
-# ALPINE_VERSION's busybox modprobe, which runcvm-vm-init uses.
+# Alpine version whose kernel (linux-virt) RunCVM bundles as its Alpine and OpenWrt kernels, with
+# an initramfs built by that version's (patched) mkinitfs. It may differ from ALPINE_VERSION, but
+# the kernel's modules must stay loadable by ALPINE_VERSION's busybox modprobe, which
+# runcvm-vm-init uses.
 ARG ALPINE_KERNEL_VERSION=3.24
 
 # --- BUILD STAGE ---
@@ -29,7 +30,7 @@ RUN apk update && apk add --no-cache alpine-sdk coreutils && \
     git sparse-checkout set main/seabios main/dnsmasq main/dropbear
 
 # --- BUILD STAGE ---
-# Build base alpine-sdk image, at ALPINE_KERNEL_VERSION, for the Alpine kernel's build stages
+# Build base alpine-sdk image, at ALPINE_KERNEL_VERSION, for the patched mkinitfs's build stage
 FROM alpine:$ALPINE_KERNEL_VERSION as alpine-sdk-kernel
 
 ARG ALPINE_KERNEL_VERSION
