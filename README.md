@@ -272,11 +272,20 @@ For a deep dive into RunCVM's internals, see the section on [Developing RunCVM](
 
 ## System requirements
 
-RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM.
+RunCVM should run on any amd64 (x86_64) or arm64 (aarch64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM. RunCVM detects the host's architecture when it creates a Container/VM; `--env=RUNCVM_QEMU_ARCH=<x86_64|arm64>` overrides it.
 
 RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and the `kvm` and `tun` kernel modules. RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
 RunCVM is tested on Debian Bullseye and [GitHub Codespaces](https://github.com/codespaces/new?hide_repo_select=true&ref=main&repo=514606231).
+
+### macOS on Apple Silicon
+
+On macOS, Docker and Podman run inside an arm64 Linux VM, such as those that [Lima](https://lima-vm.io/) (e.g. its `docker` template) and [Podman Desktop](https://podman-desktop.io/) (a Fedora CoreOS VM) provide. RunCVM runs inside that VM, installed from a RunCVM image built for arm64: build it within the VM, as for any host. For KVM acceleration, the VM needs nested virtualisation, so that `/dev/kvm` exists inside it; Apple's Virtualization framework offers it on M3 and later chips, with macOS 15 or later. Without `/dev/kvm`, launch Container/VMs with `--env=RUNCVM_QEMU_ACCEL=auto` or `tcg` for software emulation, which is much slower.
+
+- With Lima, enable nested virtualisation for the VM, e.g. `limactl start --set='.nestedVirtualization=true' template://docker` for a new VM, or `limactl stop <vm> && limactl edit <vm> --set '.nestedVirtualization=true' && limactl start <vm>` for an existing one.
+- With Podman Desktop, the Podman machine must have nested virtualisation. If SELinux is enforcing, a Container/VM may need `--security-opt label=disable` to use `/dev/kvm`.
+
+Check that `/dev/kvm` exists inside the VM (e.g. `limactl shell <vm> ls -l /dev/kvm`) before installing RunCVM there. The VM may also lack `/dev/vhost-net` (needed by `RUNCVM_QEMU_NET_VHOST=1`) and hugepages (needed by `RUNCVM_HUGETLB=1`); both options are off by default.
 
 ### rp_filter sysctl settings
 
@@ -314,8 +323,8 @@ This will:
   - Enable the RunCVM runtime, by patching `/etc/docker/daemon.json` to add `runcvm` to the `runtimes` property
   - Restart `dockerd`, if it can be detected how for your system (e.g. `systemctl restart docker`)
   - Verify that RunCVM is recognised via `docker info`
-- For Podman support (experimental)
-  - Display instructions on patching `/etc/containers/containers.conf`
+- For Podman support (experimental), when `podman` is installed and `docker` is not:
+  - Enable the RunCVM runtime, by adding `runcvm` to `[engine.runtimes]` in `/etc/containers/containers.conf`
 - Check your system network device `rp_filter` settings, and amend them if necessary
 
 Following installation, launch a basic test RunCVM Container/VM:
@@ -675,7 +684,7 @@ Enable USB interface.
 
 ### `--env=RUNCVM_BIOS=EFI`
 
-By default SeaBIOS is used to boot the VM. Enable OVMF EFI boot with this option.
+By default SeaBIOS is used to boot the VM (on arm64, QEMU boots the kernel directly, without firmware). Enable OVMF EFI boot with this option, on x86_64 only: on arm64, the Container/VM fails to start with an error.
 
 ### `--env=RUNCVM_QEMU_NET_VHOST=1`
 

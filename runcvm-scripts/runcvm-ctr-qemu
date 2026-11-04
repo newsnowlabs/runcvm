@@ -749,7 +749,11 @@ if [ "$RUNCVM_BIOS_DEBUG" != "1" ] && [ "$RUNCVM_QEMU_ARCH" != "arm64" ]; then
 fi
 
 if [ "$RUNCVM_BIOS" = "EFI" ]; then
-  # UEFI firmware
+  # UEFI firmware: OVMF, which is x86_64's
+  if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
+    error "Error: RUNCVM_BIOS=EFI is unsupported on arm64"
+  fi
+
   OPTS+=(
     # -drive if=pflash,format=raw,unit=0,readonly=on,file=$RUNCVM_GUEST/usr/share/OVMF/OVMF_CODE.fd
     # -drive if=pflash,format=raw,unit=1,readonly=on,file=$RUNCVM_GUEST/usr/share/OVMF/OVMF_VARS.fd
