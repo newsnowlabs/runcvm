@@ -142,7 +142,7 @@ def run(item):
 
 
 def disks_of(mounts):
-    """Map each of MOUNTS to (n, root): n numbers its device in order of first appearance."""
+    """Map each of MOUNTS to (n, root), n numbering its device in order of first appearance, or None if unmounted."""
     devices = {}
     result = {}
     for k in MOUNTS:
