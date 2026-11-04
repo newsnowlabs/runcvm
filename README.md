@@ -319,6 +319,27 @@ The last column concerns the workload's own module loading, e.g. `modprobe`, or 
 
 Other releases of these distributions may work, but are not targeted.
 
+### Other distributions
+
+RunCVM bundles no kernel for other distributions. How it treats some popular ones, as named by their images' `/etc/os-release`:
+
+| Distribution | `ID` | `ID_LIKE` | Status |
+|---|---|---|---|
+| Rocky Linux | `rocky` | `rhel centos fedora` | Refused, unless launched with `--env=RUNCVM_KERNEL=<dist>` (e.g. `ol`) |
+| AlmaLinux | `almalinux` | `rhel centos fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
+| CentOS Stream | `centos` | `rhel fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
+| Red Hat Universal Base Image (UBI) | `rhel` | `fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
+| Amazon Linux | `amzn` | `fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
+| Fedora | `fedora` | | Refused, unless launched with `RUNCVM_KERNEL` |
+| openSUSE Leap, openSUSE Tumbleweed | `opensuse-leap`, `opensuse-tumbleweed` | `suse opensuse` | Refused, unless launched with `RUNCVM_KERNEL` |
+| Arch Linux | `arch` | | Refused, unless launched with `RUNCVM_KERNEL` |
+| Kali Linux | `kali` | `debian` | Refused, unless launched with `RUNCVM_KERNEL` (e.g. `debian`) |
+| Wolfi (Chainguard) | `wolfi` | | Refused, unless launched with `RUNCVM_KERNEL` |
+| Distroless (Debian-based, e.g. `gcr.io/distroless/base-debian12`) | `debian` | | Debian's kernel, as for Debian |
+| BusyBox, and images built `FROM scratch` | (no `/etc/os-release`) | | Debian's kernel |
+
+A Container/VM launched with `RUNCVM_KERNEL` boots the named kernel, whatever the image.
+
 ## Installation
 
 Run:
