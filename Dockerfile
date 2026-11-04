@@ -1,7 +1,12 @@
 # syntax=docker/dockerfile:1.3-labs
 
-# Alpine version to build with
+# Alpine version to build RunCVM's own binaries and libraries with
 ARG ALPINE_VERSION=3.19
+
+# Alpine version whose kernel (linux-virt) and mkinitfs to bundle, as the Alpine and OpenWrt
+# kernels. It may differ from ALPINE_VERSION, but the kernel's modules must stay loadable by
+# ALPINE_VERSION's busybox modprobe, which runcvm-vm-init uses.
+ARG ALPINE_KERNEL_VERSION=3.24
 
 # --- BUILD STAGE ---
 # Build base alpine-sdk image for later build stages
@@ -21,7 +26,22 @@ RUN apk update && apk add --no-cache alpine-sdk coreutils && \
       --branch ${ALPINE_VERSION}-stable \
       https://gitlab.alpinelinux.org/alpine/aports.git ~/aports && \
     cd ~/aports/ && \
-    git sparse-checkout set main/seabios main/dnsmasq main/dropbear main/mkinitfs
+    git sparse-checkout set main/seabios main/dnsmasq main/dropbear
+
+# --- BUILD STAGE ---
+# Build base alpine-sdk image, at ALPINE_KERNEL_VERSION, for the Alpine kernel's build stages
+FROM alpine:$ALPINE_KERNEL_VERSION as alpine-sdk-kernel
+
+ARG ALPINE_KERNEL_VERSION
+
+RUN apk update && apk add --no-cache alpine-sdk coreutils && \
+    abuild-keygen -an && \
+    cp -a /root/.abuild/*.pub /etc/apk/keys && \
+    git clone --depth 1 --single-branch --filter=blob:none --sparse \
+      --branch ${ALPINE_KERNEL_VERSION}-stable \
+      https://gitlab.alpinelinux.org/alpine/aports.git ~/aports && \
+    cd ~/aports/ && \
+    git sparse-checkout set main/mkinitfs
 
 # --- BUILD STAGE ---
 # Build patched SeaBIOS packages
@@ -86,7 +106,7 @@ EOF
 # --- BUILD STAGE ---
 # Build patched mkinitfs/nlplug-findfs
 # with a shorter maximum device-event timeout than upstream (1s, not 5s), for faster boot
-FROM alpine-sdk as alpine-mkinitfs
+FROM alpine-sdk-kernel as alpine-mkinitfs
 
 ADD patches/mkinitfs/nlplug-findfs.patch /root/aports/main/mkinitfs/nlplug-findfs.patch
 
@@ -201,13 +221,14 @@ RUN cd /root/qemu-exit && cc -o /root/qemu-exit/qemu-exit -std=gnu99 -static -s 
 
 # --- BUILD STAGE ---
 # Build alpine kernel and initramfs with virtiofs module
-FROM alpine:$ALPINE_VERSION as alpine-kernel
+FROM alpine:$ALPINE_KERNEL_VERSION as alpine-kernel
 
 # Install patched mkinitfs
 COPY --from=alpine-mkinitfs /root/packages/main/x86_64 /tmp/mkinitfs/
 RUN apk add --allow-untrusted /tmp/mkinitfs/*.apk
 RUN apk add --no-cache linux-virt
-RUN echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules && \
+RUN (grep -qxF 'kernel/fs/fuse/virtiofs*' /etc/mkinitfs/features.d/virtio.modules || \
+      echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules) && \
     sed -ri 's/\b(ata|nvme|raid|scsi|usb|cdrom|kms|mmc)\b//g; s/[ ]+/ /g' /etc/mkinitfs/mkinitfs.conf && \
     sed -ri 's/(nlplug-findfs)/\1 --timeout=1000/' /usr/share/mkinitfs/initramfs-init && \
     mkinitfs $(basename $(ls -d /lib/modules/*))
@@ -225,12 +246,12 @@ RUN mkdir -p /opt/runcvm/kernels/openwrt/$(basename $(ls -d /lib/modules/*))/mod
     cp -a /boot/vmlinuz-virt vmlinuz && \
     cp -a /boot/initramfs-virt initrd && \
     find /lib/modules/ -type f -name '*.ko*' -exec cp -a {} modules/$(basename $(ls -d /lib/modules/*)) \; && \
-    gunzip modules/$(basename $(ls -d /lib/modules/*))/*.gz && \
+    find modules/ -name '*.ko.gz' -exec gunzip {} + && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/openwrt
 
 # --- BUILD STAGE ---
-# Build Debian bookworm kernel and initramfs with virtiofs module
-FROM amd64/debian:bookworm as debian-kernel
+# Build Debian trixie kernel and initramfs with virtiofs module
+FROM amd64/debian:trixie as debian-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt update && apt install -y linux-image-amd64:amd64 && \
@@ -240,33 +261,37 @@ RUN apt update && apt install -y linux-image-amd64:amd64 && \
     update-initramfs -u
 RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
     mkdir -p /opt/runcvm/kernels/debian/$BASENAME && \
-    cp -aL /vmlinuz /opt/runcvm/kernels/debian/$BASENAME/vmlinuz && \
-    cp -aL /initrd.img /opt/runcvm/kernels/debian/$BASENAME/initrd && \
+    cp -aL /boot/vmlinuz-$BASENAME /opt/runcvm/kernels/debian/$BASENAME/vmlinuz && \
+    cp -aL /boot/initrd.img-$BASENAME /opt/runcvm/kernels/debian/$BASENAME/initrd && \
     cp -a /lib/modules/ /opt/runcvm/kernels/debian/$BASENAME/ && \
     cp -a /boot/config-$BASENAME /opt/runcvm/kernels/debian/$BASENAME/modules/$BASENAME/config && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/debian
 
 # --- BUILD STAGE ---
-# Build Ubuntu bullseye kernel and initramfs with virtiofs module
-FROM amd64/ubuntu:jammy as ubuntu-kernel
+# Build Ubuntu 26.04 (resolute) kernel and initramfs with virtiofs module
+FROM amd64/ubuntu:resolute as ubuntu-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
-RUN apt update && apt install -y linux-generic:amd64 && \
+RUN apt update && apt install -y linux-generic:amd64 zstd && \
     echo 'virtiofs' >>/etc/initramfs-tools/modules && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
+# Ubuntu compresses its kernel modules with zstd, which busybox modprobe (used by runcvm-vm-init,
+# and by busybox-based images) cannot read, so decompress them.
 RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
+    find /lib/modules/$BASENAME -name '*.ko.zst' -exec zstd -q -d --rm {} + && \
+    depmod $BASENAME && \
     mkdir -p /opt/runcvm/kernels/ubuntu/$BASENAME && \
-    cp -aL /boot/vmlinuz /opt/runcvm/kernels/ubuntu/$BASENAME/vmlinuz && \
-    cp -aL /boot/initrd.img /opt/runcvm/kernels/ubuntu/$BASENAME/initrd && \
+    cp -aL /boot/vmlinuz-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/vmlinuz && \
+    cp -aL /boot/initrd.img-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/initrd && \
     cp -a /lib/modules/ /opt/runcvm/kernels/ubuntu/$BASENAME/ && \
     cp -a /boot/config-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/modules/$BASENAME/config && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/ubuntu
 
 # --- BUILD STAGE ---
 # Build Oracle Linux kernel and initramfs with virtiofs module
-FROM oraclelinux:9 as oracle-kernel
+FROM oraclelinux:10 as oracle-kernel
 
 RUN dnf install -y kernel
 ADD ./kernels/oraclelinux/addvirtiofs.conf /etc/dracut.conf.d/addvirtiofs.conf

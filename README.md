@@ -508,17 +508,22 @@ Specify with which RunCVM kernel (from `/opt/runcvm/kernels`) to boot the VM. Va
 $ find /opt/runcvm/kernels/ -maxdepth 2 | sed 's!^/opt/runcvm/kernels/!!; /^$/d'
 debian
 debian/latest
-debian/5.10.0-16-amd64
+debian/6.12.115+deb13.1-amd64
 alpine
 alpine/latest
-alpine/5.15.59-0-virt
+alpine/6.18.60-0-virt
+openwrt
+openwrt/latest
+openwrt/6.18.60-0-virt
 ubuntu
 ubuntu/latest
-ubuntu/5.15.0-43-generic
+ubuntu/<version>-generic
 ol
-ol/5.14.0-70.22.1.0.1.el9_0.x86_64
+ol/6.12.0-211.72.1.el10_2.x86_64
 ol/latest
 ```
+
+RunCVM bundles the kernels of Debian 13 (trixie), Ubuntu 26.04 (resolute), Oracle Linux 10 and Alpine (`linux-virt`, also used for OpenWrt images), at the versions current when RunCVM is built. The Alpine kernel's release is set by the build argument `ALPINE_KERNEL_VERSION` (by default `3.24`), separately from `ALPINE_VERSION` (by default `3.19`), the release RunCVM's own tools are built from, e.g. `DOCKER_BUILDKIT=1 docker build --build-arg ALPINE_KERNEL_VERSION=3.23 -t newsnowlabs/runcvm .`.
 
 Example:
 
