@@ -245,7 +245,7 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
     cp -a /boot/vmlinuz-virt /opt/runcvm/kernels/alpine/$BASENAME/vmlinuz && \
     cp -a /boot/initramfs-virt /opt/runcvm/kernels/alpine/$BASENAME/initrd && \
     cp -a /lib/modules/ /opt/runcvm/kernels/alpine/$BASENAME/ && \
-    cp -a /boot/config-virt /opt/runcvm/kernels/alpine/$BASENAME/modules/$BASENAME/config && \
+    cp -a /boot/config-$BASENAME /opt/runcvm/kernels/alpine/$BASENAME/modules/$BASENAME/config && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/alpine
 
 FROM alpine-kernel as openwrt-kernel
