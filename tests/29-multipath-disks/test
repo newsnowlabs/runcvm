@@ -12,13 +12,17 @@ security.capability).
 - Each destination's tree on the disk matches its source: ownership, modes,
   times, contents, hard links, symlink targets and xattrs. The Container/VM
   runs with --cap-add=SYS_ADMIN, without which mke2fs, running in the
-  container, cannot read trusted.* xattrs.
+  container, cannot read trusted.* xattrs; for xfs and btrfs, also with
+  RUNCVM_SYS_ADMIN=1, without which virtiofsd, through which the VM copies
+  the destinations, drops the capability.
 - The 'subdirs' disks are mounted at /.runcvm/disks/0 and
   /.runcvm/disks/1; /mp/one, /mp/two and /default are bind mounts of their
   directories 'mp-one', 'mp-two' and 'default'.
 - The 'root' disk holds its tree at its root, and is mounted directly at
   /single.
-- Files written to every destination survive a Container/VM restart.
+- Files written to every destination survive a Container/VM restart, and
+  each mount is of the same disk as before (compared by which disk, as
+  btrfs's device numbers are allocated afresh on every mount).
 
 Run for each filesystem RunCVM supports by default (ext4, xfs and btrfs),
 with and without --init. mke2fs populates an ext4 disk itself; an xfs or
@@ -109,7 +113,8 @@ def run(item):
     name = t.unique("multipath-disks-" + label)
     t.cleanup_container(name)
     r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
-                 *(["--init"] if init else []), "--cap-add=SYS_ADMIN", "--mount", "type=volume,src=%s,dst=/disks" % volume,
+                 *(["--init"] if init else []), "--cap-add=SYS_ADMIN",
+                 *(["--env=RUNCVM_SYS_ADMIN=1"] if fs != "ext4" else []), "--mount", "type=volume,src=%s,dst=/disks" % volume,
                  "--mount", "type=volume,src=%s,dst=/mp/two" % two, "--env", "RUNCVM_DISKS=" + disks(fs),
                  image, "sleep", "infinity")
     if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
@@ -134,6 +139,16 @@ def run(item):
     }
     results["mounts-after-restart"] = mountinfo(name)
     return results
+
+
+def disks_of(mounts):
+    """Map each of MOUNTS to (n, root): n numbers its device in order of first appearance."""
+    devices = {}
+    result = {}
+    for k in MOUNTS:
+        m = mounts.get(k)
+        result[k] = None if m is None else (devices.setdefault(m[0], len(devices)), m[1])
+    return result
 
 
 def compare(desc, source, disk):
@@ -194,6 +209,6 @@ for (fs, init), results in zip(items, t.parallel(run, items)):
     t.check("%s: files written survive a restart" % mode, {d: label for d in DSTS},
             results["after-restart"])
     t.check("%s: same mounts after a restart" % mode,
-            {k: mounts.get(k) for k in MOUNTS}, {k: results["mounts-after-restart"].get(k) for k in MOUNTS})
+            disks_of(mounts), disks_of(results["mounts-after-restart"]))
 
 t.finish()

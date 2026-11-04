@@ -254,7 +254,7 @@ do_disk() {
 
   if ! disk_fs "$fs"; then
     mapfile -t fss < <(disk_fs_list 1)
-    error "Error: disk spec '$spec' invalid: fs '$fs' unsupported; fs must be one of: ${fss[*]}"
+    error "Error: disk spec '$spec' invalid: fs '$fs' unsupported; fs must be one of: $(IFS=' '; echo "${fss[*]}")"
   fi
 
   if [[ -e "$src" && ! -f "$src" ]]; then

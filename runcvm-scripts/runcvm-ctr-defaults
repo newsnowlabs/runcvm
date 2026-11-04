@@ -83,9 +83,10 @@ workload_env() {
 # Looks up filesystem <fs> in $RUNCVM_GUEST/etc/disk-filesystems, the filesystems that disks in
 # RUNCVM_DISKS may have, setting DISK_FS_MODULES (an array of kernel modules), DISK_FS_LABEL_OPT,
 # DISK_FS_SUBDIRS_LABEL and DISK_FS_MKFS (an array: the mkfs command and its options). Returns 1
-# if <fs> is not listed.
+# if <fs> is not listed. Fields are split at whitespace, whatever the caller's IFS.
 disk_fs() {
   local fs modules packages label_opt label mkfs
+  local IFS=$' \t\n'
 
   while read -r fs modules packages label_opt label mkfs
   do
@@ -130,10 +131,12 @@ load_network6() {
   return 0
 }
 
+# Prints the path of command $1 in RunCVM's own tool directories (RUNCVM_PATH), whatever the
+# caller's IFS; returns 1 if it is not there.
 which() {
-  local cmd="$1"
-  local WHICH_PATH="${RUNCVM_PATH//:/ }" # Replace ':' with ' '
-  for p in $WHICH_PATH; do [ -x "$p/$cmd" ] && echo "$p/$cmd" && return 0; done
+  local cmd="$1" p
+  local IFS=':'
+  for p in $RUNCVM_PATH; do [ -x "$p/$cmd" ] && echo "$p/$cmd" && return 0; done
   return 1
 }
 
