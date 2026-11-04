@@ -307,13 +307,15 @@ RunCVM aims to support each distribution's latest release and the two before it 
 
 | Distribution | Image releases RunCVM targets | RunCVM's kernel (`RUNCVM_KERNEL`) | Kernel built from | Kernel series | Module compression | Image releases whose own `modprobe` can load the kernel's modules |
 |---|---|---|---|---|---|---|
-| Debian | 13 (Trixie), 12 (Bookworm), 11 (Bullseye) | `debian` | Debian 12 (Bookworm) | 6.1 | none | all |
-| Ubuntu | 26.04 LTS (Resolute Raccoon), 24.04 LTS (Noble Numbat), 22.04 LTS (Jammy Jellyfish) | `ubuntu` | Ubuntu 22.04 LTS (Jammy Jellyfish) | 5.15 | none | all |
-| Oracle Linux | 10, 9, 8 | `ol` | Oracle Linux 9 | 5.14 | xz | 7 and later (9 and 10 once `kmod` is installed) |
-| Alpine Linux | 3.24, 3.23, 3.22 | `alpine` | Alpine Linux 3.19 (`linux-virt`) | 6.6 | gzip | all |
-| OpenWrt | (not targeted by release) | `openwrt` | Alpine Linux 3.19 (`linux-virt`) | 6.6 | none | all |
+| Debian | 13 (Trixie), 12 (Bookworm), 11 (Bullseye) | `debian` | Debian 13 (Trixie) | 6.12 | xz | 10 (Buster) and later |
+| Ubuntu | 26.04 LTS (Resolute Raccoon), 24.04 LTS (Noble Numbat), 22.04 LTS (Jammy Jellyfish) | `ubuntu` | Ubuntu 26.04 LTS (Resolute Raccoon) | 7.0 | xz (recompressed from Ubuntu's zstd) | 20.04 LTS (Focal Fossa) and later |
+| Oracle Linux | 10, 9, 8 | `ol` | Oracle Linux 10 | 6.12 | xz | 7 and later (9 and 10 once `kmod` is installed) |
+| Alpine Linux | 3.24, 3.23, 3.22 | `alpine` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | gzip | all |
+| OpenWrt | (not targeted by release) | `openwrt` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | none | all |
 
-Each kernel is the latest that its release provides when RunCVM is built (e.g. Debian 12's current 6.1 kernel).
+Each kernel is the latest that its release provides when RunCVM is built (e.g. Debian 13's current 6.12 kernel).
+
+The Debian, Ubuntu and Oracle Linux kernels' modules are xz-compressed by default, which the targeted releases all read. For an image whose own `modprobe` reads only uncompressed modules, such as Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) or Ubuntu 18.04 LTS (Bionic Beaver), build RunCVM with the build argument `KERNEL_MODULE_COMPRESSION=none`, which leaves those kernels' modules uncompressed, at the cost of a larger RunCVM image (the Debian and Ubuntu kernels' modules together take of the order of 1 GB uncompressed, and roughly a quarter of that compressed), e.g. `DOCKER_BUILDKIT=1 docker build --build-arg KERNEL_MODULE_COMPRESSION=none -t newsnowlabs/runcvm .`.
 
 The last column concerns the workload's own module loading, e.g. `modprobe`, or `dockerd` loading `overlay` or `br_netfilter`, in the VM. It reflects which compressed formats each release's `kmod` (or, for Alpine Linux, BusyBox) can read: for example, Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) and Ubuntu 18.04 LTS (Bionic Beaver) read only uncompressed modules, Debian 10 (Buster), Debian 11 (Bullseye) and Ubuntu 20.04 LTS (Focal Fossa) also read xz, and later releases also read zstd. Oracle Linux 9 and 10 images include no `kmod` until it is installed. RunCVM itself loads the modules it needs, while the VM boots, with its own bundled BusyBox `modprobe`, which reads uncompressed, gzip and xz modules, whatever the image.
 
@@ -538,13 +540,13 @@ openwrt/latest
 openwrt/6.18.60-0-virt
 ubuntu
 ubuntu/latest
-ubuntu/<version>-generic
+ubuntu/7.0.0-14-generic
 ol
 ol/6.12.0-211.72.1.el10_2.x86_64
 ol/latest
 ```
 
-RunCVM bundles the kernels of Debian 13 (trixie), Ubuntu 26.04 (resolute, with its modules recompressed from zstd to xz, which busybox `modprobe` reads), Oracle Linux 10 and Alpine (`linux-virt`, also used for OpenWrt images), each at the version its distribution provides when the RunCVM image is built. The Alpine kernel's release is set by the build argument `ALPINE_KERNEL_VERSION` (by default `3.24`), separately from `ALPINE_VERSION` (by default `3.19`), the release RunCVM's own binaries and libraries are built from, e.g. `DOCKER_BUILDKIT=1 docker build --build-arg ALPINE_KERNEL_VERSION=3.23 -t newsnowlabs/runcvm .`.
+RunCVM bundles the kernels of Debian 13 (trixie), Ubuntu 26.04 (resolute), Oracle Linux 10 and Alpine (`linux-virt`, also used for OpenWrt images), each at the version its distribution provides when the RunCVM image is built. The Alpine kernel's release is set by the build argument `ALPINE_KERNEL_VERSION` (by default `3.24`), separately from `ALPINE_VERSION` (by default `3.19`), the release RunCVM's own binaries and libraries are built from, e.g. `DOCKER_BUILDKIT=1 docker build --build-arg ALPINE_KERNEL_VERSION=3.23 -t newsnowlabs/runcvm .`.
 
 Example:
 

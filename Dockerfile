@@ -9,6 +9,13 @@ ARG ALPINE_VERSION=3.19
 # runcvm-vm-init uses.
 ARG ALPINE_KERNEL_VERSION=3.24
 
+# Compression of the Debian, Ubuntu and Oracle Linux kernels' modules: 'xz' (the default), which
+# busybox modprobe (used by runcvm-vm-init) and the kmod of Debian 10 (Buster), Ubuntu 20.04 LTS
+# (Focal Fossa), Oracle Linux 7 and their later releases read; or 'none', for images whose own
+# modprobe reads only uncompressed modules, such as Debian 9 (Stretch) and Ubuntu 18.04 LTS
+# (Bionic Beaver). The Alpine and OpenWrt kernels' modules are unaffected.
+ARG KERNEL_MODULE_COMPRESSION=xz
+
 # --- BUILD STAGE ---
 # Build base alpine-sdk image for later build stages
 FROM alpine:$ALPINE_VERSION as alpine-sdk
@@ -255,12 +262,20 @@ RUN mkdir -p /opt/runcvm/kernels/openwrt/$(basename $(ls -d /lib/modules/*))/mod
 FROM amd64/debian:trixie as debian-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
-RUN apt update && apt install -y linux-image-amd64:amd64 && \
+ARG KERNEL_MODULE_COMPRESSION
+RUN apt update && apt install -y linux-image-amd64:amd64 xz-utils && \
     echo 'virtiofs' >>/etc/initramfs-tools/modules && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
+# Debian compresses its kernel modules with xz.
 RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
+    case "$KERNEL_MODULE_COMPRESSION" in \
+      xz) ;; \
+      none) find /lib/modules/$BASENAME -name '*.ko.xz' -print0 | xargs -0 -r -n 64 -P "$(nproc)" xz -q -d && \
+            depmod $BASENAME ;; \
+      *) echo "KERNEL_MODULE_COMPRESSION must be 'xz' or 'none'" >&2; exit 1 ;; \
+    esac && \
     mkdir -p /opt/runcvm/kernels/debian/$BASENAME && \
     cp -aL /boot/vmlinuz-$BASENAME /opt/runcvm/kernels/debian/$BASENAME/vmlinuz && \
     cp -aL /boot/initrd.img-$BASENAME /opt/runcvm/kernels/debian/$BASENAME/initrd && \
@@ -273,17 +288,23 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
 FROM amd64/ubuntu:resolute as ubuntu-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG KERNEL_MODULE_COMPRESSION
 RUN apt update && apt install -y linux-generic:amd64 zstd xz-utils && \
     echo 'virtiofs' >>/etc/initramfs-tools/modules && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
 # Ubuntu compresses its kernel modules with zstd, which busybox modprobe (used by runcvm-vm-init,
-# and by busybox-based images) cannot read, so recompress them with xz, which it can, as Debian's
-# and Oracle Linux's modules are compressed, with the options the kernel's own build uses for xz.
+# and by busybox-based images) cannot read, so decompress them, and for 'xz' recompress them with
+# xz, which it can, as Debian's and Oracle Linux's modules are compressed, with the options the
+# kernel's own build uses for xz.
 RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
+    case "$KERNEL_MODULE_COMPRESSION" in \
+      xz|none) ;; \
+      *) echo "KERNEL_MODULE_COMPRESSION must be 'xz' or 'none'" >&2; exit 1 ;; \
+    esac && \
     find /lib/modules/$BASENAME -name '*.ko.zst' -print0 | \
-      xargs -0 -r -n 64 -P "$(nproc)" sh -ec 'for f; do zstd -q -d --rm "$f"; xz -q --check=crc32 --lzma2=dict=1MiB "${f%.zst}"; done' sh && \
+      xargs -0 -r -n 64 -P "$(nproc)" sh -ec 'm=$1; shift; for f; do zstd -q -d --rm "$f"; [ "$m" = none ] || xz -q --check=crc32 --lzma2=dict=1MiB "${f%.zst}"; done' sh "$KERNEL_MODULE_COMPRESSION" && \
     depmod $BASENAME && \
     mkdir -p /opt/runcvm/kernels/ubuntu/$BASENAME && \
     cp -aL /boot/vmlinuz-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/vmlinuz && \
@@ -296,10 +317,19 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
 # Build Oracle Linux kernel and initramfs with virtiofs module
 FROM oraclelinux:10 as oracle-kernel
 
-RUN dnf install -y kernel
+ARG KERNEL_MODULE_COMPRESSION
+RUN dnf install -y kernel xz
 ADD ./kernels/oraclelinux/addvirtiofs.conf /etc/dracut.conf.d/addvirtiofs.conf
 ADD ./kernels/oraclelinux/95virtiofs /usr/lib/dracut/modules.d/95virtiofs
 RUN dracut --force --kver $(basename /lib/modules/*) --kmoddir /lib/modules/*
+# Oracle Linux compresses its kernel modules with xz.
+RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
+    case "$KERNEL_MODULE_COMPRESSION" in \
+      xz) ;; \
+      none) find /lib/modules/$BASENAME -name '*.ko.xz' -print0 | xargs -0 -r -n 64 -P "$(nproc)" xz -q -d && \
+            depmod $BASENAME ;; \
+      *) echo "KERNEL_MODULE_COMPRESSION must be 'xz' or 'none'" >&2; exit 1 ;; \
+    esac
 RUN mkdir -p /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*)) && \
     mv /lib/modules/*/vmlinuz /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
     cp -aL /boot/initramfs* /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*))/initrd && \
