@@ -85,8 +85,8 @@ error() {
 
 # Sets RUNC to the runc binary to which RunCVM passes each command: the first 'runc' in the
 # caller's PATH (as Docker itself finds runc), or else in the usual system directories. Docker's
-# own packages install runc as /usr/bin/runc; Debian's and Ubuntu's (docker.io, runc) as
-# /usr/sbin/runc. Returns 1 if none is found.
+# own packages install runc as /usr/bin/runc; Debian's and Ubuntu's runc package (a dependency of
+# their docker.io package) as /usr/sbin/runc. Returns 1 if none is found.
 find_runc() {
   local dir
 
