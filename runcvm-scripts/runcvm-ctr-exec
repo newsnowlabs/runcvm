@@ -2,15 +2,11 @@
 
 # See https://qemu-project.gitlab.io/qemu/interop/qemu-ga-ref.html
 
-# Load original environment
+# Load RunCVM's own environment, saved by runcvm-ctr-entrypoint
 . /.runcvm/config
 
 # Load defaults and aliases
 . $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
-
-env() {
-  busybox env "$@"
-}
 
 to_bin() {
   # tab, LF, space, ', ", \
@@ -18,21 +14,23 @@ to_bin() {
 }
 
 # Expects:
-# - To be run as root
-# - To be given env vars
+# - To be run as root, with RunCVM's own environment
 # - To be given arguments
 #   $1 <uid>:<gid>:<additionalGids>
 #   $2 <cwd>
 #   $3 <ENV-HOME-boolean>
 #   $4 <wantsTerminal-boolean>
-#   $(5...) <command> <args>
+#   $5 <N>, the number of entries in the command's environment
+#   $(6...5+N) <NAME>=<VALUE>, the command's environment
+#   $(6+N...) <command> <args>
 
 command="$RUNCVM_GUEST/scripts/runcvm-vm-exec"
 uidgid="$1"
 cwd="$2"
 hasHome="$3"
 wantsTerminal="$4"
-shift 4
+env=("${@:6:$5}")
+shift $(($5 + 5))
 
 # Parse uidgid and construct args array for the call to $command within the VM:
 # $1 <uid>
@@ -52,16 +50,13 @@ fi
 #
 # - See runcvm-ctr-entrypoint for full details of how/why hasHome is needed and HOME gets set.
 
+workload_env env
+
 if [ "$hasHome" != "1" ]; then
   # Look up uid's HOME here (runcvm-vm-exec could equally do this).
-  HOME=$(getent passwd "$uid" | cut -d':' -f6)
+  home=$(getent passwd "$uid" | cut -d':' -f6)
+  env+=("HOME=${home:-/}")
 fi
-
-# Clean RUNCVM env vars
-clean_env
-
-# N.B. Only exported env vars will be returned and sent
-mapfile -t env < <(env -u _ -u SHLVL -u PWD)
 
 if [ ${#env[@]} -gt 0 ]; then
   env_bin=$(printf '%s\n' "${env[@]}" | to_bin)
@@ -79,7 +74,7 @@ do
   if [ $retries -gt 0 ]; then
     retries=$((retries-1))
     delay=1
-    sleep 0.5
+    busybox sleep 0.5
     continue
   fi
 
@@ -89,7 +84,7 @@ done
 
 # If startup was detected, wait a few extra seconds for dropbear sshd to be ready
 if [ "$delay" -ne 0 ]; then
-  sleep 2
+  busybox sleep 2
 fi
 
 exec $RUNCVM_GUEST/usr/bin/dbclient "${opts[@]}" -p $SSHD_PORT -y -y -i /.runcvm/dropbear/key root@$DOCKER_IF_IP "$command '$uidgid' '$(echo -n $cwd | to_bin)' '$args_bin' '$env_bin'"

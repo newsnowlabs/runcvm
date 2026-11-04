@@ -32,11 +32,11 @@ log -n "Creating plain (IPv4-only) network '$NETWORK2' ..."
 docker network create $(labels) "$NETWORK2"
 
 # Launch two RunCVM containers on the dual-stack network. '--dns-search=.' gives them no DNS
-# search domains, whatever the host's resolv.conf holds, so that name lookups between them behave
-# the same on every host.
+# search domains, and '--dns-opt=ndots:1' a fixed ndots in place of Docker's 'ndots:0', whatever
+# the host's resolv.conf holds, so that name lookups between them behave the same on every host.
 for n in a b; do
   log -n "Launching RunCVM container '$NODE-$n' ..."
-  docker run -d --rm $(labels) $(vm_opts) --runtime=$RUNTIME --network=$NETWORK --dns-search=. --name=$NODE-$n --hostname=$NODE-$n $IMAGE \
+  docker run -d --rm $(labels) $(vm_opts) --runtime=$RUNTIME --network=$NETWORK --dns-search=. --dns-opt=ndots:1 --name=$NODE-$n --hostname=$NODE-$n $IMAGE \
     sh -c 'while true; do sleep 1; done'
 done
 

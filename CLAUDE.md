@@ -32,7 +32,7 @@ the runtime or the scripts.
   exercises RunCVM itself, so it suits sandboxes and CI hosts without nested virtualisation.
   The integration tests need a Docker daemon with the `runcvm` runtime registered. Check what
   the current environment has before choosing what to test, and say plainly in any report what
-  could not be tested there (e.g. "not tested on KVM", "not tested on arm64").
+  could not be tested there (e.g. "not tested on KVM", "not tested with Podman").
 
 ## Integration tests
 
@@ -156,6 +156,23 @@ Format: a subject line of at most about 72 characters, in the imperative or as a
 wrapped at 72 columns explaining what the change does and why, with user-visible options and
 behaviour stated explicitly.
 
+Pull request descriptions, unlike commit messages, are not hard-wrapped: write each paragraph
+and list item as a single line. GitHub renders a line break within a paragraph or list item in
+a description as a visible break, so wrapped text displays as ragged, broken lines.
+
+A pull request's test steps go in one `bash` code block, which can be copied and run as a
+whole. Announce each step with `echo`, and after each command whose outcome matters, `echo`
+its exit status alongside the status expected, e.g.
+`echo "=== second run exit status: $? (expect 1)"`, so that the output makes sense when pasted
+back. Don't use `set -e`: chain with `&&` each step that is meaningless or unsafe after an
+earlier one fails (e.g. a test run after its setup), and leave independent steps unchained, so
+they run regardless. Where steps differ between KVM and TCG hosts, set the difference in a
+variable on the block's first line.
+
+A pull request may be raised while its tests are still running. Its description then says which
+results are pending; as they come in, record them there, and push any fixes they call for to
+the branch.
+
 ## Merging to `main`
 
 `main` takes only clean commits. How a pull request lands depends on its branch:
@@ -171,6 +188,16 @@ behaviour stated explicitly.
   Raw-History: raw/<branch> (<original-tip-short-hash>)
   ```
   A single-commit branch needs no tag or trailer.
+
+Once the changes in a pull request whose branch has more than one commit are complete (its
+tests may still be running), its description ends with a "Squash commit message" section, for
+use if it is squash-merged; a clean branch may still be rebase-merged instead. The section
+holds the subject and body in a fenced block, which keeps the body's 72-column wrapping. They
+follow the rules in "Commit messages", with the subject ending in the pull request's number
+(e.g. `(#60)`) as GitHub's own squash subjects do, and the body ending with the
+`Raw-History:` trailer for the branch's tip and any `Co-Authored-By:` trailers. The message
+describes the pull request's final diff against its base, not the branch's commits one by
+one, and is updated whenever the branch changes.
 
 ### Stacked pull requests
 

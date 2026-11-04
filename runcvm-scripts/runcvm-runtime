@@ -37,6 +37,19 @@ RUNCVM_QEMU_TCG_TB_MEM_SIZE_MIN="32"
 RUNCVM_QEMU_TCG_TB_MEM_SIZE_MAX="4096"
 RUNCVM_DEBUG=""
 
+# The PATH of RunCVM's own processes in the container and the VM: the RunCVM guest tool
+# directories. Must match RUNCVM_PATH in runcvm-ctr-defaults.
+RUNCVM_GUEST_PATH="$RUNCVM_GUEST/usr/sbin:$RUNCVM_GUEST/usr/bin:$RUNCVM_GUEST/sbin:$RUNCVM_GUEST/bin:$RUNCVM_GUEST/usr/lib/qemu"
+
+# runcvm_env($path): the environment of RunCVM's own processes, given the environment of a
+# container process (config.json's process.env, or process.json's env): its RUNCVM_* settings,
+# TERM (used by QEMU's curses display) if present, PATH ($path) and HOME (/.runcvm, private to
+# RunCVM). The process's original environment is passed in its arguments instead, and only the
+# workload receives it, so that no variable meant for the workload (e.g. LD_LIBRARY_PATH,
+# BASH_ENV, UID) can affect RunCVM's own scripts and tools.
+RUNCVM_ENV_JQ='def runcvm_env($path):
+  (. // []) | map(select(startswith("RUNCVM_") or startswith("TERM="))) + ["PATH=" + $path, "HOME=/.runcvm"];'
+
 debug() {
   [ -n "$RUNCVM_DEBUG" ] && true || false
 }
@@ -94,8 +107,9 @@ load_env_from_file() {
   return 1
 }
 
+# HOME=$RUNCVM keeps jq from loading the invoking user's ~/.jq.
 jq() {
-  $RUNCVM_LD $RUNCVM_JQ "$@"
+  HOME=$RUNCVM $RUNCVM_LD $RUNCVM_JQ "$@"
 }
 
 jq_set() {
@@ -218,6 +232,9 @@ if [ "$COMMAND" = "create" ]; then
 
   CFG="$BUNDLE/config.json"
   ROOT=$(jq -r .root.path $CFG)
+
+  # The container's environment, as given by Docker/Podman, for the workload (see below)
+  WORKLOAD_ENV=$(jq -c '.process.env // []' "$CFG")
 
   # Allow user to enable debug logging
   if [ "$(get_config_env RUNCVM_RUNTIME_DEBUG)" = "1" ]; then
@@ -555,6 +572,21 @@ if [ "$COMMAND" = "create" ]; then
     jq_set "$CFG" '.process.capabilities.bounding += ["CAP_SYS_ADMIN"] | .process.capabilities.effective += ["CAP_SYS_ADMIN"] | .process.capabilities.permitted += ["CAP_SYS_ADMIN"]'
   fi
 
+  # CONFIGURE ENVIRONMENT
+  # This must remain the last change to config.json: it follows every set_config_env, and the
+  # placement of runcvm-ctr-entrypoint in process.args[0].
+  #
+  # Pass the workload's environment to runcvm-ctr-entrypoint as arguments, following its own
+  # path: a count N, then N NAME=VALUE entries, before the original entrypoint and command.
+  # Each entry being an argument of its own, it has the same size limit as an environment
+  # string. Then reduce the environment to RunCVM's own (see runcvm_env above).
+  jq_set "$CFG" \
+    --slurpfile env <(printf '%s' "$WORKLOAD_ENV") \
+    --arg path "$RUNCVM_GUEST_PATH" \
+    "$RUNCVM_ENV_JQ"'
+      .process.args = [.process.args[0], ($env[0] | length | tostring)] + $env[0] + .process.args[1:]
+      | .process.env |= runcvm_env($path)'
+
   debug && cp -a $CFG /tmp/config.json-$$-2
   
 elif [ "$COMMAND" = "exec" ]; then
@@ -613,13 +645,20 @@ elif [ "$COMMAND" = "exec" ]; then
     hasHome=$(get_process_env_boolean "$PROCESS" 'HOME')
     wantsTerminal=$(jq_get "$PROCESS" '.terminal')
 
+    # Pass the command's environment to runcvm-ctr-exec as arguments (a count N, then N
+    # NAME=VALUE entries, before the command), and reduce the environment to RunCVM's own (see
+    # runcvm_env above).
     jq_set "$PROCESS" \
       --arg exec "$RUNCVM_EXEC" \
       --arg uidgid "$uidgid" \
       --arg cwd "$cwd" \
       --arg hasHome "$hasHome" \
       --arg wantsTerminal "$wantsTerminal" \
-      '.args |= [$exec, $uidgid, $cwd, $hasHome, $wantsTerminal] + .'
+      --arg path "$RUNCVM_GUEST_PATH" \
+      "$RUNCVM_ENV_JQ"'
+        (.env // []) as $env
+        | .args |= [$exec, $uidgid, $cwd, $hasHome, $wantsTerminal, ($env | length | tostring)] + $env + .
+        | .env = ($env | runcvm_env($path))'
 
     # Force root (or whatever user qemu runs as)
     # Force cwd in the container to / 

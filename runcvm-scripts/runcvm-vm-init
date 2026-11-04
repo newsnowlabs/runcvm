@@ -1,18 +1,21 @@
 #!/.runcvm/guest/bin/bash -e
 
-# Load original environment
+# Load RunCVM's own environment, saved by runcvm-ctr-entrypoint
 . /.runcvm/config
 
 # Load defaults and aliases
 . $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
-# Alpine initrd doesn't honour command-line rw flag
-mount -o remount,rw /
+# Alpine initrd doesn't honour command-line rw flag.
+# -i keeps mount from running any /sbin/mount.<type> helper from the image, and
+# --options-source=disable keeps the image's /etc/fstab from adding options to the remount (e.g.
+# 'errors=remount-ro', which virtiofs rejects, halting the VM as this script runs with 'bash -e').
+mount -i --options-source=disable -o remount,rw /
 
 # FIXME: Something is making /.runcvm ro, so remount it rw
 # until such time as exit code handling and dropbear key creation
 # obviate the need for this.
-mount -o remount,rw /.runcvm
+mount -i --options-source=disable -o remount,rw /.runcvm
 
 # Alpine initrd doesn't configure /dev device permissions and ownership
 # to support non-root users.
@@ -43,6 +46,65 @@ fi
 # Some systems do not set up /dev/fd. If needed, add it.
 if ! [ -h /dev/fd ]; then
   ln -s /proc/self/fd /dev/fd
+fi
+
+# Switch the root filesystem to the whole-root disk, if RUNCVM_DISKS defines one (see do_root_disk
+# in runcvm-ctr-qemu). This must happen before anything else uses the root: everything after it,
+# and the workload, sees the disk as /.
+if [ -f /.runcvm/rootdisk ]; then
+  read -r ROOTDISK_UUID </.runcvm/rootdisk
+
+  # The paths to carry onto the disk: each mount directly below the root, such as /proc, /sys and
+  # /dev; and each path the container recorded as a mountpoint, as Docker's volumes appear in the
+  # VM as mounts only once accessed, and its bind-mounted files, such as /etc/hosts, never do.
+  ROOTDISK_MOUNTS=$(
+    {
+      awk 'NR==FNR { if ($5 == "/") root=$1; next } $2 == root && $5 != "/.runcvm" { print $5 }' /proc/self/mountinfo /proc/self/mountinfo
+      cat /.runcvm/rootdisk-mounts
+    } | busybox sort -u
+  )
+
+  busybox modprobe ext4
+  mkdir -p /.runcvm/newroot /.runcvm/vmroot
+  mount -i --options-source=disable -t ext4 -o noatime "UUID=$ROOTDISK_UUID" /.runcvm/newroot
+
+  # Carry /.runcvm, and RunCVM's own tools in /.runcvm/guest, onto the disk.
+  mkdir -p /.runcvm/newroot/.runcvm
+  mount -i --options-source=disable --bind /.runcvm /.runcvm/newroot/.runcvm
+  mount -i --options-source=disable --bind /.runcvm/guest /.runcvm/newroot/.runcvm/guest
+
+  # Bind each path over the same path on the disk, recursively, so that each carries the mounts
+  # below it, creating a mountpoint of the same kind if the disk lacks one: the disk holds an empty
+  # directory at each mountpoint that is a directory, and nothing at a mounted file.
+  ROOTDISK_CARRIED=()
+  while IFS= read -r path
+  do
+    [ -n "$path" ] || continue
+
+    for carried in "${ROOTDISK_CARRIED[@]}"
+    do
+      [[ "$path" = "$carried"/* ]] && continue 2
+    done
+    ROOTDISK_CARRIED+=("$path")
+
+    if [ -d "$path" ]; then
+      mkdir -p "/.runcvm/newroot$path"
+    else
+      mkdir -p "/.runcvm/newroot$(busybox dirname "$path")"
+      [ -e "/.runcvm/newroot$path" ] || touch "/.runcvm/newroot$path"
+    fi
+
+    mount -i --options-source=disable --rbind "$path" "/.runcvm/newroot$path"
+  done <<<"$ROOTDISK_MOUNTS"
+
+  # Switch to the disk. Everything this script uses must already be on the disk: RunCVM's tools,
+  # which find their libraries through /proc/self/exe, need /proc. Nothing needs the image's
+  # filesystem afterwards, so detach it.
+  cd /.runcvm/newroot
+  busybox pivot_root . .runcvm/vmroot
+  cd /
+  busybox umount -l /.runcvm/vmroot
+  rmdir /.runcvm/vmroot /.runcvm/newroot
 fi
 
 # Some kernels (e.g. Alpine's) build IPv6 as a module. Unless IPv6 is disabled on the kernel command
@@ -143,13 +205,48 @@ done </.runcvm/network/routes6
 # Setup hostname
 hostname -F /etc/hostname
 
+# Reports error $1 on the console device, which the container's output is connected to, and powers
+# the VM off with exit status 1.
+vm_init_error() {
+  local console
+
+  read -r console </.runcvm/console
+  echo "RunCVM: Error: $1" >"/dev/$console"
+  echo 1 >/.runcvm/exitcode
+  poweroff -f
+  exit 1
+}
+
 # Mount filesystems defined in /etc/fstab OR as defined in RUNCVM_DISKS
 if [ -f /.runcvm/fstab ]; then
   busybox modprobe ext4
-  mount -a --fstab /.runcvm/fstab -o X-mount.mkdir
+
+  # Resolve UUID= with RunCVM's own libblkid configuration, which scans devices and keeps no
+  # cache, not with the image's /etc/blkid.conf and /run/blkid cache. -i keeps mount from running
+  # any /sbin/mount.<type> helper from the image.
+  if ! BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null mount -i -a --fstab /.runcvm/fstab -o X-mount.mkdir; then
+    # Name each entry left unmounted. A bind mount from a disk with layout 'subdirs' fails if the
+    # disk, once mounted at /.runcvm/disks/<n>, has no directory for its destination: a
+    # destination added to the disk's spec after the disk was created. That is reported only
+    # where the disk itself is mounted, as an unmounted disk holds no directories to look for.
+    unmounted=()
+    while read -r src dst _
+    do
+      [[ -z "$dst" || "$src" = \#* ]] && continue
+      findmnt -rn --mountpoint "$dst" >/dev/null && continue
+
+      if [[ "$src" = /.runcvm/disks/* ]] && findmnt -rn --mountpoint "${src%/*}" >/dev/null && ! [ -d "$src" ]; then
+        vm_init_error "dst '$dst' cannot be mounted: its disk has no directory '${src##*/}', so was created without this destination; destinations cannot be added to an existing disk"
+      fi
+
+      unmounted+=("$dst")
+    done </.runcvm/fstab
+
+    vm_init_error "mounting the filesystems in /.runcvm/fstab failed, leaving unmounted: ${unmounted[*]}"
+  fi
 
   # Now mount our fstab over /etc/fstab
-  mount --bind /.runcvm/fstab /etc/fstab
+  mount -i --bind /.runcvm/fstab /etc/fstab
 fi
 
 # Load cgroupfs (if needed/requested):
@@ -208,7 +305,7 @@ if [ "$RUNCVM_INIT" = "1" ]; then
   cat >/etc/inittab <<_EOE_
 $CONSOLE_DEVICE::respawn:-$RUNCVM_GUEST/scripts/runcvm-vm-start-wrapper
 null::respawn:$RUNCVM_GUEST/scripts/runcvm-vm-qemu-ga
-null::respawn:$RUNCVM_GUEST/usr/sbin/dropbear -REF -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
+null::respawn:$RUNCVM_GUEST/usr/sbin/dropbear -REF -s -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
 null::ctrlaltdel:$RUNCVM_GUEST/bin/poweroff
 null::restart:$RUNCVM_GUEST/bin/poweroff
 null::shutdown:$RUNCVM_GUEST/bin/poweroff
@@ -226,10 +323,12 @@ else
   clean_env
 
   # Run the qemu guest agent, needed to support future functionality
-  $RUNCVM/scripts/runcvm-vm-qemu-ga &>/dev/null &
+  $RUNCVM_GUEST/scripts/runcvm-vm-qemu-ga &>/dev/null &
 
-  # Run dropbear SSH server, needed to support 'docker exec'
-  dropbear -REF -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
+  # Run dropbear SSH server, needed to support 'docker exec'.
+  # It accepts only RunCVM's own key (via the EPKA plugin): -s disables password logins, which would
+  # otherwise be checked against the image's /etc/shadow, and -j and -k disable port forwarding.
+  dropbear -REF -s -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
 
   # Run init from the image
   # Pipe input/output from/to console device

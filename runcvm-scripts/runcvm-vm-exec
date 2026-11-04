@@ -1,7 +1,9 @@
 #!/.runcvm/guest/bin/bash
 
+# Runs before runcvm-ctr-defaults is loaded (RUNCVM_GUEST is not yet set), with dropbear's PATH,
+# so must name RunCVM's own 'tr' explicitly.
 from_bin() {
-  tr '\200\201\202\203\204\205' "\011\012\040\047\042\134"
+  /.runcvm/guest/bin/tr '\200\201\202\203\204\205' "\011\012\040\047\042\134"
 }
 
 error() {
@@ -24,7 +26,7 @@ cwd=$(echo -n "$cwd_bin" | from_bin)
 
 cd "$cwd" 2>/dev/null && unset OLDPWD || error
 
-# Load original environment
+# Load RunCVM's own environment, saved by runcvm-ctr-entrypoint
 . /.runcvm/config
 
 # Load defaults and aliases

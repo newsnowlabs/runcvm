@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""RunCVM's own tools take nothing from the image.
+
+The Container/VM's root file system is the image's, so RunCVM's scripts and
+bundled tools must not use the image's configuration files, helpers or
+commands. This test builds an image from alpine that would subvert each of
+them:
+
+- /etc/fstab gives / the option 'errors=remount-ro', which the VM's remount
+  of its virtiofs root would reject;
+- /etc/dnsmasq.conf sets 'port=0', which would disable the DNS forwarder;
+- /etc/qemu/qemu-ga.conf names a log file, /dev/qga-conf-marker;
+- /sbin/mount.<type> helpers for virtiofs, tmpfs, cgroup, cgroup2, ext4 and
+  none write markers to /dev;
+- /scripts/runcvm-vm-qemu-ga writes a marker, and must not be run in place of
+  RunCVM's own;
+- /usr/lib/ip/link_bridge.so is not a valid library;
+- /etc/iproute2/rt_protos and rt_scopes rename 'kernel', 'link' and 'global';
+- there is no 'tr' and no 'sleep'.
+
+With and without --init, the Container/VM must boot and run its entrypoint,
+mount a RUNCVM_DISKS disk (an ext4 mount and a bind mount from it) and a
+RUNCVM_TMPFS file system, resolve a container name over DNS, run
+'docker exec' (also as soon as it starts), and run qemu-ga, and no marker may
+appear.
+"""
+
+import atexit
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+DOCKERFILE = r"""
+FROM alpine
+RUN echo '/dev/vda / ext4 errors=remount-ro 0 1' >/etc/fstab \
+ && echo 'port=0' >/etc/dnsmasq.conf \
+ && mkdir -p /etc/qemu /etc/iproute2 /usr/lib/ip /scripts /data \
+ && printf '[general]\nlogfile=/dev/qga-conf-marker\nverbose=true\n' >/etc/qemu/qemu-ga.conf \
+ && printf '2\tkern\n' >/etc/iproute2/rt_protos \
+ && printf '0\tglob\n253\tlnk\n' >/etc/iproute2/rt_scopes \
+ && echo 'not a library' >/usr/lib/ip/link_bridge.so \
+ && printf '#!/bin/sh\necho "$0 $*" >>/dev/mount-helper-marker\nexit 1\n' >/sbin/mount.virtiofs \
+ && chmod 755 /sbin/mount.virtiofs \
+ && for t in tmpfs cgroup cgroup2 ext4 none; do ln -s mount.virtiofs /sbin/mount.$t; done \
+ && printf '#!/bin/sh\ntouch /dev/image-qemu-ga-marker\n' >/scripts/runcvm-vm-qemu-ga \
+ && chmod 755 /scripts/runcvm-vm-qemu-ga \
+ && rm /usr/bin/tr /bin/sleep
+"""
+
+MARKERS = ["/dev/qga-conf-marker", "/dev/mount-helper-marker", "/dev/image-qemu-ga-marker"]
+
+image = t.unique("hostile-image").lower()
+subprocess.run(["docker", "build", "-q", *t.labels(), "-t", image, "-"], check=True,
+               input=DOCKERFILE, universal_newlines=True, stdout=subprocess.DEVNULL)
+atexit.register(lambda: t.docker("rmi", "-f", image))
+
+network = t.unique("net")
+t.docker("network", "create", *t.labels(), network, check=True)
+t.cleanup_network(network)
+
+# '--dns-search=.' gives each Container/VM no DNS search domains, and '--dns-opt=ndots:1' a fixed
+# ndots in place of Docker's 'ndots:0', whatever the host's resolv.conf holds, so that lookups of
+# container names behave the same on every host.
+DNS = ["--dns-search=.", "--dns-opt=ndots:1"]
+
+# A disk with the default layout 'subdirs' is mounted at /.runcvm/disks/0 (ext4), and /data is
+# bind-mounted from it; RUNCVM_TMPFS adds a tmpfs at /scratch. All three are mounted from
+# /.runcvm/fstab, so would run the image's mount.ext4, mount.none and mount.tmpfs helpers.
+MOUNTS = ["--env=RUNCVM_DISKS=/disks/d,/data,ext4,16M",
+          "--env=RUNCVM_TMPFS=tmpfs /scratch tmpfs defaults 0 0"]
+
+
+def case(init):
+    mode = "--init" if init else "no --init"
+    name = t.unique("hostile" + ("-init" if init else ""))
+    t.cleanup_container(name)
+    r = t.docker("run", "-d", "--name", name, "--hostname", name, *t.labels(), "--runtime=" + t.RUNTIME,
+                 *t.vm_opts(), "--network", network, *DNS, *MOUNTS, *(["--init"] if init else []), image,
+                 "sh", "-c", "echo entrypoint-ran >/dev/entrypoint-marker; exec busybox sleep 3600")
+    if r.returncode != 0:
+        return [("%s: Container/VM created" % mode, 0, r.returncode)]
+
+    # An immediate 'docker exec' runs while the VM boots, and so goes through runcvm-ctr-exec's
+    # wait loop.
+    early = t.docker("exec", name, "true")
+    results = [("%s: early 'docker exec' uses no command from the image" % mode, False,
+                "not found" in early.stdout)]
+
+    def ready_or_exited():
+        if t.docker("exec", name, "true").returncode == 0:
+            return True
+        return t.docker("inspect", "-f", "{{.State.Running}}", name).stdout.strip() != "true"
+
+    t.wait_for("'docker exec' into %s, or its exit" % name, BOOT_TIMEOUT, ready_or_exited)
+    if t.docker("exec", name, "true").returncode != 0:
+        log = t.docker("logs", name).stdout
+        t.log("%s: logs:\n%s" % (mode, log[-4000:]))
+        return results + [("%s: Container/VM boots and 'docker exec' works" % mode, True, False)]
+
+    def ex(*cmd):
+        return t.docker("exec", name, *cmd).stdout.strip()
+
+    ex("busybox", "sleep", "3")  # Allow qemu-ga time to start.
+    # The trailing '.' makes the name absolute, so no search domain applies to it.
+    lookup = ex("nslookup", name + ".")
+    results += [
+        ("%s: Container/VM boots and 'docker exec' works" % mode, True, True),
+        ("%s: entrypoint ran" % mode, "entrypoint-ran", ex("cat", "/dev/entrypoint-marker")),
+        ("%s: 'docker exec' passes arguments intact" % mode, "a b  'c'", ex("echo", "a b  'c'")),
+        ("%s: disk and tmpfs mounted" % mode, "/data ext4 /scratch tmpfs",
+         " ".join(ex("awk", '$2 == "/data" || $2 == "/scratch" { print $2, $3 }',
+                     "/proc/mounts").split())),
+        ("%s: DNS resolves the container's own name" % mode, True,
+         "Address" in lookup and "NXDOMAIN" not in lookup),
+        ("%s: qemu-ga runs" % mode, True, "qemu-ga" in ex("ps", "-o", "comm").split()),
+        ("%s: qemu-ga writes no pidfile to the image" % mode, "absent",
+         ex("sh", "-c", "[ -e /var/run/qemu-ga.pid ] && echo present || echo absent")),
+    ]
+    for marker in MARKERS:
+        results.append(("%s: no %s" % (mode, marker), "absent",
+                        ex("sh", "-c", "[ -e %s ] && cat %s || echo absent" % (marker, marker))))
+    return results
+
+
+# Each check names its mode.
+t.param("init", "no, yes")
+for results in t.parallel(case, (False, True), jobs=2):
+    for desc, expected, actual in results:
+        t.check(desc, expected, actual)
+
+t.finish()

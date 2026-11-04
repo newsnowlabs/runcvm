@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""The workload's environment cannot affect RunCVM itself.
+
+RunCVM's own scripts and tools run with a fixed environment of their own;
+the workload's environment reaches only the workload. So a Container/VM
+boots, runs its entrypoint, and 'docker exec' works, with each of these
+variables set, which would otherwise disrupt RunCVM's bash scripts or its
+bundled tools:
+
+- LD_LIBRARY_PATH naming glibc libraries (debian:bookworm): musl's loader
+  would load them into RunCVM's binaries.
+- UID: read-only in bash.
+- BASH_ENV: a file every bash script would source (here, one that writes a
+  marker file, which must not appear).
+- POSIXLY_CORRECT and TMOUT: change bash's behaviour.
+- RUST_LOG: virtiofsd's log level.
+
+The workload, and 'docker exec', still see each variable with its value,
+and 'docker exec -e' overrides it. Separately, the environment seen by the
+workload and by 'docker exec' (including with -e and -u) matches runc's.
+
+Each case runs with and without --init.
+"""
+
+import os
+import platform
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+VM = ["--runtime=" + t.RUNTIME, *t.vm_opts()]
+ENTRYPOINT = ["sh", "-c", "env >/run-env; exec sleep 3600"]
+MULTIARCH = "%s-linux-gnu" % platform.machine()
+
+# (case, image, variable, value for 'docker run', value for 'docker exec -e')
+CASES = [
+    ("ld-library-path", "debian:bookworm", "LD_LIBRARY_PATH", "/lib/" + MULTIARCH, "/usr/lib/" + MULTIARCH),
+    ("uid", "alpine", "UID", "1000", "2000"),
+    ("bash-env", "alpine", "BASH_ENV", "/bash-env", "/bash-env-exec"),
+    ("posixly-correct", "alpine", "POSIXLY_CORRECT", "1", "2"),
+    ("tmout", "alpine", "TMOUT", "1", "2"),
+    ("rust-log", "alpine", "RUST_LOG", "trace", "debug"),
+]
+
+# Sourced by bash wherever BASH_ENV names it: records that it was.
+BASH_ENV_SCRIPT = "echo \"$0\" >>/bash-env-marker\n"
+
+
+def diagnose(name):
+    """Log a Container/VM's state and output, after it failed to start."""
+    t.log("docker inspect %s: %s" % (name, t.docker("inspect", "--format", "{{json .State}}", name).stdout.strip()))
+    t.log("docker logs %s:\n%s" % (name, t.docker("logs", name).stdout))
+
+
+def boots(name):
+    """Wait until 'docker exec' into the Container/VM works; fail at once if it stops running."""
+    def ready_or_stopped():
+        if t.docker("exec", name, "true").returncode == 0:
+            return True
+        return t.docker("inspect", "--format", "{{.State.Running}}", name).stdout.strip() != "true"
+
+    t.wait_for("'docker exec' into %s, or it stops" % name, BOOT_TIMEOUT, ready_or_stopped)
+    return t.docker("exec", name, "true").returncode == 0
+
+
+def init_opts(init):
+    return ["--init"] if init else []
+
+
+def mode(init):
+    return "--init" if init else "no --init"
+
+
+def env_value(env, var):
+    """The value of var in 'env' output, or None if absent."""
+    for line in env.splitlines():
+        if line.startswith(var + "="):
+            return line[len(var) + 1:]
+    return None
+
+
+def hostile(item):
+    (case, image, var, value, exec_value), init = item
+    desc = "%s=%s, %s" % (var, value, mode(init))
+    name = t.unique(case + ("-init" if init else ""))
+    t.cleanup_container(name)
+
+    r = t.docker("create", "--name", name, *t.labels(), *VM, *init_opts(init), "--env=%s=%s" % (var, value),
+                 image, *ENTRYPOINT)
+    if r.returncode != 0:
+        t.log("docker create %s:\n%s" % (name, r.stdout))
+        return [("%s: Container/VM created" % desc, True, False)]
+
+    if var == "BASH_ENV":
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(BASH_ENV_SCRIPT)
+        for path in (value, exec_value):
+            t.docker("cp", f.name, "%s:%s" % (name, path), check=True)
+        os.unlink(f.name)
+
+    r = t.docker("start", name)
+    if r.returncode != 0 or not boots(name):
+        diagnose(name)
+        return [("%s: Container/VM boots and 'docker exec' works" % desc, True, False)]
+
+    def ex(*args):
+        return t.docker("exec", *args).stdout
+
+    results = [
+        ("%s: Container/VM boots and 'docker exec' works" % desc, True, True),
+        ("%s: workload sees it" % desc, value, env_value(ex(name, "cat", "/run-env"), var)),
+        ("%s: 'docker exec' sees it" % desc, value, env_value(ex(name, "env"), var)),
+        ("%s: 'docker exec -e %s=%s' overrides it" % (desc, var, exec_value), exec_value,
+         env_value(ex("-e", "%s=%s" % (var, exec_value), name, "env"), var)),
+    ]
+    if var == "BASH_ENV":
+        marker = t.docker("exec", name, "cat", "/bash-env-marker")
+        results.append(("%s: no RunCVM script sourced it" % desc, "",
+                        marker.stdout if marker.returncode == 0 else ""))
+    return results
+
+
+# The run-time environment, for parity: a variable, an empty one, and USER.
+PARITY_ENV = ["--env=FOO=1", "--env=EMPTY=", "--env=USER=bob"]
+
+# What to compare: (description, 'docker exec' arguments before the container name, command)
+PARITY_EXECS = [
+    ("'docker exec'", [], ["env"]),
+    ("'docker exec -e FOO=2 -e BAR=3 -e HOME=/x'", ["-e", "FOO=2", "-e", "BAR=3", "-e", "HOME=/x"], ["env"]),
+    ("'docker exec -u 1000'", ["-u", "1000"], ["env"]),
+]
+
+
+def environments(runtime, opts, init):
+    """The sorted environments seen by the workload and by each of PARITY_EXECS, or None."""
+    name = t.unique("parity-%s%s" % (runtime, "-init" if init else ""))
+    t.cleanup_container(name)
+    r = t.docker("run", "-d", "--name", name, "--hostname=parity", *t.labels(), "--runtime=" + runtime, *opts,
+                 *init_opts(init), *PARITY_ENV, "alpine", *ENTRYPOINT)
+    if r.returncode != 0 or not boots(name):
+        diagnose(name)
+        return None
+    envs = {"workload": sorted(t.docker("exec", name, "cat", "/run-env").stdout.splitlines())}
+    for desc, args, cmd in PARITY_EXECS:
+        envs[desc] = sorted(t.docker("exec", *args, name, *cmd).stdout.splitlines())
+    return envs
+
+
+def parity(init):
+    runc = environments("runc", [], init)
+    runcvm = environments(t.RUNTIME, t.vm_opts(), init)
+    if runc is None or runcvm is None:
+        return [("parity with runc, %s: containers start" % mode(init), True, False)]
+    return [("parity with runc, %s: %s environment" % (mode(init), what), runc[what], runcvm[what])
+            for what in ["workload"] + [desc for desc, _, _ in PARITY_EXECS]]
+
+
+t.param("init", "both")
+
+items = [(case, init) for init in (False, True) for case in CASES]
+for results in t.parallel(hostile, items):
+    for desc, expected, actual in results:
+        t.check(desc, expected, actual)
+
+for results in t.parallel(parity, (False, True)):
+    for desc, expected, actual in results:
+        t.check(desc, expected, actual)
+
+t.finish()

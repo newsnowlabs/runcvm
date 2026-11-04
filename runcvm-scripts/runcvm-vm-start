@@ -1,6 +1,6 @@
 #!/.runcvm/guest/bin/bash
 
-# Load original environment
+# Load RunCVM's own environment, saved by runcvm-ctr-entrypoint
 . /.runcvm/config
 
 # Load defaults and aliases
@@ -16,14 +16,12 @@ fi
 # Change to saved PWD
 cd $(cat /.runcvm/pwd) && unset OLDPWD
 
-# Reload original environment
-. /.runcvm/config
-
 # Load original entrypoint
 mapfile -t ARGS </.runcvm/entrypoint
 
-# Clean RUNCVM env vars
-clean_env
+# Load the workload's environment, saved NUL-separated by runcvm-ctr-entrypoint
+mapfile -d '' -t env </.runcvm/env
 
+# Run the entrypoint with the workload's environment alone
 IFS=':' read -r uid gid additionalGids <<< "$RUNCVM_UIDGID"
-exec $RUNCVM_GUEST/bin/s6-applyuidgid -u $uid -g $gid -G "$additionalGids" "${ARGS[@]}"
+exec -c $RUNCVM_GUEST/bin/busybox env -i "${env[@]}" $RUNCVM_GUEST/bin/s6-applyuidgid -u $uid -g $gid -G "$additionalGids" "${ARGS[@]}"

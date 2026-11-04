@@ -57,15 +57,16 @@ def vm_opts():
     return ["--env=RUNCVM_QEMU_ACCEL=%s" % ACCEL] if ACCEL else []
 
 
-def docker(*args, check=False, timeout=None, capture=True):
+def docker(*args, check=False, timeout=None, capture=True, input=None):
     """Run a docker CLI command and return the CompletedProcess (text mode).
 
     With check=True, raise subprocess.CalledProcessError on a non-zero exit.
     With capture=False, output goes straight to this test's output.
+    With input, the text is passed on standard input (e.g. to 'docker run -i').
     """
     out = subprocess.PIPE if capture else None
     return subprocess.run(("docker",) + tuple(args), stdout=out, stderr=subprocess.STDOUT if capture else None,
-                          universal_newlines=True, check=check, timeout=timeout)
+                          universal_newlines=True, check=check, timeout=timeout, input=input)
 
 
 def parallel(func, items, jobs=None):
@@ -180,16 +181,23 @@ def cleanup_volume(name):
     _cleanups.append(("volume", name))
 
 
+def cleanup_image(name):
+    """Remove the named image (e.g. one built or committed by the test) when the test exits."""
+    _cleanups.append(("image", name))
+
+
 def cleanup():
-    """Remove registered containers, then networks and volumes (also run automatically at exit)."""
-    order = {"container": 0, "network": 1, "volume": 2}
+    """Remove registered containers, then networks, volumes and images (also run automatically at exit)."""
+    order = {"container": 0, "network": 1, "volume": 2, "image": 3}
     for kind, name in sorted(reversed(_cleanups), key=lambda c: order[c[0]]):
         if kind == "container":
             docker("rm", "-fv", name)
         elif kind == "network":
             docker("network", "rm", name)
-        else:
+        elif kind == "volume":
             docker("volume", "rm", "-f", name)
+        else:
+            docker("image", "rm", "-f", name)
     del _cleanups[:]
 
 
