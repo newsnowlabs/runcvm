@@ -51,11 +51,12 @@ subprocess.run(["docker", "build", "-q", *t.labels(), "-t", user_image, "-"], ch
                stdout=subprocess.DEVNULL)
 atexit.register(lambda: t.docker("rmi", "-f", user_image))
 
-# An alpine image whose /etc/os-release is an absolute symbolic link to /usr/lib/os-release.
+# An alpine image whose /etc/os-release is an absolute symbolic link to /usr/lib/os-release (alpine's
+# own is a relative one).
 link_image = t.unique("os-release-link").lower()
 subprocess.run(["docker", "build", "-q", *t.labels(), "-t", link_image, "-"], check=True,
-               input="FROM alpine\nRUN mv /etc/os-release /usr/lib/os-release && "
-                     "ln -s /usr/lib/os-release /etc/os-release\n",
+               input="FROM alpine\nRUN test -f /usr/lib/os-release && "
+                     "ln -sfn /usr/lib/os-release /etc/os-release\n",
                universal_newlines=True, stdout=subprocess.DEVNULL)
 atexit.register(lambda: t.docker("rmi", "-f", link_image))
 
