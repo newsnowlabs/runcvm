@@ -277,7 +277,7 @@ RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >=
 
 RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and the `kvm` and `tun` kernel modules. RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
-RunCVM is tested on Debian Bullseye and [GitHub Codespaces](https://github.com/codespaces/new?hide_repo_select=true&ref=main&repo=514606231).
+RunCVM is tested on x86-64 hosts with KVM running Debian 12 (Bookworm) and Ubuntu 24.04 LTS (Noble Numbat), with Docker Engine, both Docker's own packages and Ubuntu's `docker.io`. The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
 
 ### rp_filter sysctl settings
 
