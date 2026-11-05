@@ -68,6 +68,7 @@ class FakeTests:
         e.update({"RUNCVM_TEST_KILL_AFTER": "2"})
         e.pop("RUNCVM_TEST_MOCK", None)
         e.pop("RUNCVM_TEST_ACCEL", None)
+        e.pop("RUNCVM_TEST_TCG_CASES", None)
         if env:
             e.update(env)
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -306,6 +307,30 @@ class RunnerTests(unittest.TestCase):
                                             "EXPECT_OPTS": "--env=RUNCVM_QEMU_ACCEL=auto"})
             self.assertEqual(r.rc, 0, r.out)
             self.assertEqual(ft.run("--accel", "bogus").rc, 2)
+        finally:
+            ft.cleanup()
+
+    def test_tcg_cases(self):
+        ft = FakeTests()
+        try:
+            ft.add("t-tcg-bash", """\
+                #!/bin/bash -e
+                . ../framework.sh
+                check "tcg_cases" "$EXPECT" "$(tcg_cases && echo 1 || echo 0)"
+                finish
+                """)
+            ft.add("u-tcg-python", PY_PREAMBLE + textwrap.dedent("""\
+                t.check("TCG_CASES", os.environ["EXPECT"] == "1", t.TCG_CASES)
+                t.finish()
+                """))
+            default = "0" if os.path.exists("/dev/kvm") else "1"
+            for opts, env, expect in [([], {}, default),
+                                      (["--tcg-cases"], {}, "1"),
+                                      ([], {"RUNCVM_TEST_TCG_CASES": "1"}, "1"),
+                                      (["--accel", "tcg"], {}, "1")]:
+                r = ft.run(*opts, env=dict(env, EXPECT=expect))
+                self.assertEqual(r.rc, 0, r.out)
+                self.assertEqual(r.json()["tcg_cases"], expect == "1")
         finally:
             ft.cleanup()
 

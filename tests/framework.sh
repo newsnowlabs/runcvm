@@ -103,6 +103,19 @@ vm_opts() {
   fi
 }
 
+# tcg_cases
+# Succeed if checks that launch Container/VMs explicitly under software emulation (TCG),
+# which are slow on a host with KVM, are to run: as RUNCVM_TEST_TCG_CASES says (see
+# tests/run), or, where it is unset, with --accel tcg or without /dev/kvm.
+# Usage: if tcg_cases; then ...; else record_result SKIP "<description>"; fi
+tcg_cases() {
+  case "$RUNCVM_TEST_TCG_CASES" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  [ "$RUNCVM_TEST_ACCEL" = "tcg" ] || [ ! -e /dev/kvm ]
+}
+
 # record_result STATUS DESCRIPTION
 # Record a sub-result (PASS, FAIL or SKIP) for inclusion in the runner's
 # TAP and JUnit output.
