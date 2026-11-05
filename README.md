@@ -309,7 +309,7 @@ RunCVM aims to support each distribution's latest release and one or two before 
 |---|---|---|---|---|---|---|
 | Debian | 12 (Bookworm) | `debian` | Debian 12 (Bookworm) | 6.1 | none | all |
 | Ubuntu | 24.04 LTS (Noble Numbat) | `ubuntu` | Ubuntu 22.04 LTS (Jammy Jellyfish) | 5.15 | none | all |
-| Oracle Linux | none (the kernel is tested with an Alpine Linux image) | `ol` | Oracle Linux 9 | 5.14 | xz | 7 and later (9 and 10 once `kmod` is installed) |
+| Oracle Linux | 9 | `ol` | Oracle Linux 9 | 5.14 | xz | 7 and later (9 and 10 once `kmod` is installed) |
 | Alpine Linux | the latest (the `alpine` image) | `alpine` | Alpine Linux 3.19 (`linux-virt`) | 6.6 | gzip | all |
 | OpenWrt | none (the kernel is tested with an Alpine Linux image) | `openwrt` | Alpine Linux 3.19 (`linux-virt`) | 6.6 | none | all |
 
