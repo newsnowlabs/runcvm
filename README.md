@@ -736,6 +736,16 @@ Enable use of [virtio vhost-net](https://www.redhat.com/en/blog/introduction-vir
 
 By default, IPv6 is enabled in the VM automatically if a global IPv6 address was assigned to the container (i.e. the Docker network is dual-stack), and disabled otherwise. Set to `1` to force IPv6 on regardless, or `0` to force it off (e.g. to keep a container IPv4-only despite being attached to a dual-stack network).
 
+### `--env=RUNCVM_DNS_IP=<IPv4 address>`
+
+Sets the address, `169.254.53.53` by default, at which the VM reaches RunCVM's own services in the container:
+- on a user-defined network, the VM's DNS server: the VM's `/etc/resolv.conf` names this address in place of Docker's embedded DNS server (`127.0.0.11`), and `dnsmasq` in the container answers it, forwarding to Docker's DNS;
+- the source address of `docker exec`'s connections to the VM's SSH server, so the VM sees each `docker exec` session as coming from this address, and replies to it.
+
+The default is link-local, so that the VM's traffic to it is never routed beyond the host, and lies outside the link-local addresses that cloud platforms and Kubernetes are known to use: notably `169.254.169.254`, the instance metadata address of AWS, Azure, Google Cloud, OpenStack and others (which on Google Cloud is also the VM's DNS server); AWS's other services in `169.254.169.0/24` and `169.254.170.0/24`; Scaleway's `169.254.42.42`; and Kubernetes NodeLocal DNSCache's `169.254.20.10`. Firewall rules in the VM that block one of those, as hardening against server-side request forgery commonly does, therefore leave RunCVM's DNS and `docker exec` working.
+
+Set another address only if the default clashes with something in your environment, such as software in the VM that intercepts or blocks it. The address must be a unicast IPv4 address, outside `0.0.0.0/8` and `127.0.0.0/8`, and none of the container's own addresses, its gateway's, or RunCVM's bridge address in the container (`169.254.1.1`); a Container/VM with an invalid one fails to start, with an error saying so. An address in `169.254.0.0/16` keeps the VM's traffic to it on the host.
+
 ### `--env=RUNCVM_QEMU_ACCEL=<kvm|auto|tcg>`
 
 Selects how QEMU runs the VM:
@@ -893,8 +903,8 @@ The `runcvm-ctr-entrypoint`:
 - Creates a bridge (acting as a hub) for each container network interface, to join that interface to a VM tap network interface.
 - Launches `virtiofsd` to serve the container's root filesystem.
 - Configures `/etc/resolv.conf` in the container.
-- Launches `dnsmasq`. Where the container's DNS server is Docker's embedded one (`127.0.0.11`, on user-defined networks), which only the container can reach, it rewrites that server in `/vm/etc/resolv.conf` to `169.254.169.254`, which `dnsmasq` answers, forwarding the VM's DNS requests to Docker's DNS. Elsewhere (e.g. on the default bridge network), the VM uses the container's DNS servers directly.
-- Adds container firewall rules (with `nft`) for the traffic between the VM and RunCVM's own services in the container: replies to `docker exec`'s connections to the VM; the VM's UDP DNS requests to `dnsmasq`, where `dnsmasq` is its DNS server; and, in VNC display mode, connections to QEMU's VNC server. Such traffic crosses the container's bridge addressed to the VM, or to the Docker network's gateway, so rules in the bridge's prerouting hook readdress it to the container, by its arrival interface, addresses and ports, and `nat` rules hand it to the service. The rules match the VM's traffic to `169.254.169.254` only from TCP port 22222 (dropbear's) and to UDP port 53; the VM's other traffic passes through the bridge unchanged.
+- Launches `dnsmasq`. Where the container's DNS server is Docker's embedded one (`127.0.0.11`, on user-defined networks), which only the container can reach, it rewrites that server in `/vm/etc/resolv.conf` to RunCVM's DNS address (`RUNCVM_DNS_IP`, by default `169.254.53.53`), which `dnsmasq` answers, forwarding the VM's DNS requests to Docker's DNS. Elsewhere (e.g. on the default bridge network), the VM uses the container's DNS servers directly.
+- Adds container firewall rules (with `nft`) for the traffic between the VM and RunCVM's own services in the container: replies to `docker exec`'s connections to the VM; the VM's UDP DNS requests to `dnsmasq`, where `dnsmasq` is its DNS server; and, in VNC display mode, connections to QEMU's VNC server. Such traffic crosses the container's bridge addressed to the VM, or to the Docker network's gateway, so rules in the bridge's prerouting hook readdress it to the container, by its arrival interface, addresses and ports, and `nat` rules hand it to the service. The rules match the VM's traffic to RunCVM's DNS address only from TCP port 22222 (dropbear's) and to UDP port 53; the VM's other traffic passes through the bridge unchanged.
 - Execs RunCVM's own `runcvm-init` init process to supervise `runcvm-ctr-qemu` to launch the VM.
 
 The `runcvm-init` process:
