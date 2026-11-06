@@ -78,8 +78,19 @@ if [ -n "$push" ]; then
   # imagetools copies the image, with all its platforms, from registry to registry, so it
   # must follow the push to Docker Hub.
   if [ "$push" = "all" ]; then
+    # The copy on ghcr.io is an index, from which GitHub reads the image's source repository and
+    # description as annotations rather than labels: the image's org.opencontainers.image.*
+    # labels, set in the Dockerfile, become the index's annotations.
+    labels=$(docker image inspect --format '{{range $k, $v := .Config.Labels}}{{$k}}={{$v}}{{"\n"}}{{end}}' "$REPO:${tags[0]}") ||
+      die "reading the labels of $REPO:${tags[0]} failed"
+    annotation_opts=()
+    while IFS= read -r label; do
+      annotation_opts+=(--annotation "index:$label")
+    done < <(grep '^org\.opencontainers\.image\.' <<<"$labels")
+    [ ${#annotation_opts[@]} -gt 0 ] || die "$REPO:${tags[0]} has no org.opencontainers.image.* labels"
+
     for tag in "${tags[@]}"; do
-      docker buildx imagetools create --tag "$GHCR_REPO:$tag" "$REPO:$tag" ||
+      docker buildx imagetools create "${annotation_opts[@]}" --tag "$GHCR_REPO:$tag" "$REPO:$tag" ||
         die "copying $REPO:$tag to $GHCR_REPO:$tag failed"
     done
   fi
