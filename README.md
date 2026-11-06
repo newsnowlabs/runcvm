@@ -986,6 +986,8 @@ Helpers for tests are in `tests/framework.sh` (bash) and `tests/framework.py` (P
 
 `--accel kvm|auto|tcg` (or `RUNCVM_TEST_ACCEL`) selects QEMU acceleration for the tests' RunCVM Container/VMs, which tests pass on as `RUNCVM_QEMU_ACCEL` using the `vm_opts` helper (where the RunCVM version under test supports it). With `--accel tcg`, real RunCVM Container/VMs run under software emulation where KVM is unavailable: slow, but it exercises RunCVM itself; tests that require `kvm` are skipped.
 
+Checks that launch a Container/VM explicitly under software emulation, whatever `--accel` says (such as `13-qemu-accel`'s `tcg` cases), are slow on a host with KVM, so there they run only with `--tcg-cases` (or `RUNCVM_TEST_TCG_CASES=1`) and are otherwise recorded as skipped. With `--accel tcg`, or without `/dev/kvm`, they always run. Tests guard them with the `tcg_cases` helper (`TCG_CASES` in Python).
+
 #### Developing the tests without KVM (stand-in mode)
 
 `tests/run --mock` (or `RUNCVM_TEST_MOCK=1`) runs the tests with a standard runtime (`runc`, unless `--runtime` is given) in place of RunCVM, skipping tests that require `vm`; tests see `RUNCVM_TEST_MOCK=1`. This exercises the runner, the helpers and most test logic on any host with Docker, but proves nothing about RunCVM itself.
