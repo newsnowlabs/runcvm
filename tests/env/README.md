@@ -17,7 +17,7 @@ The image runs in _dev mode_ when launched with no arguments: a long-lived L1 fo
 The image is published on GitHub's container registry as `ghcr.io/newsnowlabs/runcvm/images/test-l1`, with these tags:
 
 - `<release>`, e.g. `v1.7.0`: the RunCVM release preinstalled;
-- `latest`: the most recent of those;
+- `latest`: published alongside a release's tag, so the most recent of those;
 - `sha-<commit>`: the repository commit (its first 12 hex digits) each image was built from.
 
 Each image's labels name its commit (`org.opencontainers.image.revision`) and the RunCVM image preinstalled (`io.github.newsnowlabs.runcvm.image`). Published images do not include [Claude Code](#claude-code).
@@ -30,7 +30,7 @@ To launch a published image, give its name in place of `runcvm-l1` in [Launching
 docker build -t runcvm-l1 tests/env
 ```
 
-or, to tag the image as published, `ghcr.io/newsnowlabs/runcvm/images/test-l1:<tag>`, and optionally push it:
+Alternatively, to tag the image as published, `ghcr.io/newsnowlabs/runcvm/images/test-l1:<tag>`, and optionally push it, run:
 
 ```sh
 tests/env/build.sh [--tag <tag>]... [--runcvm-image <image>] [--push] [-- <docker build option>...]
@@ -38,10 +38,10 @@ tests/env/build.sh [--tag <tag>]... [--runcvm-image <image>] [--push] [-- <docke
 
 - `--tag` may be given more than once; without it, the tag is `latest`.
 - `--runcvm-image` sets the build argument `RUNCVM_IMAGE` (below).
-- `--push` also tags the image `sha-<commit>`, and pushes each tag. It requires a working tree with no uncommitted changes, `docker login ghcr.io`, and no `CLAUDE_CODE_VERSION`. Each pushed tag's index is given the image's `org.opencontainers.image.*` labels as annotations, which GitHub reads to link the package to this repository.
+- `--push` also tags the image `sha-<commit>`, and pushes each tag. It requires git and a checkout whose working tree has no uncommitted changes or untracked files, `docker login ghcr.io`, and no `CLAUDE_CODE_VERSION`, `REVISION` or `VERSION` build argument. Each pushed tag's index is given the image's `org.opencontainers.image.*` labels as annotations, which GitHub reads to link the package to this repository.
 - Arguments after `--` are passed to `docker build`.
 
-`tests/env/build.sh --help` describes the options. To use another image name, e.g. to publish from a fork, set `RUNCVM_L1_IMAGE`. The script sets the build arguments `REVISION`, to the repository's commit, and `VERSION`, to the first tag, for the image's labels.
+`tests/env/build.sh --help` describes the options. To use another image name, e.g. to publish from a fork, set `RUNCVM_L1_IMAGE`. The script sets the build arguments `VERSION`, to the first tag, and `REVISION`, to the repository's commit where there is one, for the image's labels.
 
 Build arguments:
 

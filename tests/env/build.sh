@@ -24,9 +24,10 @@ Builds the L1 image as $IMAGE:<tag>, for each tag given
 
   --push
       After a successful build, also tag the image 'sha-<commit>', for the repository's
-      commit, and push each tag to $IMAGE. Requires a working tree with no
-      uncommitted changes, so that the commit describes the image; 'docker login ghcr.io';
-      and no CLAUDE_CODE_VERSION build argument.
+      commit, and push each tag to $IMAGE. Requires git and a checkout of the
+      repository whose working tree has no uncommitted changes or untracked files, so that
+      the commit describes the image; 'docker login ghcr.io'; and no CLAUDE_CODE_VERSION,
+      REVISION or VERSION build argument (the script sets REVISION and VERSION).
 
   -- <docker build option>...
       Pass the remaining arguments to 'docker build', e.g. '-- --no-cache'.
@@ -71,18 +72,23 @@ done
 # The build context is this directory, wherever the script is run from.
 cd "$(dirname "$0")" || exit 1
 
-revision=$(git rev-parse HEAD) || die "not in a git repository"
+# The repository commit, for the image's labels: required with --push, optional otherwise.
+revision=$(git rev-parse HEAD 2>/dev/null)
 
 if [ -n "$push" ]; then
-  # Claude Code is not redistributed in a published image.
+  [ -n "$revision" ] || die "--push needs git, and the script run from a checkout of the repository"
   for opt in "${build_opts[@]}"; do
+    # Claude Code is not redistributed in a published image.
     [[ "$opt" == *CLAUDE_CODE_VERSION* ]] && die "--push does not publish an image with Claude Code (CLAUDE_CODE_VERSION)"
+    # The script sets these, so that the published image's labels describe it.
+    [[ "$opt" =~ (^|=)(REVISION|VERSION)= ]] && die "--push sets the build arguments REVISION and VERSION itself"
   done
-  [ -z "$(git status --porcelain)" ] || die "--push needs a working tree with no uncommitted changes"
+  [ -z "$(git status --porcelain)" ] || die "--push needs a working tree with no uncommitted changes or untracked files"
   tags+=("sha-${revision:0:12}")
 fi
 
-arg_opts=(--build-arg "REVISION=$revision" --build-arg "VERSION=${tags[0]}")
+arg_opts=(--build-arg "VERSION=${tags[0]}")
+[ -n "$revision" ] && arg_opts+=(--build-arg "REVISION=$revision")
 [ -n "$runcvm_image" ] && arg_opts+=(--build-arg "RUNCVM_IMAGE=$runcvm_image")
 
 tag_opts=()
