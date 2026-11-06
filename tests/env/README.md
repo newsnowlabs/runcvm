@@ -38,7 +38,7 @@ tests/env/build.sh [--tag <tag>]... [--runcvm-image <image>] [--push] [-- <docke
 
 - `--tag` may be given more than once; without it, the tag is `latest`.
 - `--runcvm-image` sets the build argument `RUNCVM_IMAGE` (below).
-- `--push` also tags the image `sha-<commit>`, and pushes each tag. It requires git and a checkout whose working tree has no uncommitted changes or untracked files, `docker login ghcr.io`, and no `CLAUDE_CODE_VERSION`, `REVISION` or `VERSION` build argument. Each pushed tag's index is given the image's `org.opencontainers.image.*` labels as annotations, which GitHub reads to link the package to this repository.
+- `--push` also tags the image `sha-<commit>`, and pushes each tag. It requires git and a checkout whose working tree has no uncommitted changes or untracked files, `docker login ghcr.io`, Docker's containerd image store (see the RunCVM README's Building section), and no `CLAUDE_CODE_VERSION`, `REVISION` or `VERSION` build argument. Each pushed tag's index is given the image's `org.opencontainers.image.*` labels as annotations, which GitHub reads to link the package to this repository.
 - Arguments after `--` are passed to `docker build`.
 
 `tests/env/build.sh --help` describes the options. To use another image name, e.g. to publish from a fork, set `RUNCVM_L1_IMAGE`. The script sets the build arguments `VERSION`, to the first tag, and `REVISION`, to the repository's commit where there is one, for the image's labels.

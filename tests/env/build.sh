@@ -26,7 +26,8 @@ Builds the L1 image as $IMAGE:<tag>, for each tag given
       After a successful build, also tag the image 'sha-<commit>', for the repository's
       commit, and push each tag to $IMAGE. Requires git and a checkout of the
       repository whose working tree has no uncommitted changes or untracked files, so that
-      the commit describes the image; 'docker login ghcr.io'; and no CLAUDE_CODE_VERSION,
+      the commit describes the image; 'docker login ghcr.io'; Docker's containerd image
+      store, for the annotations; and no CLAUDE_CODE_VERSION,
       REVISION or VERSION build argument (the script sets REVISION and VERSION).
 
   -- <docker build option>...
@@ -84,6 +85,11 @@ if [ -n "$push" ]; then
     [[ "$opt" =~ (^|=)(REVISION|VERSION)= ]] && die "--push sets the build arguments REVISION and VERSION itself"
   done
   [ -z "$(git status --porcelain)" ] || die "--push needs a working tree with no uncommitted changes or untracked files"
+  # Each tag's index carries annotations (see below), which need OCI manifests. Docker pushes those
+  # with its containerd image store; with its classic store, it pushes Docker manifests, from which
+  # 'docker buildx imagetools create' makes a Docker manifest list, which has no annotations.
+  [[ "$(docker info --format '{{json .DriverStatus}}')" == *io.containerd.snapshotter* ]] ||
+    die "--push needs Docker's containerd image store (in /etc/docker/daemon.json, \"features\": {\"containerd-snapshotter\": true}), for the annotations on ghcr.io"
   tags+=("sha-${revision:0:12}")
 fi
 
@@ -117,6 +123,8 @@ if [ -n "$push" ]; then
   for tag in "${tags[@]}"; do
     docker buildx imagetools create "${annotation_opts[@]}" --tag "$IMAGE:$tag" "$IMAGE:$tag" ||
       die "annotating $IMAGE:$tag failed"
+    docker buildx imagetools inspect --raw "$IMAGE:$tag" | grep -q '"org.opencontainers.image.source"' ||
+      die "$IMAGE:$tag has no annotations"
   done
 fi
 
