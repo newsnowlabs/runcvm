@@ -22,7 +22,7 @@ Build arguments:
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `RUNCVM_IMAGE` | `newsnowlabs/runcvm:v1.6.1` | The RunCVM image whose `/opt/runcvm` is preinstalled in L1, for running L2s (see [Limitations](#limitations)). Any image built by `./build/build.sh` may be given, e.g. a local build tagged `newsnowlabs/runcvm:dev`. |
+| `RUNCVM_IMAGE` | `newsnowlabs/runcvm:v1.7.0` | The RunCVM image whose `/opt/runcvm` is preinstalled in L1, for running L2s (see [Limitations](#limitations)). Any image built by `./build/build.sh` may be given, e.g. a local build tagged `newsnowlabs/runcvm:dev`. |
 | `DOCKER_VERSION` | `29.9.2` | The version of `docker-ce` and `docker-ce-cli` |
 | `CONTAINERD_VERSION` | `2.4.2-3` | The version of `containerd.io` |
 | `BUILDX_VERSION` | `0.38.1` | The version of `docker-buildx-plugin` |
@@ -232,7 +232,7 @@ Run these as a user with uid 1000 on L0, or `chown 1000` the directory and file,
 
 ## Limitations
 
-- **`RUNCVM_IMAGE` default:** the default, release `v1.6.1`, predates three fixes that L2s and the test suite need. It does not run images without a shell, such as `hello-world`: `docker run` exits 0 without output, so `runcvm-l1-check`'s `hello-world` check fails. It lacks `RUNCVM_QEMU_ACCEL`, so L2s cannot use software emulation. And it does not reject `--network=host`, which with it reconfigures L1's network (L0's is unaffected). `tests/run` from the current repository expects the RunCVM it was written with. Build with `--build-arg RUNCVM_IMAGE=<image>` to preinstall a later RunCVM.
+- **`RUNCVM_IMAGE` default:** the default is release `v1.7.0`. `tests/run` from the current repository expects the RunCVM it was written with, so tests of behaviour added since that release need a later RunCVM: build with `--build-arg RUNCVM_IMAGE=<image>`, e.g. a local build tagged `newsnowlabs/runcvm:dev`.
 - **Batch mode:** this image does not implement it. An L1 launched with arguments powers off with exit status 2.
 - **L1's kernel:** this is L0's RunCVM's Ubuntu kernel, as RunCVM chooses for an Ubuntu image.
 - **Dockside:** launching L1 from Dockside has not been tested.
