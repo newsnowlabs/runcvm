@@ -303,8 +303,8 @@ def signal_group(pgid, sig):
         pass
 
 
-# Starts a line of a test's output that goes to the terminal only with --verbose (see log_detail in
-# framework.sh and framework.py).
+# Marks a line of a test's output as a detail line, shown on the terminal only with --verbose (see
+# log_detail in framework.sh and framework.py).
 DETAIL_MARK = b"\x1e"
 
 
