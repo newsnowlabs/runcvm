@@ -249,6 +249,12 @@ fi
 #   diverted and redirected to dnsmasq.
 # - VNC: connections to the VM's address on the VNC port (5900 + display number), published from
 #   the host, are diverted and redirected to QEMU's VNC server.
+#
+# Traffic from the container itself (e.g. QEMU's VNC server's replies) leaves from the bridge, whose
+# only address is $QEMU_BRIDGE_IP, so the container's ARP requests for its next hop would name that
+# address as sender; a host with strict reverse-path filtering (rp_filter=1) on its bridge drops
+# them, as its route back to that address is not via the bridge. The arp rule sends them as ARP
+# probes, with sender address 0.0.0.0, which Linux answers without validating the sender.
 divert() {
   echo "iifname \"$1\" ip daddr $2 $3 ether daddr set $QEMU_BRIDGE_IF_MAC meta pkttype set host"
 }
@@ -284,9 +290,15 @@ table ip runcvm {
     oifname "br-$QEMU_BRIDGE_IF" ip saddr $QEMU_BRIDGE_IP tcp dport $SSHD_PORT snat to $RUNCVM_DNS_IP
   }
 }
+table arp runcvm {
+  chain output {
+    type filter hook output priority filter; policy accept;
+    arp operation request arp saddr ip $QEMU_BRIDGE_IP arp saddr ip set 0.0.0.0
+  }
+}
 _EOF_
 then
-  echo "RunCVM: Error: could not install RunCVM's firewall rules in the container (nft's error is above); RunCVM needs nf_tables with bridge and NAT support in the host's kernel (and nft_meta_bridge, where the kernel builds it as a module)" >&2
+  echo "RunCVM: Error: could not install RunCVM's firewall rules in the container (nft's error is above); RunCVM needs nf_tables with bridge, ARP and NAT support in the host's kernel (and nft_meta_bridge, where the kernel builds it as a module)" >&2
   exit 1
 fi
 
