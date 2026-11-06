@@ -275,7 +275,16 @@ For a deep dive into RunCVM's internals, see the section on [Developing RunCVM](
 
 RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM.
 
-RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman), the `kvm` and `tun` kernel modules, and and the kernel's `nf_tables` with bridge and NAT support (`CONFIG_NF_TABLES_BRIDGE`, `CONFIG_NFT_NAT`), with which RunCVM installs firewall rules in each container, as Docker's own networking does. Where the kernel builds `nft_meta_bridge` as a module (as Debian's, Ubuntu's and Oracle Linux's kernels do), the kernel loads it on demand. RunCVM does not need the `br_netfilter` module. RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
+RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and these features of the host's kernel, which the kernels of common distributions provide, built in or as modules that load on demand:
+- KVM: `kvm`, with `kvm_intel` or `kvm_amd`;
+- `tun` (`CONFIG_TUN`), for the tap device that connects the VM to the container;
+- the Linux bridge, `bridge` (`CONFIG_BRIDGE`), which RunCVM creates in each container between the tap device and the container's network interface;
+- `nf_tables`, with which RunCVM installs firewall rules in each container, as Docker's own networking does: its IPv4 and bridge families (`CONFIG_NF_TABLES_IPV4`, `CONFIG_NF_TABLES_BRIDGE`), bridge `meta` expressions (`nft_meta_bridge`, `CONFIG_NFT_BRIDGE_META`), NAT (`nft_nat` and `nft_chain_nat`, `CONFIG_NFT_NAT`) and redirection (`nft_redir`, `CONFIG_NFT_REDIR`), with connection tracking;
+- optionally, `vhost_net` (`CONFIG_VHOST_NET`), for `RUNCVM_QEMU_NET_VHOST=1`.
+
+RunCVM does not need the `br_netfilter` module.
+
+RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
 RunCVM is tested on x86-64 hosts with KVM running Debian 12 (Bookworm) and Ubuntu 24.04 LTS (Noble Numbat), with Docker Engine, both Docker's own packages and Ubuntu's `docker.io`. The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
 
