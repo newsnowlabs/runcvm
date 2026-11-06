@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 
 # L1: the disposable outer Container/VM in which RunCVM tests itself, launched with stock RunCVM
-# as a Container/VM on L0 (the bare-metal host). See README.md in this directory.
+# as a Container/VM on L0 (the host: bare metal, or a VM with nested virtualisation). See
+# README.md in this directory.
 
 # The RunCVM image whose /opt/runcvm is preinstalled: the RunCVM that L1 runs L2s with.
 ARG RUNCVM_IMAGE=newsnowlabs/runcvm:v1.7.0
