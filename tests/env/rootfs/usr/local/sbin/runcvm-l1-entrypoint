@@ -1,0 +1,89 @@
+#!/bin/sh
+# The L1 image's entrypoint. RunCVM runs it as the VM's PID 1 (L1 must be launched without
+# --init). It saves its arguments and the RUNCVM_L1_* environment variables for systemd's units,
+# which see neither, then execs systemd as PID 1.
+#
+# - /etc/runcvm-l1/args: the arguments, each followed by a NUL; empty when there are none.
+# - /etc/runcvm-l1/env: each RUNCVM_L1_* variable, as a systemd EnvironmentFile.
+#
+# Both files are written on every boot, replacing the previous boot's, under /etc rather than
+# /run, which systemd mounts afresh.
+
+set -u
+
+dir=/etc/runcvm-l1
+
+fail() {
+  echo "runcvm-l1-entrypoint: error: $*" >&2
+  # RunCVM's runcvm-ctr-exit takes the Container/VM's exit status from this file.
+  [ -d /.runcvm ] && echo 2 >/.runcvm/exitcode 2>/dev/null
+  # As PID 1, power the VM off directly (systemctl -ff calls reboot(2), needing no running
+  # systemd): if PID 1 exited, the kernel would panic. Where powering off is not permitted, as
+  # in a container without CAP_SYS_BOOT, systemctl returns and the script exits.
+  if [ "$$" = 1 ]; then
+    sync
+    /usr/bin/systemctl --force --force poweroff >/dev/null 2>&1
+  fi
+  exit 2
+}
+
+[ "$$" = 1 ] || fail "must run as PID 1, to exec systemd as PID 1; launch L1 without --init"
+
+# sh drops variables whose names are not identifiers from its environment, so such names are
+# found in the environment this process was started with.
+bad=$(grep -za '^RUNCVM_L1_[A-Za-z0-9_]*[^A-Za-z0-9_=]' /proc/$$/environ | tr '\0' '\n' | cut -d= -f1)
+[ -z "$bad" ] || fail "variable names must be identifiers:" $bad
+
+umask 077
+mkdir -p "$dir" || fail "cannot create $dir"
+
+# Each file is written in full to <file>.new, then renamed over <file>, mode 0600, owned by root.
+# commit <file>: makes <file>.new root's, mode 0600, and renames it to <file>.
+commit() {
+  chown 0:0 "$1.new" && chmod 0600 "$1.new" && mv -f "$1.new" "$1" || fail "cannot write $1"
+}
+
+if [ $# -gt 0 ]; then
+  printf '%s\0' "$@"
+fi >"$dir/args.new" || fail "cannot write $dir/args.new"
+
+# Each variable becomes NAME="VALUE", with \ " ` and $ escaped by a backslash: systemd's parser
+# keeps everything else between double quotes as it is, and expands no variables. A newline
+# would end the assignment, and systemd drops values that are not valid UTF-8, so such values
+# are rejected rather than saved altered.
+awk '
+  BEGIN {
+    n = 0
+    for (name in ENVIRON) {
+      if (name !~ /^RUNCVM_L1_/) continue
+      if (index(ENVIRON[name], "\n")) {
+        print "runcvm-l1-entrypoint: error: " name " contains a newline, which an EnvironmentFile cannot hold" > "/dev/stderr"
+        exit 1
+      }
+      names[++n] = name
+    }
+    # Sorted, so that the file is the same for the same variables.
+    for (i = 2; i <= n; i++)
+      for (j = i; j > 1 && names[j - 1] > names[j]; j--) {
+        t = names[j]; names[j] = names[j - 1]; names[j - 1] = t
+      }
+    for (i = 1; i <= n; i++) {
+      v = ENVIRON[names[i]]
+      gsub(/[\\"`$]/, "\\\\&", v)
+      print names[i] "=\"" v "\""
+    }
+  }
+' >"$dir/env.new" || { rm -f "$dir/env.new"; fail "cannot save the RUNCVM_L1_* variables"; }
+
+if ! iconv -f UTF-8 -t UTF-8 "$dir/env.new" >/dev/null 2>&1; then
+  bad=$(while IFS= read -r line; do
+    printf '%s\n' "$line" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || printf ' %s' "${line%%=*}"
+  done <"$dir/env.new")
+  rm -f "$dir/env.new"
+  fail "not valid UTF-8, which an EnvironmentFile cannot hold:$bad"
+fi
+
+commit "$dir/args"
+commit "$dir/env"
+
+exec /usr/lib/systemd/systemd

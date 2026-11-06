@@ -209,6 +209,7 @@ RunCVM features:
 - [Applications for RunCVM](#applications-for-runcvm)
 - [How RunCVM works](#how-runcvm-works)
 - [System requirements](#system-requirements)
+- [Supported distributions](#supported-distributions)
 - [Installation](#installation)
 - [Upgrading](#upgrading)
 - [Features and Limitations](#features-and-limitations)
@@ -276,7 +277,7 @@ RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >=
 
 RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman), the `kvm` and `tun` kernel modules, and and the kernel's `nf_tables` with bridge and NAT support (`CONFIG_NF_TABLES_BRIDGE`, `CONFIG_NFT_NAT`), with which RunCVM installs firewall rules in each container, as Docker's own networking does. Where the kernel builds `nft_meta_bridge` as a module (as Debian's, Ubuntu's and Oracle Linux's kernels do), the kernel loads it on demand. RunCVM does not need the `br_netfilter` module. RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
-RunCVM is tested on Debian Bullseye and [GitHub Codespaces](https://github.com/codespaces/new?hide_repo_select=true&ref=main&repo=514606231).
+RunCVM is tested on x86-64 hosts with KVM running Debian 12 (Bookworm) and Ubuntu 24.04 LTS (Noble Numbat), with Docker Engine, both Docker's own packages and Ubuntu's `docker.io`. The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
 
 ### rp_filter sysctl settings
 
@@ -299,6 +300,45 @@ At time of writing:
 We recommend `all/rp_filter` be set to 2, as this is the simplest change and provides a good balance of security.
 
 This requirement concerns IPv4 only. A dual-stack Container/VM's DNS requests and `docker exec` connections still use IPv4, and Linux has no IPv6 equivalent of `rp_filter`, so IPv6 needs no further host configuration.
+
+## Supported distributions
+
+RunCVM aims to support each distribution's latest release and one or two before it (for Ubuntu, its LTS releases), while they remain supported upstream, as the image a Container/VM runs. It bundles a kernel for each of these distributions, built from the release shown, which a Container/VM boots unless its image has a kernel of its own (see [Kernel auto-detection](#kernel-auto-detection)). The table lists the image releases that the integration tests (`tests/25-images-kernels`) boot:
+
+| Distribution | Image releases tested | RunCVM's kernel (`RUNCVM_KERNEL`) | Kernel built from | Kernel series | Module compression | Image releases whose own `modprobe` can load the kernel's modules |
+|---|---|---|---|---|---|---|
+| Debian | 12 (Bookworm) | `debian` | Debian 12 (Bookworm) | 6.1 | none | all |
+| Ubuntu | 24.04 LTS (Noble Numbat) | `ubuntu` | Ubuntu 22.04 LTS (Jammy Jellyfish) | 5.15 | none | all |
+| Oracle Linux | none (the kernel is tested with an Alpine Linux image) | `ol` | Oracle Linux 9 | 5.14 | xz | 7 and later (9 and 10 once `kmod` is installed) |
+| Alpine Linux | the latest (the `alpine` image) | `alpine` | Alpine Linux 3.19 (`linux-virt`) | 6.6 | gzip | all |
+| OpenWrt | none (the kernel is tested with an Alpine Linux image) | `openwrt` | Alpine Linux 3.19 (`linux-virt`) | 6.6 | none | all |
+
+Each kernel comes from the release in the "Kernel built from" column, which stays fixed for a given RunCVM version: its series (as shown) does not change, and each build of RunCVM takes that release's newest kernel update (e.g. Debian 12's newest 6.1 kernel).
+
+The last column concerns the workload's own module loading, e.g. `modprobe`, or `dockerd` loading `overlay` or `br_netfilter`, in the VM. It reflects which compressed formats each release's `kmod` (or, for Alpine Linux, BusyBox) can read: for example, Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) and Ubuntu 18.04 LTS (Bionic Beaver) read only uncompressed modules, Debian 10 (Buster), Debian 11 (Bullseye) and Ubuntu 20.04 LTS (Focal Fossa) also read xz, and later releases also read zstd. Oracle Linux 9 and 10 images include no `kmod` until it is installed. RunCVM itself loads the modules it needs, while the VM boots, with its own bundled BusyBox `modprobe`, which reads uncompressed, gzip and xz modules, whatever the image.
+
+Other releases of these distributions, including the older releases RunCVM aims to support, may work, but are not yet tested.
+
+### Other distributions
+
+RunCVM bundles no kernel for other distributions. How it treats some popular ones, as named by their images' `/etc/os-release`:
+
+| Distribution | `ID` | `ID_LIKE` | Status |
+|---|---|---|---|
+| Rocky Linux | `rocky` | `rhel centos fedora` | Refused, unless launched with `--env=RUNCVM_KERNEL=<dist>` (e.g. `ol`) |
+| AlmaLinux | `almalinux` | `rhel centos fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
+| CentOS Stream | `centos` | `rhel fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
+| Red Hat Universal Base Image (UBI) | `rhel` | `fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
+| Amazon Linux | `amzn` | `fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
+| Fedora | `fedora` | | Refused, unless launched with `RUNCVM_KERNEL` |
+| openSUSE Leap, openSUSE Tumbleweed | `opensuse-leap`, `opensuse-tumbleweed` | `suse opensuse` | Refused, unless launched with `RUNCVM_KERNEL` |
+| Arch Linux | `arch` | | Refused, unless launched with `RUNCVM_KERNEL` |
+| Kali Linux | `kali` | `debian` | Refused, unless launched with `RUNCVM_KERNEL` (e.g. `debian`) |
+| Wolfi (Chainguard) | `wolfi` | | Refused, unless launched with `RUNCVM_KERNEL` |
+| Distroless (Debian-based, e.g. `gcr.io/distroless/base-debian12`) | `debian` | | Debian's kernel, as for Debian |
+| BusyBox, and images built `FROM scratch` | (no `/etc/os-release`) | | Debian's kernel |
+
+A Container/VM launched with `RUNCVM_KERNEL` boots the named kernel, whatever the image.
 
 ## Installation
 
@@ -492,8 +532,10 @@ When creating a container, RunCVM will examine the image being launched to try t
       - Debian: `/vmlinuz` and `/initrd.img`
       - Ubuntu: `/boot/vmlinuz` and `/boot/initrd.img`
       - Alpine: `/boot/vmlinuz-virt` `/boot/initramfs-virt`
-   2. Otherwise, if found in the RunCVM package, select the latest kernel compatible with the distro
-   3. Finally, use the Debian kernel from the RunCVM package
+   2. Otherwise, select the latest RunCVM kernel for the distro: `debian`, `ubuntu`, `ol` (Oracle Linux), `alpine` or `openwrt`
+   3. If the image has no `/etc/os-release`, or it gives no `ID`, use the Debian kernel from the RunCVM package
+
+An image whose `/etc/os-release` `ID` is none of `debian`, `ubuntu`, `ol`, `alpine` and `openwrt` (e.g. Fedora) cannot be launched without `--env=RUNCVM_KERNEL=<dist>`, even if it has a kernel of its own.
 
 ## Option reference
 
@@ -810,6 +852,8 @@ The modifications to `create` are designed to make the created container launch 
 
 The modifications to `exec` are designed to run commands within the VM instead of the container.
 
+`runcvm-runtime` passes every command, modified or not, to `runc`: the first `runc` in its caller's `PATH` (as Docker itself finds `runc`), or else in `/usr/bin`, `/usr/sbin`, `/usr/local/bin`, `/usr/local/sbin`, `/bin` or `/sbin`. Whatever the `PATH`, the directories include both Docker's own packages' `/usr/bin/runc` and Debian's and Ubuntu's `/usr/sbin/runc` (from their `runc` package, on which `docker.io` depends). If it finds none, the command fails with an error naming the places searched.
+
 #### `runcvm-runtime` - `create` command
 
 In more detail, the RunCVM runtime `create` process:
@@ -889,54 +933,24 @@ cd runcvm
 ./build/build.sh
 ```
 
-The build script creates a Docker image named `newsnowlabs/runcvm:latest`.
+The build script creates a Docker image named `newsnowlabs/runcvm:latest`. To tag it otherwise, give `--tag <tag>`, once or more, e.g. `--tag dev` for a development build, or `--tag v1.2.3 --tag latest` for a release. Arguments after `--` are passed to `docker build`.
+
+To publish the build, add `--push`, which after a successful build pushes each tag to Docker Hub (`newsnowlabs/runcvm:<tag>`), then copies it to GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`) with `docker buildx imagetools create`; `--push=dockerhub` pushes to Docker Hub only. Both need `docker login` to the registries concerned. `./build/build.sh --help` lists the options.
+
+To install a build tagged other than `latest`, name it in `REPO` when running the installation script, e.g. `sudo REPO=newsnowlabs/runcvm:dev ./runcvm-scripts/runcvm-install-runtime.sh`.
 
 Now follow the main [installation instructions](#installation) to install your built RunCVM from the Docker image.
 
 ## Testing
 
-Test RunCVM using nested RunCVM. You can do this using a Docker image capable of installing RunCVM, or an image built with a version of RunCVM preinstalled.
+Test RunCVM using nested RunCVM: in a Container/VM, launched with RunCVM, that runs systemd and Docker and has a RunCVM of its own installed. [`tests/env/`](tests/env/README.md) builds the image for such a Container/VM, with RunCVM preinstalled from a RunCVM image chosen at build time. Its README describes the image, the build arguments, and what the Container/VM configures and why.
 
-Build a suitable image as follows:
-
-```sh
-cat <<EOF | docker build --tag=ubuntu-docker-runcvm -
-FROM ubuntu:jammy
-
-# Install needed packages and create and configure 'runcvm' user account
-RUN apt update && \
-    apt -y install \
-        apt-utils kmod wget iproute2 systemd \
-        ca-certificates curl gnupg udev dbus sudo psmisc && \
-    curl -fsSL https://get.docker.com | bash && \
-    echo kvm_intel >>/etc/modules && \
-    useradd --create-home --shell /bin/bash --groups sudo,docker runcvm && \
-    echo runcvm:runcvm | chpasswd && \
-    echo 'runcvm ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/runcvm
-
-WORKDIR /home/runcvm
-ENTRYPOINT ["/lib/systemd/systemd"]
-VOLUME /disks
-
-# Mount formatted backing files at:
-# - /var/lib/docker for speed and overlay2 support
-# - /opt/runcvm to avoid nested virtiofs, which works, but can't be great for speed
-ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,2G;/disks/runcvm,/opt/runcvm,ext4,2G'
-
-# # Uncomment this block to preinstall RunCVM from the specified image
-#
-# COPY --from=newsnowlabs/runcvm:latest /opt /opt/
-# RUN rm -f /etc/init.d/docker && \
-#     bash /opt/runcvm/scripts/runcvm-install-runtime.sh --no-dockerd
-EOF
-```
-
-(Uncomment the final block to build an image with RunCVM preinstalled, or leave the block commented to test RunCVM installation).
-
-To launch, run:
+Build and launch it, then obtain a command prompt in it, as follows:
 
 ```sh
-docker run -d --runtime=runcvm -m 2g --name=ubuntu-docker-runcvm ubuntu-docker-runcvm
+docker build -t runcvm-l1 tests/env
+docker run -d --runtime=runcvm -m 4g --cpus=4 --stop-timeout=120 --name=runcvm-l1 runcvm-l1
+docker exec -it -u runcvm runcvm-l1 bash
 ```
 
 > Optionally modify this `docker run` command by:
@@ -944,9 +958,13 @@ docker run -d --runtime=runcvm -m 2g --name=ubuntu-docker-runcvm ubuntu-docker-r
 > - removing `-d` and adding `--env=RUNCVM_KERNEL_DEBUG=1` - to see kernel and systemd boot logs
 > - removing `-d` and adding `-it` - to provide a console
 
-Then `docker exec -it -u runcvm ubuntu-docker-runcvm bash` to obtain a command prompt and perform testing.
+Launch it without `--init`, so that systemd is the VM's PID 1. `docker exec runcvm-l1 runcvm-l1-check` checks that it is working.
 
-Run `docker rm -fv ubuntu-docker-runcvm` to clean up after testing.
+The image preinstalls the RunCVM release named by its `RUNCVM_IMAGE` build argument. To run the integration tests below inside it, preinstall the RunCVM they were written for, e.g. one built by `./build/build.sh`: `docker build -t runcvm-l1 --build-arg RUNCVM_IMAGE=newsnowlabs/runcvm:latest tests/env`.
+
+To test RunCVM's installer, run `runcvm-scripts/runcvm-install-runtime.sh` from a clone of this repository inside it.
+
+Run `docker rm -fv runcvm-l1` to clean up after testing.
 
 ### Running the integration tests
 
