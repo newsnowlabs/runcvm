@@ -294,6 +294,13 @@ ADD runcvm-etc /opt/runcvm/etc/
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]
 
+# OCI labels. GitHub links the image's package on ghcr.io to the repository named by 'source', and
+# shows 'description'. build/build.sh gives the image's index on ghcr.io the same keys as
+# annotations, which GitHub reads in place of labels where a tag names an index.
+LABEL org.opencontainers.image.source="https://github.com/newsnowlabs/runcvm" \
+      org.opencontainers.image.description="Experimental open-source container runtime for Linux that launches standard container workloads, and system workloads such as systemd, Docker and OpenWrt, in VMs" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 # Install needed kernels.
 # Comment out any kernels that are unneeded.
 COPY --from=alpine-kernel /opt/runcvm/kernels/alpine /opt/runcvm/kernels/alpine
