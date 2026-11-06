@@ -209,6 +209,7 @@ RunCVM features:
 - [Applications for RunCVM](#applications-for-runcvm)
 - [How RunCVM works](#how-runcvm-works)
 - [System requirements](#system-requirements)
+- [Supported distributions](#supported-distributions)
 - [Installation](#installation)
 - [Upgrading](#upgrading)
 - [Features and Limitations](#features-and-limitations)
@@ -276,7 +277,7 @@ RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >=
 
 RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and the `kvm` and `tun` kernel modules. RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
-RunCVM is tested on Debian Bullseye and [GitHub Codespaces](https://github.com/codespaces/new?hide_repo_select=true&ref=main&repo=514606231).
+RunCVM is tested on x86-64 hosts with KVM running Debian 12 (Bookworm) and Ubuntu 24.04 LTS (Noble Numbat), with Docker Engine, both Docker's own packages and Ubuntu's `docker.io`. The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
 
 ### rp_filter sysctl settings
 
@@ -299,6 +300,45 @@ At time of writing:
 We recommend `all/rp_filter` be set to 2, as this is the simplest change and provides a good balance of security.
 
 This requirement concerns IPv4 only. A dual-stack Container/VM's DNS requests and `docker exec` connections still use IPv4, and Linux has no IPv6 equivalent of `rp_filter`, so IPv6 needs no further host configuration.
+
+## Supported distributions
+
+RunCVM aims to support each distribution's latest release and one or two before it (for Ubuntu, its LTS releases), while they remain supported upstream, as the image a Container/VM runs. It bundles a kernel for each of these distributions, built from the release shown, which a Container/VM boots unless its image has a kernel of its own (see [Kernel auto-detection](#kernel-auto-detection)). The table lists the image releases that the integration tests (`tests/25-images-kernels`) boot:
+
+| Distribution | Image releases tested | RunCVM's kernel (`RUNCVM_KERNEL`) | Kernel built from | Kernel series | Module compression | Image releases whose own `modprobe` can load the kernel's modules |
+|---|---|---|---|---|---|---|
+| Debian | 12 (Bookworm) | `debian` | Debian 12 (Bookworm) | 6.1 | none | all |
+| Ubuntu | 24.04 LTS (Noble Numbat) | `ubuntu` | Ubuntu 22.04 LTS (Jammy Jellyfish) | 5.15 | none | all |
+| Oracle Linux | none (the kernel is tested with an Alpine Linux image) | `ol` | Oracle Linux 9 | 5.14 | xz | 7 and later (9 and 10 once `kmod` is installed) |
+| Alpine Linux | the latest (the `alpine` image) | `alpine` | Alpine Linux 3.19 (`linux-virt`) | 6.6 | gzip | all |
+| OpenWrt | none (the kernel is tested with an Alpine Linux image) | `openwrt` | Alpine Linux 3.19 (`linux-virt`) | 6.6 | none | all |
+
+Each kernel comes from the release in the "Kernel built from" column, which stays fixed for a given RunCVM version: its series (as shown) does not change, and each build of RunCVM takes that release's newest kernel update (e.g. Debian 12's newest 6.1 kernel).
+
+The last column concerns the workload's own module loading, e.g. `modprobe`, or `dockerd` loading `overlay` or `br_netfilter`, in the VM. It reflects which compressed formats each release's `kmod` (or, for Alpine Linux, BusyBox) can read: for example, Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) and Ubuntu 18.04 LTS (Bionic Beaver) read only uncompressed modules, Debian 10 (Buster), Debian 11 (Bullseye) and Ubuntu 20.04 LTS (Focal Fossa) also read xz, and later releases also read zstd. Oracle Linux 9 and 10 images include no `kmod` until it is installed. RunCVM itself loads the modules it needs, while the VM boots, with its own bundled BusyBox `modprobe`, which reads uncompressed, gzip and xz modules, whatever the image.
+
+Other releases of these distributions, including the older releases RunCVM aims to support, may work, but are not yet tested.
+
+### Other distributions
+
+RunCVM bundles no kernel for other distributions. How it treats some popular ones, as named by their images' `/etc/os-release`:
+
+| Distribution | `ID` | `ID_LIKE` | Status |
+|---|---|---|---|
+| Rocky Linux | `rocky` | `rhel centos fedora` | Refused, unless launched with `--env=RUNCVM_KERNEL=<dist>` (e.g. `ol`) |
+| AlmaLinux | `almalinux` | `rhel centos fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
+| CentOS Stream | `centos` | `rhel fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
+| Red Hat Universal Base Image (UBI) | `rhel` | `fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
+| Amazon Linux | `amzn` | `fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
+| Fedora | `fedora` | | Refused, unless launched with `RUNCVM_KERNEL` |
+| openSUSE Leap, openSUSE Tumbleweed | `opensuse-leap`, `opensuse-tumbleweed` | `suse opensuse` | Refused, unless launched with `RUNCVM_KERNEL` |
+| Arch Linux | `arch` | | Refused, unless launched with `RUNCVM_KERNEL` |
+| Kali Linux | `kali` | `debian` | Refused, unless launched with `RUNCVM_KERNEL` (e.g. `debian`) |
+| Wolfi (Chainguard) | `wolfi` | | Refused, unless launched with `RUNCVM_KERNEL` |
+| Distroless (Debian-based, e.g. `gcr.io/distroless/base-debian12`) | `debian` | | Debian's kernel, as for Debian |
+| BusyBox, and images built `FROM scratch` | (no `/etc/os-release`) | | Debian's kernel |
+
+A Container/VM launched with `RUNCVM_KERNEL` boots the named kernel, whatever the image.
 
 ## Installation
 
@@ -492,8 +532,10 @@ When creating a container, RunCVM will examine the image being launched to try t
       - Debian: `/vmlinuz` and `/initrd.img`
       - Ubuntu: `/boot/vmlinuz` and `/boot/initrd.img`
       - Alpine: `/boot/vmlinuz-virt` `/boot/initramfs-virt`
-   2. Otherwise, if found in the RunCVM package, select the latest kernel compatible with the distro
-   3. Finally, use the Debian kernel from the RunCVM package
+   2. Otherwise, select the latest RunCVM kernel for the distro: `debian`, `ubuntu`, `ol` (Oracle Linux), `alpine` or `openwrt`
+   3. If the image has no `/etc/os-release`, or it gives no `ID`, use the Debian kernel from the RunCVM package
+
+An image whose `/etc/os-release` `ID` is none of `debian`, `ubuntu`, `ol`, `alpine` and `openwrt` (e.g. Fedora) cannot be launched without `--env=RUNCVM_KERNEL=<dist>`, even if it has a kernel of its own.
 
 ## Option reference
 
