@@ -9,6 +9,12 @@ log() {
   echo $opts "> $1"
 }
 
+# Log a detail line: written to the test's log, and to the terminal only with 'tests/run --verbose'.
+# The leading ASCII record separator (0x1e) marks it as such for the runner.
+log_detail() {
+  printf '\036> %s\n' "$1"
+}
+
 _cleanup() {
 
   if [ "$(nodes)" != "" ]; then

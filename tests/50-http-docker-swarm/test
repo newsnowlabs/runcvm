@@ -105,9 +105,9 @@ _EOE_
 for i in $(seq 1 200 | sort -nr)
 do
   replicas=$(docker exec ${NODE}1 docker service ls --format='{{ .Replicas }}' --filter='Name=http')
-  log "Waiting for remainder of $replicas replicas to launch (#$i) ..."
+  log_detail "Waiting for remainder of $replicas replicas to launch (#$i) ..."
   [ "$replicas" = "$NODES/$NODES" ] && break
-  [ $i -eq 1 ] && exit 253
+  [ $i -eq 1 ] && log "Only $replicas replicas launched in 200s; giving up." && exit 253
   sleep 1
 done
 log "All $NODES replicas launched."
@@ -142,13 +142,13 @@ do
     response=$(tr '\012\015' '  ' <<<$response)
     grep -q "remote_addr=$DOCKER_IPV4" <<<$response
     if [ $? -ne 0 ]; then
-      log "#$loop Response error: $response"
+      log_detail "#$loop Response error: $response"
       ERROR=1
     else
-      log "#$loop Response error: $response"
+      log_detail "#$loop Response OK: $response"
     fi
   else
-    log "#$loop Response error: curl error $ERROR"
+    log_detail "#$loop Response error: curl error $ERROR"
     ERROR=1
   fi
 
