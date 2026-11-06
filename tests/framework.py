@@ -47,6 +47,12 @@ def log(msg):
     print("> %s" % msg, flush=True)
 
 
+def log_detail(msg):
+    """Log a detail line, as framework.sh's log_detail(): written to the test's log, and to the
+    terminal only with 'tests/run --verbose'."""
+    print("\x1e> %s" % msg, flush=True)
+
+
 def unique(name):
     """A Docker object name unique to this run, so runs and tests can proceed concurrently."""
     return re.sub(r"[^a-zA-Z0-9_.-]", "-", "rcvt-%s-%s" % (RUN_ID, name))

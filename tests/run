@@ -59,6 +59,12 @@ to 1 (framework helper tcg_cases): when asked to, or when VMs do not use KVM
 anyway (--accel tcg, or no /dev/kvm). Otherwise the test records them as
 skipped.
 
+Detail lines (framework helper log_detail) record step-by-step progress, such
+as each of many requests' outcomes. They are written to the test's log, but to
+the terminal only with --verbose (or RUNCVM_TEST_VERBOSE=1). A detail line is
+one that starts with the ASCII record separator (0x1e), which the runner
+removes.
+
 Requires only Python 3.6+ and the docker CLI.
 """
 
@@ -297,7 +303,12 @@ def signal_group(pgid, sig):
         pass
 
 
-def run_test(test, env, logs_dir, kill_after):
+# Marks a line of a test's output as a detail line, shown on the terminal only with --verbose (see
+# log_detail in framework.sh and framework.py).
+DETAIL_MARK = b"\x1e"
+
+
+def run_test(test, env, logs_dir, kill_after, verbose=False):
     log_path = os.path.join(logs_dir, test.name + ".log")
     checks_path = os.path.join(logs_dir, test.name + ".checks")
     params_path = os.path.join(logs_dir, test.name + ".params")
@@ -326,9 +337,13 @@ def run_test(test, env, logs_dir, kill_after):
     def pump():
         with open(log_path, "wb") as log:
             for line in iter(proc.stdout.readline, b""):
+                detail = line.startswith(DETAIL_MARK)
+                if detail:
+                    line = line[len(DETAIL_MARK):]
                 log.write(line)
                 log.flush()
-                say_bytes(prefix + line)
+                if verbose or not detail:
+                    say_bytes(prefix + line)
                 m = re.search(rb"SKIP: (.*)", line)
                 if m and not skip_reason:
                     skip_reason.append(m.group(1).decode(errors="replace").strip())
@@ -550,6 +565,8 @@ def parse_args(argv):
     p.add_argument("--tcg-cases", action="store_true", default=truthy(os.environ.get("RUNCVM_TEST_TCG_CASES")),
                    help="run checks that launch Container/VMs under software emulation (TCG) even "
                         "where VMs use KVM (always on with --accel tcg, or without /dev/kvm)")
+    p.add_argument("-v", "--verbose", action="store_true", default=truthy(os.environ.get("RUNCVM_TEST_VERBOSE")),
+                   help="show tests' detail lines on the terminal as well as in their logs")
     p.add_argument("-x", "--exitfirst", action="store_true", help="stop after the first failure or timeout")
     p.add_argument("-l", "--list", action="store_true", help="list selected tests and exit")
     p.add_argument("--no-preflight", action="store_true",
@@ -639,7 +656,7 @@ def main(argv):
             write_results(results_dir, logs_dir, results, env, args, selected, running=t.name)
             say("=== %s (tier %s, timeout %ss)" % (t.name, t.tier, t.timeout))
             try:
-                r = run_test(t, env, logs_dir, kill_after)
+                r = run_test(t, env, logs_dir, kill_after, verbose=args.verbose)
             except (KeyboardInterrupt, Terminated) as e:
                 stopped = 143 if isinstance(e, Terminated) else 130
                 r = Result(t, "interrupted", None, 0, "terminated" if stopped == 143 else "interrupted")
