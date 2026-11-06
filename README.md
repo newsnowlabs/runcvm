@@ -853,6 +853,8 @@ The modifications to `create` are designed to make the created container launch 
 
 The modifications to `exec` are designed to run commands within the VM instead of the container.
 
+`runcvm-runtime` passes every command, modified or not, to `runc`: the first `runc` in its caller's `PATH` (as Docker itself finds `runc`), or else in `/usr/bin`, `/usr/sbin`, `/usr/local/bin`, `/usr/local/sbin`, `/bin` or `/sbin`. Whatever the `PATH`, the directories include both Docker's own packages' `/usr/bin/runc` and Debian's and Ubuntu's `/usr/sbin/runc` (from their `runc` package, on which `docker.io` depends). If it finds none, the command fails with an error naming the places searched.
+
 #### `runcvm-runtime` - `create` command
 
 In more detail, the RunCVM runtime `create` process:
@@ -931,7 +933,11 @@ cd runcvm
 ./build/build.sh
 ```
 
-The build script creates a Docker image named `newsnowlabs/runcvm:latest`.
+The build script creates a Docker image named `newsnowlabs/runcvm:latest`. To tag it otherwise, give `--tag <tag>`, once or more, e.g. `--tag dev` for a development build, or `--tag v1.2.3 --tag latest` for a release. Arguments after `--` are passed to `docker build`.
+
+To publish the build, add `--push`, which after a successful build pushes each tag to Docker Hub (`newsnowlabs/runcvm:<tag>`), then copies it to GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`) with `docker buildx imagetools create`; `--push=dockerhub` pushes to Docker Hub only. Both need `docker login` to the registries concerned. `./build/build.sh --help` lists the options.
+
+To install a build tagged other than `latest`, name it in `REPO` when running the installation script, e.g. `sudo REPO=newsnowlabs/runcvm:dev ./runcvm-scripts/runcvm-install-runtime.sh`.
 
 Now follow the main [installation instructions](#installation) to install your built RunCVM from the Docker image.
 
