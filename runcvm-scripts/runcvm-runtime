@@ -1,4 +1,4 @@
-#!/opt/runcvm/lib/ld-musl-x86_64.so.1 /opt/runcvm/bin/bash
+#!/opt/runcvm/lib/ld /opt/runcvm/bin/bash
 
 # REFERENCES
 
@@ -492,6 +492,15 @@ if [ "$COMMAND" = "create" ]; then
   set_config_env "RUNCVM_KERNEL_PATH" "$RUNCVM_KERNEL_PATH"
   set_config_env "RUNCVM_KERNEL_INITRAMFS_PATH" "$RUNCVM_KERNEL_INITRAMFS_PATH"
   set_config_env "RUNCVM_KERNEL_ROOT" "$RUNCVM_KERNEL_ROOT"
+
+  # Auto-detect host architecture; respect user-supplied RUNCVM_QEMU_ARCH if set
+  case "$(uname -m)" in
+    aarch64) RUNCVM_QEMU_ARCH_DEFAULT="arm64" ;;
+    x86_64)  RUNCVM_QEMU_ARCH_DEFAULT="x86_64" ;;
+    *)       RUNCVM_QEMU_ARCH_DEFAULT="x86_64" ;;
+  esac
+  RUNCVM_QEMU_ARCH="$(get_config_env 'RUNCVM_QEMU_ARCH' "$RUNCVM_QEMU_ARCH_DEFAULT")"
+  set_config_env "RUNCVM_QEMU_ARCH" "$RUNCVM_QEMU_ARCH"
 
   # QEMU acceleration:
   # - kvm (default): use KVM; fail at creation if /dev/kvm is unavailable on this host
