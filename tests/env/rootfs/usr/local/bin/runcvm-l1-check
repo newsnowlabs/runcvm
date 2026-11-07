@@ -110,7 +110,7 @@ else
   for spec in "${specs[@]}"; do
     IFS=',' read -ra fields <<<"$spec"
     dsts=()
-    if [[ "${fields[0]}" =~ ^(src|source|dst|target|destination|fs|size|layout)= ]]; then
+    if [[ "${fields[0]}" =~ ^(src|source|dst|target|destination|fs|size|layout|prealloc)= ]]; then
       for f in "${fields[@]}"; do
         case "$f" in dst=*|target=*|destination=*) dsts+=("${f#*=}") ;; esac
       done

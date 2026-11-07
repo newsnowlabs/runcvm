@@ -84,6 +84,14 @@ INVALID = [
     ("keyed-alias-repeated", "fs=ext4,source=/disks/d,target=/srv/a,src=/disks/e,size=16M",
      "src specified more than once"),
     ("unsupported-fs", "/disks/d,/srv/a,zfs,16M", "fs 'zfs' unsupported; fs must be one of: ext4 xfs btrfs"),
+    ("bad-prealloc", "/disks/d,/srv/a,ext4,16M,prealloc=yes",
+     "prealloc must be 'on' or 'off'"),
+    ("repeated-prealloc", "/disks/d,/srv/a,ext4,16M,prealloc=on,prealloc=off",
+     "prealloc specified more than once"),
+    ("keyed-bad-prealloc", "src=/disks/d,dst=/srv/a,fs=ext4,size=16M,prealloc=1",
+     "prealloc must be 'on' or 'off'"),
+    ("keyed-repeated-prealloc", "prealloc=on,src=/disks/d,dst=/srv/a,fs=ext4,size=16M,prealloc=on",
+     "prealloc specified more than once"),
 ]
 
 
