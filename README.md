@@ -348,10 +348,12 @@ Run:
 curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
 ```
 
+To build RunCVM from source and install that instead, see [Building](#building).
+
 This will:
 - Install the RunCVM software package to `/opt/runcvm` (installation elsewhere is currently unsupported)
 - For Docker support:
-  - Enable the RunCVM runtime, by patching `/etc/docker/daemon.json` to add `runcvm` to the `runtimes` property
+  - Enable the RunCVM runtime, by setting `runtimes.runcvm.path` in `/etc/docker/daemon.json` to `/opt/runcvm/scripts/runcvm-runtime`, leaving any other runtimes there unchanged (see [Registering the runtime by hand](#registering-the-runtime-by-hand))
   - Restart `dockerd`, if it can be detected how for your system (e.g. `systemctl restart docker`)
   - Verify that RunCVM is recognised via `docker info`
 - For Podman support (experimental)
@@ -362,6 +364,36 @@ Following installation, launch a basic test RunCVM Container/VM:
 
 ```console
 docker run --runtime=runcvm --rm -it hello-world
+```
+
+### Registering the runtime by hand
+
+The installation script registers RunCVM with Docker by adding a `runcvm` entry to the `runtimes` property of `/etc/docker/daemon.json`, creating the file if there is none. To do the same yourself, for example where `daemon.json` is managed by configuration management, add the entry alongside any runtimes already there. For instance, a `daemon.json` that makes [crun](https://github.com/containers/crun) the default runtime, with RunCVM registered, reads:
+
+```json
+{
+  "default-runtime": "crun",
+  "runtimes": {
+    "crun": {
+      "path": "/opt/crun/bin/crun"
+    },
+    "runcvm": {
+      "path": "/opt/runcvm/scripts/runcvm-runtime"
+    }
+  }
+}
+```
+
+Then restart `dockerd` (e.g. `sudo systemctl restart docker`), and check that Docker lists the runtime, which prints its path:
+
+```console
+docker info --format '{{.Runtimes.runcvm.Path}}'
+```
+
+For Podman (experimental), add the following to the `[engine.runtimes]` section of `/etc/containers/containers.conf`:
+
+```toml
+runcvm = [ "/opt/runcvm/scripts/runcvm-runtime" ]
 ```
 
 ### Install on Google Cloud
@@ -1027,9 +1059,18 @@ If you would like to contribute a feature suggestion or code, please raise an is
 
 ## Uninstallation
 
-Shut down any RunCVM containers.
+1. Stop and remove all RunCVM containers.
+2. Remove the `runcvm` entry from the `runtimes` property of `/etc/docker/daemon.json` (see [Registering the runtime by hand](#registering-the-runtime-by-hand)), then restart `dockerd` (e.g. `sudo systemctl restart docker`). With `jq` installed, this removes the entry:
+   ```console
+   sudo sh -c 'jq "del(.runtimes.runcvm)" /etc/docker/daemon.json >/etc/docker/daemon.json.new && mv /etc/docker/daemon.json.new /etc/docker/daemon.json'
+   ```
+   For Podman, remove the `runcvm` line from `/etc/containers/containers.conf`.
+3. Remove the RunCVM software package:
+   ```console
+   sudo rm -rf /opt/runcvm
+   ```
 
-Then run `sudo rm -f /opt/runcvm`.
+If the installation script changed `rp_filter` settings in `/etc/sysctl.conf` or `/etc/sysctl.d/`, it marked each change with `# DISABLED BY RUNCVM` (the original line, commented out) and `# ADDED BY RUNCVM` (its replacement); restore the original lines to undo them.
 
 ## RunCVM and Dockside
 
