@@ -1,0 +1,93 @@
+# Probes whether GitHub-hosted Linux runners can run RunCVM Container/VMs under KVM: reports the
+# runner's virtualisation support, opens /dev/kvm to the runner user, installs a RunCVM image, runs
+# a Container/VM and checks that it used KVM, then runs the integration tests. A step that fails
+# is marked failed in the run's summary, and the job carries on, so that one run answers as much as
+# it can. It runs on a push to its own branch, or by hand once on the default branch.
+name: KVM probe
+
+on:
+  push:
+    branches: [claude/ci-kvm-probe]
+  workflow_dispatch:
+    inputs:
+      runcvm_image:
+        description: RunCVM image to install
+        default: newsnowlabs/runcvm:latest
+      tier:
+        description: Integration test tier to run (core, extended, all, or none)
+        default: core
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04, ubuntu-22.04]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      RUNCVM_IMAGE: ${{ inputs.runcvm_image || 'newsnowlabs/runcvm:latest' }}
+      TIER: ${{ inputs.tier || 'core' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Runner facts
+        run: |
+          echo "=== kernel, CPUs, memory, disk"
+          uname -a; nproc; free -m; df -h / | tail -1
+          echo "=== CPU virtualisation flags (vmx or svm; expect a non-zero count)"
+          grep -cE '\b(vmx|svm)\b' /proc/cpuinfo || true
+          lscpu | grep -iE 'virtuali|hypervisor|model name' || true
+          echo "=== KVM modules, and whether nested virtualisation is enabled"
+          lsmod | grep -E '^kvm' || echo "no kvm modules loaded"
+          cat /sys/module/kvm_intel/parameters/nested /sys/module/kvm_amd/parameters/nested 2>/dev/null || true
+          echo "=== /dev/kvm before opening it"
+          ls -l /dev/kvm || true
+          echo "=== Docker"
+          docker version --format 'client {{.Client.Version}}, server {{.Server.Version}}'
+          docker info --format 'storage driver {{.Driver}}; cgroup v{{.CgroupVersion}}'
+
+      - name: Open /dev/kvm to the runner user
+        continue-on-error: true
+        run: |
+          # As in GitHub's changelog for hardware-accelerated virtualisation on hosted runners.
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+          echo "=== /dev/kvm usable by the runner user: $([ -r /dev/kvm ] && [ -w /dev/kvm ] && echo yes || echo no)"
+
+      - name: Install RunCVM (${{ env.RUNCVM_IMAGE }})
+        continue-on-error: true
+        run: |
+          sudo REPO="$RUNCVM_IMAGE" ./runcvm-scripts/runcvm-install-runtime.sh </dev/null
+          docker info --format '{{.Runtimes.runcvm.Path}}'
+
+      - name: Run a Container/VM
+        continue-on-error: true
+        run: |
+          time docker run --rm --runtime=runcvm hello-world
+
+      - name: Check the Container/VM used KVM
+        continue-on-error: true
+        run: |
+          # With RUNCVM_QEMU_ACCEL=kvm (RunCVM's default, given here explicitly), RunCVM refuses to start
+          # the Container/VM without /dev/kvm, rather than falling back to software emulation; the
+          # guest kernel reports the hypervisor it detects.
+          time docker run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=kvm alpine \
+            sh -c 'dmesg | grep -iE "hypervisor detected|kvm-clock" | head -3; echo vcpus: $(nproc)'
+
+      - name: Integration tests (${{ env.TIER }} tier)
+        continue-on-error: true
+        if: env.TIER != 'none'
+        run: |
+          # Test 25 boots many VMs at once; two at a time suits a hosted runner's CPUs and memory.
+          RUNCVM_TEST_JOBS=2 tests/run --tier "$TIER" --results "$RUNNER_TEMP/results"
+
+      - name: Upload test results
+        if: always() && env.TIER != 'none'
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.runner }}
+          path: ${{ runner.temp }}/results
+          if-no-files-found: ignore
