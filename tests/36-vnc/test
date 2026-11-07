@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""VNC display mode: QEMU's VNC server is reachable through a published port.
+
+With RUNCVM_DISPLAY_MODE=vnc, QEMU in the container serves the VM's display over VNC, on port
+5900 plus the display number (RUNCVM_QEMU_VNC_DISPLAY, default 0). A port published from the
+host is forwarded to the VM's address, so the container's firewall rules must pick the
+connection out of the bridge and hand it to QEMU. The test reads QEMU's RFB greeting through
+the published port, on the default bridge network and on a user-defined network with display
+1, with and without --init, and checks that 'docker exec' still works.
+"""
+
+import os
+import socket
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+network = t.unique("net")
+t.docker("network", "create", *t.labels(), network, check=True)
+t.cleanup_network(network)
+
+
+def greeting(port):
+    """Return the first line QEMU's VNC server sends on the published port."""
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=10) as s:
+            return s.recv(12).decode(errors="replace").strip()
+    except (OSError, ValueError) as e:
+        return "error: %s" % e
+
+
+def case(args):
+    net, display, init = args
+    desc = "%s, display %d, %s" % ("user-defined network" if net else "default bridge", display,
+                                 "--init" if init else "no --init")
+    name = t.unique("vnc-%d%s%s" % (display, "-net" if net else "", "-init" if init else ""))
+    t.cleanup_container(name)
+    vnc_port = 5900 + display
+    r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 *(["--init"] if init else []), *(["--network", net] if net else []),
+                 "--env=RUNCVM_DISPLAY_MODE=vnc", "--env=RUNCVM_QEMU_VNC_DISPLAY=%d" % display,
+                 "-p", "127.0.0.1::%d" % vnc_port, "alpine", "sleep", "600")
+    if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
+        return [("%s: Container/VM starts and accepts 'docker exec'" % desc, True, False)]
+    port = t.docker("port", name, "%d/tcp" % vnc_port).stdout.strip().rsplit(":", 1)[-1]
+    return [
+        ("%s: Container/VM starts and accepts 'docker exec'" % desc, True, True),
+        ("%s: RFB greeting through the published port" % desc, "RFB 003.008", greeting(port)),
+    ]
+
+
+cases = [(net, display, init) for net, display in ((None, 0), (network, 1)) for init in (False, True)]
+for results in t.parallel(case, cases):
+    for desc, expected, actual in results:
+        t.check(desc, expected, actual)
+
+t.finish()
