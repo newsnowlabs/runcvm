@@ -275,7 +275,16 @@ For a deep dive into RunCVM's internals, see the section on [Developing RunCVM](
 
 RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM.
 
-RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and the `kvm` and `tun` kernel modules. RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
+RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and these features of the host's kernel, which the kernels of common distributions provide, built in or as modules that load on demand:
+- KVM: `kvm`, with `kvm_intel` or `kvm_amd`;
+- `tun` (`CONFIG_TUN`), for the tap device that connects the VM to the container;
+- the Linux bridge, `bridge` (`CONFIG_BRIDGE`), which RunCVM creates in each container between the tap device and the container's network interface;
+- `nf_tables`, with which RunCVM installs firewall rules in each container, as Docker's own networking does: its IPv4 and bridge families (`CONFIG_NF_TABLES_IPV4`, `CONFIG_NF_TABLES_BRIDGE`), bridge `meta` expressions (`nft_meta_bridge`, `CONFIG_NFT_BRIDGE_META`), NAT (`nft_nat` and `nft_chain_nat`, `CONFIG_NFT_NAT`) and redirection (`nft_redir`, `CONFIG_NFT_REDIR`), with connection tracking;
+- optionally, `vhost_net` (`CONFIG_VHOST_NET`), for `RUNCVM_QEMU_NET_VHOST=1`.
+
+RunCVM does not need the `br_netfilter` module.
+
+RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
 RunCVM is tested on x86-64 hosts with KVM running Debian 12 (Bookworm) and Ubuntu 24.04 LTS (Noble Numbat), with Docker Engine, both Docker's own packages and Ubuntu's `docker.io`. The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
 
@@ -901,7 +910,8 @@ The `runcvm-ctr-entrypoint`:
 - Creates a bridge (acting as a hub) for each container network interface, to join that interface to a VM tap network interface.
 - Launches `virtiofsd` to serve the container's root filesystem.
 - Configures `/etc/resolv.conf` in the container.
-- Adds container firewall rules, launches `dnsmasq` and modifies `/vm/etc/resolv.conf` to proxy DNS requests from the VM to Docker's DNS.
+- Launches `dnsmasq`. Where the container's DNS server is Docker's embedded one (`127.0.0.11`, on user-defined networks), which only the container can reach, it rewrites that server in `/vm/etc/resolv.conf` to `169.254.169.254`, which `dnsmasq` answers, forwarding the VM's DNS requests to Docker's DNS. Elsewhere (e.g. on the default bridge network), the VM uses the container's DNS servers directly.
+- Adds container firewall rules (with `nft`) for the traffic between the VM and RunCVM's own services in the container: replies to `docker exec`'s connections to the VM; the VM's UDP DNS requests to `dnsmasq`, where `dnsmasq` is its DNS server; and, in VNC display mode, connections to QEMU's VNC server. Such traffic crosses the container's bridge addressed to the VM, or to the Docker network's gateway, so rules in the bridge's prerouting hook readdress it to the container, by its arrival interface, addresses and ports, and `nat` rules hand it to the service. The rules match the VM's traffic to `169.254.169.254` only from TCP port 22222 (dropbear's) and to UDP port 53; the VM's other traffic passes through the bridge unchanged.
 - Execs RunCVM's own `runcvm-init` init process to supervise `runcvm-ctr-qemu` to launch the VM.
 
 The `runcvm-init` process:
