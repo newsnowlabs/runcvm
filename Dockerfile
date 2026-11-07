@@ -158,13 +158,14 @@ RUN apk add --allow-untrusted /tmp/dnsmasq/dnsmasq-2*.apk /tmp/dnsmasq/dnsmasq-c
 COPY --from=e2fsprogs /usr/local/sbin/mke2fs /sbin/mke2fs
 
 # Install patched dropbear
-COPY --from=alpine-dropbear /root/packages/main/x86_64 /usr/local/lib/libepka_file.so /tmp/dropbear/
+COPY --from=alpine-dropbear /root/packages/main/x86_64 /tmp/dropbear/
+COPY --from=alpine-dropbear /usr/local/lib/libepka_file.so /usr/lib/dropbear/
 RUN apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/dropbear-dbclient*.apk /tmp/dropbear/dropbear-2*.apk
 
 # Patch the binaries and set up symlinks
 COPY build-utils/make-bundelf-bundle.sh /usr/local/bin/make-bundelf-bundle.sh
 ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey"
-ENV BUNDELF_EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so"
+ENV BUNDELF_EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /usr/lib/dropbear/libepka_file.so /usr/lib/qemu/*.so"
 ENV BUNDELF_EXTRA_SYSTEM_LIB_PATHS="/usr/lib/xtables"
 ENV BUNDELF_CODE_PATH="/opt/runcvm"
 ENV BUNDELF_EXEC_PATH="/.runcvm/guest"
@@ -186,8 +187,9 @@ RUN for cmd in $(awk '$1 !~ /^#/ && NF { print $6 }' /tmp/disk-filesystems); do 
     cp -a /usr/share/qemu $BUNDELF_CODE_PATH/usr/share && \
     cp -a /etc/terminfo $BUNDELF_CODE_PATH/usr/share && \
     cp -a /usr/share/OVMF $BUNDELF_CODE_PATH/usr/share && \
-    # Remove setuid/setgid bits from any/all binaries
-    chmod -R -s $BUNDELF_CODE_PATH/
+    # Remove setuid/setgid bits from any/all binaries; make the package readable by all users, and
+    # writable by root only (see the check at the end of the installer stage)
+    chmod -R -s,a+rX,go-w $BUNDELF_CODE_PATH/
 
 # --- BUILD STAGE ---
 # Build static runcvm-init
@@ -325,3 +327,9 @@ RUN for d in /opt/runcvm/kernels/*; do \
       tgt="$(ls -d */ 2>/dev/null | sed 's:/$::' | grep -v '^latest$' | sort -Vr | head -n 1)"; \
       [ -n "$tgt" ] && ln -sfn "$tgt" latest; \
     done
+
+# Every file and directory in the package must be readable by all users, as RunCVM's binaries load
+# their libraries (and Podman may run the runtime) as users other than root; and writable by root
+# only, as the VM's dropbear, running as root, loads its plugin from the package.
+RUN bad=$(find /opt/runcvm ! -type l \( ! -perm -o=r -o -type d ! -perm -o=x -o -perm /022 \)) && \
+    [ -z "$bad" ] || { echo "Files with the wrong permissions in /opt/runcvm:" >&2; echo "$bad" | head -20 >&2; exit 1; }
