@@ -334,6 +334,22 @@ read -r CONSOLE_DEVICE </.runcvm/console
 # specify 'ConditionVirtualization=!container'
 [ -f "/.dockerenv" ] && busybox mv /.dockerenv /.dockerenv.runcvm
 
+# dropbear listens on every address of the VM, whose networks may reach other containers and
+# hosts, so accept connections to its port only from the address 'docker exec' connects from,
+# where the VM's kernel has nf_tables. Without nf_tables, dropbear still accepts RunCVM's own key
+# only. The table must be in place before dropbear starts.
+read -r EXEC_SOURCE_IP </.runcvm/network/exec-source
+busybox modprobe nf_tables 2>/dev/null || true
+nft -f - &>/dev/null <<_EOE_ || true
+table inet runcvm {
+  chain input {
+    type filter hook input priority filter; policy accept;
+    tcp dport $SSHD_PORT ip saddr $EXEC_SOURCE_IP accept
+    tcp dport $SSHD_PORT drop
+  }
+}
+_EOE_
+
 if [ "$RUNCVM_INIT" = "1" ]; then
   # If launched with '--init' (or --env=RUNCVM_INIT=1) then run our own init in place of Docker's/Podman's.
 

@@ -169,6 +169,7 @@ create_aliases() {
     mke2fs
     mount
     nc
+    nft
     poweroff
     ps
     qemu-ga

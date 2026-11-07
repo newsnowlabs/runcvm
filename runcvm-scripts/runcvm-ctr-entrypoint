@@ -113,6 +113,10 @@ RUNCVM_DNS_IP=169.254.169.254
 
 mkdir -p /.runcvm/network/devices
 
+# 'docker exec' reaches the VM's dropbear from $RUNCVM_DNS_IP (see the SNAT rule for $SSHD_PORT
+# below); runcvm-vm-init accepts connections to dropbear from this address only.
+echo "$RUNCVM_DNS_IP" >/.runcvm/network/exec-source
+
 # The 'ip -N' parses below match protocols and scopes by number (protocol 2 is 'kernel'; scope 0 is
 # 'global' and 253 'link'), because their names come from /etc/iproute2, which is the image's.
 
