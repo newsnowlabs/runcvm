@@ -328,8 +328,10 @@ RUN for d in /opt/runcvm/kernels/*; do \
       [ -n "$tgt" ] && ln -sfn "$tgt" latest; \
     done
 
-# Every file and directory in the package must be readable by all users, as RunCVM's binaries load
-# their libraries (and Podman may run the runtime) as users other than root; and writable by root
-# only, as the VM's dropbear, running as root, loads its plugin from the package.
-RUN bad=$(find /opt/runcvm ! -type l \( ! -perm -o=r -o -type d ! -perm -o=x -o -perm /022 \)) && \
+# Every file in the package must be readable, and every directory searchable, by all users, as
+# RunCVM's binaries load their libraries (and Podman may run the runtime) as users other than root;
+# and everything writable by root only, as the VM's dropbear, running as root, loads its plugin
+# from the package.
+RUN bad=$(find /opt/runcvm ! -type l \( ! -perm -o=r -o -type d ! -perm -o=x -o -perm /022 \)) || \
+      { echo "Checking permissions in /opt/runcvm failed" >&2; exit 1; } && \
     [ -z "$bad" ] || { echo "Files with the wrong permissions in /opt/runcvm:" >&2; echo "$bad" | head -20 >&2; exit 1; }
