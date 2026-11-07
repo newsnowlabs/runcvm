@@ -9,6 +9,10 @@
 #   the container's memory limit (VM memory + 256Mb helper allowance + cache)
 # - invalid values are rejected
 #
+# On a host with KVM, the cases that boot under TCG run only with the runner's --tcg-cases
+# (framework helper tcg_cases); without it they are recorded as skipped. Without KVM, or
+# with --accel tcg, they always run.
+#
 # Expectations depend on whether this host has /dev/kvm. The acceleration in use is
 # read from QEMU's command line in the container's process list, and the memory limit
 # from the container's cgroup on the host.
@@ -127,9 +131,16 @@ else
   expect_running "auto" tcg 1 $DEFAULT_TB $TCG_MEM --env=RUNCVM_QEMU_ACCEL=auto
 fi
 
-expect_running "tcg" tcg 0 $DEFAULT_TB $TCG_MEM --env=RUNCVM_QEMU_ACCEL=tcg
-expect_running "tcg-tb64-mem1g" tcg 0 64 $((1024 + OVERHEAD + 64)) \
-  --env=RUNCVM_QEMU_ACCEL=tcg --env=RUNCVM_QEMU_TCG_TB_MEM_SIZE=64 --memory=1g
+if tcg_cases; then
+  expect_running "tcg" tcg 0 $DEFAULT_TB $TCG_MEM --env=RUNCVM_QEMU_ACCEL=tcg
+  expect_running "tcg-tb64-mem1g" tcg 0 64 $((1024 + OVERHEAD + 64)) \
+    --env=RUNCVM_QEMU_ACCEL=tcg --env=RUNCVM_QEMU_TCG_TB_MEM_SIZE=64 --memory=1g
+else
+  for label in tcg tcg-tb64-mem1g; do
+    log "$label: boots under TCG - SKIP (run with --tcg-cases)"
+    record_result SKIP "$label: boots under TCG"
+  done
+fi
 expect_failure "bogus-accel" RUNCVM_QEMU_ACCEL --env=RUNCVM_QEMU_ACCEL=bogus
 expect_failure "bad-tb-size" RUNCVM_QEMU_TCG_TB_MEM_SIZE --env=RUNCVM_QEMU_ACCEL=tcg --env=RUNCVM_QEMU_TCG_TB_MEM_SIZE=8
 

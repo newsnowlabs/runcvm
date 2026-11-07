@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""RunCVM Container/VMs attached to several Docker networks at creation.
+
+A Container/VM is created with three '--network' options: an IPv4 network
+with a 1400-byte MTU, on which it has a fixed address; an internal (no
+gateway) IPv4 network with a 9000-byte MTU, on which it has an alias; and a
+dual-stack network (IPv6 where dockerd can create it), which gw-priority
+makes the one holding the default routes. A second Container/VM is
+attached to the first two networks only. Two more are attached to the
+first and third networks, which both have gateways: one with gw-priority
+on the first, one with no gw-priority. runc containers on each network
+serve as peers, and a runc "twin" of each Container/VM, created with the
+same network options (less fixed addresses and aliases), shows which
+gateway Docker gives a container so attached. Checks:
+
+- Each VM has one interface per network, with the address Docker assigned
+  on that network (the fixed one included) and that network's MTU.
+- Each VM's IPv4 default gateway is its twin's: the dual-stack network's
+  for vm1 (gw-priority), the first network's for vm2 (the second is
+  internal) and vm3 (gw-priority), and whichever Docker chooses for vm4.
+  With IPv6, vm1 has its Docker-assigned IPv6 address, and its IPv6
+  default route is via the dual-stack network's gateway.
+- From the VM, a peer on each network is reachable by name, and sees the
+  VM's own address on that network.
+- From each peer, the VM is reachable by its name, and on the internal
+  network by its alias.
+- The VMs reach each other by name in both directions (vm1 and vm2, and
+  vm1 and vm3), vm2 reaches vm1 by its alias, and each sees the other's
+  own address on a network they share.
+- vm1 and vm2 exchange 8900-byte pings across the internal network, and
+  1372-byte pings (1400 less IP and ICMP headers) across the 1400-byte
+  one. 4 MB transfers over TCP arrive intact: between vm1 and vm2 in each
+  direction on the first two networks, from vm1 to vm3 on the dual-stack
+  network, and between vm1 and each network's peer in each direction.
+- With IPv6, the VM reaches its peer on the dual-stack network over IPv6.
+- A port published from the VM is reachable from the host.
+- After 'docker restart', the VM has the same addresses, each with the
+  same MTU, and the same default route.
+
+Networks connected to a running Container/VM are not supported (the VM's
+interfaces are configured at boot), so are not tested. Needs Docker 28 or
+later, for gw-priority.
+
+The expected values describe current behaviour. A change to it must update
+them deliberately.
+"""
+
+import os
+import random
+import socket
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+DNS = ["--dns-search=.", "--dns-opt=ndots:1"]
+VM = ["--runtime=" + t.RUNTIME, *t.vm_opts(), *DNS]
+
+# A server answering with its own name on port 80, logging each connection's source to /tmp/conns,
+# and one sending 4 MB of fixed data on port 81 (whose checksum is in /tmp/data.md5).
+SERVERS = ("head -c 4194304 /dev/urandom >/tmp/data && md5sum </tmp/data | cut -d' ' -f1 >/tmp/data.md5; "
+           "(while true; do nc -l -p 81 </tmp/data; done) & "
+           "while true; do hostname | nc -l -v -p 80 2>>/tmp/conns; done")
+
+# Docker lowercases network names given in --network's key=value form.
+octet = random.randint(100, 250)
+SUBNET = {"a": "10.%d.1.0/24" % octet, "b": "10.%d.2.0/24" % octet, "c": "10.%d.3.0/24" % octet}
+FIXED_IP = "10.%d.1.50" % octet
+SUBNET6 = "fd%02x:%04x:%04x::/64" % (random.randint(0, 255), random.randint(0, 65535), random.randint(0, 65535))
+MTU = {"a": "1400", "b": "9000", "c": "1500"}
+net = {k: t.unique("net-" + k).lower() for k in "abc"}
+
+t.docker("network", "create", *t.labels(), "--subnet", SUBNET["a"],
+         "--opt", "com.docker.network.driver.mtu=" + MTU["a"], net["a"], check=True)
+t.cleanup_network(net["a"])
+t.docker("network", "create", *t.labels(), "--internal", "--subnet", SUBNET["b"],
+         "--opt", "com.docker.network.driver.mtu=" + MTU["b"], net["b"], check=True)
+t.cleanup_network(net["b"])
+r = t.docker("network", "create", *t.labels(), "--ipv6", "--subnet", SUBNET["c"], "--subnet", SUBNET6, net["c"])
+IPV6 = r.returncode == 0
+if not IPV6:
+    t.log("could not create an IPv6-enabled network (%s); the IPv6 checks are skipped" % r.stdout.strip())
+    t.docker("network", "create", *t.labels(), "--subnet", SUBNET["c"], net["c"], check=True)
+t.cleanup_network(net["c"])
+t.param("ipv6", "1" if IPV6 else "0")
+
+vm1, vm2 = t.unique("vm1").lower(), t.unique("vm2").lower()
+peer = {k: t.unique("peer-" + k).lower() for k in "abc"}
+ALIAS = t.unique("vm1-alias").lower()
+VM1_NETWORKS = ["--network", "name=%s,ip=%s" % (net["a"], FIXED_IP),
+                "--network", "name=%s,alias=%s" % (net["b"], ALIAS),
+                "--network", "name=%s,gw-priority=10" % net["c"]]
+VM2_NETWORKS = ["--network", net["a"], "--network", net["b"]]
+VM3_NETWORKS = ["--network", "name=%s,gw-priority=20" % net["a"], "--network", net["c"]]
+VM4_NETWORKS = ["--network", net["a"], "--network", net["c"]]
+vm3, vm4 = t.unique("vm3").lower(), t.unique("vm4").lower()
+TWIN_NETWORKS = {
+    vm1: ["--network", net["a"], "--network", net["b"], "--network", "name=%s,gw-priority=10" % net["c"]],
+    vm2: VM2_NETWORKS, vm3: VM3_NETWORKS, vm4: VM4_NETWORKS,
+}
+twin = {v: t.unique("twin-" + v.rsplit("-", 1)[-1]).lower() for v in TWIN_NETWORKS}
+
+
+def ex(name, *cmd):
+    return t.docker("exec", name, *cmd).stdout.strip()
+
+
+def start(args):
+    name, opts, vm = args
+    t.cleanup_container(name)
+    r = t.docker("run", "-d", "--name", name, "--hostname", name, *t.labels(), *(VM if vm else DNS), *opts,
+                 "alpine", "sh", "-c", SERVERS)
+    if r.returncode != 0:
+        t.log("%s: docker run failed: %s" % (name, r.stdout.strip()))
+        return False
+    return t.wait_for_exec(name, BOOT_TIMEOUT) if vm else True
+
+
+CONTAINERS = [
+    (vm1, VM1_NETWORKS + ["-p", "127.0.0.1::80"], True),
+    (vm2, VM2_NETWORKS, True),
+    (vm3, VM3_NETWORKS, True),
+    (vm4, VM4_NETWORKS, True),
+] + [(peer[k], ["--network", net[k]], False) for k in "abc"] + [
+    (twin[v], opts, False) for v, opts in TWIN_NETWORKS.items()]
+started = dict(zip([c[0] for c in CONTAINERS], t.parallel(start, CONTAINERS, jobs=len(CONTAINERS))))
+for name, ok in started.items():
+    t.check("%s starts (and, for a VM, accepts 'docker exec')" % name, True, ok)
+if not all(started.values()):
+    t.finish()
+
+# Wait for each server's data file and checksum.
+for name in [vm1, vm2, vm3] + list(peer.values()):
+    t.check("%s has its test data" % name, True, t.wait_for(
+        "%s's test data" % name, 60, lambda n=name: t.docker("exec", n, "test", "-s", "/tmp/data.md5").returncode == 0))
+
+
+def seen(ip, conns):
+    """Whether nc's connection log 'conns' shows a connection from IPv4 address 'ip': as '(<ip>:<port>)',
+    or, where nc listens on an IPv6 socket, '([::ffff:<ip>]:<port>)'."""
+    return bool(ip) and ("(%s:" % ip in conns or "[::ffff:%s]:" % ip in conns)
+
+
+def docker_addr(name, network, key="IPAddress"):
+    return t.docker("inspect", "-f", "{{(index .NetworkSettings.Networks \"%s\").%s}}" % (network, key), name).stdout.strip()
+
+
+def vm_interfaces(name):
+    """{IPv4 address: (interface, MTU)} in the VM."""
+    out = ex(name, "sh", "-c", "for i in $(ls /sys/class/net); do [ $i = lo ] && continue; "
+                               "for a in $(ip -4 -o addr show dev $i | awk '{print $4}'); do "
+                               "echo \"${a%/*} $i $(cat /sys/class/net/$i/mtu)\"; done; done")
+    return {f[0]: (f[1], f[2]) for f in (line.split() for line in out.splitlines()) if len(f) == 3}
+
+
+def check_interfaces(label, name, networks):
+    ifs = vm_interfaces(name)
+    t.check("%s: one interface per network" % label, len(networks), len(ifs))
+    for k in networks:
+        ip = docker_addr(name, net[k])
+        t.check("%s: network %s: Docker's address is the VM's" % (label, k), True, ip in ifs)
+        t.check("%s: network %s: MTU" % (label, k), MTU[k], ifs.get(ip, ("", ""))[1])
+    return ifs
+
+
+def default_via(name, family="-4"):
+    return ex(name, "sh", "-c", "ip %s route show default | awk '{print $3}' | head -n 1" % family)
+
+
+# Interfaces, addresses and default routes.
+ifs1 = check_interfaces("vm1", vm1, "abc")
+t.check("vm1: fixed address on network a", FIXED_IP, docker_addr(vm1, net["a"]))
+t.check("vm1: IPv4 default route via network c's gateway", docker_addr(vm1, net["c"], "Gateway"), default_via(vm1))
+check_interfaces("vm2", vm2, "ab")
+t.check("vm2: IPv4 default route via network a's gateway (b is internal)",
+        docker_addr(vm2, net["a"], "Gateway"), default_via(vm2))
+check_interfaces("vm3", vm3, "ac")
+t.check("vm3: IPv4 default route via network a's gateway (gw-priority 20)",
+        docker_addr(vm3, net["a"], "Gateway"), default_via(vm3))
+check_interfaces("vm4", vm4, "ac")
+for v in TWIN_NETWORKS:
+    label = v.rsplit("-", 1)[-1]
+    expected = default_via(twin[v])
+    t.check("%s: its runc twin has an IPv4 default gateway" % label, True, bool(expected))
+    t.check("%s: IPv4 default gateway is its runc twin's (%s)" % (label, expected), expected, default_via(v))
+if IPV6:
+    t.check("vm1: IPv6 address on network c", docker_addr(vm1, net["c"], "GlobalIPv6Address"),
+            ex(vm1, "sh", "-c", "ip -6 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | head -n 1"))
+    gw6 = docker_addr(vm1, net["c"], "IPv6Gateway")
+    t.check("vm1: Docker gives network c an IPv6 gateway", True, bool(gw6))
+    t.check("vm1: IPv6 default route via network c's gateway", gw6, default_via(vm1, "-6"))
+    t.check("vm1: reaches network c's peer over IPv6", peer["c"],
+            ex(vm1, "nc", "-w", "5", docker_addr(peer["c"], net["c"], "GlobalIPv6Address"), "80"))
+else:
+    for desc in ("IPv6 address on network c", "IPv6 default route via network c's gateway",
+                 "reaches network c's peer over IPv6"):
+        t.record_result("SKIP", "vm1: " + desc)
+
+# The VM and each peer, in both directions.
+for k in "abc":
+    t.check("vm1 reaches network %s's peer by name" % k, peer[k], ex(vm1, "nc", "-w", "5", peer[k], "80"))
+    t.check("network %s's peer sees vm1's own address" % k, True,
+            seen(docker_addr(vm1, net[k]), ex(peer[k], "cat", "/tmp/conns")))
+    t.check("network %s's peer reaches vm1 by name" % k, vm1, ex(peer[k], "nc", "-w", "5", vm1, "80"))
+t.check("network b's peer reaches vm1 by its alias", vm1, ex(peer["b"], "nc", "-w", "5", ALIAS, "80"))
+
+
+def transfer_ok(src, dst, ip):
+    """Whether 4 MB fetched by 'dst' from 'src' at 'ip' arrives intact."""
+    got = ex(dst, "sh", "-c", "nc -w 10 %s 81 | md5sum | cut -d' ' -f1" % ip)
+    return bool(got) and got == ex(src, "cat", "/tmp/data.md5")
+
+
+# Between the VMs, and VM-to-peer, on each network's MTU.
+vm2_b, vm2_a = docker_addr(vm2, net["b"]), docker_addr(vm2, net["a"])
+t.check("vm1 to vm2: 8900-byte ping across network b (MTU 9000)", True,
+        " 0% packet loss" in ex(vm1, "ping", "-c", "3", "-s", "8900", "-W", "5", vm2_b))
+t.check("vm1 to vm2: 1372-byte ping across network a (MTU 1400)", True,
+        " 0% packet loss" in ex(vm1, "ping", "-c", "3", "-s", "1372", "-W", "5", vm2_a))
+t.check("vm1 from vm2: 4 MB intact across network b", True, transfer_ok(vm2, vm1, vm2_b))
+t.check("vm1 from vm2: 4 MB intact across network a", True, transfer_ok(vm2, vm1, vm2_a))
+t.check("vm2 from vm1: 4 MB intact across network b", True, transfer_ok(vm1, vm2, docker_addr(vm1, net["b"])))
+t.check("vm2 from vm1: 4 MB intact across network a", True, transfer_ok(vm1, vm2, docker_addr(vm1, net["a"])))
+t.check("vm3 from vm1: 4 MB intact across network c", True, transfer_ok(vm1, vm3, docker_addr(vm1, net["c"])))
+
+# Between the VMs, by name and alias, each seeing the other's own address.
+# Two VMs sharing two networks may connect over either, so the source seen may be its address on
+# either shared network.
+for src, dst, shared in ((vm1, vm2, "ab"), (vm2, vm1, "ab"), (vm1, vm3, "ac"), (vm3, vm1, "ac")):
+    s_label, d_label = src.rsplit("-", 1)[-1], dst.rsplit("-", 1)[-1]
+    t.check("%s reaches %s by name" % (s_label, d_label), dst, ex(src, "nc", "-w", "5", dst, "80"))
+    conns = ex(dst, "cat", "/tmp/conns")
+    t.check("%s sees %s's own address" % (d_label, s_label), True,
+            any(seen(docker_addr(src, net[k]), conns) for k in shared))
+t.check("vm2 reaches vm1 by its alias", vm1, ex(vm2, "nc", "-w", "5", ALIAS, "80"))
+for k in "abc":
+    t.check("vm1 from network %s's peer: 4 MB intact" % k, True,
+            transfer_ok(peer[k], vm1, docker_addr(peer[k], net[k])))
+    t.check("network %s's peer from vm1: 4 MB intact" % k, True,
+            transfer_ok(vm1, peer[k], docker_addr(vm1, net[k])))
+
+# A port published from the VM.
+port = t.docker("port", vm1, "80/tcp").stdout.strip().rsplit(":", 1)[-1]
+try:
+    with socket.create_connection(("127.0.0.1", int(port)), timeout=10) as s:
+        published = s.recv(100).decode().strip()
+except (OSError, ValueError) as e:
+    published = "error: %s" % e
+t.check("vm1: published port reachable from the host", vm1, published)
+
+# After a restart, the same interfaces, addresses, MTUs and default route.
+try:
+    restarted = t.docker("restart", vm1, timeout=BOOT_TIMEOUT).returncode == 0
+except subprocess.TimeoutExpired:
+    t.log("'docker restart %s' did not finish within %ss" % (vm1, BOOT_TIMEOUT))
+    restarted = False
+if t.check("vm1: restarts and accepts 'docker exec'", True, restarted and t.wait_for_exec(vm1, BOOT_TIMEOUT)):
+    # Docker may name a container's interfaces in a different order at each start (as it does
+    # under runc), so addresses and MTUs are compared, not interface names.
+    t.check("vm1 after restart: same addresses, with the same MTUs",
+            {ip: mtu for ip, (_, mtu) in ifs1.items()}, {ip: mtu for ip, (_, mtu) in vm_interfaces(vm1).items()})
+    t.check("vm1 after restart: IPv4 default route via network c's gateway",
+            docker_addr(vm1, net["c"], "Gateway"), default_via(vm1))
+
+t.finish()

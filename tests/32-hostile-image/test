@@ -16,13 +16,17 @@ them:
   RunCVM's own;
 - /usr/lib/ip/link_bridge.so is not a valid library;
 - /etc/iproute2/rt_protos and rt_scopes rename 'kernel', 'link' and 'global';
+- root's login shell is /sbin/nologin, and there is no /etc/shells;
+- root has a ~/.ssh directory; once the VM runs, the test adds a key to its
+  authorized_keys, which the VM's dropbear must refuse;
 - there is no 'tr' and no 'sleep'.
 
 With and without --init, the Container/VM must boot and run its entrypoint,
 mount a RUNCVM_DISKS disk (an ext4 mount and a bind mount from it) and a
 RUNCVM_TMPFS file system, resolve a container name over DNS, run
-'docker exec' (also as soon as it starts), and run qemu-ga, and no marker may
-appear.
+'docker exec' (also as soon as it starts), and run qemu-ga; no marker may
+appear, and the VM's dropbear must refuse the key in root's
+authorized_keys.
 """
 
 import atexit
@@ -49,8 +53,23 @@ RUN echo '/dev/vda / ext4 errors=remount-ro 0 1' >/etc/fstab \
  && for t in tmpfs cgroup cgroup2 ext4 none; do ln -s mount.virtiofs /sbin/mount.$t; done \
  && printf '#!/bin/sh\ntouch /dev/image-qemu-ga-marker\n' >/scripts/runcvm-vm-qemu-ga \
  && chmod 755 /scripts/runcvm-vm-qemu-ga \
+ && sed -i 's|^root:.*|root:x:0:0:root:/root:/sbin/nologin|' /etc/passwd \
+ && rm -f /etc/shells \
+ && mkdir -m 700 /root/.ssh \
  && rm /usr/bin/tr /bin/sleep
 """
+
+# Adds a key to the image's /root/.ssh/authorized_keys, then logs in to the VM's dropbear with it,
+# using RunCVM's own dropbearkey and dbclient. dbclient reports 'No auth methods could be used'
+# when dropbear refuses the key; the command prints 'granted' if it accepts it. The script is
+# one line, as 'docker exec' under RunCVM splits an argument at each newline.
+AUTHORIZED_KEYS_LOGIN = "; ".join([
+    "G=/.runcvm/guest/usr/bin",
+    "$G/dropbearkey -t ed25519 -f /tmp/k >/dev/null 2>&1 || exit 1",
+    "$G/dropbearkey -y -f /tmp/k | grep '^ssh-' >/root/.ssh/authorized_keys",
+    "chmod 600 /root/.ssh/authorized_keys",
+    "HOME=/tmp $G/dbclient -y -y -i /tmp/k -p 22222 root@127.0.0.1 echo granted </dev/null 2>&1",
+])
 
 MARKERS = ["/dev/qga-conf-marker", "/dev/mount-helper-marker", "/dev/image-qemu-ga-marker"]
 
@@ -121,6 +140,10 @@ def case(init):
         ("%s: qemu-ga writes no pidfile to the image" % mode, "absent",
          ex("sh", "-c", "[ -e /var/run/qemu-ga.pid ] && echo present || echo absent")),
     ]
+    login = ex("sh", "-c", AUTHORIZED_KEYS_LOGIN)
+    t.log("%s: login with a key from authorized_keys:\n%s" % (mode, login))
+    results.append(("%s: dropbear refuses a key from root's authorized_keys" % mode, True,
+                    "No auth methods could be used" in login and "granted" not in login.split()))
     for marker in MARKERS:
         results.append(("%s: no %s" % (mode, marker), "absent",
                         ex("sh", "-c", "[ -e %s ] && cat %s || echo absent" % (marker, marker))))
