@@ -113,10 +113,6 @@ RUNCVM_DNS_IP=169.254.169.254
 
 mkdir -p /.runcvm/network/devices
 
-# 'docker exec' reaches the VM's dropbear from $RUNCVM_DNS_IP (see the SNAT rule for $SSHD_PORT
-# below); runcvm-vm-init accepts connections to dropbear from this address only.
-echo "$RUNCVM_DNS_IP" >/.runcvm/network/exec-source
-
 # The 'ip -N' parses below match protocols and scopes by number (protocol 2 is 'kernel'; scope 0 is
 # 'global' and 253 'link'), because their names come from /etc/iproute2, which is the image's.
 
@@ -276,6 +272,14 @@ table bridge runcvm {
   chain prerouting {
     type filter hook prerouting priority dstnat; policy accept;
     $BRIDGE_RULES
+  }
+  # The VM's dropbear, which serves 'docker exec', listens on every address of the VM: drop TCP to
+  # its port in every frame bridged to the VM, on any of its networks, so that other containers and
+  # hosts cannot reach it. 'docker exec' connects from this namespace, so its frames leave each
+  # bridge through its output hook, not its forward hook.
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    oifname "tap-*" meta l4proto tcp th dport $SSHD_PORT drop
   }
 }
 table ip runcvm {

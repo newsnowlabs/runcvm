@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""The VM's firewall for dropbear, which serves 'docker exec'.
+"""RunCVM's rule, in the container's network namespace, that keeps others from dropbear.
 
 A Container/VM, with and without --init, and a runc peer share a user-defined network. The VM's
-dropbear listens on port 22222 on every address, and the VM's nft table 'inet runcvm' accepts
-connections to that port only from the address 'docker exec' connects from:
+dropbear, which serves 'docker exec', listens on port 22222 on every address, and RunCVM's nft
+table 'bridge runcvm' in the container drops TCP to that port in every frame bridged to the VM:
 
 - the peer reaches a port the VM's workload listens on (8080), so the network is working;
 - the peer cannot connect to port 22222 on the VM's address;
