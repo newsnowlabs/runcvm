@@ -141,6 +141,11 @@ RUN apk update && \
         ncurses coreutils \
         patchelf
 
+# Install the packages of each filesystem that disks in RUNCVM_DISKS may have
+ADD runcvm-etc/disk-filesystems /tmp/disk-filesystems
+RUN packages=$(awk '$1 !~ /^#/ && NF && $3 != "-" { gsub(",", " ", $3); print $3 }' /tmp/disk-filesystems) && \
+    if [ -n "$packages" ]; then apk add --no-cache $packages; fi
+
 # Install patched SeaBIOS
 COPY --from=alpine-seabios /root/packages/main/x86_64 /tmp/seabios/
 RUN apk add --allow-untrusted /tmp/seabios/*.apk && cp -a /usr/share/seabios/bios*.bin /usr/share/qemu/
@@ -164,7 +169,11 @@ ENV BUNDELF_EXTRA_SYSTEM_LIB_PATHS="/usr/lib/xtables"
 ENV BUNDELF_CODE_PATH="/opt/runcvm"
 ENV BUNDELF_EXEC_PATH="/.runcvm/guest"
 
-RUN /usr/local/bin/make-bundelf-bundle.sh --bundle && \
+# Bundle, as well, each filesystem's mkfs command (field 6 of disk-filesystems)
+RUN for cmd in $(awk '$1 !~ /^#/ && NF { print $6 }' /tmp/disk-filesystems); do \
+      case " $BUNDELF_BINARIES " in *" $cmd "*) ;; *) BUNDELF_BINARIES="$BUNDELF_BINARIES $cmd" ;; esac; \
+    done && \
+    BUNDELF_BINARIES="$BUNDELF_BINARIES" /usr/local/bin/make-bundelf-bundle.sh --bundle && \
     mkdir -p $BUNDELF_CODE_PATH/bin && \
     cd $BUNDELF_CODE_PATH/bin && \
     for cmd in \

@@ -585,15 +585,15 @@ where:
 
 - `<src>` is the path _within the container_ where the virtual disk backing file should be located. This may be in the container's overlayfs or within a volume (mounted using `--mount=type=volume`).
 - `<dst>` is both (a) the path within the VM where the disk's files should appear; and (b) the location of the directory with which contents the disk should be prepopulated. Several destinations may share one disk: separated by `:` in the positional form, or each given by its own `dst=` in the keyed form, where a destination may also contain `:`.
-- `<filesystem>` is the filesystem with which the backing disk should be formatted when first created.
+- `<filesystem>` is the filesystem with which the backing disk should be formatted when first created: by default, `ext4`, `xfs` or `btrfs` (see [Disk filesystems](#disk-filesystems) below).
 - `<size>` is the size of the backing file (in `truncate` format), and must be specified if `<src>` does not exist.
 - `layout=subdirs` or `layout=root` chooses the disk's layout (see [Disk layouts](#disk-layouts) below). It applies when the disk is created, and defaults to `subdirs`.
 
 In the keyed form, each field is split at its first `=`, so values may contain `=`; only `dst` may be given more than once. In either form, no value may contain `,` or `;`, and an unknown or repeated option is rejected.
 
-When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs` and prepopulated with any files preexisting at each `<dst>`, with their ownership, modes, timestamps, extended attributes and hard links. (`trusted.*` extended attributes are copied only if the container has `CAP_SYS_ADMIN`, e.g. with `--cap-add=SYS_ADMIN`, because `mke2fs` runs in the container.)
+When first created, the backing file will be created as a sparse file to the specified `<size>`, formatted with the specified `<filesystem>`, and prepopulated with any files preexisting at each `<dst>`, with their ownership, modes, timestamps, extended attributes and hard links. An `ext4` disk is formatted and prepopulated in the container, by `mke2fs`. A disk with another filesystem is formatted empty in the container, then prepopulated when the VM first boots with it, before anything is mounted over the destinations, by copying each `<dst>` with RunCVM's own `cp -a`. (`trusted.*` extended attributes are copied only if the container has `CAP_SYS_ADMIN`, e.g. with `--cap-add=SYS_ADMIN`, because `mke2fs` runs in the container. For a disk with another filesystem, they are copied only with `--env=RUNCVM_SYS_ADMIN=1` as well, as the VM reads the container's files through `virtiofsd`, which otherwise drops the capability.)
 
-RunCVM formats disks with its own bundled `mke2fs` and `mke2fs.conf`, ignoring any `/etc/mke2fs.conf` in the container's image, so a disk is formatted the same way whatever the image. For `ext4`, the configuration leaves out the `orphan_file` and `metadata_csum_seed` features, as Debian's and Ubuntu's do, so that the disk can also be checked, resized and tuned with older versions of e2fsprogs: `orphan_file` needs e2fsprogs 1.47 or later, and `metadata_csum_seed` 1.43 or later.
+RunCVM formats disks with its own bundled `mkfs` commands, and `ext4` disks with its own `mke2fs.conf`, ignoring any `/etc/mke2fs.conf` in the container's image, so a disk is formatted the same way whatever the image. For `ext4`, the configuration leaves out the `orphan_file` and `metadata_csum_seed` features, as Debian's and Ubuntu's do, so that the disk can also be checked, resized and tuned with older versions of e2fsprogs: `orphan_file` needs e2fsprogs 1.47 or later, and `metadata_csum_seed` 1.43 or later.
 
 When RunCVM creates a Container/VM, fstab entries will be drafted, identifying each disk by its filesystem's UUID. After the VM boots, the fstab entries will be mounted, in order. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on. RunCVM finds each disk with its own bundled `blkid.conf`, which scans the VM's block devices and keeps no cache, ignoring any `/etc/blkid.conf` in the image.
 
@@ -610,7 +610,7 @@ When RunCVM creates a Container/VM, fstab entries will be drafted, identifying e
 
 #### Disk layouts
 
-A disk with layout `subdirs`, the default, holds a top-level directory for each destination, prepopulated from it. On every boot, the disk is mounted at a hidden mountpoint, `/.runcvm/disks/<n>` (where `<n>` counts disks from 0 in `RUNCVM_DISKS` order), and each directory is bind-mounted over its destination. Such a disk is created with the filesystem label `runcvm-subdirs`, by which RunCVM recognises its layout thereafter; relabelling the disk would change how it is mounted.
+A disk with layout `subdirs`, the default, holds a top-level directory for each destination, prepopulated from it. On every boot, the disk is mounted at a hidden mountpoint, `/.runcvm/disks/<n>` (where `<n>` counts disks from 0 in `RUNCVM_DISKS` order), and each directory is bind-mounted over its destination. Such a disk is created with the filesystem label `runcvm-subdirs` (`rcvm-subdirs` for `xfs`, whose labels are at most 12 characters), by which RunCVM recognises its layout thereafter; relabelling the disk would change how it is mounted.
 
 Each directory is named after its destination: the path without its leading `/`, with each `%`, `-` and `=` encoded as `%25`, `%2D` and `%3D`, and then each `/` replaced by `-`. For example, `/var/lib/docker` is held in `var-lib-docker`, `/a/b` in `a-b`, and `/a-b` in `a%2Db`. The name depends only on the destination, so it is the same on every boot, and distinct destinations always have distinct names.
 
@@ -621,9 +621,23 @@ The destinations of a disk with layout `subdirs`:
 
 Destinations may be left out of an existing disk's spec, leaving their directories on the disk unmounted, so long as at least one remains; but destinations cannot be added: when a destination has no directory on an existing disk, the VM reports the error and powers off with exit status 1.
 
-A disk with layout `root` has exactly one destination, holds its files at its root, and is mounted directly at the destination. Any existing disk without the label `runcvm-subdirs`, including any disk created by an earlier RunCVM release, has layout `root`.
+A disk with layout `root` has exactly one destination, holds its files at its root, and is mounted directly at the destination. Any existing disk without its filesystem's `subdirs` label, including any disk created by an earlier RunCVM release, has layout `root`.
 
-An existing disk keeps its layout: a spec giving a different `layout`, or several destinations for a disk with layout `root`, is rejected.
+An existing disk keeps its layout and filesystem: a spec giving a different `layout`, several destinations for a disk with layout `root`, or a different `<filesystem>`, is rejected.
+
+#### Disk filesystems
+
+The filesystems a disk may have are listed in `runcvm-etc/disk-filesystems`, which is installed with RunCVM as `/opt/runcvm/etc/disk-filesystems`. Each line gives a filesystem's name, its kernel modules, the Alpine packages that provide its `mkfs` command, the `mkfs` option that sets a label, the label that marks layout `subdirs`, and the `mkfs` command with its options. The build installs the packages and bundles each `mkfs` command; RunCVM accepts only the filesystems listed, and loads each disk's modules in the VM before mounting it. To support another filesystem, add its line to the file before building RunCVM.
+
+By default, the list holds:
+
+| Filesystem | `mkfs` command | Notes |
+|---|---|---|
+| `ext4` | `mke2fs` (RunCVM's own build) | The only filesystem a whole-root disk may have. |
+| `xfs` | `mkfs.xfs`, from `xfsprogs` | `mkfs.xfs` rejects a disk smaller than 300M. |
+| `btrfs` | `mkfs.btrfs`, from `btrfs-progs` | `mkfs.btrfs` rejects a disk smaller than 114294784 bytes (109M). Formatted without subvolumes. |
+
+The VM's kernel must provide each filesystem used. RunCVM's Alpine, Debian, Ubuntu and OpenWrt kernels provide all three; its Oracle Linux kernel provides `ext4` and `xfs`, but not `btrfs`. A disk whose filesystem the kernel lacks stops the VM at boot, reporting the missing module.
 
 #### Whole-root disks
 
