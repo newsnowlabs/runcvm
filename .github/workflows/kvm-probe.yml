@@ -1,8 +1,10 @@
 # Probes whether GitHub-hosted Linux runners can run RunCVM Container/VMs under KVM: reports the
 # runner's virtualisation support, opens /dev/kvm to the runner user, installs a RunCVM image, runs
-# a Container/VM and checks that it used KVM, then runs the integration tests. A step that fails
-# is marked failed in the run's summary, and the job carries on, so that one run answers as much as
-# it can. It runs on a push to its own branch, or by hand once on the default branch.
+# a Container/VM and checks that it used KVM, diagnoses `docker exec`'s path into the VM, then runs
+# integration tests. Each job runs with the runner's own Docker or with the latest Docker release.
+# A step that fails is marked failed in the run's summary, and the job carries on, so that one run
+# answers as much as it can. It runs on a push to its own branch, or by hand once on the default
+# branch.
 name: KVM probe
 
 on:
@@ -13,23 +15,32 @@ on:
       runcvm_image:
         description: RunCVM image to install
         default: newsnowlabs/runcvm:latest
-      tier:
-        description: Integration test tier to run (core, extended, all, or none)
-        default: core
+      tests:
+        description: Integration tests to run (tests/run arguments, e.g. "--tier core"; "none" for none)
+        default: 10-user-workdir 24-networking 35-exec-args
 
 jobs:
   probe:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04, ubuntu-22.04]
+        runner: [ubuntu-24.04]
+        docker: [runner, latest]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 45
     env:
       RUNCVM_IMAGE: ${{ inputs.runcvm_image || 'newsnowlabs/runcvm:latest' }}
-      TIER: ${{ inputs.tier || 'core' }}
+      TESTS: ${{ inputs.tests || '10-user-workdir 24-networking 35-exec-args' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install the latest Docker release
+        if: matrix.docker == 'latest'
+        continue-on-error: true
+        run: |
+          sudo apt-get remove -y moby-engine moby-cli moby-buildx moby-compose moby-containerd moby-runc || true
+          curl -fsSL https://get.docker.com | sudo sh
+          sudo systemctl restart docker
 
       - name: Runner facts
         run: |
@@ -46,6 +57,9 @@ jobs:
           echo "=== Docker"
           docker version --format 'client {{.Client.Version}}, server {{.Server.Version}}'
           docker info --format 'storage driver {{.Driver}}; cgroup v{{.CgroupVersion}}'
+          echo "=== bridge netfilter"
+          lsmod | grep -E '^br_netfilter' || echo "br_netfilter not loaded"
+          sysctl net.bridge 2>/dev/null || true
 
       - name: Open /dev/kvm to the runner user
         continue-on-error: true
@@ -77,17 +91,52 @@ jobs:
           time docker run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=kvm alpine \
             sh -c 'dmesg | grep -iE "hypervisor detected|kvm-clock" | head -3; echo vcpus: $(nproc)'
 
-      - name: Integration tests (${{ env.TIER }} tier)
+      - name: Diagnose docker exec
         continue-on-error: true
-        if: env.TIER != 'none'
+        run: |
+          command -v tcpdump >/dev/null || sudo apt-get install -y -qq tcpdump >/dev/null
+          # The VM reports its own network state and listening sockets in its output, which
+          # docker logs shows, so that it is visible even when docker exec fails.
+          docker run -d --runtime=runcvm --name diag alpine sh -c \
+            'sleep 5; echo "=== VM: addresses"; ip addr; echo "=== VM: routes"; ip route; echo "=== VM: listening"; netstat -ltn; echo "=== VM: ping gateway"; ping -c 2 -W 2 $(ip route | awk "/^default/{print \$3}"); sleep 3600'
+          sleep 30
+          pid=$(docker inspect -f '{{.State.Pid}}' diag)
+          ns() { sudo nsenter -t "$pid" -n "$@"; }
+          ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' diag)
+          echo "=== Container/VM pid $pid, address $ip"
+          echo "=== docker logs (VM console)"; docker logs diag 2>&1 | tail -40
+          echo "=== container netns: links"; ns ip -d link
+          echo "=== container netns: addresses"; ns ip addr
+          echo "=== container netns: routes"; ns ip route
+          echo "=== container netns: neighbours"; ns ip neigh
+          echo "=== container netns: bridge netfilter"; ns sysctl net.bridge 2>/dev/null || true
+          echo "=== container netns: nft ruleset"; ns nft list ruleset
+          echo "=== host: nft ruleset"; sudo nft list ruleset
+          echo "=== exec attempt 1, with a capture in the container netns"
+          ns timeout 70 tcpdump -lni any -c 40 'arp or tcp port 22222' >"$RUNNER_TEMP/cap1" 2>&1 &
+          sleep 2
+          timeout 60 docker exec diag echo exec-ok; echo "=== exec 1 exit status: $? (expect 0)"
+          wait; cat "$RUNNER_TEMP/cap1"
+          echo "=== container netns: conntrack"; ns cat /proc/net/nf_conntrack 2>/dev/null | grep 22222 || echo "none, or no conntrack table"
+          echo "=== bridge netfilter off in host and container netns"
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=0 net.bridge.bridge-nf-call-ip6tables=0 net.bridge.bridge-nf-call-arptables=0 || true
+          ns sysctl -w net.bridge.bridge-nf-call-iptables=0 net.bridge.bridge-nf-call-ip6tables=0 net.bridge.bridge-nf-call-arptables=0 || true
+          echo "=== exec attempt 2"
+          timeout 60 docker exec diag echo exec-ok; echo "=== exec 2 exit status: $? (expect 0)"
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1 net.bridge.bridge-nf-call-ip6tables=1 net.bridge.bridge-nf-call-arptables=1 || true
+          docker rm -f diag >/dev/null
+
+      - name: Integration tests (${{ env.TESTS }})
+        continue-on-error: true
+        if: env.TESTS != 'none'
         run: |
           # Test 25 boots many VMs at once; two at a time suits a hosted runner's CPUs and memory.
-          RUNCVM_TEST_JOBS=2 tests/run --tier "$TIER" --results "$RUNNER_TEMP/results"
+          RUNCVM_TEST_JOBS=2 tests/run $TESTS --results "$RUNNER_TEMP/results"
 
       - name: Upload test results
-        if: always() && env.TIER != 'none'
+        if: always() && env.TESTS != 'none'
         uses: actions/upload-artifact@v4
         with:
-          name: results-${{ matrix.runner }}
+          name: results-${{ matrix.runner }}-docker-${{ matrix.docker }}
           path: ${{ runner.temp }}/results
           if-no-files-found: ignore
