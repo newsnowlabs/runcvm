@@ -48,6 +48,9 @@ the runtime or the scripts.
 - `tests/run --accel tcg` runs real RunCVM Container/VMs under software emulation where KVM is
   unavailable; tests requiring `kvm` are skipped. Expect each VM to take tens of seconds to
   start, and allow for that in any wait.
+- Checks that launch a Container/VM explicitly under TCG (`RUNCVM_QEMU_ACCEL=tcg`) are slow
+  on a KVM host, so they run there only with `tests/run --tcg-cases`. Tests guard them with the
+  framework helper `tcg_cases` (`TCG_CASES` in Python), and record them as skipped otherwise.
 - After changing `tests/run`, `tests/framework.sh` or `tests/framework.py`, run
   `tests/selftest/run-selftest` (no Docker needed), and with `--docker` where a Docker daemon
   is available.
@@ -62,7 +65,9 @@ the runtime or the scripts.
   `unique` for every Docker object name and `labels` on every object created, so that runs can
   proceed concurrently and the runner can remove leftovers; `vm_opts` on every RunCVM
   Container/VM; `check`, `check_cmd` and `expect_exit` for results; `wait_for` and
-  `wait_for_exec` for every wait, so nothing waits without a deadline; `parallel` (Python) to
+  `wait_for_exec` for every wait, so nothing waits without a deadline; `log_detail` for
+  step-by-step progress (e.g. each of many requests' outcomes), which goes to the test's log,
+  and to the terminal only with `tests/run --verbose`; `parallel` (Python) to
   run independent cases at once; `skip` and `finish` to end.
 - Tests must not download anything at run time beyond pulling images: containers on Docker
   networks may have no outbound access in sandboxed or CI environments.

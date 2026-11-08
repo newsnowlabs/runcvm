@@ -8,6 +8,8 @@ RUNCVM_DISKS ext4 disk:
   /var/lib/docker is an ext4 filesystem rather than virtiofs.
 - An image loaded into it ('docker save | docker load', so nothing is
   downloaded) runs as a container, which has a network address.
+- With RunCVM's default cgroupfs (cgroup2), dockerd uses cgroup v2 and
+  applies a container's memory and CPU-set limits.
 """
 
 import os
@@ -53,5 +55,12 @@ t.check("container runs in the VM's Docker", "inner-ok",
         ex("docker", "run", "--rm", "alpine", "echo", "inner-ok").stdout.strip())
 t.check("container in the VM's Docker has a network address", True,
         "inet " in ex("docker", "run", "--rm", "alpine", "ip", "-4", "-o", "addr", "show", "eth0").stdout)
+
+t.check("the VM's Docker uses cgroup v2", "2", ex("docker", "info", "-f", "{{.CgroupVersion}}").stdout.strip())
+t.check("container's memory limit is applied", "67108864",
+        ex("docker", "run", "--rm", "-m", "64m", "alpine", "cat", "/sys/fs/cgroup/memory.max").stdout.strip())
+t.check("container's CPU set is applied", "0",
+        ex("docker", "run", "--rm", "--cpuset-cpus=0", "alpine", "cat", "/sys/fs/cgroup/cpuset.cpus.effective")
+        .stdout.strip())
 
 t.finish()

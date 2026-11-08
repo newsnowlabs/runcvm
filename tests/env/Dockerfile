@@ -1,10 +1,11 @@
 # syntax=docker/dockerfile:1
 
 # L1: the disposable outer Container/VM in which RunCVM tests itself, launched with stock RunCVM
-# as a Container/VM on L0 (the bare-metal host). See README.md in this directory.
+# as a Container/VM on L0 (the host: bare metal, or a VM with nested virtualisation). See
+# README.md in this directory.
 
 # The RunCVM image whose /opt/runcvm is preinstalled: the RunCVM that L1 runs L2s with.
-ARG RUNCVM_IMAGE=newsnowlabs/runcvm:v1.6.1
+ARG RUNCVM_IMAGE=newsnowlabs/runcvm:v1.7.0
 
 FROM ${RUNCVM_IMAGE} AS runcvm
 
@@ -171,3 +172,21 @@ WORKDIR /home/runcvm
 
 # Must run as the VM's PID 1: launch without --init.
 ENTRYPOINT ["/usr/local/sbin/runcvm-l1-entrypoint"]
+
+# OCI labels. GitHub links the image's package on ghcr.io to the repository named by 'source', and
+# shows 'description'; build.sh in this directory gives each pushed tag's index the
+# org.opencontainers.image.* labels as annotations, which GitHub reads in place of labels where a
+# tag names an index. 'revision' is the repository commit the image was built from (build
+# argument REVISION, which build.sh sets), 'version' the image's first tag (build argument VERSION,
+# which build.sh sets; it replaces the base image's own 'version', Ubuntu's release), and
+# io.github.newsnowlabs.runcvm.image the RunCVM image preinstalled. They come last, so that a change
+# of commit rebuilds no earlier step.
+ARG RUNCVM_IMAGE
+ARG REVISION=
+ARG VERSION=
+LABEL org.opencontainers.image.source="https://github.com/newsnowlabs/runcvm" \
+      org.opencontainers.image.description="L1: a RunCVM Container/VM, with systemd, Docker and RunCVM preinstalled, for testing and developing RunCVM" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.version="${VERSION}" \
+      io.github.newsnowlabs.runcvm.image="${RUNCVM_IMAGE}"

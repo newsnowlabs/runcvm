@@ -219,7 +219,42 @@ vm_init_error() {
 
 # Mount filesystems defined in /etc/fstab OR as defined in RUNCVM_DISKS
 if [ -f /.runcvm/fstab ]; then
-  busybox modprobe ext4
+  # Load the kernel modules of each disk's filesystem, as listed in disk-filesystems.
+  for fs in $(awk '$1 ~ /^UUID=/ { print $3 }' /.runcvm/fstab | busybox sort -u)
+  do
+    disk_fs "$fs" || vm_init_error "fs '$fs' is not supported"
+    for module in "${DISK_FS_MODULES[@]}"
+    do
+      busybox modprobe "$module" || vm_init_error "fs '$fs' needs kernel module '$module', which the VM's kernel ($(busybox uname -r)) lacks"
+    done
+  done
+
+  # Populate each new disk that its mkfs command left empty: copy each destination's contents, as
+  # the image holds them, to its directory on the disk, with RunCVM's own cp, which preserves
+  # ownership, permissions, timestamps, links and extended attributes.
+  if [ -f /.runcvm/disks-populate ]; then
+    while read -r id uuid fs dir dst
+    do
+      mnt="/.runcvm/disks/$id"
+      if ! findmnt -rn --mountpoint "$mnt" >/dev/null; then
+        mkdir -p "$mnt"
+        BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null mount -i --options-source=disable -t "$fs" -o noatime "UUID=$uuid" "$mnt" || \
+          vm_init_error "dst '$dst' cannot be populated: mounting its new disk failed"
+      fi
+
+      mkdir -p "$mnt/$dir"
+      if [ -d "$dst" ]; then
+        $RUNCVM_GUEST/usr/bin/coreutils --coreutils-prog=cp -a "$dst/." "$mnt/$dir/" || \
+          vm_init_error "dst '$dst' cannot be populated: copying its contents to its new disk failed"
+      fi
+    done </.runcvm/disks-populate
+
+    # Unmount the disks again, for the fstab to mount them as for any other boot.
+    for mnt in $(awk '{ print $1 }' /.runcvm/disks-populate | busybox sort -u)
+    do
+      busybox umount "/.runcvm/disks/$mnt" || vm_init_error "unmounting new disk '/.runcvm/disks/$mnt' after populating it failed"
+    done
+  fi
 
   # Resolve UUID= with RunCVM's own libblkid configuration, which scans devices and keeps no
   # cache, not with the image's /etc/blkid.conf and /run/blkid cache. -i keeps mount from running
@@ -249,9 +284,9 @@ if [ -f /.runcvm/fstab ]; then
   mount -i --bind /.runcvm/fstab /etc/fstab
 fi
 
-# Load cgroupfs (if needed/requested):
-# - If entrypoint is systemd-like () then call cgroupfs_mount "${RUNCVM_CGROUPFS:-none}"
-# - Else call cgroupfs_mount "${RUNCVM_CGROUPFS:-hybrid}"
+# Mount cgroupfs as RUNCVM_CGROUPFS requests, by default:
+# - nothing, if the entrypoint is systemd (which mounts its own);
+# - else cgroup2 alone, on /sys/fs/cgroup.
 
 # Load cgroupfs functions first.
 . $RUNCVM_GUEST/scripts/functions/cgroupfs
@@ -269,7 +304,7 @@ fi
 if [[ "$ARGS_INIT" =~ /systemd$ ]]; then
   cgroupfs_mount "${RUNCVM_CGROUPFS:-none}"
 else
-  cgroupfs_mount "${RUNCVM_CGROUPFS:-hybrid}"
+  cgroupfs_mount "${RUNCVM_CGROUPFS:-2}"
 fi
 
 # Make directory for dropbear host keys and public/private keypair
@@ -305,7 +340,7 @@ if [ "$RUNCVM_INIT" = "1" ]; then
   cat >/etc/inittab <<_EOE_
 $CONSOLE_DEVICE::respawn:-$RUNCVM_GUEST/scripts/runcvm-vm-start-wrapper
 null::respawn:$RUNCVM_GUEST/scripts/runcvm-vm-qemu-ga
-null::respawn:$RUNCVM_GUEST/usr/sbin/dropbear -REF -s -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
+null::respawn:$RUNCVM_GUEST/usr/sbin/dropbear -REF -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
 null::ctrlaltdel:$RUNCVM_GUEST/bin/poweroff
 null::restart:$RUNCVM_GUEST/bin/poweroff
 null::shutdown:$RUNCVM_GUEST/bin/poweroff
@@ -326,9 +361,11 @@ else
   $RUNCVM_GUEST/scripts/runcvm-vm-qemu-ga &>/dev/null &
 
   # Run dropbear SSH server, needed to support 'docker exec'.
-  # It accepts only RunCVM's own key (via the EPKA plugin): -s disables password logins, which would
-  # otherwise be checked against the image's /etc/shadow, and -j and -k disable port forwarding.
-  dropbear -REF -s -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
+  # It accepts only RunCVM's own key (via the EPKA plugin), and has no password logins; -j and -k
+  # disable port forwarding. It runs commands with RunCVM's bash, and its sessions inherit its
+  # environment, so it starts with an empty one: variables from the image, such as BASH_ENV,
+  # would otherwise reach that bash.
+  busybox env -i $RUNCVM_GUEST/usr/sbin/dropbear -REF -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
 
   # Run init from the image
   # Pipe input/output from/to console device

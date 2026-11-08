@@ -9,36 +9,6 @@ node_state() {
   IsManager=$(docker info --format '{{.Swarm.ControlAvailable}}')
 }
 
-cgroupfs_mount() {
-  # see also https://github.com/tianon/cgroupfs-mount/blob/master/cgroupfs-mount
-  if grep -v '^#' /etc/fstab | grep -q cgroup \
-    || [ ! -e /proc/cgroups ] \
-    || [ ! -d /sys/fs/cgroup ]; then
-      return
-    fi
-  
-  if ! mountpoint -q /sys/fs/cgroup; then
-    mount -t tmpfs -o uid=0,gid=0,mode=0755 cgroup /sys/fs/cgroup
-  fi
-	
-  cd /sys/fs/cgroup
-  for sys in $(awk '!/^#/ { if ($4 == 1) print $1 }' /proc/cgroups); do
-    mkdir -p $sys
-    if ! mountpoint -q $sys; then
-      if ! mount -n -t cgroup -o $sys cgroup $sys; then
-        rmdir $sys || true
-      fi
-    fi
-  done
-  
-  if ! mountpoint -q /sys/fs/cgroup/unified; then
-    mkdir -p /sys/fs/cgroup/unified
-    mount -t cgroup2 cgroup2 /sys/fs/cgroup/unified
-  fi
-
-  true
-}
-
 detect_ingress_ip() {
   local FILE="$1"
   local IP
@@ -51,10 +21,10 @@ detect_ingress_ip() {
     sleep 0.5
   done
   
-  echo -n "$IP" >$FILE
+  # Write to a temporary file and rename it into place, so that other nodes, which read $FILE as
+  # soon as it exists, never see it empty or partly written.
+  echo -n "$IP" >/swarm/.$NODE.tmp && mv /swarm/.$NODE.tmp "$FILE"
 }
-
-cgroupfs_mount
 
 ulimit -u unlimited
 
@@ -98,9 +68,10 @@ docker info
 node_state
 log "docker swarm: node state = $NodeState; manager=$IsManager"
 
+# No fixed subnet: dockerd chooses one that overlaps none of the node's routes, so docker_gwbridge
+# never takes the subnet (or the gateway address) of the node's own network.
 log "Creating docker_gwbridge network with MTU $DOCKER_IF_MTU"
 docker network create -d bridge \
-   --subnet 172.18.0.0/16 \
    --opt com.docker.network.bridge.name=docker_gwbridge \
    --opt com.docker.network.bridge.enable_icc=false \
    --opt com.docker.network.bridge.enable_ip_masquerade=true \
@@ -114,7 +85,7 @@ if [ "$NodeState" = "inactive" ] || [ "$NodeState" = "pending" ]; then
     for i in $(seq 1 20 | sort -nr)
     do
       log "Waiting for swarm manager startup (#$i) ..."
-      [ -f /swarm/worker ] && break
+      [ -s /swarm/worker ] && break
       [ $i -eq 1 ] && exit 1
       sleep 1
     done
@@ -159,7 +130,10 @@ if [ "$NodeState" = "inactive" ] || [ "$NodeState" = "pending" ]; then
     fi
 
     log "Writing swarm 'join token' to shared storage and waiting for other nodes ..."
-    mkdir -p /swarm/nodes && docker swarm join-token worker | grep docker >/swarm/worker
+    # Write the join command to a temporary file and rename it into place, so that the other
+    # nodes, which source /swarm/worker as soon as it is non-empty, never source it empty or
+    # partly written.
+    mkdir -p /swarm/nodes && docker swarm join-token worker | grep docker >/swarm/worker.tmp && mv /swarm/worker.tmp /swarm/worker
 
     for i in $(seq 1 30 | sort -nr)
     do

@@ -594,15 +594,15 @@ where:
 
 - `<src>` is the path _within the container_ where the virtual disk backing file should be located. This may be in the container's overlayfs or within a volume (mounted using `--mount=type=volume`).
 - `<dst>` is both (a) the path within the VM where the disk's files should appear; and (b) the location of the directory with which contents the disk should be prepopulated. Several destinations may share one disk: separated by `:` in the positional form, or each given by its own `dst=` in the keyed form, where a destination may also contain `:`.
-- `<filesystem>` is the filesystem with which the backing disk should be formatted when first created.
+- `<filesystem>` is the filesystem with which the backing disk should be formatted when first created: by default, `ext4`, `xfs` or `btrfs` (see [Disk filesystems](#disk-filesystems) below).
 - `<size>` is the size of the backing file (in `truncate` format), and must be specified if `<src>` does not exist.
 - `layout=subdirs` or `layout=root` chooses the disk's layout (see [Disk layouts](#disk-layouts) below). It applies when the disk is created, and defaults to `subdirs`.
 
 In the keyed form, each field is split at its first `=`, so values may contain `=`; only `dst` may be given more than once. In either form, no value may contain `,` or `;`, and an unknown or repeated option is rejected.
 
-When first created, the backing file will be created as a sparse file to the specified `<size>` and formatted with the specified `<filesystem>` using `mke2fs` and prepopulated with any files preexisting at each `<dst>`, with their ownership, modes, timestamps, extended attributes and hard links. (`trusted.*` extended attributes are copied only if the container has `CAP_SYS_ADMIN`, e.g. with `--cap-add=SYS_ADMIN`, because `mke2fs` runs in the container.)
+When first created, the backing file will be created as a sparse file to the specified `<size>`, formatted with the specified `<filesystem>`, and prepopulated with any files preexisting at each `<dst>`, with their ownership, modes, timestamps, extended attributes and hard links. An `ext4` disk is formatted and prepopulated in the container, by `mke2fs`. A disk with another filesystem is formatted empty in the container, then prepopulated when the VM first boots with it, before anything is mounted over the destinations, by copying each `<dst>` with RunCVM's own `cp -a`. (`trusted.*` extended attributes are copied only if the container has `CAP_SYS_ADMIN`, e.g. with `--cap-add=SYS_ADMIN`, because `mke2fs` runs in the container. For a disk with another filesystem, they are copied only with `--env=RUNCVM_SYS_ADMIN=1` as well, as the VM reads the container's files through `virtiofsd`, which otherwise drops the capability.)
 
-RunCVM formats disks with its own bundled `mke2fs` and `mke2fs.conf`, ignoring any `/etc/mke2fs.conf` in the container's image, so a disk is formatted the same way whatever the image. For `ext4`, the configuration leaves out the `orphan_file` and `metadata_csum_seed` features, as Debian's and Ubuntu's do, so that the disk can also be checked, resized and tuned with older versions of e2fsprogs: `orphan_file` needs e2fsprogs 1.47 or later, and `metadata_csum_seed` 1.43 or later.
+RunCVM formats disks with its own bundled `mkfs` commands, and `ext4` disks with its own `mke2fs.conf`, ignoring any `/etc/mke2fs.conf` in the container's image, so a disk is formatted the same way whatever the image. For `ext4`, the configuration leaves out the `orphan_file` and `metadata_csum_seed` features, as Debian's and Ubuntu's do, so that the disk can also be checked, resized and tuned with older versions of e2fsprogs: `orphan_file` needs e2fsprogs 1.47 or later, and `metadata_csum_seed` 1.43 or later.
 
 When RunCVM creates a Container/VM, fstab entries will be drafted, identifying each disk by its filesystem's UUID. After the VM boots, the fstab entries will be mounted, in order. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on. RunCVM finds each disk with its own bundled `blkid.conf`, which scans the VM's block devices and keeps no cache, ignoring any `/etc/blkid.conf` in the image.
 
@@ -619,7 +619,7 @@ When RunCVM creates a Container/VM, fstab entries will be drafted, identifying e
 
 #### Disk layouts
 
-A disk with layout `subdirs`, the default, holds a top-level directory for each destination, prepopulated from it. On every boot, the disk is mounted at a hidden mountpoint, `/.runcvm/disks/<n>` (where `<n>` counts disks from 0 in `RUNCVM_DISKS` order), and each directory is bind-mounted over its destination. Such a disk is created with the filesystem label `runcvm-subdirs`, by which RunCVM recognises its layout thereafter; relabelling the disk would change how it is mounted.
+A disk with layout `subdirs`, the default, holds a top-level directory for each destination, prepopulated from it. On every boot, the disk is mounted at a hidden mountpoint, `/.runcvm/disks/<n>` (where `<n>` counts disks from 0 in `RUNCVM_DISKS` order), and each directory is bind-mounted over its destination. Such a disk is created with the filesystem label `runcvm-subdirs` (`rcvm-subdirs` for `xfs`, whose labels are at most 12 characters), by which RunCVM recognises its layout thereafter; relabelling the disk would change how it is mounted.
 
 Each directory is named after its destination: the path without its leading `/`, with each `%`, `-` and `=` encoded as `%25`, `%2D` and `%3D`, and then each `/` replaced by `-`. For example, `/var/lib/docker` is held in `var-lib-docker`, `/a/b` in `a-b`, and `/a-b` in `a%2Db`. The name depends only on the destination, so it is the same on every boot, and distinct destinations always have distinct names.
 
@@ -630,9 +630,23 @@ The destinations of a disk with layout `subdirs`:
 
 Destinations may be left out of an existing disk's spec, leaving their directories on the disk unmounted, so long as at least one remains; but destinations cannot be added: when a destination has no directory on an existing disk, the VM reports the error and powers off with exit status 1.
 
-A disk with layout `root` has exactly one destination, holds its files at its root, and is mounted directly at the destination. Any existing disk without the label `runcvm-subdirs`, including any disk created by an earlier RunCVM release, has layout `root`.
+A disk with layout `root` has exactly one destination, holds its files at its root, and is mounted directly at the destination. Any existing disk without its filesystem's `subdirs` label, including any disk created by an earlier RunCVM release, has layout `root`.
 
-An existing disk keeps its layout: a spec giving a different `layout`, or several destinations for a disk with layout `root`, is rejected.
+An existing disk keeps its layout and filesystem: a spec giving a different `layout`, several destinations for a disk with layout `root`, or a different `<filesystem>`, is rejected.
+
+#### Disk filesystems
+
+The filesystems a disk may have are listed in `runcvm-etc/disk-filesystems`, which is installed with RunCVM as `/opt/runcvm/etc/disk-filesystems`. Each line gives a filesystem's name, its kernel modules, the Alpine packages that provide its `mkfs` command, the `mkfs` option that sets a label, the label that marks layout `subdirs`, and the `mkfs` command with its options. The build installs the packages and bundles each `mkfs` command; RunCVM accepts only the filesystems listed, and loads each disk's modules in the VM before mounting it. To support another filesystem, add its line to the file before building RunCVM.
+
+By default, the list holds:
+
+| Filesystem | `mkfs` command | Notes |
+|---|---|---|
+| `ext4` | `mke2fs` (RunCVM's own build) | The only filesystem a whole-root disk may have. |
+| `xfs` | `mkfs.xfs`, from `xfsprogs` | `mkfs.xfs` rejects a disk smaller than 300M. |
+| `btrfs` | `mkfs.btrfs`, from `btrfs-progs` | `mkfs.btrfs` rejects a disk smaller than 114294784 bytes (109M). Formatted without subvolumes. |
+
+The VM's kernel must provide each filesystem used. RunCVM's Alpine, Debian, Ubuntu and OpenWrt kernels provide all three; its Oracle Linux kernel provides `ext4` and `xfs`, but not `btrfs`. A disk whose filesystem the kernel lacks stops the VM at boot, reporting the missing module.
 
 #### Whole-root disks
 
@@ -807,17 +821,20 @@ Specifies the cache policy passed to `virtiofsd` via `-o cache=<value>`. The def
 Configures cgroupfs mountpoints in the VM, which may be needed to run applications like Docker if systemd is not running. Acceptable values are:
 
 - `none`/`systemd` - do nothing; leave to the application or to systemd (if running)
-- `1`/`cgroup1` - mount only cgroup v1 filesystems supported by the running kernel to subdirectories of `/sys/fs/cgroup`
 - `2`/`cgroup2` - mount only cgroup v2 filesystem to `/sys/fs/cgroup`
+- `1`/`cgroup1` - mount only cgroup v1 filesystems supported by the running kernel to subdirectories of `/sys/fs/cgroup`
 - `hybrid`/`mixed` - mount cgroup v1 filesystems and mount cgroup v2 filesystem to `/sys/fs/cgroup/unified`
 
-Please note that if `RUNCVM_CGROUPFS` is left undefined or set to an empty string, then RunCVM selects an appropriate
-default behaviour according to these rules:
+If `RUNCVM_CGROUPFS` is left undefined or set to an empty string, RunCVM chooses:
 
-- If specified entrypoint (or, if a symlink, its target) matches the regex `/systemd$` then assume a default value of `none`;
-- Else, assume a default value of `hybrid`.
+- `none`, if the specified entrypoint (or, if a symlink, its target) matches the regex `/systemd$`;
+- else `2`.
 
-These rules work well in the cases of running Docker in (a) stock Alpine/Debian/Ubuntu distributions in which Docker has been installed but Systemd is not running; and (b) distributions in which Systemd is running. Of course you should set `RUNCVM_CGROUPFS` if you need to override the default behaviour.
+These defaults suit running Docker in (a) stock Alpine/Debian/Ubuntu distributions in which Docker has been installed but systemd is not running; and (b) distributions in which systemd is running. Set `RUNCVM_CGROUPFS` to override them.
+
+Use `1` or `hybrid` only for software that requires cgroup v1. A kernel built without `CONFIG_MEMCG_V1` and `CONFIG_CPUSETS_V1`, as are recent distributions' kernels, has no v1 `memory` or `cpuset` controller, so under `1` or `hybrid` software that uses cgroup v1, such as Docker, cannot apply memory or CPU-set limits: Docker discards them, with a warning. Docker supports cgroup v2 from version 20.10.
+
+If cgroup2 is already mounted on `/sys/fs/cgroup` when the VM starts, as the systemd-based initramfs of some distributions (such as Oracle Linux) leaves it, RunCVM mounts nothing more, whatever the value.
 
 Please also note that in the case your distribution is running Systemd you may instead set `--env=RUNCVM_KERNEL_APPEND='systemd.unified_cgroup_hierarchy=<boolean>'` (where `<boolean>` is `0` or `1`) to request Systemd to create either hybrid or cgroup2-only cgroup filesystem(s) itself.
 
@@ -924,7 +941,7 @@ The `runcvm-vm-init` process:
 - Launches the container's pre-existing entrypoint, in one of two ways.
    1. If `RUNCVM_INIT` is `1` (i.e. the container was originally intended to be launched with Docker's own init process) then it configures and execs busybox `init`, which becomes the VM's PID1, to supervise `dropbear`, run `runcvm-vm-start` and `poweroff` the VM if signalled to do so.
    2. Else, it backgrounds `dropbear`, then execs (via `runcvm-init`, purely to create a controlling tty) `runcvm-vm-start`, which runs as the VM's PID1.
-- In both cases, `dropbear` accepts only RunCVM's own key (used by `docker exec`), with password logins and port forwarding disabled.
+- In both cases, `dropbear` accepts only RunCVM's own key (used by `docker exec`), with password logins and port forwarding disabled. It ignores the image's `/etc/passwd`, `/etc/shadow`, `/etc/shells` and `authorized_keys`, and runs `runcvm-vm-exec` with RunCVM's own `bash`, so `docker exec` works whatever shell, if any, the image gives root.
 
 The `runcvm-vm-start` script:
 - Execs the container's originally-intended entrypoint with the workload's environment variables alone, and with its `<uid>`, `<gid>`, `<additionalGids>` and `<cwd>`.
@@ -954,7 +971,7 @@ cd runcvm
 
 The build script creates a Docker image named `newsnowlabs/runcvm:latest`. To tag it otherwise, give `--tag <tag>`, once or more, e.g. `--tag dev` for a development build, or `--tag v1.2.3 --tag latest` for a release. Arguments after `--` are passed to `docker build`.
 
-To publish the build, add `--push`, which after a successful build pushes each tag to Docker Hub (`newsnowlabs/runcvm:<tag>`), then copies it to GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`) with `docker buildx imagetools create`; `--push=dockerhub` pushes to Docker Hub only. Both need `docker login` to the registries concerned. `./build/build.sh --help` lists the options.
+To publish the build, add `--push`, which after a successful build pushes each tag to Docker Hub (`newsnowlabs/runcvm:<tag>`), then copies it to GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`) with `docker buildx imagetools create`, giving the copy's index the image's `org.opencontainers.image.*` labels (its source repository, description and licence) as annotations, which GitHub uses to link the package on ghcr.io to this repository; `--push=dockerhub` pushes to Docker Hub only. Both need `docker login` to the registries concerned, and `--push` (with `all`) needs Docker's [containerd image store](https://docs.docker.com/engine/storage/containerd/) (the default for new installations of Docker Engine 29 and later): with Docker's classic store, the copy on ghcr.io would be a Docker manifest list, which cannot carry annotations, so the script stops before building. `./build/build.sh --help` lists the options.
 
 To install a build tagged other than `latest`, name it in `REPO` when running the installation script, e.g. `sudo REPO=newsnowlabs/runcvm:dev ./runcvm-scripts/runcvm-install-runtime.sh`.
 
@@ -1005,6 +1022,8 @@ Each test is a directory under `tests/` containing an executable `test` file, in
 Helpers for tests are in `tests/framework.sh` (bash) and `tests/framework.py` (Python), with the same names: unique per-run names (`unique`), labels that let the runner remove leftovers (`labels`), options for RunCVM Container/VMs (`vm_opts`), recorded checks (`check`, `check_cmd`, `expect_exit`), parameters (`param`), polling with deadlines (`wait_for`, `wait_for_exec`), results volumes (`volume_create`, `volume_read`), `skip` and `finish`.
 
 `--accel kvm|auto|tcg` (or `RUNCVM_TEST_ACCEL`) selects QEMU acceleration for the tests' RunCVM Container/VMs, which tests pass on as `RUNCVM_QEMU_ACCEL` using the `vm_opts` helper (where the RunCVM version under test supports it). With `--accel tcg`, real RunCVM Container/VMs run under software emulation where KVM is unavailable: slow, but it exercises RunCVM itself; tests that require `kvm` are skipped.
+
+Checks that launch a Container/VM explicitly under software emulation, whatever `--accel` says (such as `13-qemu-accel`'s `tcg` cases), are slow on a host with KVM, so there they run only with `--tcg-cases` (or `RUNCVM_TEST_TCG_CASES=1`) and are otherwise recorded as skipped. With `--accel tcg`, or without `/dev/kvm`, they always run. Tests guard them with the `tcg_cases` helper (`TCG_CASES` in Python).
 
 #### Developing the tests without KVM (stand-in mode)
 
