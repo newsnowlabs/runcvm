@@ -171,6 +171,44 @@ docker run -it --rm --runtime=runcvm --name=openwrt --network=runcvm-openwrt --i
 
 - [Watch on Asciinema](https://asciinema.org/a/631857)
 
+## Use cases
+
+RunCVM suits workloads that need what a container cannot give them, a whole machine, while keeping a container's image, command line and lifecycle:
+
+- **System services that need `systemd` as PID 1**, and the units, timers and socket activation it manages, such as a package's services, or configuration-management code (e.g. Ansible roles) that manages them. See [System workloads](#system-workloads).
+- **Docker, Docker Swarm or [Kubernetes](https://kubernetes.io/) inside a VM**, without `--privileged`: Docker tooling tested against a dockerd of its own, which it may reconfigure, restart or break, or a multi-node cluster on one host, each node a VM with its own kernel, firewall and cgroups. See [Running Docker in a RunCVM Container/VM](#running-docker-in-a-runcvm-containervm), and the Docker Swarm example in [Quick start](#quick-start).
+- **Software that needs a kernel of its own**: kernel modules, eBPF tools, sysctls, netfilter and routing (e.g. firewalls, VPNs and routing daemons), memory and CPU limits enforced by the VM's own kernel, or a kernel version other than the host's. Each distribution's image boots that distribution's kernel. See [Kernel auto-detection](#kernel-auto-detection) and [`RUNCVM_KERNEL`](#--envruncvm_kerneldistversion).
+- **Storage tools that need block devices**, to make filesystems, mount them, or use quotas or btrfs or xfs features. See [`RUNCVM_DISKS`](#--envruncvm_disksdisk1disk2).
+- **Appliances and system images** that expect a machine of their own, such as [OpenWrt](https://openwrt.org/) (see [System workloads](#system-workloads)), and container workloads intended for VM platforms such as [fly.io](https://fly.io).
+- **Graphical desktops**, served over VNC. See [Graphical workloads with VNC](#graphical-workloads-with-vnc).
+- **Existing container workloads with stronger isolation**, behind hardware virtualisation. See [RunCVM vs Kata comparison](#runcvm-vs-kata-comparison).
+- **Development environments for any of the above**, in [Dockside](https://dockside.io/). See [RunCVM and Dockside](#runcvm-and-dockside).
+- **Testing any of the above in continuous integration**, on any CI host with KVM. See [RunCVM in CI](#runcvm-in-ci).
+
+### RunCVM in CI
+
+GitHub Actions' hosted Linux runners (e.g. `ubuntu-24.04`) provide KVM, so a workflow can install RunCVM and run Container/VMs in its jobs, for example to test packages across distributions, configuration-management code against a real `systemd`, or a multi-node cluster described in one Compose file. The runner user needs access to `/dev/kvm`, which a udev rule gives it:
+
+```yaml
+    steps:
+      - name: Install RunCVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
+      - run: docker run --rm --runtime=runcvm alpine uname -a
+```
+
+A hosted runner (4 vCPUs and 16 GB for public repositories) runs a handful of Container/VMs at once. On a self-hosted runner with RunCVM installed, a job's `container:` (and its `services:`) can run under RunCVM, with `options: --runtime=runcvm`, giving each a VM of its own: this suits projects that run untrusted pull requests' code on their own hardware.
+
+### When RunCVM is not the right fit
+
+- **Very short-lived containers in large numbers.** Each Container/VM boots a kernel, which takes a few seconds, and runs a VM of its own, sized by its memory and CPU limits.
+- **Hosts without KVM, or not x86-64 Linux.** Without KVM, Container/VMs run only under QEMU's software emulation, which is much slower (see [`RUNCVM_QEMU_ACCEL`](#--envruncvm_qemu_accelkvmautotcg)).
+- **Podman**, whose support is experimental.
+- **Workloads that rely on container features RunCVM does not provide**, such as networks connected to a running Container/VM. See [Features and limitations](#features-and-limitations).
+
 ## RunCVM-in-Portainer walk-through
 
 [![Playing around with RunCVM, a docker runtime plugin](https://i.ytimg.com/vi/OENaWDlCWKg/maxresdefault.jpg)](https://www.youtube.com/watch?v=OENaWDlCWKg "Playing around with RunCVM, a docker runtime plugin")
@@ -202,11 +240,12 @@ RunCVM features:
 
 - [Introduction](#introduction)
 - [Quick start](#quick-start)
+- [Use cases](#use-cases)
+- [RunCVM-in-Portainer walk-through](#runcvm-in-portainer-walk-through)
 - [Motivation](#motivation)
 - [Licence](#licence)
 - [Project aims](#project-aims)
 - [Project ambitions](#project-ambitions)
-- [Applications for RunCVM](#applications-for-runcvm)
 - [How RunCVM works](#how-runcvm-works)
 - [System requirements](#system-requirements)
 - [Supported distributions](#supported-distributions)
@@ -214,7 +253,7 @@ RunCVM features:
 - [Upgrading](#upgrading)
 - [Features and Limitations](#features-and-limitations)
 - [RunCVM vs Kata comparison](#runcvm-vs-kata-comparison)
-- [Kernel selection](#kernel-selection)
+- [Kernel auto-detection](#kernel-auto-detection)
 - [Option reference](#option-reference)
 - [Advanced usage](#advanced-usage)
 - [Developing](#developing)
@@ -223,7 +262,8 @@ RunCVM features:
 - [Contributing](#contributing)
 - [Support](#support)
 - [Uninstallation](#uninstallation)
-- [Legals](#Legals)
+- [RunCVM and Dockside](#runcvm-and-dockside)
+- [Legals](#legals)
 
 ## Licence
 
@@ -246,24 +286,10 @@ RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. 
 
 ## Project ambitions
 
-- Support for booting VM with a file-backed disk root fs generated from the container image, instead of only virtiofs root
 - Support running foreign-architecture VMs by using QEMU dynamic CPU emulation for the entire VM (instead of the approach used by [https://github.com/multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static) which uses dynamic CPU emulation for each individual binary)
 - Support for QEMU [microvm](https://qemu.readthedocs.io/en/latest/system/i386/microvm.html) or potentially Amazon Firecracker
 - More natural console support with independent stdout and stderr channels for `docker run -it`
 - Improve VM boot time and other behaviours using custom kernel
-- Support for specific hardware e.g. graphics display served via VNC
-
-## Applications for RunCVM
-
-The main applications for RunCVM are:
-
-1. Running and testing applications that:
-   - don't work with (or require enhanced privileges to work with) standard container runtimes (e.g. `systemd`, `dockerd`, Docker swarm services, [Kubernetes](https://kubernetes.io/))
-   - require a running kernel, or a kernel version or modules not available on the host
-   - require specific hardware that can be emulated e.g. disks, graphics displays
-2. Running existing container workloads with increased security
-3. Testing container workloads that are already intended to launch in VM environments, such as on [fly.io](https://fly.io)
-4. Developing any of the above applications in [Dockside](https://dockside.io/) (see [RunCVM and Dockside](#runcvm-and-dockside))
 
 ## How RunCVM works
 
