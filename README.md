@@ -1023,6 +1023,8 @@ We are typically available to respond to queries Monday-Friday, 9am-5pm UK time,
 
 ## Contributing
 
+RunCVM is maintained by [Struan Bartlett](https://github.com/struanb) at [NewsNow Labs](https://github.com/newsnowlabs).
+
 If you would like to contribute a feature suggestion or code, please raise an issue or submit a pull request.
 
 ## Uninstallation
@@ -1046,7 +1048,7 @@ docker run --rm -it --runtime=runcvm  --memory=2g --name=docksidevm -p 443:443 -
 
 This project (known as "RunCVM"), comprising the files in this Git repository
 (but excluding files containing a conflicting copyright notice and licence),
-is copyright 2023 NewsNow Publishing Limited, Struan Bartlett, and contributors.
+is copyright 2023-2026 NewsNow Publishing Limited, Struan Bartlett, and contributors.
 
 RunCVM is an open-source project licensed under the Apache License, Version 2.0
 (the "License"); you may not use RunCVM or its constituent files except in

@@ -1,0 +1,13 @@
+RunCVM
+Copyright 2023-2026 NewsNow Publishing Limited, Struan Bartlett, and contributors.
+
+Created and maintained by Struan Bartlett at NewsNow Labs.
+https://github.com/newsnowlabs/runcvm
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file.
+
+Files in this repository that carry their own copyright notice and licence
+are covered by that notice and licence.
+
+RunCVM relies upon third-party open-source software that is separate from
+and independent of RunCVM and published under its own licences.
