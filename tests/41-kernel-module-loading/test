@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""The VM's kernel loads modules on demand, whether or not the image has a modprobe.
+
+The kernel loads a module it needs (e.g. a filesystem's, on its first mount) by
+running the program named in /proc/sys/kernel/modprobe. RunCVM names its own
+loader there, which runs the image's /sbin/modprobe (or /usr/sbin/modprobe)
+where the image has one, and RunCVM's own otherwise.
+
+Each case boots Debian's kernel, whose overlay filesystem is a module, and
+mounts an overlay filesystem, which makes the kernel load the module:
+
+- busybox, which has no /sbin/modprobe (only /bin/modprobe, which the kernel
+  does not use): the mount succeeds, and the module is loaded;
+- an image built from busybox with a /sbin/modprobe that records its
+  arguments, then runs busybox's: the mount succeeds, and the image's
+  modprobe is the one the kernel ran, for the module (which the kernel
+  requests by its alias, fs-overlay).
+
+Each case runs with and without --init.
+"""
+
+import atexit
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+DOCKERFILE = r"""
+FROM busybox
+RUN mkdir -p /sbin \
+ && printf '#!/bin/sh\necho "$*" >>/dev/image-modprobe-marker\nexec /bin/modprobe "$@"\n' >/sbin/modprobe \
+ && chmod 755 /sbin/modprobe
+"""
+
+# Run in the VM: reports the kernel's module loader, whether overlay is available before and
+# after an overlay mount, and what the image's modprobe recorded, if anything. Its commands are
+# joined with '; ', as a single line.
+SCRIPT = "; ".join([
+    'echo "loader=$(cat /proc/sys/kernel/modprobe)"',
+    "grep -qw overlay /proc/filesystems && echo before=loaded || echo before=absent",
+    "mkdir -p /t && mount -t tmpfs t /t && mkdir /t/l /t/u /t/w /t/m",
+    "mount -t overlay o -o lowerdir=/t/l,upperdir=/t/u,workdir=/t/w /t/m && echo mount=ok || echo mount=failed",
+    "grep -q '^overlay ' /proc/modules && echo module=loaded || echo module=absent",
+    "[ -f /dev/image-modprobe-marker ] && sed 's/^/marker=/' /dev/image-modprobe-marker",
+    "true",
+])
+
+image = t.unique("own-modprobe").lower()
+subprocess.run(["docker", "build", "-q", *t.labels(), "-t", image, "-"], check=True,
+               input=DOCKERFILE, universal_newlines=True, stdout=subprocess.DEVNULL)
+atexit.register(lambda: t.docker("rmi", "-f", image))
+
+
+def run(name, img, init):
+    r = t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
+                 *t.vm_opts(), "--env", "RUNCVM_KERNEL=debian", *(["--init"] if init else []),
+                 img, "sh", "-c", SCRIPT, timeout=TIMEOUT)
+    out = {}
+    markers = []
+    for line in r.stdout.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if not sep:
+            continue
+        if key == "marker":
+            markers.append(value)
+        else:
+            out[key] = value
+    if r.returncode != 0 or "mount" not in out:
+        t.log("exit status %d, output:\n%s" % (r.returncode, r.stdout))
+    return out, markers
+
+
+t.param("init", "with and without")
+
+for init in (False, True):
+    mode = "--init" if init else "no --init"
+
+    out, markers = run("busybox" + ("-init" if init else ""), "busybox", init)
+    t.check("busybox, %s: kernel's module loader is RunCVM's" % mode,
+            "/.runcvm/guest/scripts/runcvm-vm-modprobe", out.get("loader"))
+    t.check("busybox, %s: overlay not loaded before the mount" % mode, "absent", out.get("before"))
+    t.check("busybox, %s: overlay mount" % mode, "ok", out.get("mount"))
+    t.check("busybox, %s: overlay module loaded" % mode, "loaded", out.get("module"))
+
+    out, markers = run("own-modprobe" + ("-init" if init else ""), image, init)
+    t.check("own modprobe, %s: overlay mount" % mode, "ok", out.get("mount"))
+    t.check("own modprobe, %s: overlay module loaded" % mode, "loaded", out.get("module"))
+    t.check("own modprobe, %s: the image's modprobe loaded it" % mode, True,
+            any(m.split()[-1:] in (["overlay"], ["fs-overlay"]) for m in markers))
+
+t.finish()

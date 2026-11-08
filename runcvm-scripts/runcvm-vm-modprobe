@@ -1,0 +1,17 @@
+#!/.runcvm/guest/bin/bash
+
+# The VM kernel's module loader: runcvm-vm-init sets /proc/sys/kernel/modprobe to this script, which
+# the kernel runs (with arguments such as '-q -- <module>') to load a module on demand, e.g. a
+# filesystem's on its first mount, or a netfilter match's when a rule first uses it.
+#
+# It runs the image's modprobe where the image has one, so that the image's modprobe.d
+# configuration applies, including to one installed while the VM runs; otherwise, RunCVM's own
+# (BusyBox's), which loads modules from the same /lib/modules. The kernel runs it with no PATH and
+# a minimal environment, so every path here is absolute.
+
+for modprobe in /sbin/modprobe /usr/sbin/modprobe
+do
+  [ -x "$modprobe" ] && exec "$modprobe" "$@"
+done
+
+exec /.runcvm/guest/bin/busybox modprobe "$@"
