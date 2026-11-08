@@ -85,6 +85,10 @@ jobs:
         if: matrix.ref
         run: |
           git log --oneline -1
+          # gitlab.alpinelinux.org refuses requests from GitHub-hosted runners (HTTP 418), so the
+          # build clones aports from its GitHub mirror.
+          sed -i 's#https://gitlab.alpinelinux.org/alpine/aports.git#https://github.com/alpinelinux/aports.git#' Dockerfile
+          git diff --stat
           time ./build/build.sh --tag probe
 
       - name: Install RunCVM (${{ env.RUNCVM_IMAGE }})
