@@ -280,8 +280,12 @@ if [ -f /.runcvm/fstab ]; then
     vm_init_error "mounting the filesystems in /.runcvm/fstab failed, leaving unmounted: ${unmounted[*]}"
   fi
 
-  # Now mount our fstab over /etc/fstab
-  mount -i --bind /.runcvm/fstab /etc/fstab
+  # Mount our fstab over the image's /etc/fstab, where the image has one. An image without one
+  # (e.g. busybox, or a static binary's) has nothing that reads it, and has no file to mount over:
+  # this script runs with 'bash -e' as the VM's PID 1, so a failed mount would halt the VM.
+  if [ -e /etc/fstab ]; then
+    mount -i --bind /.runcvm/fstab /etc/fstab
+  fi
 fi
 
 # Mount cgroupfs as RUNCVM_CGROUPFS requests, by default:
