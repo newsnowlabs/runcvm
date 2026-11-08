@@ -7,7 +7,8 @@
 #
 # Each matrix entry installs an image (built on the runner from the entry's ref if build is set),
 # checks out ref for its tests, loads br_netfilter if br_netfilter is 'load', and replaces the
-# runner's Docker with the latest Docker release if docker is 'latest'. Entries used:
+# runner's Docker with a Docker release if docker is set ('latest', or a version such as 28.5).
+# Entries used:
 #   release-brnf  the published image, with br_netfilter loaded: in that release, docker exec's
 #                 replies from the VM reach the container's network stack only through bridge
 #                 netfilter, and GitHub's runners do not load it by default
@@ -15,6 +16,8 @@
 #   dns-address   the DNS address branch (stacked on nft-divert), from an image built elsewhere
 #   nft-divert-docker-latest  the nft bridge diversion branch, from an image built elsewhere, with
 #                 the latest Docker release
+#   docker-<version>  the same image, with that Docker release, running the tests whose results
+#                 depend on Docker's version
 name: KVM probe
 
 on:
@@ -32,26 +35,46 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: nft-divert-docker-latest
+          - variant: docker-28.1
             ref: claude/runcvm-nft-bridge-divert
             image: ghcr.io/newsnowlabs/runcvm:probe-nft-5b98014
             br_netfilter: leave
-            docker: latest
+            docker: "28.1"
+            tests: 12-ipv6 38-multi-network
+          - variant: docker-28.3
+            ref: claude/runcvm-nft-bridge-divert
+            image: ghcr.io/newsnowlabs/runcvm:probe-nft-5b98014
+            br_netfilter: leave
+            docker: "28.3"
+            tests: 12-ipv6 38-multi-network
+          - variant: docker-28.5
+            ref: claude/runcvm-nft-bridge-divert
+            image: ghcr.io/newsnowlabs/runcvm:probe-nft-5b98014
+            br_netfilter: leave
+            docker: "28.5"
+            tests: 12-ipv6 38-multi-network
+          - variant: docker-29.0
+            ref: claude/runcvm-nft-bridge-divert
+            image: ghcr.io/newsnowlabs/runcvm:probe-nft-5b98014
+            br_netfilter: leave
+            docker: "29.0"
+            tests: 12-ipv6 38-multi-network
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       RUNCVM_IMAGE: ${{ matrix.image }}
-      TESTS: ${{ inputs.tests || '--tier core' }}
+      TESTS: ${{ inputs.tests || matrix.tests || '--tier core' }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ matrix.ref || github.ref }}
 
-      - name: Install the latest Docker release
-        if: matrix.docker == 'latest'
+      - name: Install Docker ${{ matrix.docker }}
+        if: matrix.docker
         run: |
           sudo apt-get remove -y moby-engine moby-cli moby-buildx moby-compose moby-containerd moby-runc || true
-          curl -fsSL https://get.docker.com | sudo sh
+          curl -fsSL https://get.docker.com -o "$RUNNER_TEMP/get-docker.sh"
+          if [ "${{ matrix.docker }}" = latest ]; then sudo sh "$RUNNER_TEMP/get-docker.sh"; else sudo VERSION="${{ matrix.docker }}" sh "$RUNNER_TEMP/get-docker.sh"; fi
           sudo systemctl restart docker
 
       - name: Runner facts
