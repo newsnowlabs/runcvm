@@ -36,8 +36,9 @@ RUN mkdir -p /sbin \
  && chmod 755 /sbin/modprobe
 """
 
-# Run in the VM: reports the kernel's module loader, whether overlay is available before and
-# after an overlay mount, and what the image's modprobe recorded, if anything. Its commands are
+# Run in the VM: reports the kernel's module loader, whether overlay is available before the
+# mount, whether the mount succeeds and the module is loaded, and what the image's modprobe
+# recorded, if anything. Its commands are
 # joined with '; ', as a single line.
 SCRIPT = "; ".join([
     'echo "loader=$(cat /proc/sys/kernel/modprobe)"',
