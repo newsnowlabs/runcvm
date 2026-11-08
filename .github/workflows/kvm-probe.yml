@@ -5,12 +5,13 @@
 # is marked failed in the run's summary, and the job carries on, so that one run answers as much
 # as it can. It runs on a push to its own branch, or by hand once on the default branch.
 #
-# Matrix entries:
-#   release-brnf  the published image, with br_netfilter loaded on the runner: in that release,
-#                 docker exec's replies from the VM reach the container's network stack only
-#                 through bridge netfilter, and GitHub's runners do not load it by default
-#   nft-divert    an image built from the nft bridge diversion branch, which needs no
-#                 br_netfilter, with br_netfilter left unloaded
+# Each matrix entry installs an image (built on the runner from the entry's ref if build is set),
+# checks out ref for its tests, and loads br_netfilter if br_netfilter is 'load'. Entries used:
+#   release-brnf  the published image, with br_netfilter loaded: in that release, docker exec's
+#                 replies from the VM reach the container's network stack only through bridge
+#                 netfilter, and GitHub's runners do not load it by default
+#   nft-divert    the nft bridge diversion branch, which needs no br_netfilter, built on the runner
+#   dns-address   the DNS address branch (stacked on nft-divert), from an image built elsewhere
 name: KVM probe
 
 on:
@@ -28,12 +29,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: release-brnf
-            image: newsnowlabs/runcvm:latest
-            br_netfilter: load
-          - variant: nft-divert
-            ref: claude/runcvm-nft-bridge-divert
-            image: newsnowlabs/runcvm:probe
+          - variant: dns-address
+            ref: claude/runcvm-dns-address
+            image: ghcr.io/newsnowlabs/runcvm:probe-dns-d9d02b9
             br_netfilter: leave
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -82,7 +80,7 @@ jobs:
           echo "=== /dev/kvm usable by the runner user: $([ -r /dev/kvm ] && [ -w /dev/kvm ] && echo yes || echo no)"
 
       - name: Build RunCVM from ${{ matrix.ref }}
-        if: matrix.ref
+        if: matrix.build
         run: |
           git log --oneline -1
           # gitlab.alpinelinux.org refuses requests from GitHub-hosted runners (HTTP 418), so the
@@ -93,6 +91,7 @@ jobs:
           git diff
           git diff --stat
           time ./build/build.sh --tag probe
+          docker tag newsnowlabs/runcvm:probe "$RUNCVM_IMAGE"
 
       - name: Install RunCVM (${{ env.RUNCVM_IMAGE }})
         continue-on-error: true
