@@ -6,12 +6,15 @@
 # as it can. It runs on a push to its own branch, or by hand once on the default branch.
 #
 # Each matrix entry installs an image (built on the runner from the entry's ref if build is set),
-# checks out ref for its tests, and loads br_netfilter if br_netfilter is 'load'. Entries used:
+# checks out ref for its tests, loads br_netfilter if br_netfilter is 'load', and replaces the
+# runner's Docker with the latest Docker release if docker is 'latest'. Entries used:
 #   release-brnf  the published image, with br_netfilter loaded: in that release, docker exec's
 #                 replies from the VM reach the container's network stack only through bridge
 #                 netfilter, and GitHub's runners do not load it by default
 #   nft-divert    the nft bridge diversion branch, which needs no br_netfilter, built on the runner
 #   dns-address   the DNS address branch (stacked on nft-divert), from an image built elsewhere
+#   nft-divert-docker-latest  the nft bridge diversion branch, from an image built elsewhere, with
+#                 the latest Docker release
 name: KVM probe
 
 on:
@@ -29,10 +32,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: dns-address
-            ref: claude/runcvm-dns-address
-            image: ghcr.io/newsnowlabs/runcvm:probe-dns-d9d02b9
+          - variant: nft-divert-docker-latest
+            ref: claude/runcvm-nft-bridge-divert
+            image: ghcr.io/newsnowlabs/runcvm:probe-nft-5b98014
             br_netfilter: leave
+            docker: latest
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -42,6 +46,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ matrix.ref || github.ref }}
+
+      - name: Install the latest Docker release
+        if: matrix.docker == 'latest'
+        run: |
+          sudo apt-get remove -y moby-engine moby-cli moby-buildx moby-compose moby-containerd moby-runc || true
+          curl -fsSL https://get.docker.com | sudo sh
+          sudo systemctl restart docker
 
       - name: Runner facts
         run: |
