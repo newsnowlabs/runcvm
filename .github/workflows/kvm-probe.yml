@@ -86,8 +86,11 @@ jobs:
         run: |
           git log --oneline -1
           # gitlab.alpinelinux.org refuses requests from GitHub-hosted runners (HTTP 418), so the
-          # build clones aports from its GitHub mirror.
-          sed -i 's#https://gitlab.alpinelinux.org/alpine/aports.git#https://github.com/alpinelinux/aports.git#' Dockerfile
+          # build clones aports from its GitHub mirror, and abuild fetches sources from Alpine's
+          # distfiles mirror, which it tries before each source's upstream URL.
+          sed -i -e 's#https://gitlab.alpinelinux.org/alpine/aports.git#https://github.com/alpinelinux/aports.git#' \
+            -e 's#^\( *\)abuild-keygen -an && \\#&\n\1echo "DISTFILES_MIRROR=https://distfiles.alpinelinux.org/distfiles/v${ALPINE_VERSION}" >>/etc/abuild.conf \&\& \\#' Dockerfile
+          git diff
           git diff --stat
           time ./build/build.sh --tag probe
 
