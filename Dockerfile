@@ -300,14 +300,18 @@ RUN apk update && apk add --no-cache rsync
 
 ADD runcvm-scripts /opt/runcvm/scripts/
 ADD runcvm-etc /opt/runcvm/etc/
+COPY LICENSE NOTICE /opt/runcvm/
 
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]
 
 # OCI labels. GitHub links the image's package on ghcr.io to the repository named by 'source', and
 # shows 'description'. build/build.sh gives the image's index on ghcr.io the same keys as
-# annotations, which GitHub reads in place of labels where a tag names an index.
+# annotations, which GitHub reads in place of labels where a tag names an index. 'authors' names
+# the maintainer, in place of Docker's deprecated MAINTAINER instruction.
 LABEL org.opencontainers.image.source="https://github.com/newsnowlabs/runcvm" \
+      org.opencontainers.image.authors="Struan Bartlett (https://github.com/struanb)" \
+      org.opencontainers.image.vendor="NewsNow Labs" \
       org.opencontainers.image.description="Experimental open-source container runtime for Linux that launches standard container workloads, and system workloads such as systemd, Docker and OpenWrt, in VMs" \
       org.opencontainers.image.licenses="Apache-2.0"
 

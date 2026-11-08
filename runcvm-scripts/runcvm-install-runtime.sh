@@ -240,3 +240,6 @@ check_rp_filter
 
 log "- RunCVM installation/upgrade complete."
 log
+log "RunCVM is copyright 2022-2026 NewsNow Publishing Limited, Struan Bartlett, and contributors,"
+log "and licensed under the Apache License, Version 2.0: see $RUNCVM/LICENSE and $RUNCVM/NOTICE."
+log
