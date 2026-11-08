@@ -35,30 +35,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: docker-28.1
+          - variant: docker-29.2
             ref: claude/runcvm-nft-bridge-divert
             image: ghcr.io/newsnowlabs/runcvm:probe-nft-5b98014
             br_netfilter: leave
-            docker: "28.1"
-            tests: 12-ipv6 38-multi-network
-          - variant: docker-28.3
+            docker: "29.2"
+            tests: 38-multi-network
+          - variant: docker-29.4
             ref: claude/runcvm-nft-bridge-divert
             image: ghcr.io/newsnowlabs/runcvm:probe-nft-5b98014
             br_netfilter: leave
-            docker: "28.3"
-            tests: 12-ipv6 38-multi-network
-          - variant: docker-28.5
+            docker: "29.4"
+            tests: 38-multi-network
+          - variant: docker-29.6
             ref: claude/runcvm-nft-bridge-divert
             image: ghcr.io/newsnowlabs/runcvm:probe-nft-5b98014
             br_netfilter: leave
-            docker: "28.5"
-            tests: 12-ipv6 38-multi-network
-          - variant: docker-29.0
+            docker: "29.6"
+            tests: 38-multi-network
+          - variant: docker-29.8
             ref: claude/runcvm-nft-bridge-divert
             image: ghcr.io/newsnowlabs/runcvm:probe-nft-5b98014
             br_netfilter: leave
-            docker: "29.0"
-            tests: 12-ipv6 38-multi-network
+            docker: "29.8"
+            tests: 38-multi-network
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
