@@ -2,9 +2,9 @@
 
 # Exit on errors, so that a failure while preparing the VM stops it from launching.
 #
-# Under pipefail, a pipeline whose status matters must end in a command that reads all its input:
-# not grep -q, -m or -l, head, sed's q, awk's exit or a single read, which can exit first and leave
-# the command writing to them killed by SIGPIPE, failing the pipeline at random. Use e.g.
+# Under pipefail, every command after a pipe in a pipeline whose status matters must read all its
+# input: not grep -q, -m or -l, head, sed's q, awk's exit or a single read, which can exit first
+# and leave the command writing to them killed by SIGPIPE, failing the pipeline at random. Use e.g.
 # 'grep ... >/dev/null', or capture the output first. tests/43-pipefail-readers checks this.
 set -o errexit -o pipefail
 

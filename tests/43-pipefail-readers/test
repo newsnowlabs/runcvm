@@ -10,7 +10,8 @@ the pipeline's status, that turns a match into a failure.
 
 The test reads every file in the repository that turns on pipefail (a shell
 script's 'set -o pipefail', or a Dockerfile's SHELL with '-o pipefail') and
-fails on each pipeline in it whose last command is such a reader. It first
+fails on each pipeline in it with such a reader after any of its pipes: a
+reader that exits early fails the pipeline wherever it stands in it. It first
 checks that it finds each kind of reader in a sample, so that a fault in the
 test itself cannot pass unnoticed. It needs no Container/VM.
 """
@@ -23,7 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import framework as t  # noqa: E402
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-SKIP_DIRS = {".git", "kernels", "patches"}
+SKIP_DIRS = {".git"}
 
 # A pipe (not '||') followed by a reader that can exit early.
 READER = re.compile(
