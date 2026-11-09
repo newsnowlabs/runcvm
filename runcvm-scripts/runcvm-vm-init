@@ -48,6 +48,13 @@ if ! [ -h /dev/fd ]; then
   ln -s /proc/self/fd /dev/fd
 fi
 
+# Have the kernel load modules on demand through RunCVM's module loader, which runs the image's
+# modprobe where the image has one and RunCVM's otherwise: the kernel's default, /sbin/modprobe, is
+# absent from many images (e.g. busybox, rancher/k3s), and the kernel then loads no module that it
+# requests, such as overlay on its first mount. The loader is in RunCVM's tools, which stay
+# available to the kernel for the VM's lifetime, including after a switch to a whole-root disk.
+echo "$RUNCVM_GUEST/scripts/runcvm-vm-modprobe" >/proc/sys/kernel/modprobe
+
 # Switch the root filesystem to the whole-root disk, if RUNCVM_DISKS defines one (see do_root_disk
 # in runcvm-ctr-qemu). This must happen before anything else uses the root: everything after it,
 # and the workload, sees the disk as /.
