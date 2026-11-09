@@ -85,6 +85,7 @@ docker exec runcvm-l1 runcvm-l1-check
 - systemd is PID 1;
 - the system has finished starting, with no failed units;
 - the mode;
+- the number of `RUNCVM_L1_*` variables `runcvm-l1-entrypoint` saved to `/etc/runcvm-l1/env` (a `NOTE`);
 - dockerd is running, with the `runcvm` runtime;
 - `/dev/kvm` exists, or else a notice that L2s must use software emulation;
 - the verdict of the unit that loads the KVM modules;
