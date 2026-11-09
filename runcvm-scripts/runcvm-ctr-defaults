@@ -170,6 +170,7 @@ create_aliases() {
     mke2fs
     mount
     nc
+    nft
     poweroff
     ps
     qemu-ga
@@ -181,8 +182,6 @@ create_aliases() {
     sysctl
     touch
     tr
-    xtables-legacy-multi
-    xtables-nft-multi
   )
 
   local cmd
