@@ -572,6 +572,10 @@ docker run --rm --runtime=runcvm --env=RUNCVM_KERNEL=ol hello-world
 
 Any custom kernel command line options e.g. `apparmor=0` or `systemd.unified_cgroup_hierarchy=0`.
 
+### `--env=RUNCVM_KERNEL_MODULES=<module>[,<module>...]`
+
+Kernel modules to load into the VM's kernel when it boots, before the workload starts, e.g. `--env=RUNCVM_KERNEL_MODULES=kvm_intel` for VMs nested in the Container/VM. The kernel loads most modules on demand, when they are first needed (e.g. a filesystem's, on its first mount), so this is for modules that nothing requests. A value that is not a comma-separated list of module names is rejected when the Container/VM is created; a module that the VM's kernel lacks stops the Container/VM before its workload starts, with exit status 1 and an error naming the module.
+
 ### `--env='RUNCVM_DISKS=<disk1>[;<disk2>;...]'`
 
 Automatically create, format, prepopulate and mount backing files as virtual disks on the VM.

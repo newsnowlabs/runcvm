@@ -217,6 +217,18 @@ vm_init_error() {
   exit 1
 }
 
+# Load the kernel modules that RUNCVM_KERNEL_MODULES names (checked by runcvm-runtime as a
+# comma-separated list of module names), before the workload starts: for modules that nothing
+# requests from the kernel on demand, such as kvm_intel or kvm_amd for VMs nested in this one.
+if [ -n "$RUNCVM_KERNEL_MODULES" ]; then
+  IFS=',' read -r -a modules <<<"$RUNCVM_KERNEL_MODULES"
+  for module in "${modules[@]}"
+  do
+    busybox modprobe "$module" || \
+      vm_init_error "RUNCVM_KERNEL_MODULES: kernel module '$module' cannot be loaded into the VM's kernel ($(busybox uname -r))"
+  done
+fi
+
 # Mount filesystems defined in /etc/fstab OR as defined in RUNCVM_DISKS
 if [ -f /.runcvm/fstab ]; then
   # Load the kernel modules of each disk's filesystem, as listed in disk-filesystems.

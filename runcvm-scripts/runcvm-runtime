@@ -493,6 +493,12 @@ if [ "$COMMAND" = "create" ]; then
   set_config_env "RUNCVM_KERNEL_INITRAMFS_PATH" "$RUNCVM_KERNEL_INITRAMFS_PATH"
   set_config_env "RUNCVM_KERNEL_ROOT" "$RUNCVM_KERNEL_ROOT"
 
+  # RUNCVM_KERNEL_MODULES: kernel modules for runcvm-vm-init to load at boot, by name.
+  RUNCVM_KERNEL_MODULES="$(get_config_env 'RUNCVM_KERNEL_MODULES')"
+  if [ -n "$RUNCVM_KERNEL_MODULES" ] && ! [[ "$RUNCVM_KERNEL_MODULES" =~ ^[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*$ ]]; then
+    error "RUNCVM_KERNEL_MODULES '$RUNCVM_KERNEL_MODULES' invalid (should be a comma-separated list of kernel module names, e.g. kvm_intel,vxlan)"
+  fi
+
   # QEMU acceleration:
   # - kvm (default): use KVM; fail at creation if /dev/kvm is unavailable on this host
   # - auto: use KVM if /dev/kvm is available, otherwise (much slower) software emulation
