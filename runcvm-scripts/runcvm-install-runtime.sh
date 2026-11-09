@@ -127,9 +127,9 @@ else
   fi
 fi
 
-# Install RunCVM package to $MNT
+# Install the RunCVM package to /opt/runcvm, which the installer image sees mounted at $MNT
 if [ -z "$NO_DOCKERD" ]; then
-  log "- Installing RunCVM package to $MNT ..."
+  log "- Installing RunCVM package to /opt/runcvm ..."
   if docker run --rm -v /opt/runcvm:$MNT $REPO --quiet; then
     log "- Installed RunCVM package to /opt/runcvm"
   else
@@ -187,4 +187,7 @@ _EOE_
 fi
 
 log "- RunCVM installation/upgrade complete."
+log
+log "RunCVM is copyright 2022-2026 NewsNow Publishing Limited, Struan Bartlett, and contributors,"
+log "and licensed under the Apache License, Version 2.0: see $RUNCVM/LICENSE and $RUNCVM/NOTICE."
 log

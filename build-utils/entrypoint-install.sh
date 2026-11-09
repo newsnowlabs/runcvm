@@ -37,9 +37,12 @@ if [ -z "$QUIET" ]; then
 RunCVM install/upgrade successful
 =================================
 
+RunCVM is copyright 2022-2026 NewsNow Publishing Limited, Struan Bartlett, and contributors,
+and licensed under the Apache License, Version 2.0: see /opt/runcvm/LICENSE and /opt/runcvm/NOTICE.
+
 If this is your first time installing RunCVM on this server/VM, then:
 
-1. Run the following to update /etc/docker/daemon.conf and restart docker:
+1. Run the following to update /etc/docker/daemon.json and restart docker:
 
   sudo /opt/runcvm/scripts/runcvm-install-runtime.sh
 
