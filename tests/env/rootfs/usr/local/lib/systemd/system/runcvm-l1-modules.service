@@ -1,0 +1,16 @@
+[Unit]
+Description=RunCVM L1: load the kernel modules RunCVM needs
+Documentation=file:/usr/local/share/doc/runcvm-l1/README.md
+DefaultDependencies=no
+ConditionVirtualization=!container
+After=systemd-modules-load.service systemd-udev-trigger.service
+Before=sysinit.target docker.service
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/runcvm-l1-modules
+
+[Install]
+WantedBy=sysinit.target

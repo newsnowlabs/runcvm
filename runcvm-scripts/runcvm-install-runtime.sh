@@ -43,55 +43,6 @@ _EOE_
   exit 1
 }
 
-check_rp_filter() {
-  # For RunCVM to work, the following condition on /proc/sys/net/ipv4/conf/ must be met:
-  # - the max of all/rp_filter and <bridge>/rp_filter should be 0 or 2
-  #   (where <bridge> is the bridge underpinning the Docker network to which RunCVM instances will be attached)
-  #
-  # This means that:
-  # - if all/rp_filter is set to 0, then <bridge>/rp_filter must be set to 0 or 2
-  #   (or, if <bridge> is not yet or might not yet have been created, then default/rp_filter must be set to 0 or 2)
-  # - if all/rp_filter is set to 1, then <bridge>/rp_filter must be set to 2
-  #   (or, if <bridge> is not yet or might not yet have been created, then default/rp_filter must be set to 2)
-  # - if all/rp_filter is set to 2, then no further action is needed
-
-  local rp_filter_all rp_filter_default
-
-  log "- Checking rp_filter ..."
-
-  if [ -f "/proc/sys/net/ipv4/conf/all/rp_filter" ]; then
-    rp_filter_all=$(cat /proc/sys/net/ipv4/conf/all/rp_filter)
-  else
-    log "  - Warning: could not find /proc/sys/net/ipv4/conf/all/rp_filter"
-  fi
-
-  if [ -f "/proc/sys/net/ipv4/conf/default/rp_filter" ]; then
-    rp_filter_default=$(cat /proc/sys/net/ipv4/conf/default/rp_filter)
-  else
-    log "  - Warning: could not find /proc/sys/net/ipv4/conf/default/rp_filter"
-  fi
-
-  if [ -z "$rp_filter_all" ] || [ -z "$rp_filter_default" ]; then
-    return
-  fi
-  
-  if [ "$rp_filter_all" = "2" ]; then
-    log "  - sys.net.ipv4.conf.all.rp_filter is set to 2; assuming no further action needed"
-    return
-  elif [ "$rp_filter_all" = "0" ] && [ "$rp_filter_default" = "0" ]; then
-    log "  - sys.net.ipv4.conf.all.rp_filter AND sys.net.ipv4.conf.default.rp_filter are set to 0; assuming no further action needed"
-    return
-  fi
-  
-  log "  - sys.net.ipv4.conf.all.rp_filter is set to $rp_filter_all; fixing ..."
-  log "  - Setting sys.net.ipv4.conf.all.rp_filter and Setting sys.net.ipv4.conf.default.rp_filter to 2 ..."
-  echo 2 >/proc/sys/net/ipv4/conf/all/rp_filter
-  echo 2 >/proc/sys/net/ipv4/conf/default/rp_filter
-
-  log "  - Patching /etc/sysctl.conf, /etc/sysctl.d/* to make these settings persist after reboot ..."
-  find /etc/sysctl.conf /etc/sysctl.d -type f -exec sed -r -i 's/^([ ]*net.ipv4.conf.(all|default).rp_filter)=(1)$/# DISABLED BY RUNCVM\n# \1=\3\n# ADDED BY RUNCVM\n\1=2/' {} \;
-}
-
 docker_restart() {
   # docker_restart
   # - With systemd, run: systemctl restart docker
@@ -176,9 +127,9 @@ else
   fi
 fi
 
-# Install RunCVM package to $MNT
+# Install the RunCVM package to /opt/runcvm, which the installer image sees mounted at $MNT
 if [ -z "$NO_DOCKERD" ]; then
-  log "- Installing RunCVM package to $MNT ..."
+  log "- Installing RunCVM package to /opt/runcvm ..."
   if docker run --rm -v /opt/runcvm:$MNT $REPO --quiet; then
     log "- Installed RunCVM package to /opt/runcvm"
   else
@@ -196,11 +147,12 @@ if [ -d "/etc/docker" ]; then
     echo '{}' >/etc/docker/daemon.json
   fi
 
-  if [ $(jq_get "/etc/docker/daemon.json" ".runtimes.runcvm.path") != "/opt/runcvm/scripts/runcvm-runtime" ]; then
-    log "  - Adding runcvm to daemon.json runtimes property ..."
+  if [ "$(jq_get "/etc/docker/daemon.json" ".runtimes.runcvm.path")" != "/opt/runcvm/scripts/runcvm-runtime" ]; then
+    log "  - Setting runtimes.runcvm.path in /etc/docker/daemon.json to \"/opt/runcvm/scripts/runcvm-runtime\" ..."
 
     if jq_set  "/etc/docker/daemon.json" '.runtimes.runcvm.path |= "/opt/runcvm/scripts/runcvm-runtime"'; then
-      log "    - Done"
+      log "    - Done; daemon.json's runtimes property is now:"
+      jq '.runtimes' /etc/docker/daemon.json | sed 's/^/        /'
     else
       log "    - Failed: $!"
       exit 1
@@ -211,7 +163,7 @@ if [ -d "/etc/docker" ]; then
     docker_restart
 
   else
-    log "  - Valid runcvm property already found in daemon.json"
+    log "  - runtimes.runcvm.path in /etc/docker/daemon.json is already \"/opt/runcvm/scripts/runcvm-runtime\""
   fi
 
   if docker info 2>/dev/null | grep -q runcvm; then
@@ -235,8 +187,8 @@ if [ -n "$(which podman)" ]; then
 _EOE_
 fi
 
-# Check, correct and make persistent required rp_filter settings
-check_rp_filter
-
 log "- RunCVM installation/upgrade complete."
+log
+log "RunCVM is copyright 2022-2026 NewsNow Publishing Limited, Struan Bartlett, and contributors,"
+log "and licensed under the Apache License, Version 2.0: see $RUNCVM/LICENSE and $RUNCVM/NOTICE."
 log

@@ -1,0 +1,55 @@
+#!/bin/sh
+# Run by runcvm-l1-modules.service: loads the kernel modules RunCVM needs in L1, unless already
+# loaded or built in, and logs each module's state beforehand, which shows whether udev's
+# coldplug had loaded it already:
+# - kvm_intel or kvm_amd, according to the CPU's vmx or svm flag;
+# - vhost_net and tun;
+# - br_netfilter: 'docker exec' into a RunCVM Container/VM connects from the container to the VM
+#   through a source NAT on the container's bridge, and the VM's replies, addressed to the
+#   network's gateway, reach the container only if br_netfilter passes bridged traffic through
+#   netfilter, which reverses the NAT. dockerd does not always load it.
+#
+# A CPU with neither flag (no nested virtualisation on L0) is reported, not treated as a failure:
+# L2s can still run with RUNCVM_QEMU_ACCEL=tcg.
+
+if grep -qw vmx /proc/cpuinfo; then
+  kvm=kvm_intel
+elif grep -qw svm /proc/cpuinfo; then
+  kvm=kvm_amd
+else
+  kvm=
+  echo "warning: the CPU has neither the vmx nor the svm flag, so KVM is unavailable in L1;" \
+    "L2s need RUNCVM_QEMU_ACCEL=tcg"
+fi
+
+# Let udev finish processing coldplug events, so that what it loads is reported as such.
+udevadm settle --timeout=30 2>/dev/null
+
+state() {
+  if grep -q "^$1 " /proc/modules; then
+    echo loaded
+  elif grep -q "/$1\.ko" "/lib/modules/$(uname -r)/modules.builtin" 2>/dev/null; then
+    echo built-in
+  else
+    echo absent
+  fi
+}
+
+rc=0
+for m in $kvm vhost_net tun br_netfilter; do
+  s=$(state "$m")
+  case "$s" in
+    absent)
+      if modprobe "$m"; then
+        echo "$m: not loaded; loaded it"
+      else
+        echo "$m: not loaded; failed to load it"
+        rc=1
+      fi
+      ;;
+    *) echo "$m: already $s" ;;
+  esac
+done
+
+[ -e /dev/kvm ] && echo "/dev/kvm: present" || echo "/dev/kvm: absent"
+exit $rc

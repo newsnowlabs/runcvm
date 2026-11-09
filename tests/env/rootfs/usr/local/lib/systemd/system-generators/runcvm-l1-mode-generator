@@ -1,0 +1,24 @@
+#!/bin/sh
+# systemd generator: chooses L1's mode, before any ordinary unit starts, from the arguments
+# that runcvm-l1-entrypoint saved in /etc/runcvm-l1/args.
+#
+# - No arguments: dev mode, the normal default target.
+# - Any arguments: batch mode, which this image does not implement: runcvm-l1-unsupported.target
+#   replaces the default target, and powers L1 off with exit status 2.
+#
+# systemd runs generators with the arguments <normal-dir> <early-dir> <late-dir>. A default.target
+# in <early-dir> takes precedence over the one in /etc and /usr; systemd.unit= on the kernel
+# command line still overrides it.
+
+early_dir=${2:-}
+[ -n "$early_dir" ] || exit 0
+
+if [ -s /etc/runcvm-l1/args ]; then
+  mode=unsupported
+  ln -sf /usr/local/lib/systemd/system/runcvm-l1-unsupported.target "$early_dir/default.target"
+else
+  mode=dev
+fi
+
+echo "runcvm-l1-mode-generator: mode $mode" >/dev/kmsg 2>/dev/null
+exit 0

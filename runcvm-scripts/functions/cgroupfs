@@ -14,6 +14,13 @@ cgroupfs_mount() {
       return
   fi
 
+  # If cgroup2 is already mounted on /sys/fs/cgroup (as the systemd-based initramfs of some
+  # distributions leaves it), there is nothing to add: directories made in it to mount cgroup v1
+  # hierarchies on would be cgroup2 child cgroups.
+  if [ "$(findmnt -rnu -o FSTYPE -M /sys/fs/cgroup)" = "cgroup2" ]; then
+    return
+  fi
+
   # If hybrid, mixed, or cgroup1 cgroup support is requested...
   if [[ "$cgroupfs" = "hybrid" || "$cgroupfs" = "mixed" || "$cgroupfs" = "1" || "$cgroupfs" = "cgroup1" ]]; then
 

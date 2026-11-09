@@ -1,0 +1,29 @@
+#!/bin/sh
+# Build-time stand-in for systemctl, which the Dockerfile diverts while packages are installed:
+# no systemd is running during a build. Subcommands that edit or read unit files are passed to
+# the real systemctl (without --now); those that need a running systemd report success and do
+# nothing, so that package scripts calling systemctl directly do not fail. The Dockerfile
+# removes the stand-in, and the diversion, once the image is complete.
+
+real=/usr/bin/systemctl.distrib
+
+for arg in "$@"; do
+  case "$arg" in
+    -*) ;;
+    *) cmd=$arg; break ;;
+  esac
+done
+
+case "${cmd:-}" in
+  add-requires|add-wants|cat|disable|enable|get-default|is-enabled|link|list-unit-files|mask|\
+  preset|preset-all|reenable|revert|set-default|unmask)
+    for arg in "$@"; do
+      shift
+      [ "$arg" = --now ] || set -- "$@" "$arg"
+    done
+    exec "$real" "$@"
+    ;;
+  *)
+    exit 0
+    ;;
+esac

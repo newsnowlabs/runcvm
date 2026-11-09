@@ -38,6 +38,10 @@ RUNCVM_KERNEL_SUSE_FAMILY=opensuse
 RUNCVM_MEM_SIZE_DEFAULT="512" # Default VM memory size (Mb) if not specified in container config
 RUNCVM_CONTAINER_MEM_OVERHEAD="256" # Memory (Mb) overhead to allow for QEMU, virtiofsd, dnsmasq and other container memory footprint: 128Mb minimum, 256Mb recommended
 RUNCVM_QEMU_TCG_TB_MEM_SIZE_DEFAULT="128" # Memory (Mb) for QEMU's translated-code cache under software emulation (TCG), added to the container's memory limit
+# Address at which the VM reaches RunCVM's own services in the container (see RUNCVM_DNS_IP in the
+# README): link-local, so never routed beyond the host, and outside the link-local addresses known to
+# be used by cloud platforms (e.g. 169.254.169.254) and by Kubernetes (169.254.20.10).
+RUNCVM_DNS_IP_DEFAULT="169.254.53.53"
 RUNCVM_QEMU_TCG_TB_MEM_SIZE_MIN="32"
 RUNCVM_QEMU_TCG_TB_MEM_SIZE_MAX="4096"
 RUNCVM_DEBUG=""
@@ -161,6 +165,26 @@ kernel_for_distro() {
   echo "$family"
 }
 
+# Sets RUNC to the runc binary to which RunCVM passes each command: the first 'runc' in the
+# caller's PATH (as Docker itself finds runc), or else in the usual system directories. Docker's
+# own packages install runc as /usr/bin/runc; Debian's and Ubuntu's runc package (a dependency of
+# their docker.io package) as /usr/sbin/runc. Returns 1 if none is found.
+find_runc() {
+  local dir
+
+  RUNC=$(type -P runc) && return 0
+
+  for dir in /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /bin /sbin
+  do
+    if [ -x "$dir/runc" ]; then
+      RUNC="$dir/runc"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 load_env_from_file() {
   local file="$1"
   local var="$2"
@@ -232,6 +256,19 @@ get_process_env_boolean() {
   [ -n "$value" ] && echo "1" || echo "0"
 }
 
+# Succeeds if $1 has the form RUNCVM_DNS_IP needs: a dotted-quad IPv4 address (without leading
+# zeros), unicast, and not in 0.0.0.0/8 or 127.0.0.0/8. (runcvm-ctr-entrypoint checks that it is
+# none of the container's own addresses.)
+valid_dns_ip() {
+  local ip="$1" octet
+  local -a octets
+
+  [[ "$ip" =~ ^(0|[1-9][0-9]{0,2})(\.(0|[1-9][0-9]{0,2})){3}$ ]] || return 1
+  IFS=. read -r -a octets <<< "$ip"
+  for octet in "${octets[@]}"; do [ "$octet" -le 255 ] || return 1; done
+  [ "${octets[0]}" -ne 0 ] && [ "${octets[0]}" -ne 127 ] && [ "${octets[0]}" -lt 224 ]
+}
+
 get_config_env() {
   local var="$1"
   local default="$2"
@@ -281,6 +318,8 @@ done
 
 COMMAND="$1"
 shift
+
+find_runc || error "runc not found in PATH ($PATH) or in /usr/bin, /usr/sbin, /usr/local/bin, /usr/local/sbin, /bin or /sbin"
 
 if [ "$COMMAND" = "create" ]; then
 
@@ -582,6 +621,12 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   set_config_env "RUNCVM_KERNEL_INITRAMFS_PATH" "$RUNCVM_KERNEL_INITRAMFS_PATH"
   set_config_env "RUNCVM_KERNEL_ROOT" "$RUNCVM_KERNEL_ROOT"
 
+  # RUNCVM_KERNEL_MODULES: kernel modules for runcvm-vm-init to load at boot, by name.
+  RUNCVM_KERNEL_MODULES="$(get_config_env 'RUNCVM_KERNEL_MODULES')"
+  if [ -n "$RUNCVM_KERNEL_MODULES" ] && ! [[ "$RUNCVM_KERNEL_MODULES" =~ ^[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*$ ]]; then
+    error "RUNCVM_KERNEL_MODULES '$RUNCVM_KERNEL_MODULES' invalid (should be a comma-separated list of kernel module names, e.g. kvm_intel,vxlan)"
+  fi
+
   # QEMU acceleration:
   # - kvm (default): use KVM; fail at creation if /dev/kvm is unavailable on this host
   # - auto: use KVM if /dev/kvm is available, otherwise (much slower) software emulation
@@ -595,6 +640,13 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     error "/dev/kvm is unavailable on this host; launch with --env=RUNCVM_QEMU_ACCEL=auto or --env=RUNCVM_QEMU_ACCEL=tcg to allow (much slower) software emulation"
   fi
   set_config_env "RUNCVM_QEMU_ACCEL" "$RUNCVM_QEMU_ACCEL"
+
+  # The address at which the VM reaches dnsmasq, and from which 'docker exec' connects to the VM.
+  RUNCVM_DNS_IP="$(get_config_env 'RUNCVM_DNS_IP' "$RUNCVM_DNS_IP_DEFAULT")"
+  if ! valid_dns_ip "$RUNCVM_DNS_IP"; then
+    error "RUNCVM_DNS_IP '$RUNCVM_DNS_IP' invalid (should be a unicast IPv4 address, not in 0.0.0.0/8 or 127.0.0.0/8; default $RUNCVM_DNS_IP_DEFAULT)"
+  fi
+  set_config_env "RUNCVM_DNS_IP" "$RUNCVM_DNS_IP"
 
   # Under software emulation, QEMU keeps a cache of translated code, whose size is set by
   # RUNCVM_QEMU_TCG_TB_MEM_SIZE (Mb) and added to the container's memory limit (below), so
@@ -772,4 +824,4 @@ fi
 
 debug && log "--- LOG ENDS ---"
 
-exec /usr/bin/runc "${COMMAND_LINE[@]}"
+exec "$RUNC" "${COMMAND_LINE[@]}"

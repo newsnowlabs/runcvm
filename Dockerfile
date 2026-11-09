@@ -85,8 +85,9 @@ abuild -rFf
 EOF
 
 # --- BUILD STAGE ---
-# Build patched dropbear with epka plugin
-# that does not require /etc/passwd or PAM to run
+# Build patched dropbear with epka plugin, which accepts only the plugin's keys
+# and runs commands with RunCVM's bash, without reading the image's /etc/passwd,
+# /etc/shadow, /etc/shells or authorized_keys
 FROM alpine-sdk as alpine-dropbear
 
 ADD patches/dropbear/runcvm.patch /root/aports/main/dropbear/runcvm.patch
@@ -165,9 +166,14 @@ RUN apk update && \
         qemu-hw-display-virtio-vga \
         ovmf \
         jq iproute2 netcat-openbsd blkid util-linux \
-        s6 dnsmasq iptables nftables \
+        s6 dnsmasq nftables \
         ncurses coreutils \
         patchelf
+
+# Install the packages of each filesystem that disks in RUNCVM_DISKS may have
+ADD runcvm-etc/disk-filesystems /tmp/disk-filesystems
+RUN packages=$(awk '$1 !~ /^#/ && NF && $3 != "-" { gsub(",", " ", $3); print $3 }' /tmp/disk-filesystems) && \
+    if [ -n "$packages" ]; then apk add --no-cache $packages; fi
 
 # Install patched SeaBIOS
 COPY --from=alpine-seabios /root/packages/main/x86_64 /tmp/seabios/
@@ -186,13 +192,16 @@ RUN apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/drop
 
 # Patch the binaries and set up symlinks
 COPY build-utils/make-bundelf-bundle.sh /usr/local/bin/make-bundelf-bundle.sh
-ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey"
-ENV BUNDELF_EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so"
-ENV BUNDELF_EXTRA_SYSTEM_LIB_PATHS="/usr/lib/xtables"
+ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey"
+ENV BUNDELF_EXTRA_LIBS="/usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so"
 ENV BUNDELF_CODE_PATH="/opt/runcvm"
 ENV BUNDELF_EXEC_PATH="/.runcvm/guest"
 
-RUN /usr/local/bin/make-bundelf-bundle.sh --bundle && \
+# Bundle, as well, each filesystem's mkfs command (field 6 of disk-filesystems)
+RUN for cmd in $(awk '$1 !~ /^#/ && NF { print $6 }' /tmp/disk-filesystems); do \
+      case " $BUNDELF_BINARIES " in *" $cmd "*) ;; *) BUNDELF_BINARIES="$BUNDELF_BINARIES $cmd" ;; esac; \
+    done && \
+    BUNDELF_BINARIES="$BUNDELF_BINARIES" /usr/local/bin/make-bundelf-bundle.sh --bundle && \
     mkdir -p $BUNDELF_CODE_PATH/bin && \
     cd $BUNDELF_CODE_PATH/bin && \
     for cmd in \
@@ -414,9 +423,20 @@ RUN apk update && apk add --no-cache rsync
 
 ADD runcvm-scripts /opt/runcvm/scripts/
 ADD runcvm-etc /opt/runcvm/etc/
+COPY LICENSE NOTICE /opt/runcvm/
 
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]
+
+# OCI labels. GitHub links the image's package on ghcr.io to the repository named by 'source', and
+# shows 'description'. build/build.sh gives the image's index on ghcr.io the same keys as
+# annotations, which GitHub reads in place of labels where a tag names an index. 'authors' names
+# the maintainer, in place of Docker's deprecated MAINTAINER instruction.
+LABEL org.opencontainers.image.source="https://github.com/newsnowlabs/runcvm" \
+      org.opencontainers.image.authors="Struan Bartlett (https://github.com/struanb)" \
+      org.opencontainers.image.vendor="NewsNow Labs" \
+      org.opencontainers.image.description="Experimental open-source container runtime for Linux that launches standard container workloads, and system workloads such as systemd, Docker and OpenWrt, in VMs" \
+      org.opencontainers.image.licenses="Apache-2.0"
 
 # Install needed kernels.
 # Comment out any kernels that are unneeded.
