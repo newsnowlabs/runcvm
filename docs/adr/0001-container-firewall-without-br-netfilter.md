@@ -15,7 +15,7 @@ Such traffic crosses the bridge, so the container's IPv4 stack sees it only if s
 1. **`br_netfilter`**: with this module loaded on the host (and `bridge-nf-call-iptables`, its default, in the container's network namespace), bridged IPv4 packets also traverse the `ip` family's netfilter hooks, where `nat` rules (`REDIRECT`, `SNAT`) can claim them.
 2. **Bridge-family `nf_tables` rules**: a rule in the bridge's `prerouting` hook rewrites the destination MAC address to the container interface's own and sets the packet type to `host`, so the bridge delivers the packet to the container's stack instead of forwarding it; `ip` family `nat` rules then hand it to the service.
 
-Mechanism 1 is not only a theoretical alternative: it is the one every RunCVM release from v1.0.0 to v1.7.0 uses, and so is proven in use. In those releases, `runcvm-ctr-entrypoint` installs `nat` rules with `iptables` (through the bundled `xtables-nft-multi`, i.e. `nf_tables` in its `iptables` compatibility mode), and relies on `br_netfilter` being loaded on the host. Their rules are in the repository at the tag `v1.7.0`.
+Mechanism 1 is not only a theoretical alternative: it is the one every RunCVM release from v1.0.0 to v1.7.0 uses, and so is proven in use. In those releases, `runcvm-ctr-entrypoint` installs `nat` rules with `iptables` (through the bundled `xtables-nft-multi`, i.e. `nf_tables` in its `iptables` compatibility mode), and works only where `br_netfilter` is loaded on the host, which those releases neither load nor check. Their rules are in the repository at the tag `v1.7.0`.
 
 ## Decision
 
