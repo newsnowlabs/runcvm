@@ -287,6 +287,14 @@ table bridge runcvm {
     type filter hook prerouting priority dstnat; policy accept;
     $BRIDGE_RULES
   }
+  # The VM's dropbear, which serves 'docker exec', listens on every address of the VM: drop TCP to
+  # its port in every frame bridged to the VM, on any of its networks, so that other containers and
+  # hosts cannot reach it. 'docker exec' connects from this namespace, so its frames leave each
+  # bridge through its output hook, not its forward hook.
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    oifname "tap-*" meta l4proto tcp th dport $SSHD_PORT drop
+  }
 }
 table ip runcvm {
   chain prerouting {
