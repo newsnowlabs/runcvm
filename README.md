@@ -1100,7 +1100,7 @@ If you would like to contribute a feature suggestion or code, please raise an is
    sudo rm -rf /opt/runcvm
    ```
 
-If an installation script from RunCVM v1.7.0 or earlier changed `rp_filter` settings in `/etc/sysctl.conf` or `/etc/sysctl.d/`, it marked each change with `# DISABLED BY RUNCVM` (the original line, commented out) and `# ADDED BY RUNCVM` (its replacement); restore the original lines to undo them.
+Installation scripts from RunCVM v1.7.0 and earlier may have changed `rp_filter` settings in `/etc/sysctl.conf` or `/etc/sysctl.d/`, marking each change with `# DISABLED BY RUNCVM` (the original line, commented out) and `# ADDED BY RUNCVM` (its replacement); to undo them, uncomment the original lines and delete the replacements.
 
 ## RunCVM and Dockside
 
