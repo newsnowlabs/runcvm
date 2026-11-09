@@ -39,6 +39,9 @@ Optional per-test metadata files, in each test directory:
               kvm   VMs use KVM acceleration: /dev/kvm present on this host,
                     and not in stand-in mode or with --accel tcg
               ipv6  dockerd can create an IPv6-enabled network
+              docker>=<major>.<minor>
+                    dockerd's version is at least <major>.<minor>, e.g.
+                    docker>=29.0
 
 Stand-in mode (--mock, or RUNCVM_TEST_MOCK=1) runs tests with a standard
 runtime (runc, unless --runtime or a non-RunCVM $RUNTIME is given) in place
@@ -51,6 +54,19 @@ RUNCVM_QEMU_ACCEL (framework helper vm_opts). With --accel tcg, real RunCVM
 Container/VMs run under software emulation, e.g. where KVM is unavailable:
 slow, but unlike stand-in mode it exercises RunCVM itself. Unset, RunCVM's
 default applies.
+
+TCG cases (--tcg-cases, or RUNCVM_TEST_TCG_CASES=1) are checks that launch a
+Container/VM explicitly under software emulation, whatever --accel says. They
+are slow, so a test runs them only when the runner sets RUNCVM_TEST_TCG_CASES
+to 1 (framework helper tcg_cases): when asked to, or when VMs do not use KVM
+anyway (--accel tcg, or no /dev/kvm). Otherwise the test records them as
+skipped.
+
+Detail lines (framework helper log_detail) record step-by-step progress, such
+as each of many requests' outcomes. They are written to the test's log, but to
+the terminal only with --verbose (or RUNCVM_TEST_VERBOSE=1). A detail line is
+one that starts with the ASCII record separator (0x1e), which the runner
+removes.
 
 Requires only Python 3.6+ and the docker CLI.
 """
@@ -70,6 +86,7 @@ import xml.etree.ElementTree as ET
 SKIP_CODE = 77
 TIERS = ("core", "extended")
 KNOWN_REQUIREMENTS = ("vm", "kvm", "ipv6")
+DOCKER_VERSION_REQUIREMENT = re.compile(r"^docker>=(\d+)\.(\d+)$")
 ACCELS = ("kvm", "auto", "tcg")
 DEFAULT_TIMEOUT = 1800
 DEFAULT_KILL_AFTER = 30
@@ -143,10 +160,12 @@ def warn(msg):
 
 
 class Environment:
-    def __init__(self, runtime, mock, run_id, use_docker, accel=None):
+    def __init__(self, runtime, mock, run_id, use_docker, accel=None, tcg_cases=False):
         self.runtime = runtime
         self.mock = mock
         self.accel = accel
+        # TCG cases run when asked for, or when VMs do not use KVM anyway
+        self.tcg_cases = tcg_cases or self.accel == "tcg" or not os.path.exists("/dev/kvm")
         self.run_id = run_id
         self.use_docker = use_docker
         self._probes = {}
@@ -192,6 +211,20 @@ class Environment:
                 return True
             err = [l for l in (r.stderr or "").splitlines() if l.strip() and l.strip() != "exit status 1"]
             self._probe_notes[req] = "could not create an IPv6 network%s" % (": " + err[-1].strip() if err else "")
+            return False
+        m = DOCKER_VERSION_REQUIREMENT.match(req)
+        if m:
+            if not self.use_docker:
+                return False
+            r = docker("info", "--format", "{{.ServerVersion}}")
+            version = (r.stdout or "").strip()
+            v = re.match(r"(\d+)\.(\d+)", version)
+            if r.returncode != 0 or not v:
+                self._probe_notes[req] = "could not read dockerd's version"
+                return False
+            if (int(v.group(1)), int(v.group(2))) >= (int(m.group(1)), int(m.group(2))):
+                return True
+            self._probe_notes[req] = "dockerd is %s" % version
             return False
         raise HarnessError("unknown requirement '%s'" % req)
 
@@ -288,7 +321,12 @@ def signal_group(pgid, sig):
         pass
 
 
-def run_test(test, env, logs_dir, kill_after):
+# Marks a line of a test's output as a detail line, shown on the terminal only with --verbose (see
+# log_detail in framework.sh and framework.py).
+DETAIL_MARK = b"\x1e"
+
+
+def run_test(test, env, logs_dir, kill_after, verbose=False):
     log_path = os.path.join(logs_dir, test.name + ".log")
     checks_path = os.path.join(logs_dir, test.name + ".checks")
     params_path = os.path.join(logs_dir, test.name + ".params")
@@ -300,6 +338,7 @@ def run_test(test, env, logs_dir, kill_after):
         "RUNTIME": env.runtime,
         "RUNCVM_TEST_MOCK": "1" if env.mock else "0",
         "RUNCVM_TEST_ACCEL": env.accel or "",
+        "RUNCVM_TEST_TCG_CASES": "1" if env.tcg_cases else "0",
         "RUNCVM_TEST_RUN_ID": env.run_id,
         "RUNCVM_TEST_NAME": test.name,
         "RUNCVM_TEST_CHECKS": checks_path,
@@ -316,9 +355,13 @@ def run_test(test, env, logs_dir, kill_after):
     def pump():
         with open(log_path, "wb") as log:
             for line in iter(proc.stdout.readline, b""):
+                detail = line.startswith(DETAIL_MARK)
+                if detail:
+                    line = line[len(DETAIL_MARK):]
                 log.write(line)
                 log.flush()
-                say_bytes(prefix + line)
+                if verbose or not detail:
+                    say_bytes(prefix + line)
                 m = re.search(rb"SKIP: (.*)", line)
                 if m and not skip_reason:
                     skip_reason.append(m.group(1).decode(errors="replace").strip())
@@ -420,7 +463,7 @@ def write_junit(path, results, env, logs_dir):
         suite = ET.SubElement(root, "testsuite", name=r.test.name, time=str(r.duration))
         props = ET.SubElement(suite, "properties")
         for k, v in [("runtime", env.runtime), ("mock", "1" if env.mock else "0"),
-                     ("accel", env.accel or ""),
+                     ("accel", env.accel or ""), ("tcg_cases", "1" if env.tcg_cases else "0"),
                      ("tier", r.test.tier), ("requires", " ".join(r.test.requires))] + r.params:
             ET.SubElement(props, "property", name=k, value=v)
         for status, desc in r.checks:
@@ -443,7 +486,8 @@ def write_junit(path, results, env, logs_dir):
 
 def write_json(path, results, env, tier, status_code, running):
     data = {
-        "run_id": env.run_id, "runtime": env.runtime, "mock": env.mock, "accel": env.accel, "tier": tier,
+        "run_id": env.run_id, "runtime": env.runtime, "mock": env.mock, "accel": env.accel,
+        "tcg_cases": env.tcg_cases, "tier": tier,
         "complete": status_code is not None, "running": running, "status": status_code,
         "tests": [{
             "name": r.test.name, "tier": r.test.tier, "requires": r.test.requires,
@@ -462,8 +506,8 @@ def write_results(results_dir, logs_dir, results, env, args, selected, status_co
     progress, with the test named by 'running' (if any) under way. Each file is written to a
     temporary name and renamed into place, so that a reader never sees a partly written file."""
     counts = {s: sum(1 for r in results if r.status == s) for s in ("pass", "fail", "timeout", "skip")}
-    header = "run id: %s; runtime: %s; mock: %d; accel: %s; tier: %s" % (
-        env.run_id, env.runtime, int(args.mock), args.accel or "default", args.tier)
+    header = "run id: %s; runtime: %s; mock: %d; accel: %s; tcg cases: %d; tier: %s" % (
+        env.run_id, env.runtime, int(args.mock), args.accel or "default", int(env.tcg_cases), args.tier)
 
     lines = ["%-8s %-32s %5ss  %s" % (r.status.upper(), r.test.name, r.duration, r.reason) for r in results]
     if running:
@@ -516,7 +560,8 @@ def parse_args(argv):
         description="Run RunCVM integration tests. TEST may be a test directory name "
                     "(e.g. 10-user-workdir) or a shell pattern (e.g. '1*'). With no TEST, "
                     "all tests in the selected tier run.",
-        epilog="Environment: RUNTIME, RUNCVM_TEST_MOCK, RUNCVM_TEST_ACCEL, RUNCVM_TEST_RUN_ID, RUNCVM_TEST_RESULTS, "
+        epilog="Environment: RUNTIME, RUNCVM_TEST_MOCK, RUNCVM_TEST_ACCEL, RUNCVM_TEST_TCG_CASES, "
+               "RUNCVM_TEST_RUN_ID, RUNCVM_TEST_RESULTS, "
                "RUNCVM_TEST_KILL_AFTER (seconds between SIGTERM and SIGKILL on timeout; "
                "default %d), RUNCVM_TEST_JOBS (Container/VMs a test may run at once; default 3). See the comment at the top of this file for details." % DEFAULT_KILL_AFTER)
     p.add_argument("tests", nargs="*", metavar="TEST")
@@ -535,6 +580,11 @@ def parse_args(argv):
     p.add_argument("--accel", choices=ACCELS, default=os.environ.get("RUNCVM_TEST_ACCEL") or None,
                    help="QEMU acceleration for RunCVM Container/VMs (passed as RUNCVM_QEMU_ACCEL): "
                         "kvm, auto or tcg (software emulation); default: RunCVM's default")
+    p.add_argument("--tcg-cases", action="store_true", default=truthy(os.environ.get("RUNCVM_TEST_TCG_CASES")),
+                   help="run checks that launch Container/VMs under software emulation (TCG) even "
+                        "where VMs use KVM (always on with --accel tcg, or without /dev/kvm)")
+    p.add_argument("-v", "--verbose", action="store_true", default=truthy(os.environ.get("RUNCVM_TEST_VERBOSE")),
+                   help="show tests' detail lines on the terminal as well as in their logs")
     p.add_argument("-x", "--exitfirst", action="store_true", help="stop after the first failure or timeout")
     p.add_argument("-l", "--list", action="store_true", help="list selected tests and exit")
     p.add_argument("--no-preflight", action="store_true",
@@ -566,9 +616,9 @@ def main(argv):
         if t.tier not in TIERS:
             raise HarnessError("test '%s' has unknown tier '%s'" % (t.name, t.tier))
         for req in t.requires:
-            if req not in KNOWN_REQUIREMENTS:
+            if req not in KNOWN_REQUIREMENTS and not DOCKER_VERSION_REQUIREMENT.match(req):
                 raise HarnessError("test '%s' has unknown requirement '%s' (known: %s)"
-                                   % (t.name, req, ", ".join(KNOWN_REQUIREMENTS)))
+                                   % (t.name, req, ", ".join(KNOWN_REQUIREMENTS + ("docker>=<major>.<minor>",))))
 
     if args.list:
         for t in selected:
@@ -578,7 +628,8 @@ def main(argv):
         raise HarnessError("no tests selected (tier '%s'%s)"
                            % (args.tier, ", patterns: " + " ".join(args.tests) if args.tests else ""))
 
-    env = Environment(runtime, args.mock, run_id, use_docker=not args.no_preflight, accel=args.accel)
+    env = Environment(runtime, args.mock, run_id, use_docker=not args.no_preflight, accel=args.accel,
+                      tcg_cases=args.tcg_cases)
     if not args.no_preflight:
         env.preflight()
 
@@ -596,6 +647,7 @@ def main(argv):
     say("  run id:   %s" % run_id)
     say("  runtime:  %s%s" % (runtime, " (stand-in mode)" if args.mock else ""))
     say("  accel:    %s" % (args.accel or "(RunCVM default)"))
+    say("  tcg:      %s" % ("cases run" if env.tcg_cases else "cases skipped (--tcg-cases to run them)"))
     say("  tier:     %s" % args.tier)
     say("  tests:    %s" % " ".join(t.name for t in selected))
     say("  results:  %s" % results_dir)
@@ -622,7 +674,7 @@ def main(argv):
             write_results(results_dir, logs_dir, results, env, args, selected, running=t.name)
             say("=== %s (tier %s, timeout %ss)" % (t.name, t.tier, t.timeout))
             try:
-                r = run_test(t, env, logs_dir, kill_after)
+                r = run_test(t, env, logs_dir, kill_after, verbose=args.verbose)
             except (KeyboardInterrupt, Terminated) as e:
                 stopped = 143 if isinstance(e, Terminated) else 130
                 r = Result(t, "interrupted", None, 0, "terminated" if stopped == 143 else "interrupted")

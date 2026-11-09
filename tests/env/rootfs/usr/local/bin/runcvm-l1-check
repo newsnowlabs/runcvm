@@ -1,0 +1,182 @@
+#!/bin/bash
+# Checks a running L1 (see tests/env/README.md in the RunCVM repository): prints PASS, FAIL,
+# SKIP or NOTE for each check and exits 1 if any check failed, 2 on a usage error.
+#
+# Usage: sudo runcvm-l1-check [--no-l2] [--disks=<RUNCVM_DISKS>]
+#   --no-l2           skip the check that launches an L2 Container/VM (hello-world)
+#   --disks=<spec>    the RUNCVM_DISKS L1 was launched with, if not the image's default (RunCVM
+#                     does not pass RUNCVM_DISKS on to L1's processes)
+#
+# Runs as root: it reads the files runcvm-l1-entrypoint saved.
+
+set -u
+
+L2=1
+DISKS=$(cat /usr/local/share/runcvm-l1/disks 2>/dev/null)
+for arg in "$@"; do
+  case "$arg" in
+    --no-l2) L2=0 ;;
+    --disks=*) DISKS=${arg#--disks=} ;;
+    *) echo "Usage: $0 [--no-l2] [--disks=<RUNCVM_DISKS>]" >&2; exit 2 ;;
+  esac
+done
+
+if [ "$(id -u)" != 0 ]; then
+  echo "$0: must run as root (e.g. with sudo)" >&2
+  exit 2
+fi
+
+FAILED=0
+pass() { echo "PASS  $*"; }
+fail() { echo "FAIL  $*"; FAILED=1; }
+skip() { echo "SKIP  $*"; }
+note() { echo "NOTE  $*"; }
+indent() { sed 's/^/      /'; }
+
+# systemd is PID 1.
+comm=$(cat /proc/1/comm)
+if [ "$comm" = systemd ]; then pass "PID 1 is systemd"; else fail "PID 1 is '$comm', not systemd"; fi
+
+# The system finishes starting, with no failed units.
+state=$(timeout 300 systemctl is-system-running --wait 2>/dev/null)
+if [ "$state" = running ]; then
+  pass "systemctl is-system-running: running"
+else
+  fail "systemctl is-system-running: ${state:-no answer within 300s}"
+  systemctl --failed --no-legend --plain | indent
+fi
+
+# The saved mode.
+args=/etc/runcvm-l1/args
+if ! [ -f "$args" ]; then
+  fail "mode: $args is missing (was L1 launched with runcvm-l1-entrypoint as its entrypoint?)"
+elif [ -s "$args" ]; then
+  fail "mode: batch (arguments: $(tr '\0' ' ' <"$args")), which this image does not implement"
+else
+  pass "mode: dev (no saved arguments; default target $(systemctl get-default))"
+fi
+n=$(grep -c '^RUNCVM_L1_' /etc/runcvm-l1/env 2>/dev/null)
+note "saved RUNCVM_L1_* variables: ${n:-0}"
+
+# dockerd is running, with the runcvm runtime.
+if systemctl -q is-active docker.service && docker info >/dev/null 2>&1; then
+  if docker info --format '{{json .Runtimes}}' | jq -e 'has("runcvm")' >/dev/null; then
+    pass "dockerd is running, with the runcvm runtime ($(docker version --format '{{.Server.Version}}'))"
+  else
+    fail "dockerd is running, but without the runcvm runtime"
+  fi
+else
+  fail "dockerd is not running"
+fi
+
+# KVM, or a clear notice of software emulation.
+ACCEL=()
+if [ -c /dev/kvm ]; then
+  pass "/dev/kvm is present: L2s can use KVM"
+else
+  note "/dev/kvm is absent: L2s must use software emulation (RUNCVM_QEMU_ACCEL=tcg)," \
+    "which needs a RunCVM in L1 that supports it"
+  ACCEL=(--env=RUNCVM_QEMU_ACCEL=tcg)
+fi
+
+# The kernel-modules unit's verdict.
+unit=runcvm-l1-modules.service
+eval "$(systemctl show -p ActiveState -p Result -p ConditionResult "$unit" | sed 's/^/u_/')"
+log=$(journalctl -b -q -o cat -u "$unit" 2>/dev/null | grep -v -e '^Starting ' -e '^Finished ' \
+  -e '^Started ' -e '^runcvm-l1-modules.service:')
+if [ "${u_ConditionResult:-}" = no ]; then
+  skip "$unit: skipped by its condition (running in a container)"
+elif [ "${u_ActiveState:-}" = active ] && [ "${u_Result:-}" = success ]; then
+  pass "$unit: succeeded"
+else
+  fail "$unit: ${u_ActiveState:-unknown} (${u_Result:-unknown})"
+fi
+[ -n "$log" ] && echo "$log" | indent
+
+# Each RUNCVM_DISKS disk's destinations are mounted from one ext4 filesystem on a block device.
+if [ -z "$DISKS" ]; then
+  skip "RUNCVM_DISKS: none given"
+else
+  IFS=';' read -ra specs <<<"$DISKS"
+  for spec in "${specs[@]}"; do
+    IFS=',' read -ra fields <<<"$spec"
+    dsts=()
+    if [[ "${fields[0]}" =~ ^(src|source|dst|target|destination|fs|size|layout|prealloc)= ]]; then
+      for f in "${fields[@]}"; do
+        case "$f" in dst=*|target=*|destination=*) dsts+=("${f#*=}") ;; esac
+      done
+    else
+      IFS=':' read -ra dsts <<<"${fields[1]:-}"
+    fi
+    devs=() bad=()
+    for d in "${dsts[@]}"; do
+      read -r src fstype < <(findmnt -n -o SOURCE,FSTYPE --mountpoint "$d")
+      dev=${src%%\[*}
+      if [ "$fstype" != ext4 ] || ! [ -b "$dev" ]; then
+        bad+=("$d (${src:-not a mount point}${fstype:+, $fstype})")
+      else
+        devs+=("$dev")
+      fi
+    done
+    ndevs=$(printf '%s\n' "${devs[@]}" | sort -u | grep -c .)
+    if [ ${#bad[@]} -eq 0 ] && [ "$ndevs" = 1 ]; then
+      pass "disk ${fields[0]}: ${dsts[*]} mounted from ext4 on ${devs[0]}"
+    else
+      fail "disk ${fields[0]}: ${bad[*]:-destinations on $ndevs devices: ${devs[*]}}"
+    fi
+  done
+fi
+
+# Docker's storage driver: overlayfs on the disk, not vfs.
+driver=$(docker info --format '{{.Driver}}' 2>/dev/null)
+case "$driver" in
+  overlay2|overlayfs) pass "Docker storage driver: $driver" ;;
+  *) fail "Docker storage driver: ${driver:-unknown} (expected overlay2 or overlayfs)" ;;
+esac
+
+# IPv6: in L1's kernel, and in dockerd.
+if ! [ -e /proc/net/if_inet6 ]; then
+  fail "IPv6: disabled in L1's kernel"
+else
+  net=runcvm-l1-check-$$
+  subnet=$(printf 'fd%02x:%04x:%04x::/64' $((RANDOM % 256)) $RANDOM $RANDOM)
+  if out=$(docker network create --ipv6 --subnet "$subnet" "$net" 2>&1); then
+    docker network rm "$net" >/dev/null
+    pass "IPv6: docker network create --ipv6 works"
+  else
+    fail "IPv6: docker network create --ipv6 failed"
+    echo "$out" | indent
+  fi
+fi
+
+# An L2 Container/VM, with the RunCVM installed in L1.
+if [ "$L2" = 0 ]; then
+  skip "L2 hello-world (--no-l2)"
+else
+  cmd=(docker run --rm --runtime=runcvm "${ACCEL[@]}" hello-world)
+  start=$(date +%s)
+  if out=$(timeout 600 "${cmd[@]}" 2>&1) && grep -q 'Hello from Docker!' <<<"$out"; then
+    pass "L2: ${cmd[*]} ($(( $(date +%s) - start ))s)"
+  else
+    fail "L2: ${cmd[*]} (no 'Hello from Docker!')"
+    echo "$out" | tail -n 20 | indent
+  fi
+fi
+
+# The runcvm user: groups and passwordless sudo.
+groups=$(id -nG runcvm 2>/dev/null)
+missing=()
+for g in sudo docker; do
+  [[ " $groups " == *" $g "* ]] || missing+=("$g")
+done
+if [ -z "$groups" ]; then
+  fail "user runcvm does not exist"
+elif [ ${#missing[@]} -gt 0 ]; then
+  fail "user runcvm: not in group(s) ${missing[*]} (groups: $groups)"
+elif ! su -s /bin/sh runcvm -c 'sudo -n true' >/dev/null 2>&1; then
+  fail "user runcvm: passwordless sudo does not work"
+else
+  pass "user runcvm: uid $(id -u runcvm), groups $groups, passwordless sudo"
+fi
+
+exit $FAILED
