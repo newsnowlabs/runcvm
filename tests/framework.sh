@@ -9,6 +9,13 @@ log() {
   echo $opts "> $1"
 }
 
+# Log a detail line: written to the test's log, and to the terminal only with 'tests/run --verbose'.
+# The leading ASCII record separator (0x1e) marks it for the runner, which removes it before writing
+# the line anywhere.
+log_detail() {
+  printf '\036> %s\n' "$1"
+}
+
 _cleanup() {
 
   if [ "$(nodes)" != "" ]; then
@@ -101,6 +108,19 @@ vm_opts() {
   if [ -n "$RUNCVM_TEST_ACCEL" ]; then
     echo "--env=RUNCVM_QEMU_ACCEL=$RUNCVM_TEST_ACCEL"
   fi
+}
+
+# tcg_cases
+# Succeed if checks that launch Container/VMs explicitly under software emulation (TCG),
+# which are slow on a host with KVM, are to run: as RUNCVM_TEST_TCG_CASES says (see
+# tests/run), or, where it is unset, with --accel tcg or without /dev/kvm.
+# Usage: if tcg_cases; then ...; else record_result SKIP "<description>"; fi
+tcg_cases() {
+  case "$RUNCVM_TEST_TCG_CASES" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  [ "$RUNCVM_TEST_ACCEL" = "tcg" ] || [ ! -e /dev/kvm ]
 }
 
 # record_result STATUS DESCRIPTION

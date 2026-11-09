@@ -56,8 +56,9 @@ abuild -rFf
 EOF
 
 # --- BUILD STAGE ---
-# Build patched dropbear with epka plugin
-# that does not require /etc/passwd or PAM to run
+# Build patched dropbear with epka plugin, which accepts only the plugin's keys
+# and runs commands with RunCVM's bash, without reading the image's /etc/passwd,
+# /etc/shadow, /etc/shells or authorized_keys
 FROM alpine-sdk as alpine-dropbear
 
 ADD patches/dropbear/runcvm.patch /root/aports/main/dropbear/runcvm.patch
@@ -136,9 +137,14 @@ RUN apk update && \
         qemu-hw-display-virtio-vga \
         ovmf \
         jq iproute2 netcat-openbsd blkid util-linux \
-        s6 dnsmasq iptables nftables \
+        s6 dnsmasq nftables \
         ncurses coreutils \
         patchelf
+
+# Install the packages of each filesystem that disks in RUNCVM_DISKS may have
+ADD runcvm-etc/disk-filesystems /tmp/disk-filesystems
+RUN packages=$(awk '$1 !~ /^#/ && NF && $3 != "-" { gsub(",", " ", $3); print $3 }' /tmp/disk-filesystems) && \
+    if [ -n "$packages" ]; then apk add --no-cache $packages; fi
 
 # Install patched SeaBIOS
 COPY --from=alpine-seabios /root/packages/main/x86_64 /tmp/seabios/
@@ -152,18 +158,22 @@ RUN apk add --allow-untrusted /tmp/dnsmasq/dnsmasq-2*.apk /tmp/dnsmasq/dnsmasq-c
 COPY --from=e2fsprogs /usr/local/sbin/mke2fs /sbin/mke2fs
 
 # Install patched dropbear
-COPY --from=alpine-dropbear /root/packages/main/x86_64 /usr/local/lib/libepka_file.so /tmp/dropbear/
+COPY --from=alpine-dropbear /root/packages/main/x86_64 /tmp/dropbear/
+COPY --from=alpine-dropbear /usr/local/lib/libepka_file.so /usr/lib/dropbear/
 RUN apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/dropbear-dbclient*.apk /tmp/dropbear/dropbear-2*.apk
 
 # Patch the binaries and set up symlinks
 COPY build-utils/make-bundelf-bundle.sh /usr/local/bin/make-bundelf-bundle.sh
-ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey"
-ENV BUNDELF_EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so"
-ENV BUNDELF_EXTRA_SYSTEM_LIB_PATHS="/usr/lib/xtables"
+ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey"
+ENV BUNDELF_EXTRA_LIBS="/usr/libexec/coreutils /usr/lib/dropbear/libepka_file.so /usr/lib/qemu/*.so"
 ENV BUNDELF_CODE_PATH="/opt/runcvm"
 ENV BUNDELF_EXEC_PATH="/.runcvm/guest"
 
-RUN /usr/local/bin/make-bundelf-bundle.sh --bundle && \
+# Bundle, as well, each filesystem's mkfs command (field 6 of disk-filesystems)
+RUN for cmd in $(awk '$1 !~ /^#/ && NF { print $6 }' /tmp/disk-filesystems); do \
+      case " $BUNDELF_BINARIES " in *" $cmd "*) ;; *) BUNDELF_BINARIES="$BUNDELF_BINARIES $cmd" ;; esac; \
+    done && \
+    BUNDELF_BINARIES="$BUNDELF_BINARIES" /usr/local/bin/make-bundelf-bundle.sh --bundle && \
     mkdir -p $BUNDELF_CODE_PATH/bin && \
     cd $BUNDELF_CODE_PATH/bin && \
     for cmd in \
@@ -176,8 +186,9 @@ RUN /usr/local/bin/make-bundelf-bundle.sh --bundle && \
     cp -a /usr/share/qemu $BUNDELF_CODE_PATH/usr/share && \
     cp -a /etc/terminfo $BUNDELF_CODE_PATH/usr/share && \
     cp -a /usr/share/OVMF $BUNDELF_CODE_PATH/usr/share && \
-    # Remove setuid/setgid bits from any/all binaries
-    chmod -R -s $BUNDELF_CODE_PATH/
+    # Remove setuid/setgid bits from any/all binaries; make the package readable by all users, and
+    # writable by root only (see the check at the end of the installer stage)
+    chmod -R -s,a+rX,go-w $BUNDELF_CODE_PATH/
 
 # --- BUILD STAGE ---
 # Build static runcvm-init
@@ -290,9 +301,20 @@ RUN apk update && apk add --no-cache rsync
 
 ADD runcvm-scripts /opt/runcvm/scripts/
 ADD runcvm-etc /opt/runcvm/etc/
+COPY LICENSE NOTICE /opt/runcvm/
 
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]
+
+# OCI labels. GitHub links the image's package on ghcr.io to the repository named by 'source', and
+# shows 'description'. build/build.sh gives the image's index on ghcr.io the same keys as
+# annotations, which GitHub reads in place of labels where a tag names an index. 'authors' names
+# the maintainer, in place of Docker's deprecated MAINTAINER instruction.
+LABEL org.opencontainers.image.source="https://github.com/newsnowlabs/runcvm" \
+      org.opencontainers.image.authors="Struan Bartlett (https://github.com/struanb)" \
+      org.opencontainers.image.vendor="NewsNow Labs" \
+      org.opencontainers.image.description="Experimental open-source container runtime for Linux that launches standard container workloads, and system workloads such as systemd, Docker and OpenWrt, in VMs" \
+      org.opencontainers.image.licenses="Apache-2.0"
 
 # Install needed kernels.
 # Comment out any kernels that are unneeded.
@@ -308,3 +330,11 @@ RUN for d in /opt/runcvm/kernels/*; do \
       tgt="$(ls -d */ 2>/dev/null | sed 's:/$::' | grep -v '^latest$' | sort -Vr | head -n 1)"; \
       [ -n "$tgt" ] && ln -sfn "$tgt" latest; \
     done
+
+# Every file in the package must be readable, and every directory searchable, by all users, as
+# RunCVM's binaries load their libraries (and Podman may run the runtime) as users other than root;
+# and everything writable by root only, as the VM's dropbear, running as root, loads its plugin
+# from the package.
+RUN bad=$(find /opt/runcvm ! -type l \( ! -perm -o=r -o -type d ! -perm -o=x -o -perm /022 \)) || \
+      { echo "Checking permissions in /opt/runcvm failed" >&2; exit 1; } && \
+    [ -z "$bad" ] || { echo "Files with the wrong permissions in /opt/runcvm:" >&2; echo "$bad" | head -20 >&2; exit 1; }

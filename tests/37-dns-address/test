@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""RunCVM's DNS address (RUNCVM_DNS_IP).
+
+- By default, on a user-defined network, the VM's resolv.conf names
+  169.254.53.53, through which the VM resolves another container's name
+  (Docker's DNS, by way of dnsmasq), and 'docker exec' works.
+- With RUNCVM_DNS_IP set to another link-local address, the VM's
+  resolv.conf names that address instead, and DNS and 'docker exec' still
+  work.
+- A malformed or non-unicast RUNCVM_DNS_IP, or one in 0.0.0.0/8 or
+  127.0.0.0/8, fails Container/VM creation with an error naming it.
+- A RUNCVM_DNS_IP equal to RunCVM's bridge address in the container
+  (169.254.1.1) stops the Container/VM at start, with an error naming it.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+# '--dns-search=.' and '--dns-opt=ndots:1' keep the host's DNS search domains out of the lookups of
+# container names, as in tests/24-networking.
+VM = ["--runtime=" + t.RUNTIME, *t.vm_opts(), "--dns-search=.", "--dns-opt=ndots:1"]
+DEFAULT = "169.254.53.53"
+
+network = t.unique("net")
+t.docker("network", "create", *t.labels(), network, check=True)
+t.cleanup_network(network)
+
+peer = t.unique("peer")
+t.cleanup_container(peer)
+t.docker("run", "-d", "--name", peer, *t.labels(), "--network", network, "alpine", "sleep", "600", check=True)
+
+
+def nameservers(name):
+    r = t.docker("exec", name, "cat", "/etc/resolv.conf")
+    return [line.split()[1] for line in r.stdout.splitlines() if line.startswith("nameserver ")]
+
+
+def resolves_peer(name):
+    r = t.docker("exec", name, "nslookup", peer)
+    return r.returncode == 0 and "Address" in r.stdout.split("Name:", 1)[-1]
+
+
+def case_running(args):
+    label, opts, address = args
+    name = t.unique(label)
+    t.cleanup_container(name)
+    r = t.docker("run", "-d", "--name", name, *t.labels(), *VM, "--network", network, *opts, "alpine", "sleep", "600")
+    if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
+        return [("%s: Container/VM starts and 'docker exec' works" % label, True, False)]
+    return [
+        ("%s: 'docker exec' works" % label, True, True),
+        ("%s: the VM's DNS server" % label, [address], nameservers(name)),
+        ("%s: the VM resolves another container's name" % label, True, resolves_peer(name)),
+    ]
+
+
+def case_rejected(args):
+    index, value = args
+    name = t.unique("bad-%d" % index)
+    t.cleanup_container(name)
+    r = t.docker("run", "-d", "--name", name, *t.labels(), *VM, "--network", network,
+                 "--env=RUNCVM_DNS_IP=" + value, "alpine", "sleep", "600")
+    return [
+        ("RUNCVM_DNS_IP=%r: creation fails" % value, True, r.returncode != 0),
+        ("RUNCVM_DNS_IP=%r: error names RUNCVM_DNS_IP" % value, True, "RUNCVM_DNS_IP" in (r.stdout or "")),
+    ]
+
+
+def case_bridge_address():
+    name = t.unique("bridge-ip")
+    t.cleanup_container(name)
+    r = t.docker("run", "--name", name, *t.labels(), *VM, "--network", network,
+                 "--env=RUNCVM_DNS_IP=169.254.1.1", "alpine", "true", timeout=BOOT_TIMEOUT)
+    logs = t.docker("logs", name).stdout or ""
+    return [
+        ("RUNCVM_DNS_IP=169.254.1.1: the Container/VM exits with an error", True, r.returncode != 0),
+        ("RUNCVM_DNS_IP=169.254.1.1: error names RUNCVM_DNS_IP", True, "RUNCVM_DNS_IP" in logs),
+    ]
+
+
+results = t.parallel(case_running, [("default", [], DEFAULT),
+                                    ("override", ["--env=RUNCVM_DNS_IP=169.254.99.99"], "169.254.99.99")])
+results += [case_rejected(v) for v in enumerate(("bogus", "127.0.0.1", "0.1.2.3", "224.0.0.1", "169.254.300.1",
+                                                   "169.254.053.53"))]
+results.append(case_bridge_address())
+
+for checks in results:
+    for desc, expected, actual in checks:
+        t.check(desc, expected, actual)
+
+t.finish()

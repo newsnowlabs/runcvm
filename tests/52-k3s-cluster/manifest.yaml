@@ -1,0 +1,51 @@
+# The test's workload: a web server on each node, answering with its pod's name, behind a
+# ClusterIP Service (web) and a NodePort Service (web-nodeport, port 30080 on every node).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      # One pod on each node.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: {app: web}
+      containers:
+        - name: web
+          image: docker.io/library/busybox:1.37
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "mkdir -p /www && hostname >/www/index.html && exec httpd -f -p 80 -h /www"]
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet: {path: /, port: 80}
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  selector: {app: web}
+  ports:
+    - port: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-nodeport
+spec:
+  type: NodePort
+  selector: {app: web}
+  ports:
+    - port: 80
+      nodePort: 30080
