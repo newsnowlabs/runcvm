@@ -595,8 +595,8 @@ Automatically create, format, prepopulate and mount backing files as virtual dis
 
 Each `<diskN>` is a comma-separated list of fields, in either of two forms:
 
-- positional: `<src>,<dst>[:<dst2>:...],<filesystem>[,<size>][,layout=subdirs|root]`
-- keyed: `src=<src>,dst=<dst>[,dst=<dst2>...],fs=<filesystem>[,size=<size>][,layout=subdirs|root]`, with the fields in any order, recognised by its first field beginning with one of these keys and `=`; as in Docker's `--mount`, `source` may be given for `src`, and `target` or `destination` for `dst`
+- positional: `<src>,<dst>[:<dst2>:...],<filesystem>[,<size>][,layout=subdirs|root][,prealloc=on|off]`
+- keyed: `src=<src>,dst=<dst>[,dst=<dst2>...],fs=<filesystem>[,size=<size>][,layout=subdirs|root][,prealloc=on|off]`, with the fields in any order, recognised by its first field beginning with one of these keys and `=`; as in Docker's `--mount`, `source` may be given for `src`, and `target` or `destination` for `dst`
 
 where:
 
@@ -605,6 +605,7 @@ where:
 - `<filesystem>` is the filesystem with which the backing disk should be formatted when first created: by default, `ext4`, `xfs` or `btrfs` (see [Disk filesystems](#disk-filesystems) below).
 - `<size>` is the size of the backing file (in `truncate` format), and must be specified if `<src>` does not exist.
 - `layout=subdirs` or `layout=root` chooses the disk's layout (see [Disk layouts](#disk-layouts) below). It applies when the disk is created, and defaults to `subdirs`.
+- `prealloc=on` allocates every block of the backing file, so that it takes its full size on the host from the start, and keeps it allocated (see [Preallocated disks](#preallocated-disks) below). `prealloc=off`, the default, leaves the backing file sparse.
 
 In the keyed form, each field is split at its first `=`, so values may contain `=`; only `dst` may be given more than once. In either form, no value may contain `,` or `;`, and an unknown or repeated option is rejected.
 
@@ -624,6 +625,14 @@ When RunCVM creates a Container/VM, fstab entries will be drafted, identifying e
 > To keep a disk's data without `--init`, the workload must flush the disk before its entrypoint exits, with `sync -f <dst>` for one `<dst>` of each disk, which flushes only that disk's file system and needs no special privileges. A workload running as root may instead unmount the disk once nothing still uses it, which also leaves the disk's file system clean, needing no journal recovery. That means unmounting the disk's own mount: `umount <dst>` does so only where the disk is mounted directly at `<dst>`. Where `<dst>` is a bind mount from the disk, `umount <dst>` removes only the bind mount and leaves the disk mounted, unflushed. A plain `sync` also works, but flushes every file system in the VM, including its root file system, whether that is shared with the container or is a whole-root disk.
 >
 > A disk whose contents are thrown away after each run, such as a `/var/lib/docker` for a disposable test, needs no flushing.
+
+#### Preallocated disks
+
+A backing file is sparse by default: it takes space on the host only as the VM writes to the disk, and QEMU passes the VM's discards (e.g. from `fstrim`) and its writes of zeroes on to the backing file, freeing that space again. So the host's filesystem can fill up while the VM runs, after which the VM's writes to the disk fail with I/O errors.
+
+With `prealloc=on`, every time the Container/VM starts, RunCVM allocates every block of the backing file with `fallocate`, keeping its contents: a new disk once it is formatted and, for `ext4`, prepopulated (as `mke2fs` frees the blocks of a backing file it formats), and an existing disk, sparse or not, before the VM boots. QEMU then attaches the disk ignoring the VM's discards, and writing its zeroes as data, so the backing file stays fully allocated. Allocating fails, and the Container/VM does not start, if the host's filesystem lacks the space or does not support `fallocate`. A preallocated disk's blocks are allocated on the host, but they are not necessarily contiguous.
+
+`prealloc=on` applies to a disk of any filesystem, including a whole-root disk. Removing it again leaves the backing file allocated until the VM discards its free blocks.
 
 #### Disk layouts
 

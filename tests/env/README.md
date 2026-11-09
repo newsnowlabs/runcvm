@@ -168,6 +168,16 @@ A single disk holds `/var/lib/docker`, `/var/lib/containerd`, `/opt/runcvm` and 
 
 The disk's backing file, `/disks/l1`, is sparse: 40G is a ceiling, and it takes only as much of L0's storage as L1 writes.
 
+Being sparse, the backing file can outgrow the free space on L0's filesystem while L1 runs, and L1's writes to the disk then fail with I/O errors. To reserve the disk's full size on L0 from the start, launch L1 with `prealloc=on` added to the disk's spec (see the RunCVM README's "Preallocated disks"), which also keeps L1's discards (e.g. Ubuntu's weekly `fstrim.timer`) from freeing its blocks again:
+
+```sh
+docker run -d --runtime=runcvm -m 4g --cpus=4 --stop-timeout=120 --name=runcvm-l1 \
+  --env=RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G,prealloc=on runcvm-l1
+docker exec runcvm-l1 runcvm-l1-check --disks=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G,prealloc=on
+```
+
+`prealloc=on` also applies to an existing disk, which it allocates in full when L1 next starts.
+
 The disk has these consequences:
 
 - **Populated once:** the disk is populated from the image only when it is created, on L1's first boot.
