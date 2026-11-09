@@ -109,7 +109,15 @@ read -r DOCKER_GW_IF6 DOCKER_GW_IF6_IP < \
 # e.g. eth0 fd00:1::1
 
 QEMU_BRIDGE_IP=169.254.1.1
-RUNCVM_DNS_IP=169.254.169.254
+
+# RUNCVM_DNS_IP (set by runcvm-runtime, which checks its form) must be none of the container's own
+# addresses, nor its gateway's or the bridge's: the VM's traffic to it is diverted to the container,
+# and 'docker exec' connects to the VM from it.
+if [ "$RUNCVM_DNS_IP" = "$QEMU_BRIDGE_IP" ] || [ "$RUNCVM_DNS_IP" = "$DOCKER_GW_IF_IP" ] \
+  || ip -4 -json addr show | jq -e --arg ip "$RUNCVM_DNS_IP" 'any(.[].addr_info[]?; .local == $ip)' >/dev/null; then
+  echo "RunCVM: Error: RUNCVM_DNS_IP '$RUNCVM_DNS_IP' is one of the container's own addresses, its gateway's or RunCVM's bridge address ($QEMU_BRIDGE_IP); choose another address, e.g. in 169.254.0.0/16" >&2
+  exit 1
+fi
 
 mkdir -p /.runcvm/network/devices
 
