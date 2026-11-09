@@ -147,11 +147,12 @@ if [ -d "/etc/docker" ]; then
     echo '{}' >/etc/docker/daemon.json
   fi
 
-  if [ $(jq_get "/etc/docker/daemon.json" ".runtimes.runcvm.path") != "/opt/runcvm/scripts/runcvm-runtime" ]; then
-    log "  - Adding runcvm to daemon.json runtimes property ..."
+  if [ "$(jq_get "/etc/docker/daemon.json" ".runtimes.runcvm.path")" != "/opt/runcvm/scripts/runcvm-runtime" ]; then
+    log "  - Setting runtimes.runcvm.path in /etc/docker/daemon.json to \"/opt/runcvm/scripts/runcvm-runtime\" ..."
 
     if jq_set  "/etc/docker/daemon.json" '.runtimes.runcvm.path |= "/opt/runcvm/scripts/runcvm-runtime"'; then
-      log "    - Done"
+      log "    - Done; daemon.json's runtimes property is now:"
+      jq '.runtimes' /etc/docker/daemon.json | sed 's/^/        /'
     else
       log "    - Failed: $!"
       exit 1
@@ -162,7 +163,7 @@ if [ -d "/etc/docker" ]; then
     docker_restart
 
   else
-    log "  - Valid runcvm property already found in daemon.json"
+    log "  - runtimes.runcvm.path in /etc/docker/daemon.json is already \"/opt/runcvm/scripts/runcvm-runtime\""
   fi
 
   if docker info 2>/dev/null | grep -q runcvm; then
