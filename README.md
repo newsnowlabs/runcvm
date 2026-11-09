@@ -375,6 +375,49 @@ gcloud compute instances create runcvm-vmx-test --zone=us-central1-a --machine-t
 
 RunCVM works with Docker's default configuration. It also works with `"userland-proxy": false` in `/etc/docker/daemon.json`, with which Docker (as of Docker 29) loads the `br_netfilter` module on the host, and does not start if it cannot; RunCVM itself does not need `br_netfilter`.
 
+### Install on AWS
+
+RunCVM needs an EC2 instance with nested virtualisation, so that it has `/dev/kvm`: a bare-metal instance (`*.metal`), or a virtual instance of a type that supports nested virtualisation, launched with it enabled. The types that support it are Intel-based families such as `m7i`, `c7i`, `r7i`, `m8i`, `c8i` and `r8i` (AWS's [nested virtualisation guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/amazon-ec2-nested-virtualization.html) has the current list). To list them for a region:
+
+```console
+aws ec2 describe-instance-types --filters "Name=processor-info.supported-features,Values=nested-virtualization" --query "InstanceTypes[].InstanceType" --output text | tr '\t' '\n' | sort
+```
+
+Launch an Ubuntu 24.04 LTS instance with nested virtualisation enabled, and a user-data script that installs Docker and RunCVM:
+
+```console
+cat >/tmp/user-data.sh <<EOF
+#!/bin/bash
+
+curl -fsSL https://get.docker.com | sh && \
+    curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sh
+EOF
+
+aws ec2 run-instances --image-id resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id --instance-type m8i.large --cpu-options "NestedVirtualization=enabled" --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=50,VolumeType=gp3}' --user-data file:///tmp/user-data.sh --key-name <your-key-pair> --security-group-ids <your-security-group> --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=runcvm-test}]'
+```
+
+To enable nested virtualisation on an existing instance of a supported type, stop it, then choose Actions > Instance settings > Change CPU options in the EC2 console.
+
+### Install on Azure
+
+RunCVM needs an Azure VM with nested virtualisation, so that it has `/dev/kvm`. Azure documents nested virtualisation as supported on, among others, its Dv5 and Dsv5 series (Intel): the "Feature support" table on each size series' page in the [Azure VM sizes documentation](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/overview) says whether that series supports it.
+
+Create a resource group, then an Ubuntu 24.04 LTS VM with a cloud-init script that installs Docker and RunCVM:
+
+```console
+cat >/tmp/cloud-init.sh <<EOF
+#!/bin/bash
+
+curl -fsSL https://get.docker.com | sh && \
+    curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sh
+EOF
+
+az group create --name runcvm-test --location <your-region>
+az vm create --resource-group runcvm-test --name runcvm-test --image Canonical:ubuntu-24_04-lts:server:latest --size Standard_D2s_v5 --os-disk-size-gb 50 --admin-username azureuser --generate-ssh-keys --custom-data /tmp/cloud-init.sh
+```
+
+On either platform, once the script has finished, `ls -l /dev/kvm` on the instance shows the KVM device, and `docker run --runtime=runcvm --rm hello-world` runs a Container/VM.
+
 ## Upgrading
 
 To upgrade, follow this procedure:
