@@ -88,7 +88,6 @@ docker exec runcvm-l1 runcvm-l1-check
 - dockerd is running, with the `runcvm` runtime;
 - `/dev/kvm` exists, or else a notice that L2s must use software emulation;
 - the verdict of the unit that loads the KVM modules;
-- the `rp_filter` settings;
 - the destinations of each `RUNCVM_DISKS` disk are mounted from one ext4 filesystem;
 - Docker's storage driver is overlayfs, not `vfs`;
 - `docker network create --ipv6` works;
@@ -195,10 +194,6 @@ A whole-root disk copies the whole image when it is created, and its root, not j
 - logs a warning, and succeeds, if the CPU has neither flag, i.e. L0 does not offer nested virtualisation.
 
 It does not run where systemd finds itself in a container (`ConditionVirtualization=!container`). `runcvm-l1-check` shows its log.
-
-### rp_filter
-
-`/etc/sysctl.d/90-runcvm-l1.conf` sets `net.ipv4.conf.all.rp_filter` and `net.ipv4.conf.default.rp_filter` to `2` at every boot. This is the loose mode the RunCVM README recommends for Docker DNS in Container/VMs, whatever the base image's or the installer's settings.
 
 ### IPv6
 
