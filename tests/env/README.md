@@ -200,11 +200,12 @@ A whole-root disk copies the whole image when it is created, and its root, not j
 
 - loads `kvm_intel` or `kvm_amd`, according to the CPU's `vmx` or `svm` flag;
 - loads `vhost_net` (needed for `RUNCVM_QEMU_NET_VHOST=1` in L2s) and `tun`, unless already loaded or built in;
-- loads `br_netfilter`, without which `docker exec` into an L2 fails: RunCVM's `docker exec` connects from the container to the VM through a source NAT on the container's bridge, and the VM's replies, addressed to the network's gateway, reach the container only if `br_netfilter` passes bridged traffic through netfilter, which reverses the NAT. Docker does not always load it;
 - logs each module's state beforehand, after udev has processed its start-up events, which shows whether udev had loaded it already;
 - logs a warning, and succeeds, if the CPU has neither flag, i.e. L0 does not offer nested virtualisation.
 
 It does not run where systemd finds itself in a container (`ConditionVirtualization=!container`). `runcvm-l1-check` shows its log.
+
+It does not load `br_netfilter`, which RunCVM does not need ([docs/adr/0001-container-firewall-without-br-netfilter.md](../../docs/adr/0001-container-firewall-without-br-netfilter.md)), so L2s run as on a host without it. Docker loads it in L1 only if L1's dockerd is configured to need it, e.g. with `"userland-proxy": false`. To test RunCVM with it loaded, run `sudo modprobe br_netfilter` in L1; `sudo modprobe -r br_netfilter` unloads it again, once no dockerd configuration needs it.
 
 ### IPv6
 

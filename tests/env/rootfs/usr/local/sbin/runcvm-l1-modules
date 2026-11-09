@@ -3,11 +3,10 @@
 # loaded or built in, and logs each module's state beforehand, which shows whether udev's
 # coldplug had loaded it already:
 # - kvm_intel or kvm_amd, according to the CPU's vmx or svm flag;
-# - vhost_net and tun;
-# - br_netfilter: 'docker exec' into a RunCVM Container/VM connects from the container to the VM
-#   through a source NAT on the container's bridge, and the VM's replies, addressed to the
-#   network's gateway, reach the container only if br_netfilter passes bridged traffic through
-#   netfilter, which reverses the NAT. dockerd does not always load it.
+# - vhost_net and tun.
+#
+# It does not load br_netfilter, which RunCVM does not need, so that L2s run as on a host without
+# it (see docs/adr/0001-container-firewall-without-br-netfilter.md).
 #
 # A CPU with neither flag (no nested virtualisation on L0) is reported, not treated as a failure:
 # L2s can still run with RUNCVM_QEMU_ACCEL=tcg.
@@ -36,7 +35,7 @@ state() {
 }
 
 rc=0
-for m in $kvm vhost_net tun br_netfilter; do
+for m in $kvm vhost_net tun; do
   s=$(state "$m")
   case "$s" in
     absent)
