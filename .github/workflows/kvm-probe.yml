@@ -18,6 +18,7 @@
 #                 the latest Docker release
 #   docker-<version>  the same image, with that Docker release, running the tests whose results
 #                 depend on Docker's version
+#   dropbear-fw   the dropbear firewall branch, built on the runner, without br_netfilter
 #   arp-rp1[-brnf]  the nft-divert, DNS address and ARP probe branches merged, from an image built
 #                 elsewhere, installed with the ARP probe branch's installer (which leaves rp_filter
 #                 alone), with strict reverse-path filtering (rp_filter=1) set on the host, without
@@ -42,19 +43,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: arp-rp1
-            ref: claude/runcvm-dns-address
-            installer: claude/runcvm-arp-probe
-            image: ghcr.io/newsnowlabs/runcvm:probe-arp-9363d30
+          - variant: dropbear-fw
+            ref: claude/runcvm-dropbear-firewall
+            image: ghcr.io/newsnowlabs/runcvm:probe-dropbear-fw
+            build: true
             br_netfilter: leave
-            rp_filter: 1
-            docker: latest
-          - variant: arp-rp1-brnf
-            ref: claude/runcvm-dns-address
-            installer: claude/runcvm-arp-probe
-            image: ghcr.io/newsnowlabs/runcvm:probe-arp-9363d30
-            br_netfilter: load
-            rp_filter: 1
             docker: latest
     runs-on: ubuntu-24.04
     timeout-minutes: 120
