@@ -1,6 +1,11 @@
 #!/.runcvm/guest/bin/bash
 
-# Exit on errors
+# Exit on errors, so that a failure while preparing the VM stops it from launching.
+#
+# Under pipefail, a pipeline whose status matters must end in a command that reads all its input:
+# not grep -q, -m or -l, head, sed's q, awk's exit or a single read, which can exit first and leave
+# the command writing to them killed by SIGPIPE, failing the pipeline at random. Use e.g.
+# 'grep ... >/dev/null', or capture the output first. tests/43-pipefail-readers checks this.
 set -o errexit -o pipefail
 
 # Load RunCVM's own environment, saved by runcvm-ctr-entrypoint
@@ -270,8 +275,7 @@ do_disk() {
     fi
 
     LABEL=$(blkid -p -s LABEL -o value "$src") || true
-    # grep reads all of disk_fs_list's output (no -q): under pipefail, a grep that exits at its
-    # first match can end the pipeline with disk_fs_list's SIGPIPE status, making a match fail.
+    # grep reads all of disk_fs_list's output (no -q), as the pipefail note at the top requires.
     if [[ -n "$LABEL" ]] && disk_fs_list 5 | grep -xF -- "$LABEL" >/dev/null; then
       layout="subdirs"
     else

@@ -18,6 +18,12 @@ the runtime or the scripts.
   them that way.
 - `/.runcvm` is a root-only tmpfs (`mode=700`) inside each container; its contents are
   RunCVM's private state, not part of the workload's filesystem.
+- Where a script runs under `pipefail` (`runcvm-ctr-qemu`, and `tests/env/Dockerfile`'s `RUN`
+  steps), a pipeline whose status matters must end in a command that reads all its input: not
+  `grep -q`, `-m` or `-l`, `head`, `sed`'s `q`, `awk`'s `exit` or a single `read`, which can
+  exit first and leave the writer killed by SIGPIPE, failing the pipeline at random. Use e.g.
+  `grep ... >/dev/null`. `tests/43-pipefail-readers` checks every file that turns on
+  `pipefail`.
 
 ## Building, installing and testing
 
