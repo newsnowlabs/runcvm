@@ -324,7 +324,8 @@ FROM almalinux:10 as almalinux-kernel
 
 ARG KERNEL_MODULE_COMPRESSION
 # The almalinux image has no /boot, where the kernel package and dracut install the kernel and
-# initramfs. kernel-modules-extra provides br_netfilter, which workloads such as dockerd load.
+# initramfs. kernel-modules-extra provides br_netfilter, which k3s loads, as does dockerd with its
+# userland proxy or inter-container communication disabled.
 RUN mkdir -p /boot && dnf install -y kernel kernel-modules-extra xz
 ADD ./kernels/dracut/addvirtiofs.conf /etc/dracut.conf.d/addvirtiofs.conf
 ADD ./kernels/dracut/95virtiofs /usr/lib/dracut/modules.d/95virtiofs
