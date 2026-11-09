@@ -93,15 +93,6 @@ else
 fi
 [ -n "$log" ] && echo "$log" | indent
 
-# rp_filter.
-all=$(sysctl -n net.ipv4.conf.all.rp_filter)
-def=$(sysctl -n net.ipv4.conf.default.rp_filter)
-if [ "$all" = 2 ] && [ "$def" = 2 ]; then
-  pass "rp_filter: all=2 default=2"
-else
-  fail "rp_filter: all=$all default=$def (expected 2 and 2)"
-fi
-
 # Each RUNCVM_DISKS disk's destinations are mounted from one ext4 filesystem on a block device.
 if [ -z "$DISKS" ]; then
   skip "RUNCVM_DISKS: none given"

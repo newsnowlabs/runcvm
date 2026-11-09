@@ -48,6 +48,13 @@ if ! [ -h /dev/fd ]; then
   ln -s /proc/self/fd /dev/fd
 fi
 
+# Have the kernel load modules on demand through RunCVM's module loader, which runs the image's
+# modprobe where the image has one and RunCVM's otherwise: the kernel's default, /sbin/modprobe, is
+# absent from many images (e.g. busybox, rancher/k3s), and the kernel then loads no module that it
+# requests, such as overlay on its first mount. The loader is in RunCVM's tools, which stay
+# available to the kernel for the VM's lifetime, including after a switch to a whole-root disk.
+echo "$RUNCVM_GUEST/scripts/runcvm-vm-modprobe" >/proc/sys/kernel/modprobe
+
 # Switch the root filesystem to the whole-root disk, if RUNCVM_DISKS defines one (see do_root_disk
 # in runcvm-ctr-qemu). This must happen before anything else uses the root: everything after it,
 # and the workload, sees the disk as /.
@@ -217,6 +224,18 @@ vm_init_error() {
   exit 1
 }
 
+# Load the kernel modules that RUNCVM_KERNEL_MODULES names (checked by runcvm-runtime as a
+# comma-separated list of module names), before the workload starts: for modules that nothing
+# requests from the kernel on demand, such as kvm_intel or kvm_amd for VMs nested in this one.
+if [ -n "$RUNCVM_KERNEL_MODULES" ]; then
+  IFS=',' read -r -a modules <<<"$RUNCVM_KERNEL_MODULES"
+  for module in "${modules[@]}"
+  do
+    busybox modprobe "$module" || \
+      vm_init_error "RUNCVM_KERNEL_MODULES: kernel module '$module' cannot be loaded into the VM's kernel ($(busybox uname -r))"
+  done
+fi
+
 # Mount filesystems defined in /etc/fstab OR as defined in RUNCVM_DISKS
 if [ -f /.runcvm/fstab ]; then
   # Load the kernel modules of each disk's filesystem, as listed in disk-filesystems.
@@ -280,8 +299,12 @@ if [ -f /.runcvm/fstab ]; then
     vm_init_error "mounting the filesystems in /.runcvm/fstab failed, leaving unmounted: ${unmounted[*]}"
   fi
 
-  # Now mount our fstab over /etc/fstab
-  mount -i --bind /.runcvm/fstab /etc/fstab
+  # Mount our fstab over the image's /etc/fstab, where the image has one. An image without one
+  # (e.g. busybox, or a static binary's) has nothing that reads it, and has no file to mount over:
+  # this script runs with 'bash -e' as the VM's PID 1, so a failed mount would halt the VM.
+  if [ -e /etc/fstab ]; then
+    mount -i --bind /.runcvm/fstab /etc/fstab
+  fi
 fi
 
 # Mount cgroupfs as RUNCVM_CGROUPFS requests, by default:
