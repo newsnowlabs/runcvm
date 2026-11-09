@@ -38,8 +38,9 @@ gateway Docker gives a container so attached. Checks:
   same MTU, and the same default route.
 
 Networks connected to a running Container/VM are not supported (the VM's
-interfaces are configured at boot), so are not tested. Needs Docker 28 or
-later, for gw-priority.
+interfaces are configured at boot), so are not tested. Needs Docker 29.4
+or later (see requires): with earlier releases, network a's gw-priority
+does not give vm3 its default route.
 
 The expected values describe current behaviour. A change to it must update
 them deliberately.
