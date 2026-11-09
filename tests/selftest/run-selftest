@@ -68,6 +68,7 @@ class FakeTests:
         e.update({"RUNCVM_TEST_KILL_AFTER": "2"})
         e.pop("RUNCVM_TEST_MOCK", None)
         e.pop("RUNCVM_TEST_ACCEL", None)
+        e.pop("RUNCVM_TEST_TCG_CASES", None)
         if env:
             e.update(env)
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -164,6 +165,14 @@ class RunnerTests(unittest.TestCase):
             t.param("language", "python")
             t.finish()
             """))
+        ft.add("q-detail", """\
+            #!/bin/bash
+            . ../framework.sh
+            log "a milestone"
+            log_detail "a bash detail"
+            python3 -c 'import sys; sys.path.insert(0, ".."); import framework as t; t.log_detail("a python detail")'
+            exit 0
+            """)
         ft.add("m-python-fail", PY_PREAMBLE + "t.check('deliberate', 1, 2)\nt.finish()\n")
         ft.add("n-python-skip", PY_PREAMBLE + "t.skip('needs something absent')\n")
         # Leaves a background process holding the output pipe: the runner must not hang.
@@ -185,7 +194,7 @@ class RunnerTests(unittest.TestCase):
             "e-timeout": "timeout", "f-timeout-ignores-term": "timeout", "g-killed-early": "fail",
             "h-extended": "pass", "i-exit-124": "fail", "k-bash-helpers": "pass",
             "l-python-helpers": "pass", "m-python-fail": "fail", "n-python-skip": "skip",
-            "o-background-child": "pass", "p-requires-vm": "pass",
+            "o-background-child": "pass", "p-requires-vm": "pass", "q-detail": "pass",
         }
         for name, status in expected.items():
             with self.subTest(test=name):
@@ -206,6 +215,18 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("some output", self.full.read("logs/b-fail-piped.log"))
         self.assertIn("b-fail-piped - some output", self.full.out)
 
+    def test_detail_lines(self):
+        log = self.full.read("logs/q-detail.log")
+        for line in ("> a milestone", "> a bash detail", "> a python detail"):
+            self.assertIn(line + "\n", log)
+        self.assertNotIn("\x1e", log)
+        self.assertIn("q-detail - > a milestone", self.full.out)
+        self.assertNotIn("detail", self.full.out.replace("q-detail", ""))
+        verbose = self.ft.run("--verbose", "q-detail")
+        self.assertIn("q-detail - > a bash detail", verbose.out)
+        self.assertIn("q-detail - > a python detail", verbose.out)
+        self.assertNotIn("\x1e", verbose.out)
+
     def test_checks_and_params_recorded(self):
         a = self.full.test("a-pass")
         self.assertEqual([c["description"] for c in a["checks"]], ["one equals one", "true succeeds"])
@@ -216,7 +237,7 @@ class RunnerTests(unittest.TestCase):
     def test_tap(self):
         tap = self.full.read("results.tap").splitlines()
         self.assertEqual(tap[0], "TAP version 13")
-        self.assertEqual(tap[1], "1..15")
+        self.assertEqual(tap[1], "1..16")
         self.assertTrue(any(l.endswith(" - a-pass") and l.startswith("ok ") for l in tap))
         self.assertTrue(any(l.startswith("not ok ") and "b-fail-piped # exit code 3" in l for l in tap))
         self.assertTrue(any("d-skip # SKIP IPv6 not enabled" in l for l in tap))
@@ -309,6 +330,30 @@ class RunnerTests(unittest.TestCase):
         finally:
             ft.cleanup()
 
+    def test_tcg_cases(self):
+        ft = FakeTests()
+        try:
+            ft.add("t-tcg-bash", """\
+                #!/bin/bash -e
+                . ../framework.sh
+                check "tcg_cases" "$EXPECT" "$(tcg_cases && echo 1 || echo 0)"
+                finish
+                """)
+            ft.add("u-tcg-python", PY_PREAMBLE + textwrap.dedent("""\
+                t.check("TCG_CASES", os.environ["EXPECT"] == "1", t.TCG_CASES)
+                t.finish()
+                """))
+            default = "0" if os.path.exists("/dev/kvm") else "1"
+            for opts, env, expect in [([], {}, default),
+                                      (["--tcg-cases"], {}, "1"),
+                                      ([], {"RUNCVM_TEST_TCG_CASES": "1"}, "1"),
+                                      (["--accel", "tcg"], {}, "1")]:
+                r = ft.run(*opts, env=dict(env, EXPECT=expect))
+                self.assertEqual(r.rc, 0, r.out)
+                self.assertEqual(r.json()["tcg_cases"], expect == "1")
+        finally:
+            ft.cleanup()
+
     def test_requirements(self):
         ft = FakeTests()
         try:
@@ -319,6 +364,43 @@ class RunnerTests(unittest.TestCase):
             r = ft.run()
             self.assertEqual(r.rc, 2)
             self.assertIn("unknown requirement 'vmm'", r.out)
+        finally:
+            ft.cleanup()
+
+    def test_docker_version_requirement(self):
+        ft = FakeTests()
+        try:
+            # A stand-in docker CLI, reporting $FAKE_DOCKER_VERSION as dockerd's version and
+            # the runcvm runtime as registered; other commands succeed with no output.
+            bindir = os.path.join(ft.root, "bin")
+            os.makedirs(bindir)
+            with open(os.path.join(bindir, "docker"), "w") as f:
+                f.write(textwrap.dedent("""\
+                    #!/bin/sh
+                    case "$*" in
+                      "info --format {{json .ServerVersion}}") echo "\\"$FAKE_DOCKER_VERSION\\"" ;;
+                      "info --format {{.ServerVersion}}") echo "$FAKE_DOCKER_VERSION" ;;
+                      "info --format {{json .Runtimes}}") echo '{"runcvm": {}}' ;;
+                    esac
+                    """))
+            os.chmod(os.path.join(bindir, "docker"), 0o755)
+            ft.add("t-docker-29", "#!/bin/bash\nexit 0\n", requires="docker>=29.0")
+            for version, status in (("28.0.4", "skip"), ("28.10.0", "skip"), ("29.0.0", "pass"),
+                                    ("29.9.3", "pass"), ("30.0.0-rc.1", "pass"), ("dev", "skip")):
+                with self.subTest(version=version):
+                    r = ft.run("t-docker-29", preflight=True,
+                               env={"PATH": bindir + os.pathsep + os.environ["PATH"],
+                                    "FAKE_DOCKER_VERSION": version})
+                    self.assertEqual(r.rc, 0, r.out)
+                    self.assertEqual(r.status("t-docker-29"), status)
+                    if status == "skip":
+                        self.assertEqual(r.test("t-docker-29")["reason"], "requires docker>=29.0 (%s)"
+                                         % ("could not read dockerd's version" if version == "dev"
+                                            else "dockerd is " + version))
+            ft.add("u-docker-bad", "#!/bin/bash\nexit 0\n", requires="docker>=29")
+            r = ft.run("u-docker-bad")
+            self.assertEqual(r.rc, 2)
+            self.assertIn("unknown requirement 'docker>=29'", r.out)
         finally:
             ft.cleanup()
 

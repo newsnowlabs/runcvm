@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""RUNCVM_KERNEL_MODULES: kernel modules loaded into the VM's kernel at boot.
+
+--env=RUNCVM_KERNEL_MODULES=<module>[,<module>...] names modules for
+RunCVM to load before the workload starts. Each case boots Debian's kernel,
+in which dummy and vxlan are modules that nothing loads at boot:
+
+- RUNCVM_KERNEL_MODULES=dummy,vxlan: both are loaded when the workload
+  starts, with and without --init;
+- without RUNCVM_KERNEL_MODULES, neither is (the control);
+- a value that is not a comma-separated list of module names is rejected at
+  creation, with an error naming RUNCVM_KERNEL_MODULES;
+- a module the VM's kernel lacks stops the Container/VM before its workload
+  starts, with exit status 1 and an error naming the module.
+
+The workload does not see RUNCVM_KERNEL_MODULES in its environment.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+# Run in the VM: reports which of the two modules are loaded, and the workload's view of the
+# variable.
+SCRIPT = ("for m in dummy vxlan; do grep -q \"^$m \" /proc/modules && echo $m=loaded || echo $m=absent; done; "
+          "echo env=${RUNCVM_KERNEL_MODULES:-unset}")
+
+
+def run(name, *opts, init=False):
+    return t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
+                    *t.vm_opts(), "--env", "RUNCVM_KERNEL=debian", *(["--init"] if init else []), *opts,
+                    "alpine", "sh", "-c", SCRIPT, timeout=TIMEOUT)
+
+
+def parse(r):
+    return dict(line.strip().split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+
+
+t.param("init", "with and without")
+
+for init in (False, True):
+    mode = "--init" if init else "no --init"
+    r = run("modules" + ("-init" if init else ""), "--env", "RUNCVM_KERNEL_MODULES=dummy,vxlan", init=init)
+    out = parse(r)
+    if r.returncode != 0:
+        t.log("exit status %d, output:\n%s" % (r.returncode, r.stdout))
+    t.check("dummy,vxlan, %s: exit status" % mode, 0, r.returncode)
+    t.check("dummy,vxlan, %s: dummy loaded" % mode, "loaded", out.get("dummy"))
+    t.check("dummy,vxlan, %s: vxlan loaded" % mode, "loaded", out.get("vxlan"))
+    t.check("dummy,vxlan, %s: not in the workload's environment" % mode, "unset", out.get("env"))
+
+out = parse(run("control"))
+t.check("control: dummy not loaded", "absent", out.get("dummy"))
+t.check("control: vxlan not loaded", "absent", out.get("vxlan"))
+
+for label, value in (("bad-name", "dummy;vxlan"), ("empty-item", "dummy,,vxlan"), ("trailing-comma", "dummy,")):
+    r = run(label, "--env", "RUNCVM_KERNEL_MODULES=" + value)
+    t.check("%s: Container/VM creation fails" % label, True, r.returncode != 0)
+    t.check("%s: error names RUNCVM_KERNEL_MODULES" % label, True, "RUNCVM_KERNEL_MODULES" in r.stdout)
+
+for init in (False, True):
+    mode = "--init" if init else "no --init"
+    r = run("missing" + ("-init" if init else ""), "--env", "RUNCVM_KERNEL_MODULES=dummy,no_such_module", init=init)
+    t.check("missing module, %s: exit status" % mode, 1, r.returncode)
+    t.check("missing module, %s: error names the module" % mode, True, "no_such_module" in r.stdout)
+    t.check("missing module, %s: workload did not run" % mode, None, parse(r).get("dummy"))
+
+t.finish()

@@ -32,6 +32,11 @@ TEST_NAME = os.environ.get("RUNCVM_TEST_NAME") or os.path.basename(os.getcwd())
 RUNTIME = os.environ.get("RUNTIME") or "runcvm"
 MOCK = os.environ.get("RUNCVM_TEST_MOCK") == "1"
 ACCEL = os.environ.get("RUNCVM_TEST_ACCEL") or None
+# Whether to run checks that launch Container/VMs explicitly under software emulation (TCG),
+# which are slow on a host with KVM: as RUNCVM_TEST_TCG_CASES says (see tests/run), or, where
+# it is unset, with --accel tcg or without /dev/kvm
+TCG_CASES = (os.environ["RUNCVM_TEST_TCG_CASES"] == "1" if os.environ.get("RUNCVM_TEST_TCG_CASES")
+             else ACCEL == "tcg" or not os.path.exists("/dev/kvm"))
 
 errors = 0
 _cleanups = []
@@ -40,6 +45,12 @@ _cleanups = []
 def log(msg):
     """Log a message, in the same format as framework.sh's log()."""
     print("> %s" % msg, flush=True)
+
+
+def log_detail(msg):
+    """Log a detail line, as framework.sh's log_detail(): written to the test's log, and to the
+    terminal only with 'tests/run --verbose'."""
+    print("\x1e> %s" % msg, flush=True)
 
 
 def unique(name):
