@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""No pipeline under pipefail ends in a reader that can exit before its input does.
+
+Under pipefail, a pipeline's status is that of its last command to fail. A
+reader that can exit before reading all its input (grep -q, -m or -l, head,
+sed's q command, awk's exit, a single read) can leave the command writing
+to it to be killed by SIGPIPE, failing the pipeline at random even when
+the reader succeeded. In a script that also runs under errexit, or tests
+the pipeline's status, that turns a match into a failure.
+
+The test reads every file in the repository that turns on pipefail (a shell
+script's 'set -o pipefail', or a Dockerfile's SHELL with '-o pipefail') and
+fails on each pipeline in it whose last command is such a reader. It first
+checks that it finds each kind of reader in a sample, so that a fault in the
+test itself cannot pass unnoticed. It needs no Container/VM.
+"""
+
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+SKIP_DIRS = {".git", "kernels", "patches"}
+
+# A pipe (not '||') followed by a reader that can exit early.
+READER = re.compile(
+    r"(?<!\|)\|(?!\|)\s*("
+    r"grep\s+(?:-\S*\s+)*?(?:-[a-zA-Z]*[qml]|--quiet\b|--silent\b|--max-count\b|--files-with-matches\b)"
+    r"|head\b"
+    r"|sed\b[^|]*(?:[0-9$/;]q|\sq)\b"
+    r"|awk\b[^|]*\bexit\b"
+    r"|read\b"
+    r")")
+PIPEFAIL = re.compile(r"^\s*(set\s.*-o\s+pipefail\b|set\s+-[a-zA-Z]*o\s+pipefail\b|SHELL\s.*\bpipefail\b)")
+
+SAMPLE = [
+    ("x | grep -q y", True),
+    ("x | grep -xF -q -- y", True),
+    ("x | grep -m1 y", True),
+    ("x | grep --quiet y", True),
+    ("x | head -n 1", True),
+    ("x | sed -n '1p;1q'", True),
+    ("x | sed 1q", True),
+    ("x | awk '{ print; exit }'", True),
+    ("x | read y", True),
+    ("x | grep -xF -- y >/dev/null", False),
+    ("x | grep -c y", False),
+    ("x || grep -q y", False),
+    ("x | while read y; do :; done", False),
+    ("x | awk '{ print $1 }'", False),
+]
+
+
+def code_lines(path):
+    """Yields (line number, logical line) for a file's non-comment lines, continuations joined."""
+    with open(path, errors="replace") as f:
+        lines = f.read().split("\n")
+    i = 0
+    while i < len(lines):
+        start, text = i + 1, lines[i]
+        while (text.rstrip().endswith("\\") or text.rstrip().endswith("|")) and i + 1 < len(lines):
+            i += 1
+            text = text.rstrip().rstrip("\\") + " " + lines[i].strip()
+        i += 1
+        if not text.lstrip().startswith("#"):
+            yield start, text
+
+
+def files():
+    for root, dirs, names in os.walk(REPO):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for name in names:
+            path = os.path.join(root, name)
+            if os.path.islink(path) or not os.path.isfile(path):
+                continue
+            try:
+                with open(path, "rb") as f:
+                    head = f.read(4096)
+            except OSError:
+                continue
+            if b"\0" in head:
+                continue
+            yield path
+
+
+wrong = [line for line, expected in SAMPLE if bool(READER.search(line)) != expected]
+t.check("the test recognises early-exit readers in a sample", [], wrong)
+
+checked = []
+found = []
+for path in files():
+    lines = list(code_lines(path))
+    if not any(PIPEFAIL.search(text) for _, text in lines):
+        continue
+    rel = os.path.relpath(path, REPO)
+    checked.append(rel)
+    for number, text in lines:
+        if READER.search(text):
+            found.append("%s:%d: %s" % (rel, number, text.strip()))
+
+t.log("files under pipefail: %s" % ", ".join(sorted(checked)))
+t.check("at least one file under pipefail is checked", True, len(checked) > 0)
+t.check("no pipeline under pipefail ends in an early-exit reader", [], found)
+t.finish()
