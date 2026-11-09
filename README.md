@@ -447,7 +447,7 @@ RunCVM works with Docker's default configuration. It also works with `"userland-
 To upgrade, follow this procedure:
 
 1. Stop all RunCVM containers.
-2. Run `sudo /opt/runcvm/scripts/runcvm-install-runtime.sh`, or rerun the installation command; either installs the latest release, or the release named in `REPO` (see [Installation](#installation)).
+2. Rerun the installation command, which installs the latest release, or the release named in `REPO` (see [Installation](#installation)), and runs that release's own installer.
 3. Start any RunCVM containers.
 
 ## Features and limitations
