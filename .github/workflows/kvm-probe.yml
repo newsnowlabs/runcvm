@@ -1,19 +1,199 @@
-# Runs the README's "RunCVM in CI" example as written, on a GitHub-hosted runner.
+# Probes whether GitHub-hosted Linux runners can run RunCVM Container/VMs under KVM: reports the
+# runner's virtualisation support, opens /dev/kvm to the runner user, installs RunCVM (a published
+# image, or one built from a branch on the runner), runs a Container/VM and checks that it used
+# KVM, diagnoses `docker exec`'s path into the VM, then runs integration tests. A step that fails
+# is marked failed in the run's summary, and the job carries on, so that one run answers as much
+# as it can. It runs on a push to its own branch, or by hand once on the default branch.
+#
+# Each matrix entry installs an image (built on the runner from the entry's ref if build is set),
+# checks out ref for its tests, loads br_netfilter if br_netfilter is 'load', and replaces the
+# runner's Docker with a Docker release if docker is set ('latest', or a version such as 28.5).
+# Entries used:
+#   release-brnf  the published image, with br_netfilter loaded: in that release, docker exec's
+#                 replies from the VM reach the container's network stack only through bridge
+#                 netfilter, and GitHub's runners do not load it by default
+#   nft-divert    the nft bridge diversion branch, which needs no br_netfilter, built on the runner
+#   dns-address   the DNS address branch (stacked on nft-divert), from an image built elsewhere
+#   nft-divert-docker-latest  the nft bridge diversion branch, from an image built elsewhere, with
+#                 the latest Docker release
+#   docker-<version>  the same image, with that Docker release, running the tests whose results
+#                 depend on Docker's version
+#   arp-rp1[-brnf]  the nft-divert, DNS address and ARP probe branches merged, from an image built
+#                 elsewhere, installed with the ARP probe branch's installer (which leaves rp_filter
+#                 alone), with strict reverse-path filtering (rp_filter=1) set on the host, without
+#                 and with br_netfilter
+#
+# An entry with installer set installs with the installer from that ref instead of ref's, and one
+# with rp_filter set sets the host's all and default rp_filter to it before installing.
 name: KVM probe
 
 on:
   push:
     branches: [claude/ci-kvm-probe]
+  workflow_dispatch:
+    inputs:
+      tests:
+        description: Integration tests to run (tests/run arguments, e.g. "--tier core"; "none" for none)
+        default: --tier core
 
 jobs:
-  readme-example:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: arp-rp1
+            ref: claude/runcvm-dns-address
+            installer: claude/runcvm-arp-probe
+            image: ghcr.io/newsnowlabs/runcvm:probe-arp-9363d30
+            br_netfilter: leave
+            rp_filter: 1
+            docker: latest
+          - variant: arp-rp1-brnf
+            ref: claude/runcvm-dns-address
+            installer: claude/runcvm-arp-probe
+            image: ghcr.io/newsnowlabs/runcvm:probe-arp-9363d30
+            br_netfilter: load
+            rp_filter: 1
+            docker: latest
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 120
+    env:
+      RUNCVM_IMAGE: ${{ matrix.image }}
+      TESTS: ${{ inputs.tests || matrix.tests || '--tier core' }}
     steps:
-      - name: Install RunCVM
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref || github.ref }}
+
+      - name: Install Docker ${{ matrix.docker }}
+        if: matrix.docker
         run: |
+          sudo apt-get remove -y moby-engine moby-cli moby-buildx moby-compose moby-containerd moby-runc || true
+          curl -fsSL https://get.docker.com -o "$RUNNER_TEMP/get-docker.sh"
+          if [ "${{ matrix.docker }}" = latest ]; then sudo sh "$RUNNER_TEMP/get-docker.sh"; else sudo VERSION="${{ matrix.docker }}" sh "$RUNNER_TEMP/get-docker.sh"; fi
+          sudo systemctl restart docker
+
+      - name: Runner facts
+        run: |
+          echo "=== kernel, CPUs, memory, disk"
+          uname -a; nproc; free -m; df -h / | tail -1
+          echo "=== CPU virtualisation flags (vmx or svm; expect a non-zero count)"
+          grep -cE '\b(vmx|svm)\b' /proc/cpuinfo || true
+          lscpu | grep -iE 'virtuali|hypervisor|model name' || true
+          echo "=== KVM modules, and whether nested virtualisation is enabled"
+          lsmod | grep -E '^kvm' || echo "no kvm modules loaded"
+          cat /sys/module/kvm_intel/parameters/nested /sys/module/kvm_amd/parameters/nested 2>/dev/null || true
+          echo "=== /dev/kvm before opening it"
+          ls -l /dev/kvm || true
+          echo "=== Docker"
+          docker version --format 'client {{.Client.Version}}, server {{.Server.Version}}'
+          docker info --format 'storage driver {{.Driver}}; cgroup v{{.CgroupVersion}}'
+
+      - name: Load br_netfilter
+        if: matrix.br_netfilter == 'load'
+        run: |
+          sudo modprobe br_netfilter
+          sysctl net.bridge.bridge-nf-call-iptables
+
+      - name: Report br_netfilter
+        run: |
+          lsmod | grep -E '^br_netfilter' || echo "br_netfilter not loaded"
+
+      - name: Open /dev/kvm to the runner user
+        continue-on-error: true
+        run: |
+          # As in GitHub's changelog for hardware-accelerated virtualisation on hosted runners.
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-          curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
-      - run: docker run --rm --runtime=runcvm alpine uname -a
+          ls -l /dev/kvm
+          echo "=== /dev/kvm usable by the runner user: $([ -r /dev/kvm ] && [ -w /dev/kvm ] && echo yes || echo no)"
+
+      - name: Build RunCVM from ${{ matrix.ref }}
+        if: matrix.build
+        run: |
+          git log --oneline -1
+          # gitlab.alpinelinux.org refuses requests from GitHub-hosted runners (HTTP 418), so the
+          # build clones aports from its GitHub mirror, and abuild fetches sources from Alpine's
+          # distfiles mirror, which it tries before each source's upstream URL.
+          sed -i -e 's#https://gitlab.alpinelinux.org/alpine/aports.git#https://github.com/alpinelinux/aports.git#' \
+            -e 's#^\( *\)abuild-keygen -an && \\#&\n\1echo "DISTFILES_MIRROR=https://distfiles.alpinelinux.org/distfiles/v${ALPINE_VERSION}" >>/etc/abuild.conf \&\& \\#' Dockerfile
+          git diff
+          git diff --stat
+          time ./build/build.sh --tag probe
+          docker tag newsnowlabs/runcvm:probe "$RUNCVM_IMAGE"
+
+      - name: Set rp_filter to ${{ matrix.rp_filter }}
+        if: matrix.rp_filter
+        run: |
+          sudo sysctl -w net.ipv4.conf.all.rp_filter=${{ matrix.rp_filter }} net.ipv4.conf.default.rp_filter=${{ matrix.rp_filter }}
+          sudo sysctl -w net.ipv4.conf.docker0.rp_filter=${{ matrix.rp_filter }} || true
+
+      - name: Install RunCVM (${{ env.RUNCVM_IMAGE }})
+        continue-on-error: true
+        run: |
+          if [ -n "${{ matrix.installer }}" ]; then
+            curl -fsSL "https://raw.githubusercontent.com/newsnowlabs/runcvm/${{ matrix.installer }}/runcvm-scripts/runcvm-install-runtime.sh" -o "$RUNNER_TEMP/install.sh"
+            sudo REPO="$RUNCVM_IMAGE" sh "$RUNNER_TEMP/install.sh" </dev/null
+          else
+            sudo REPO="$RUNCVM_IMAGE" ./runcvm-scripts/runcvm-install-runtime.sh </dev/null
+          fi
+          echo "=== rp_filter after installing"
+          sysctl net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter net.ipv4.conf.docker0.rp_filter || true
+          docker info --format '{{.Runtimes.runcvm.Path}}'
+
+      - name: Run a Container/VM
+        continue-on-error: true
+        run: |
+          time docker run --rm --runtime=runcvm hello-world
+
+      - name: Check the Container/VM used KVM
+        continue-on-error: true
+        run: |
+          # With RUNCVM_QEMU_ACCEL=kvm (RunCVM's default, given here explicitly), RunCVM refuses to start
+          # the Container/VM without /dev/kvm, rather than falling back to software emulation; the
+          # guest kernel reports the hypervisor it detects.
+          time docker run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=kvm alpine \
+            sh -c 'dmesg | grep -iE "hypervisor detected|kvm-clock" | head -3; echo vcpus: $(nproc)'
+
+      - name: Diagnose docker exec
+        continue-on-error: true
+        run: |
+          set +e
+          command -v tcpdump >/dev/null || sudo apt-get install -y -qq tcpdump >/dev/null
+          # The VM reports its own network state and listening sockets in its output, which
+          # docker logs shows, so that it is visible even when docker exec fails.
+          docker run -d --runtime=runcvm --name diag alpine sh -c \
+            'sleep 5; echo "=== VM: addresses"; ip addr; echo "=== VM: routes"; ip route; echo "=== VM: listening"; netstat -ltn; echo "=== VM: ping gateway"; ping -c 2 -W 2 $(ip route | awk "/^default/{print \$3}"); sleep 3600'
+          sleep 30
+          pid=$(docker inspect -f '{{.State.Pid}}' diag)
+          ns() { sudo nsenter -t "$pid" -n "$@"; }
+          echo "=== docker logs (VM console)"; docker logs diag 2>&1 | tail -40
+          echo "=== container netns: addresses"; ns ip addr
+          echo "=== container netns: routes"; ns ip route
+          echo "=== container netns: nft ruleset"; ns nft list ruleset
+          echo "=== exec, with a capture in the container netns"
+          ns timeout 70 tcpdump -lni any -c 40 'arp or tcp port 22222' >"$RUNNER_TEMP/cap" 2>&1 &
+          sleep 2
+          timeout 60 docker exec diag echo exec-ok; echo "=== exec exit status: $? (expect 0)"
+          sudo pkill -INT -f 'tcpdump -lni any' ; wait; cat "$RUNNER_TEMP/cap"
+          echo "=== container netns: neighbours"; ns ip neigh
+          echo "=== container netns: nft ruleset, with counters"; ns nft list ruleset
+          docker rm -f diag >/dev/null
+          exit 0
+
+      - name: Integration tests (${{ env.TESTS }})
+        continue-on-error: true
+        if: env.TESTS != 'none'
+        run: |
+          # Test 25 boots many VMs at once; two at a time suits a hosted runner's CPUs and memory.
+          RUNCVM_TEST_JOBS=2 tests/run $TESTS --results "$RUNNER_TEMP/results"
+
+      - name: Upload test results
+        if: always() && env.TESTS != 'none'
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.variant }}
+          path: ${{ runner.temp }}/results
+          if-no-files-found: ignore
