@@ -14,14 +14,16 @@ docker compose up -d
 docker compose exec server kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes
 ```
 
-The nodes are Ready within a minute or so. The cluster's own images (the pause sandbox and CoreDNS) are pulled by each node on first use, or can be loaded into every node beforehand from the host, as the test does: `docker compose create`, then `docker save $(grep -v '^#' images.txt) | docker run --rm -i -v runcvm-k3s_images:/images busybox sh -c 'cat >/images/images.tar'` (k3s imports archives in `/var/lib/rancher/k3s/agent/images` as it starts), then `docker compose up -d`.
+The nodes are Ready within a minute or so. The cluster's own images (the pause sandbox and CoreDNS) are pulled by each node on first use, or can be loaded into every node beforehand from the host, as the test does: `docker compose create`, then `docker save $(grep -v '^#' images.txt) | docker run --rm -i -v runcvm-k3s_images:/images busybox:1.37 sh -c 'cat >/images/images.tar'` (k3s imports archives in `/var/lib/rancher/k3s/agent/images` as it starts), then `docker compose up -d`.
 
 Deploy the test's workload, a web server on each node behind a ClusterIP Service and a NodePort Service on port 30080, and reach it from the Docker network:
 
 ```sh
 docker compose exec -T server kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply -f - <manifest.yaml
-docker run --rm --network runcvm-k3s_default busybox wget -qO- http://agent-1:30080/
+docker run --rm --network runcvm-k3s_default busybox:1.37 wget -qO- http://agent-1:30080/
 ```
+
+The volume and network names begin with the Compose project name, `runcvm-k3s` unless `K3S_PROJECT` sets another.
 
 Remove the cluster, with its disks and the images volume:
 
@@ -40,6 +42,8 @@ Environment variables that `compose.yaml` reads, with their defaults:
 | `K3S_NODE_MEMORY` | `1536m` | Memory limit, and so VM size, of each node |
 | `K3S_TOKEN` | `runcvm-k3s-example` | The cluster's join token: set your own for anything but a local example |
 | `RUNCVM_QEMU_ACCEL` | `kvm` | RunCVM's QEMU acceleration (`tcg` for software emulation, much slower) |
+
+`RUNCVM_TEST_RUN_ID` and `RUNCVM_TEST_NAME`, which the test runner sets, label the containers, network and volume, so that the runner can remove any it leaves behind; by hand they are empty.
 
 ## How the nodes are set up
 

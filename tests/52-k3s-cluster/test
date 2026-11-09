@@ -27,7 +27,7 @@ import framework as t  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SLOW = t.ACCEL == "tcg"
-READY_TIMEOUT = 1800 if SLOW else 300
+READY_TIMEOUT = 1500 if SLOW else 300
 NODES = ["server", "agent-1", "agent-2"]
 KUBECTL = ["kubectl", "--kubeconfig", "/etc/rancher/k3s/k3s.yaml"]
 
@@ -48,7 +48,7 @@ def kubectl(*args, timeout=60):
 
 
 def down():
-    r = compose("down", "--volumes", "--timeout", "30")
+    r = compose("down", "--volumes", "--timeout", "30", timeout=300)
     if r.returncode != 0:
         t.log("docker compose down: %s" % r.stdout)
 
@@ -58,15 +58,19 @@ atexit.register(down)
 # Load the images into the images volume, as one archive that k3s imports as each node starts.
 images = [line.split()[0] for line in open(os.path.join(HERE, "images.txt"))
           if line.strip() and not line.startswith("#")]
-for image in images:
-    t.docker("pull", "-q", image, check=True, timeout=600)
-compose("create", check=True, timeout=600)
+pulled = all(t.docker("pull", "-q", image, timeout=600).returncode == 0 for image in images)
+if not t.check("images in images.txt pulled", True, pulled):
+    t.finish()
+r = compose("create", timeout=600)
+if not t.check("cluster created (docker compose create)", 0, r.returncode):
+    t.log(r.stdout)
+    t.finish()
 save = subprocess.Popen(["docker", "save", *images], stdout=subprocess.PIPE)
 load = subprocess.run(["docker", "run", "--rm", "-i", *t.labels(), "-v", "%s_images:/images" % project,
-                       "busybox", "sh", "-c", "cat >/images/images.tar"], stdin=save.stdout)
+                       "busybox:1.37", "sh", "-c", "cat >/images/images.tar"], stdin=save.stdout, timeout=600)
 save.stdout.close()
-if save.wait() != 0 or load.returncode != 0:
-    t.log("loading the images into the images volume failed")
+if not t.check("images loaded into the images volume", True,
+               save.wait(timeout=60) == 0 and load.returncode == 0):
     t.finish()
 
 r = compose("up", "-d", timeout=600)
@@ -88,11 +92,11 @@ if not t.check_cmd("all three nodes are Ready", lambda: t.wait_for(
     t.log("nodes: %s" % kubectl("get", "nodes", "-o", "wide").stdout)
     for node in NODES:
         t.log("%s's log (last 30 lines):\n%s" % (node, "\n".join(
-            compose("logs", "--no-log-prefix", node).stdout.splitlines()[-30:])))
+            compose("logs", "--no-log-prefix", node, timeout=60).stdout.splitlines()[-30:])))
     t.finish()
 
 with open(os.path.join(HERE, "manifest.yaml")) as f:
-    r = t.docker("exec", "-i", "%s-server-1" % project, *KUBECTL, "apply", "-f", "-", input=f.read())
+    r = t.docker("exec", "-i", "%s-server-1" % project, *KUBECTL, "apply", "-f", "-", input=f.read(), timeout=60)
 t.check("manifest applies", 0, r.returncode)
 
 
@@ -130,7 +134,7 @@ t.check("a pod reaches the web Service by name (through CoreDNS)", True, r.stdou
 
 # A runc container on the cluster's Docker network reaches the NodePort Service on each node.
 for node in NODES:
-    r = t.docker("run", "--rm", *t.labels(), "--runtime=runc", "--network", "%s_default" % project, "busybox",
+    r = t.docker("run", "--rm", *t.labels(), "--runtime=runc", "--network", "%s_default" % project, "busybox:1.37",
                  "wget", "-qO-", "-T", "10", "http://%s:30080/" % node, timeout=60)
     t.check("NodePort 30080 on %s answers from outside the cluster" % node, True, r.stdout.strip() in names)
 
