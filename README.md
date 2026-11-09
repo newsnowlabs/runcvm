@@ -282,7 +282,7 @@ RunCVM has no other host dependencies, apart from Docker (or experimentally, Pod
 - `nf_tables`, with which RunCVM installs firewall rules in each container, as Docker's own networking does: its IPv4 and bridge families (`CONFIG_NF_TABLES_IPV4`, `CONFIG_NF_TABLES_BRIDGE`), bridge `meta` expressions (`nft_meta_bridge`, `CONFIG_NFT_BRIDGE_META`), NAT (`nft_nat` and `nft_chain_nat`, `CONFIG_NFT_NAT`) and redirection (`nft_redir`, `CONFIG_NFT_REDIR`), with connection tracking;
 - optionally, `vhost_net` (`CONFIG_VHOST_NET`), for `RUNCVM_QEMU_NET_VHOST=1`.
 
-RunCVM does not need the `br_netfilter` module.
+RunCVM does not need the `br_netfilter` module; [docs/adr/0001-container-firewall-without-br-netfilter.md](docs/adr/0001-container-firewall-without-br-netfilter.md) records why, and how RunCVM would support a host whose kernel lacks bridge-family `nf_tables`.
 
 RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
