@@ -10,8 +10,9 @@ env=("${@:2:$1}")
 shift $(($1 + 1))
 
 # SAVE ENTRYPOINT
+# NUL-terminated, as an argument may hold any byte but NUL (newlines included).
 args=("$@")
-printf "%s\n" "${args[@]}" >/.runcvm/entrypoint
+printf '%s\0' "${args[@]}" >/.runcvm/entrypoint
 
 # SET HOME IN THE WORKLOAD'S ENVIRONMENT IF NEEDED
 
@@ -83,7 +84,8 @@ workload_env env
 . $RUNCVM_GUEST/scripts/runcvm-ip-functions
 
 # SAVE PWD
-busybox pwd >/.runcvm/pwd
+# NUL-terminated, as a path may hold any byte but NUL (newlines included).
+printf '%s\0' "$PWD" >/.runcvm/pwd
 
 # DEBUG
 if [[ "$RUNCVM_BREAK" =~ prenet ]]; then bash; fi

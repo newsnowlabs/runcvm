@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""'docker run' passes the entrypoint's arguments and the working directory intact.
+
+Each may hold any character but NUL: here newlines (including leading and
+trailing ones), tabs, runs of spaces, quotes, backslashes, shell
+metacharacters, an empty value and non-ASCII UTF-8. A RunCVM Container/VM
+must give its entrypoint exactly what runc gives it, with and without --init:
+
+- the arguments, each printed between angle brackets;
+- a multi-line 'sh -c' script, and one whose first line is empty;
+- the working directory (-w).
+
+A Container/VM's console, without a terminal, ends each line of output with
+CR LF, so the test maps CR LF to LF before comparing; no value holds a CR.
+"""
+
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+TIMEOUT = 900 if t.ACCEL == "tcg" else 180
+
+VALUES = ["a\nb", "\nleading newline", "trailing newline\n", "tab\there", "two  spaces", "'single'",
+          '"double"', "back\\slash", "", "€ é ü", "$HOME `true` $(true) *"]
+
+# Prints each argument between angle brackets, one per line.
+PRINT_ARGS = ["sh", "-c", 'for a in "$@"; do printf "<%s>\\n" "$a"; done', "sh"]
+
+# A working directory whose name holds runs of spaces, a newline, a tab and non-ASCII characters.
+WORKDIR = "/tmp/dir  with\nnewline\tand €"
+
+CASES = {
+    "arguments": ([*PRINT_ARGS, *VALUES], "".join("<%s>\n" % v for v in VALUES)),
+    "multi-line 'sh -c' script": (["sh", "-c", "echo line1\necho line2"], "line1\nline2\n"),
+    "'sh -c' script whose first line is empty": (["sh", "-c", "\necho line2"], "line2\n"),
+    "working directory": (["-w", WORKDIR, "alpine", "pwd"], WORKDIR + "\n"),
+}
+
+
+def run(item):
+    runtime, init, desc = item
+    args = CASES[desc][0]
+    opts = ["--runtime=" + runtime, *(t.vm_opts() if runtime == t.RUNTIME else []),
+            *(["--init"] if init else [])]
+    if args[0] != "-w":
+        args = ["alpine", *args]
+    # Output is decoded leniently, so that corrupted text is reported as a failure.
+    try:
+        r = subprocess.run(["docker", "run", "--rm", *t.labels(), *opts, *args], stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return item, "timed out after %ds" % TIMEOUT
+    out = r.stdout.decode("utf-8", "backslashreplace").replace("\r\n", "\n")
+    return item, (out if r.returncode == 0 else "exit status %d: %s" % (r.returncode, out))
+
+
+runtimes = [t.RUNTIME] if t.RUNTIME == "runc" else [t.RUNTIME, "runc"]
+items = [(runtime, init, desc) for runtime in runtimes for init in (False, True) for desc in CASES]
+t.param("init", "no, yes")
+for (runtime, init, desc), out in t.parallel(run, items, jobs=4):
+    t.check("%s, %s: %s" % (runtime, "--init" if init else "no --init", desc), CASES[desc][1], out)
+
+t.finish()
