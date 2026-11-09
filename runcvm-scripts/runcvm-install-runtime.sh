@@ -176,9 +176,9 @@ else
   fi
 fi
 
-# Install RunCVM package to $MNT
+# Install the RunCVM package to /opt/runcvm, which the installer image sees mounted at $MNT
 if [ -z "$NO_DOCKERD" ]; then
-  log "- Installing RunCVM package to $MNT ..."
+  log "- Installing RunCVM package to /opt/runcvm ..."
   if docker run --rm -v /opt/runcvm:$MNT $REPO --quiet; then
     log "- Installed RunCVM package to /opt/runcvm"
   else
