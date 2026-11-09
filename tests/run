@@ -39,6 +39,9 @@ Optional per-test metadata files, in each test directory:
               kvm   VMs use KVM acceleration: /dev/kvm present on this host,
                     and not in stand-in mode or with --accel tcg
               ipv6  dockerd can create an IPv6-enabled network
+              docker>=<major>.<minor>
+                    dockerd's version is at least <major>.<minor>, e.g.
+                    docker>=29.0
 
 Stand-in mode (--mock, or RUNCVM_TEST_MOCK=1) runs tests with a standard
 runtime (runc, unless --runtime or a non-RunCVM $RUNTIME is given) in place
@@ -83,6 +86,7 @@ import xml.etree.ElementTree as ET
 SKIP_CODE = 77
 TIERS = ("core", "extended")
 KNOWN_REQUIREMENTS = ("vm", "kvm", "ipv6")
+DOCKER_VERSION_REQUIREMENT = re.compile(r"^docker>=(\d+)\.(\d+)$")
 ACCELS = ("kvm", "auto", "tcg")
 DEFAULT_TIMEOUT = 1800
 DEFAULT_KILL_AFTER = 30
@@ -207,6 +211,20 @@ class Environment:
                 return True
             err = [l for l in (r.stderr or "").splitlines() if l.strip() and l.strip() != "exit status 1"]
             self._probe_notes[req] = "could not create an IPv6 network%s" % (": " + err[-1].strip() if err else "")
+            return False
+        m = DOCKER_VERSION_REQUIREMENT.match(req)
+        if m:
+            if not self.use_docker:
+                return False
+            r = docker("info", "--format", "{{.ServerVersion}}")
+            version = (r.stdout or "").strip()
+            v = re.match(r"(\d+)\.(\d+)", version)
+            if r.returncode != 0 or not v:
+                self._probe_notes[req] = "could not read dockerd's version"
+                return False
+            if (int(v.group(1)), int(v.group(2))) >= (int(m.group(1)), int(m.group(2))):
+                return True
+            self._probe_notes[req] = "dockerd is %s" % version
             return False
         raise HarnessError("unknown requirement '%s'" % req)
 
@@ -598,9 +616,9 @@ def main(argv):
         if t.tier not in TIERS:
             raise HarnessError("test '%s' has unknown tier '%s'" % (t.name, t.tier))
         for req in t.requires:
-            if req not in KNOWN_REQUIREMENTS:
+            if req not in KNOWN_REQUIREMENTS and not DOCKER_VERSION_REQUIREMENT.match(req):
                 raise HarnessError("test '%s' has unknown requirement '%s' (known: %s)"
-                                   % (t.name, req, ", ".join(KNOWN_REQUIREMENTS)))
+                                   % (t.name, req, ", ".join(KNOWN_REQUIREMENTS + ("docker>=<major>.<minor>",))))
 
     if args.list:
         for t in selected:

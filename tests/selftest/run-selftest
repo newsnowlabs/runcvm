@@ -367,6 +367,43 @@ class RunnerTests(unittest.TestCase):
         finally:
             ft.cleanup()
 
+    def test_docker_version_requirement(self):
+        ft = FakeTests()
+        try:
+            # A stand-in docker CLI, reporting $FAKE_DOCKER_VERSION as dockerd's version and
+            # the runcvm runtime as registered; other commands succeed with no output.
+            bindir = os.path.join(ft.root, "bin")
+            os.makedirs(bindir)
+            with open(os.path.join(bindir, "docker"), "w") as f:
+                f.write(textwrap.dedent("""\
+                    #!/bin/sh
+                    case "$*" in
+                      "info --format {{json .ServerVersion}}") echo "\\"$FAKE_DOCKER_VERSION\\"" ;;
+                      "info --format {{.ServerVersion}}") echo "$FAKE_DOCKER_VERSION" ;;
+                      "info --format {{json .Runtimes}}") echo '{"runcvm": {}}' ;;
+                    esac
+                    """))
+            os.chmod(os.path.join(bindir, "docker"), 0o755)
+            ft.add("t-docker-29", "#!/bin/bash\nexit 0\n", requires="docker>=29.0")
+            for version, status in (("28.0.4", "skip"), ("28.10.0", "skip"), ("29.0.0", "pass"),
+                                    ("29.9.3", "pass"), ("30.0.0-rc.1", "pass"), ("dev", "skip")):
+                with self.subTest(version=version):
+                    r = ft.run("t-docker-29", preflight=True,
+                               env={"PATH": bindir + os.pathsep + os.environ["PATH"],
+                                    "FAKE_DOCKER_VERSION": version})
+                    self.assertEqual(r.rc, 0, r.out)
+                    self.assertEqual(r.status("t-docker-29"), status)
+                    if status == "skip":
+                        self.assertEqual(r.test("t-docker-29")["reason"], "requires docker>=29.0 (%s)"
+                                         % ("could not read dockerd's version" if version == "dev"
+                                            else "dockerd is " + version))
+            ft.add("u-docker-bad", "#!/bin/bash\nexit 0\n", requires="docker>=29")
+            r = ft.run("u-docker-bad")
+            self.assertEqual(r.rc, 2)
+            self.assertIn("unknown requirement 'docker>=29'", r.out)
+        finally:
+            ft.cleanup()
+
 
 class ProgressAndSignalTests(unittest.TestCase):
     """Results written during a run; SIGTERM, SIGHUP and a vanished terminal."""
