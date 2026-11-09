@@ -18,6 +18,12 @@ the runtime or the scripts.
   them that way.
 - `/.runcvm` is a root-only tmpfs (`mode=700`) inside each container; its contents are
   RunCVM's private state, not part of the workload's filesystem.
+- Where a script runs under `pipefail` (`runcvm-ctr-qemu`, and `tests/env/Dockerfile`'s `RUN`
+  steps), a pipeline whose status matters must end in a command that reads all its input: not
+  `grep -q`, `-m` or `-l`, `head`, `sed`'s `q`, `awk`'s `exit` or a single `read`, which can
+  exit first and leave the writer killed by SIGPIPE, failing the pipeline at random; the same
+  holds for such a reader anywhere in a pipeline. Use e.g. `grep ... >/dev/null`.
+  `tests/43-pipefail-readers` checks every file in the repository that turns on `pipefail`.
 
 ## Building, installing and testing
 
@@ -60,7 +66,8 @@ the runtime or the scripts.
 - A test is a directory under `tests/` holding an executable `test` file, in bash or Python:
   exit 0 to pass, 77 to skip (after logging `SKIP: <reason>`), anything else to fail. Optional
   files `tier` (`core` or `extended`), `timeout` (seconds) and `requires` (`vm`, `kvm`,
-  `ipv6`) describe it to the runner. Numbering follows the tier: `1x` core, `5x` extended.
+  `ipv6`, `docker>=<major>.<minor>`) describe it to the runner. Numbering follows the tier:
+  `1x` core, `5x` extended.
 - Use the helpers in `tests/framework.sh` or `tests/framework.py` (same names in both):
   `unique` for every Docker object name and `labels` on every object created, so that runs can
   proceed concurrently and the runner can remove leftovers; `vm_opts` on every RunCVM

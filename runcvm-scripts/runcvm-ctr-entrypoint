@@ -109,7 +109,15 @@ read -r DOCKER_GW_IF6 DOCKER_GW_IF6_IP < \
 # e.g. eth0 fd00:1::1
 
 QEMU_BRIDGE_IP=169.254.1.1
-RUNCVM_DNS_IP=169.254.169.254
+
+# RUNCVM_DNS_IP (set by runcvm-runtime, which checks its form) must be none of the container's own
+# addresses, nor its gateway's or the bridge's: the VM's traffic to it is diverted to the container,
+# and 'docker exec' connects to the VM from it.
+if [ "$RUNCVM_DNS_IP" = "$QEMU_BRIDGE_IP" ] || [ "$RUNCVM_DNS_IP" = "$DOCKER_GW_IF_IP" ] \
+  || ip -4 -json addr show | jq -e --arg ip "$RUNCVM_DNS_IP" 'any(.[].addr_info[]?; .local == $ip)' >/dev/null; then
+  echo "RunCVM: Error: RUNCVM_DNS_IP '$RUNCVM_DNS_IP' is one of the container's own addresses, its gateway's or RunCVM's bridge address ($QEMU_BRIDGE_IP); choose another address, e.g. in 169.254.0.0/16" >&2
+  exit 1
+fi
 
 mkdir -p /.runcvm/network/devices
 
@@ -212,36 +220,99 @@ do
     # Restore default gateway route via this bridge.
     ip route add default via "$DOCKER_GW_IF_IP" dev "$QEMU_BRIDGE"
 
-    # Accept DNS requests for $RUNCVM_DNS_IP; these will be passed to dnsmasq
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -d "$RUNCVM_DNS_IP/32" -p udp -m udp --dport 53 -j REDIRECT
-
-    # Accept VNC requests on published port (5900 + display number)
-    if [[ "$RUNCVM_DISPLAY_MODE" = "vnc" ]] || is_natural_int "$RUNCVM_QEMU_VNC_DISPLAY"; then
-      XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A PREROUTING -p tcp -m tcp --dport $((RUNCVM_QEMU_VNC_DISPLAY+5900)) -j REDIRECT
-    fi
-
-    # Match UDP port 53 traffic, outgoing via the QEMU bridge, from the bridge's own IP:
-    # -> Masquerade as if from the VM's IP.
-    #    This allows outgoing DNS requests from the VM to be received by dnsmasq running in the container.
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s "$QEMU_BRIDGE_IP/32" -p udp -m udp --sport 53 -j SNAT --to-source "$DOCKER_IF_IP"
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s "$QEMU_BRIDGE_IP/32" -p udp -m udp --dport 53 -j SNAT --to-source "$DOCKER_IF_IP"
-
-    # Match traffic on TCP port $SSHD_PORT, outgoing via the QEMU bridge, from the bridge's own IP:
-    # -> Masquerade it as if from the DNS_IP.
-    #    This is necessary to allow SSH from within the container to the VM.
-    XTABLES_LIBDIR=$RUNCVM_GUEST/usr/lib/xtables xtables-nft-multi iptables -t nat -A POSTROUTING -o "$QEMU_BRIDGE" -s "$QEMU_BRIDGE_IP/32" -p tcp -m tcp --dport "$SSHD_PORT" -j SNAT --to-source "$RUNCVM_DNS_IP"
+    # The interface's MAC address and IPv4 address, for the firewall rules below.
+    QEMU_BRIDGE_IF="$if"
+    QEMU_BRIDGE_IF_MAC="$DOCKER_IF_MAC"
+    QEMU_BRIDGE_IF_IP="$DOCKER_IF_IP"
   fi
 
 done
 
 # FIXME: Bind-mount /etc/resolv.conf as well as /vm/etc/resolv.conf to prevent them showing in 'docker diff'
 cat /vm/etc/resolv.conf >/etc/resolv.conf
-RESOLV_CONF_NEW=$(busybox sed -r "s/127.0.0.11/$RUNCVM_DNS_IP/" /vm/etc/resolv.conf)
-echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
+
+# Docker's embedded DNS server, 127.0.0.11, is reachable only in the container, so where it is the
+# container's DNS server, it is rewritten in the VM's resolv.conf to $RUNCVM_DNS_IP, which dnsmasq
+# answers, forwarding to 127.0.0.11. Other DNS servers (e.g. on the default bridge network), the
+# VM queries directly.
+if busybox grep -qE '^nameserver[[:space:]]+127\.0\.0\.11([[:space:]]|$)' /vm/etc/resolv.conf; then
+  RUNCVM_DNS=1
+  RESOLV_CONF_NEW=$(busybox sed -r "s/127.0.0.11/$RUNCVM_DNS_IP/" /vm/etc/resolv.conf)
+  echo "$RESOLV_CONF_NEW" >/vm/etc/resolv.conf
+fi
+
+# FIREWALL
+# Traffic between the VM and RunCVM's own services in the container ('docker exec' to dropbear in
+# the VM, DNS to dnsmasq, VNC to QEMU) crosses the container's bridge addressed to the VM, or
+# through the Docker network's gateway, so the bridge would forward it past the container. Rules in
+# the bridge's prerouting hook pick it out, by the interface it arrives on and its addresses and
+# ports, and readdress each frame to the container interface's own MAC address, so that the bridge
+# delivers it to the container rather than forwarding it; the nat rules then hand it to the service.
+# This needs no br_netfilter on the host, nor anything in the VM.
+#
+# - 'docker exec': dbclient connects from the bridge's address, which is source-NATed to
+#   $RUNCVM_DNS_IP; the VM's replies, which it sends towards the gateway, are diverted.
+# - DNS: the VM's UDP requests to $RUNCVM_DNS_IP (only where it is the VM's DNS server, as an
+#   address inherited from an outer RunCVM VM must reach that VM's dnsmasq through the gateway) are
+#   diverted and redirected to dnsmasq.
+# - VNC: connections to the VM's address on the VNC port (5900 + display number), published from
+#   the host, are diverted and redirected to QEMU's VNC server.
+#
+# Traffic from the container itself (e.g. QEMU's VNC server's replies) leaves from the bridge, whose
+# only address is $QEMU_BRIDGE_IP, so the container's ARP requests for its next hop would name that
+# address as sender; a host with strict reverse-path filtering (rp_filter=1) on its bridge drops
+# them, as its route back to that address is not via the bridge. The arp rule sends them as ARP
+# probes, with sender address 0.0.0.0, which Linux answers without validating the sender.
+divert() {
+  echo "iifname \"$1\" ip daddr $2 $3 ether daddr set $QEMU_BRIDGE_IF_MAC meta pkttype set host"
+}
+
+BRIDGE_RULES=$(divert "tap-$QEMU_BRIDGE_IF" "$RUNCVM_DNS_IP" "tcp sport $SSHD_PORT")
+NAT_PREROUTING_RULES=""
+
+if [ "$RUNCVM_DNS" = "1" ]; then
+  BRIDGE_RULES+=$'\n'$(divert "tap-$QEMU_BRIDGE_IF" "$RUNCVM_DNS_IP" "udp dport 53")
+  NAT_PREROUTING_RULES+=$'\n'"ip daddr $RUNCVM_DNS_IP udp dport 53 redirect"
+fi
+
+if [[ "$RUNCVM_DISPLAY_MODE" = "vnc" ]] || is_natural_int "$RUNCVM_QEMU_VNC_DISPLAY"; then
+  VNC_PORT=$((RUNCVM_QEMU_VNC_DISPLAY+5900))
+  BRIDGE_RULES+=$'\n'$(divert "$QEMU_BRIDGE_IF" "$QEMU_BRIDGE_IF_IP" "tcp dport $VNC_PORT")
+  NAT_PREROUTING_RULES+=$'\n'"ip daddr $QEMU_BRIDGE_IF_IP tcp dport $VNC_PORT redirect"
+fi
+
+if ! nft -f - <<_EOF_
+table bridge runcvm {
+  chain prerouting {
+    type filter hook prerouting priority dstnat; policy accept;
+    $BRIDGE_RULES
+  }
+}
+table ip runcvm {
+  chain prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+    $NAT_PREROUTING_RULES
+  }
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "br-$QEMU_BRIDGE_IF" ip saddr $QEMU_BRIDGE_IP tcp dport $SSHD_PORT snat to $RUNCVM_DNS_IP
+  }
+}
+table arp runcvm {
+  chain output {
+    type filter hook output priority filter; policy accept;
+    arp operation request arp saddr ip $QEMU_BRIDGE_IP arp saddr ip set 0.0.0.0
+  }
+}
+_EOF_
+then
+  echo "RunCVM: Error: could not install RunCVM's firewall rules in the container (nft's error is above); RunCVM needs nf_tables with bridge, ARP and NAT support in the host's kernel (and nft_meta_bridge, where the kernel builds it as a module)" >&2
+  exit 1
+fi
 
 # LAUNCH DNSMASQ
 # It will receive local DNS requests (within the container, on 127.0.0.1)
-# and requests redirected locally (via the iptables PREROUTING REDIRECT rule) for $RUNCVM_DNS_IP.
+# and the VM's requests for $RUNCVM_DNS_IP, redirected to it by the nat rules above.
 # '-C /dev/null' keeps it from reading the image's /etc/dnsmasq.conf (and any conf-dir it names).
 dnsmasq -C /dev/null -u root --no-hosts
 
