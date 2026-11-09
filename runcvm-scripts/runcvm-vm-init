@@ -314,8 +314,8 @@ fi
 # Load cgroupfs functions first.
 . $RUNCVM_GUEST/scripts/functions/cgroupfs
 
-# Load original entrypoint
-mapfile -t ARGS </.runcvm/entrypoint
+# Load the original entrypoint and its arguments, saved NUL-separated by runcvm-ctr-entrypoint
+mapfile -d '' -t ARGS </.runcvm/entrypoint
 
 ARGS_INIT="${ARGS[0]}"
 

@@ -13,11 +13,12 @@ else
   touch /.runcvm/once
 fi
 
-# Change to saved PWD
-cd $(cat /.runcvm/pwd) && unset OLDPWD
+# Change to the working directory, saved NUL-separated by runcvm-ctr-entrypoint
+IFS= read -r -d '' pwd </.runcvm/pwd
+cd "$pwd" && unset OLDPWD
 
-# Load original entrypoint
-mapfile -t ARGS </.runcvm/entrypoint
+# Load the original entrypoint and its arguments, saved NUL-separated by runcvm-ctr-entrypoint
+mapfile -d '' -t ARGS </.runcvm/entrypoint
 
 # Load the workload's environment, saved NUL-separated by runcvm-ctr-entrypoint
 mapfile -d '' -t env </.runcvm/env
