@@ -10,7 +10,7 @@ env=("${@:2:$1}")
 shift $(($1 + 1))
 
 # SAVE ENTRYPOINT
-# NUL-terminated, as an argument may hold any byte but NUL (newlines included).
+# NUL-separated, as an argument may hold any byte but NUL (newlines included).
 args=("$@")
 printf '%s\0' "${args[@]}" >/.runcvm/entrypoint
 
@@ -84,7 +84,7 @@ workload_env env
 . $RUNCVM_GUEST/scripts/runcvm-ip-functions
 
 # SAVE PWD
-# NUL-terminated, as a path may hold any byte but NUL (newlines included).
+# NUL-separated, as a path may hold any byte but NUL (newlines included).
 printf '%s\0' "$PWD" >/.runcvm/pwd
 
 # DEBUG
