@@ -13,7 +13,7 @@ Each RunCVM container joins its network interface to the VM's tap device with a 
 Such traffic crosses the bridge, so the container's IPv4 stack sees it only if something hands it from the bridge to that stack. Two mechanisms can:
 
 1. **`br_netfilter`**: with this module loaded on the host (and `bridge-nf-call-iptables`, its default, in the container's network namespace), bridged IPv4 packets also traverse the `ip` family's netfilter hooks, where `nat` rules (`REDIRECT`, `SNAT`) can claim them.
-2. **Bridge-family `nf_tables` rules**: a rule in the bridge's `prerouting` hook rewrites the destination MAC address to the bridge's own and sets the packet type to `host`, so the bridge delivers the packet to the container's stack instead of forwarding it; `ip` family `nat` rules then hand it to the service.
+2. **Bridge-family `nf_tables` rules**: a rule in the bridge's `prerouting` hook rewrites the destination MAC address to the container interface's own and sets the packet type to `host`, so the bridge delivers the packet to the container's stack instead of forwarding it; `ip` family `nat` rules then hand it to the service.
 
 ## Decision
 
@@ -21,7 +21,7 @@ RunCVM uses bridge-family `nf_tables` rules (mechanism 2), installed with `nft` 
 
 - `br_netfilter` is a host-wide setting: once loaded, it passes every bridged IPv4 packet on the host, not only RunCVM's, through the `ip` family hooks. Many hosts do not load it, and RunCVM would otherwise have to load it, or require it, on the host.
 - The bridge-family rules match only RunCVM's own traffic, by arrival interface, addresses and ports; everything else crosses the bridge unchanged.
-- The host's kernel needs `CONFIG_NF_TABLES_BRIDGE` and `CONFIG_NFT_BRIDGE_META` (listed, with RunCVM's other kernel requirements, in the README's [System requirements](../../README.md#system-requirements)). The kernels of common distributions provide both. Where they are missing, `runcvm-ctr-entrypoint` cannot install the rules and stops the container with an error that names them.
+- The host's kernel needs `CONFIG_NF_TABLES_BRIDGE` and `CONFIG_NFT_BRIDGE_META` (listed, with RunCVM's other kernel requirements, in the README's [System requirements](../../README.md#system-requirements)). The kernels of common distributions provide both. Where they are missing, `runcvm-ctr-entrypoint` cannot install the rules and stops the container with an error naming what it needs (`nf_tables` with bridge and NAT support, and `nft_meta_bridge`).
 
 ## Plan if `br_netfilter` support is needed
 
