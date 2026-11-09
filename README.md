@@ -416,7 +416,7 @@ az group create --name runcvm-test --location <your-region>
 az vm create --resource-group runcvm-test --name runcvm-test --image Canonical:ubuntu-24_04-lts:server:latest --size Standard_D2s_v5 --os-disk-size-gb 50 --admin-username azureuser --generate-ssh-keys --custom-data /tmp/cloud-init.sh
 ```
 
-On either platform, once the script has finished, `ls -l /dev/kvm` on the instance shows the KVM device, and `docker run --runtime=runcvm --rm hello-world` runs a Container/VM.
+On either platform, log in to the instance with SSH, as `ubuntu` on AWS (with your key pair; the security group must allow SSH) or `azureuser` on Azure, at its public IP address, which `aws ec2 describe-instances` and `az vm create`'s output show. Once the script has finished, `ls -l /dev/kvm` shows the KVM device, and `sudo docker run --runtime=runcvm --rm hello-world` runs a Container/VM.
 
 ## Upgrading
 
