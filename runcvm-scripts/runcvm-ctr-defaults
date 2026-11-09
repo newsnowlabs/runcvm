@@ -20,6 +20,7 @@ RUNCVM_ENV_VARS=(
   RUNCVM_CPUS
   RUNCVM_DISKS
   RUNCVM_DISPLAY_MODE
+  RUNCVM_DNS_IP
   RUNCVM_GUEST
   RUNCVM_HAS_HOME
   RUNCVM_HUGETLB
@@ -170,6 +171,7 @@ create_aliases() {
     mke2fs
     mount
     nc
+    nft
     poweroff
     ps
     qemu-ga
@@ -181,8 +183,6 @@ create_aliases() {
     sysctl
     touch
     tr
-    xtables-legacy-multi
-    xtables-nft-multi
   )
 
   local cmd
