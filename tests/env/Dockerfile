@@ -63,7 +63,7 @@ apt-get install -y --no-install-recommends \
   udev
 
 curl -fsSL -o /tmp/docker.asc https://download.docker.com/linux/ubuntu/gpg
-fpr=$(gpg --show-keys --with-colons /tmp/docker.asc | awk -F: '$1 == "fpr" { print $10; exit }')
+fpr=$(gpg --show-keys --with-colons /tmp/docker.asc | awk -F: '$1 == "fpr" && !n++ { print $10 }')
 if [ "$fpr" != "$DOCKER_REPO_FINGERPRINT" ]; then
   echo "Docker's apt key has fingerprint '$fpr', expected '$DOCKER_REPO_FINGERPRINT'" >&2
   exit 1
