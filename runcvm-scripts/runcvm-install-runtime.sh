@@ -1,5 +1,14 @@
 #!/bin/sh
 
+# Installs RunCVM from the image $REPO (default newsnowlabs/runcvm, i.e. the latest release):
+# - copies the RunCVM package from the image to /opt/runcvm;
+# - then runs the installer in that package, with --no-dockerd, which registers the runtime with
+#   Docker. So the host-side steps are always those of the release being installed, whichever
+#   version of this script installs it.
+#
+# With --no-dockerd, it skips the dockerd check and the package copy, and registers the package
+# already in /opt/runcvm. Every release from v1.5.0 accepts --no-dockerd in the same way.
+
 RUNCVM=/opt/runcvm
 RUNCVM_LD=$RUNCVM/lib/ld
 RUNCVM_JQ=$RUNCVM/usr/bin/jq
@@ -38,7 +47,9 @@ jq_get() {
 usage() {
   cat <<_EOE_ >&2
 
-Usage: sudo $0
+Usage: sudo [REPO=<image>] $0 [--no-dockerd]
+
+e.g. sudo REPO=newsnowlabs/runcvm:v1.7.0 $0
 _EOE_
   exit 1
 }
@@ -136,6 +147,20 @@ if [ -z "$NO_DOCKERD" ]; then
     log "- Failed to install RunCVM package to /opt/runcvm; aborting!"
     exit 1
   fi
+
+  # Hand over to the installed package's own installer, for the host-side steps of its release.
+  # Its prompt to restart dockerd reads from the terminal, if there is one; otherwise (e.g. when
+  # this script is piped to sh) the prompt reads nothing, which accepts the restart.
+  PACKAGE_INSTALLER=$RUNCVM/scripts/runcvm-install-runtime.sh
+  if [ -x "$PACKAGE_INSTALLER" ]; then
+    log "- Running the installed package's installer, $PACKAGE_INSTALLER --no-dockerd ..."
+    if [ -t 0 ]; then
+      exec "$PACKAGE_INSTALLER" --no-dockerd
+    else
+      exec "$PACKAGE_INSTALLER" --no-dockerd </dev/null
+    fi
+  fi
+  log "- No installer in the installed package; continuing with this one"
 fi
 
 if [ -d "/etc/docker" ]; then

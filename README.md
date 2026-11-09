@@ -364,16 +364,25 @@ Run:
 curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
 ```
 
+This installs the latest release of RunCVM, the image `newsnowlabs/runcvm:latest`. To install another release, name its image in `REPO`, e.g. for v1.7.0:
+
+```sh
+curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=newsnowlabs/runcvm:v1.7.0 sh
+```
+
+The [releases](https://github.com/newsnowlabs/runcvm/releases) are tagged `v<version>`, on Docker Hub (`newsnowlabs/runcvm:<tag>`) and on GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`).
+
 To build RunCVM from source and install that instead, see [Building](#building).
 
-This will:
-- Install the RunCVM software package to `/opt/runcvm` (installation elsewhere is currently unsupported)
-- For Docker support:
-  - Enable the RunCVM runtime, by setting `runtimes.runcvm.path` in `/etc/docker/daemon.json` to `/opt/runcvm/scripts/runcvm-runtime`, leaving any other runtimes there unchanged (see [Registering the runtime by hand](#registering-the-runtime-by-hand))
-  - Restart `dockerd`, if it can be detected how for your system (e.g. `systemctl restart docker`)
-  - Verify that RunCVM is recognised via `docker info`
-- For Podman support (experimental)
-  - Display instructions on patching `/etc/containers/containers.conf`
+The installation script:
+- Installs the RunCVM software package from the image to `/opt/runcvm` (installation elsewhere is currently unsupported)
+- Runs the installer in that package, `/opt/runcvm/scripts/runcvm-install-runtime.sh --no-dockerd`, so the remaining steps are those of the release installed, whichever version of the script was downloaded. In the version of RunCVM this README describes, the package's installer:
+  - For Docker support:
+    - Enables the RunCVM runtime, by setting `runtimes.runcvm.path` in `/etc/docker/daemon.json` to `/opt/runcvm/scripts/runcvm-runtime`, leaving any other runtimes there unchanged (see [Registering the runtime by hand](#registering-the-runtime-by-hand))
+    - Restarts `dockerd`, if it can be detected how for your system (e.g. `systemctl restart docker`)
+    - Verifies that RunCVM is recognised via `docker info`
+  - For Podman support (experimental):
+    - Displays instructions on patching `/etc/containers/containers.conf`
 
 Following installation, launch a basic test RunCVM Container/VM:
 
@@ -441,7 +450,7 @@ RunCVM works with Docker's default configuration. It also works with `"userland-
 To upgrade, follow this procedure:
 
 1. Stop all RunCVM containers.
-2. Run `/opt/runcvm/scripts/runcvm-install-runtime.sh` (or rerun the installation command - which runs the same script)
+2. Rerun the installation command, which installs the latest release, or the release named in `REPO` (see [Installation](#installation)), and runs that release's own installer.
 3. Start any RunCVM containers.
 
 ## Features and limitations
