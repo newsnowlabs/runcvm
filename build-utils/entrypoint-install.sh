@@ -42,7 +42,7 @@ and licensed under the Apache License, Version 2.0: see /opt/runcvm/LICENSE and 
 
 If this is your first time installing RunCVM on this server/VM, then:
 
-1. Run the following to update /etc/docker/daemon.conf and restart docker:
+1. Run the following to update /etc/docker/daemon.json and restart docker:
 
   sudo /opt/runcvm/scripts/runcvm-install-runtime.sh
 
