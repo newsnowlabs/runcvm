@@ -363,7 +363,7 @@ if [ "$RUNCVM_INIT" = "1" ]; then
   cat >/etc/inittab <<_EOE_
 $CONSOLE_DEVICE::respawn:-$RUNCVM_GUEST/scripts/runcvm-vm-start-wrapper
 null::respawn:$RUNCVM_GUEST/scripts/runcvm-vm-qemu-ga
-null::respawn:$RUNCVM_GUEST/usr/sbin/dropbear -REF -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
+null::respawn:$RUNCVM_GUEST/usr/sbin/dropbear -REF -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/usr/lib/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
 null::ctrlaltdel:$RUNCVM_GUEST/bin/poweroff
 null::restart:$RUNCVM_GUEST/bin/poweroff
 null::shutdown:$RUNCVM_GUEST/bin/poweroff
@@ -388,7 +388,7 @@ else
   # disable port forwarding. It runs commands with RunCVM's bash, and its sessions inherit its
   # environment, so it starts with an empty one: variables from the image, such as BASH_ENV,
   # would otherwise reach that bash.
-  busybox env -i $RUNCVM_GUEST/usr/sbin/dropbear -REF -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/tmp/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
+  busybox env -i $RUNCVM_GUEST/usr/sbin/dropbear -REF -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/usr/lib/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
 
   # Run init from the image
   # Pipe input/output from/to console device
