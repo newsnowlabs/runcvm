@@ -686,6 +686,12 @@ case "${RUNCVM_QEMU_ACCEL:-kvm}" in
     ;;
 esac
 
+# runcvm-runtime sets RUNCVM_KERNEL_FALLBACK to '<ID> <kernel>' when it found no kernel for the
+# image's distribution (its os-release ID), or any it names in ID_LIKE, and chose its default.
+if [ -n "$RUNCVM_KERNEL_FALLBACK" ]; then
+  echo "RunCVM: Warning: RunCVM has no kernel for the image's distribution ('${RUNCVM_KERNEL_FALLBACK% *}'), so is booting its '${RUNCVM_KERNEL_FALLBACK##* }' kernel; launch with --env=RUNCVM_KERNEL=<dist> to choose another" >&2
+fi
+
 # Software emulation (TCG) keeps a cache of translated code which, by default, may grow to
 # 1GiB. Size it to RUNCVM_QEMU_TCG_TB_MEM_SIZE (Mb), which runcvm-runtime adds to the
 # container's memory limit, keeping the container's memory limit aligned with QEMU's use.
