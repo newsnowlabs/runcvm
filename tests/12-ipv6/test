@@ -67,7 +67,8 @@ VM_IP6=$(docker exec $NODE-a sh -c "ip -o -6 addr show eth0 scope global | awk '
 check "VM has Docker-assigned IPv6 address" "$EXPECTED_IP6" "$VM_IP6" || true
 check_cmd "Docker assigned an IPv6 address" test -n "$EXPECTED_IP6" || true
 
-# Confirm the VM's IPv6 default route matches the network's gateway.
+# Confirm the VM's IPv6 default route matches the network's gateway. This needs Docker 29.0 or
+# later (see requires): earlier releases list no IPv6 gateway in the network's IPAM configuration.
 GATEWAYS=$(docker network inspect "$NETWORK" --format='{{range .IPAM.Config}}{{.Gateway}}{{"\n"}}{{end}}')
 EXPECTED_GW6=$(echo "$GATEWAYS" | grep ':' || true)
 VM_GW6=$(docker exec $NODE-a sh -c "ip -6 route show default | awk '{print \$3}'" 2>/dev/null || true)
