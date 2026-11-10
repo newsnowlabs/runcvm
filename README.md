@@ -19,7 +19,7 @@ RunCVM:
 
 ## Quick start
 
-Install RunCVM, on an x86-64 Linux host with Docker and KVM (see [System requirements](#system-requirements) and [Installation](#installation)):
+Install RunCVM, on an x86-64 Linux host with Docker and KVM (see [System requirements](#system-requirements) and [Installation](#installation), including on [Google Cloud](#install-on-google-cloud), [AWS](#install-on-aws) and [Azure](#install-on-azure-untested)):
 
 ```sh
 curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
