@@ -52,14 +52,14 @@ Launch Docker (from the `docker:dind` image) in a VM with 1G memory and a 1G ext
 
 ```console
 docker run -d --runtime=runcvm --init --name=dind1 --memory=1G --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,1G docker:dind
-docker exec dind1 docker run --rm hello-world
+docker exec dind1 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done; docker run --rm hello-world'
 ```
 
 Launch Docker in a VM with 2G memory and a 5G ext4-formatted backing file, stored in a dedicated Docker volume on the host, holding `/var/lib/docker` and `/var/lib/containerd`, so that Docker's images and containers persist when the Container/VM is removed and relaunched:
 
 ```console
 docker run -d --runtime=runcvm --init --name=dind2 --memory=2G --mount=type=volume,src=dind2-disks,dst=/disks --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,5G docker:dind
-docker exec dind2 docker run --rm hello-world
+docker exec dind2 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done; docker run --rm hello-world'
 ```
 
 Launch a 3-node Docker Swarm on a network with 9000 MTU and, on the swarm, an http global service:
@@ -544,7 +544,7 @@ docker run -d --runtime=runcvm --init --name=dind --memory=2g \
   --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,10G \
   docker:dind
 
-docker exec dind docker run --rm hello-world
+docker exec dind sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done; docker run --rm hello-world'
 ```
 
 In the keyed form, the same disk is `RUNCVM_DISKS=src=/disks/docker,dst=/var/lib/docker,dst=/var/lib/containerd,fs=ext4,size=10G`.
