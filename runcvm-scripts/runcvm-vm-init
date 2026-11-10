@@ -384,7 +384,7 @@ else
   # This VM's PID 1 may hold a terminal as its controlling terminal (as after a dracut initramfs's
   # systemd switches root to it), and giving it up, as runcvm-init and systemd each do, makes the
   # kernel send SIGHUP to PID 1's process group, which would otherwise include them. The session is
-  # created in the foreground, so exists before runcvm-init runs.
+  # created in the foreground, so it exists before runcvm-init runs.
   start_daemon() {
     busybox setsid $RUNCVM_GUEST/bin/bash -c '"$@" &>/dev/null &' start_daemon "$@"
   }

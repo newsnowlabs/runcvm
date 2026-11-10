@@ -14,7 +14,8 @@ For each kernel:
   booted; systemd reaches 'running' (or 'degraded', if some unit of the
   image's own fails in a VM); and the QEMU guest agent is still running.
 - With '-t', with and without --init: the workload's controlling terminal
-  is the console, its standard input, so that e.g. Ctrl-C reaches it.
+  is the console, which is also its standard input, so that e.g. Ctrl-C
+  reaches it.
 """
 
 import os
