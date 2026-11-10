@@ -704,6 +704,11 @@ if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
   else
     MACHINE+=(-cpu max -machine virt,gic-version=max,usb=off "${TCG_ACCEL[@]}")
   fi
+
+  # The virt machine has no USB controller of its own: RUNCVM_QEMU_USB=on adds an XHCI controller.
+  if [ "$RUNCVM_QEMU_USB" = "on" ]; then
+    MACHINE+=(-device qemu-xhci,id=usb)
+  fi
 else
   CMD="$(which qemu-system-x86_64)"
 
@@ -759,10 +764,22 @@ case "${RUNCVM_DISPLAY_MODE:-headless}" in
 
     # Creates a stdio backend connected to the virtual console.
     # Use with /dev/hvc0
-    CONSOLE+=(
-      -chardev stdio,id=char0,mux=off,signal=off
-      -device virtconsole,chardev=char0,id=console0
-    )
+    if [ "$RUNCVM_QEMU_ARCH" = "arm64" ] && [ "$RUNCVM_KERNEL_DEBUG" = "1" ]; then
+      # The arm64 VM's kernel has no console until its virtio console driver loads, so its early
+      # messages go to the virt machine's UART (ttyAMA0, see EARLY_CONSOLE_DEV), which shares
+      # stdio with the virtual console. The virtual console, attached last, receives the input.
+      CONSOLE+=(
+        -chardev stdio,id=char0,mux=on,signal=off
+        -serial chardev:char0
+        -device virtconsole,chardev=char0,id=console0
+      )
+      EARLY_CONSOLE_DEV="ttyAMA0"
+    else
+      CONSOLE+=(
+        -chardev stdio,id=char0,mux=off,signal=off
+        -device virtconsole,chardev=char0,id=console0
+      )
+    fi
 
     CONSOLE_DEV="hvc0"
     NOMODESET="1"
@@ -780,7 +797,12 @@ case "${RUNCVM_DISPLAY_MODE:-headless}" in
 
     # Set monitor escape key to CTRL-T to reduce risk of conflict (as default, CTRL-A, is  commonly used)
     CONSOLE+=(-echr 20)
-    CONSOLE_DEV="ttyS0"
+    # The serial port is x86's 16550 UART (ttyS0), or the arm64 virt machine's PL011 UART (ttyAMA0)
+    if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
+      CONSOLE_DEV="ttyAMA0"
+    else
+      CONSOLE_DEV="ttyS0"
+    fi
     NOMODESET="1"
     ;;
   vnc) # VNC + tty0
@@ -806,7 +828,18 @@ fi
 if [ -n "$RUNCVM_QEMU_VGA" ]; then
 
   # i.e. virtio, std, none
-  DISPLAY+=(-vga $RUNCVM_QEMU_VGA)
+  if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
+    # The arm64 virt machine has no VGA: its display devices are PCI devices without VGA, and it
+    # has no PS/2 keyboard, so a virtio keyboard takes its place.
+    case "$RUNCVM_QEMU_VGA" in
+      none) ;;
+      virtio) DISPLAY+=(-device virtio-gpu-pci -device virtio-keyboard-pci) ;;
+      std) DISPLAY+=(-device bochs-display -device virtio-keyboard-pci) ;;
+      *) error "Error: RUNCVM_QEMU_VGA '$RUNCVM_QEMU_VGA' is unsupported on arm64, which supports: none, std, virtio" ;;
+    esac
+  else
+    DISPLAY+=(-vga $RUNCVM_QEMU_VGA)
+  fi
 
   if [ "$RUNCVM_QEMU_VGA" != "none" ]; then
     NOMODESET="0" # Disable nomodeset if using a graphical console
@@ -892,7 +925,8 @@ APPEND+=(scsi_mod.scan=none tsc=reliable no_timer_check rcupdate.rcu_expedited=1
 APPEND+=(systemd.show_status=1)
 
 if [ "$RUNCVM_KERNEL_DEBUG" = "1" ]; then
-  APPEND+=(console=$CONSOLE_DEV)
+  # The last console named is /dev/console
+  APPEND+=(${EARLY_CONSOLE_DEV:+console=$EARLY_CONSOLE_DEV} console=$CONSOLE_DEV)
 else
   APPEND+=(quiet)
 fi

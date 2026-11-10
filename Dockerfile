@@ -361,11 +361,15 @@ ARG KERNEL_MODULE_COMPRESSION
 # The initrd must be built by initramfs-tools, not dracut (Ubuntu's default initrd generator), as
 # runcvm-runtime boots the Ubuntu kernel with initramfs-tools' arguments for a virtiofs root
 # (rootfstype=virtiofs root=runcvmfs).
+# The initrd holds only the modules listed (MODULES=list) that the kernel needs to mount the
+# virtiofs root, rather than most of the kernel's modules (initramfs-tools' default): a VM unpacks
+# its initrd into memory as it boots, before RunCVM's module loader loads anything else from the
+# bundled modules.
 RUN apt update && \
     DEB_ARCH=$(dpkg --print-architecture) && \
-    apt install -y linux-generic:${DEB_ARCH} initramfs-tools zstd xz-utils && \
-    echo 'virtiofs' >>/etc/initramfs-tools/modules && \
-    echo 'virtio_console' >>/etc/initramfs-tools/modules && \
+    apt install -y linux-generic:${DEB_ARCH} initramfs-tools zstd xz-utils binutils && \
+    printf '%s\n' virtio_pci virtiofs virtio_console >>/etc/initramfs-tools/modules && \
+    echo "MODULES=list" >/etc/initramfs-tools/conf.d/runcvm-modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
 # Ubuntu compresses its kernel modules with zstd, which busybox modprobe (used by runcvm-vm-init,
@@ -381,7 +385,13 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
       xargs -0 -r -n 64 -P "$(nproc)" sh -ec 'm=$1; shift; for f; do zstd -q -d --rm "$f"; [ "$m" = none ] || xz -q --check=crc32 --lzma2=dict=1MiB "${f%.zst}"; done' sh "$KERNEL_MODULE_COMPRESSION" && \
     depmod $BASENAME && \
     mkdir -p /opt/runcvm/kernels/ubuntu/$BASENAME && \
-    cp -aL /boot/vmlinuz-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/vmlinuz && \
+    # On arm64, Ubuntu's vmlinuz is a systemd-stub EFI application, which QEMU cannot boot, holding
+    # the kernel in its .linux section, with device trees for particular machines: take the kernel.
+    if objdump -h /boot/vmlinuz-$BASENAME 2>/dev/null | grep ' \.linux ' >/dev/null; then \
+      objcopy -O binary --only-section=.linux /boot/vmlinuz-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/vmlinuz; \
+    else \
+      cp -aL /boot/vmlinuz-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/vmlinuz; \
+    fi && \
     cp -aL /boot/initrd.img-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/initrd && \
     cp -a /lib/modules/ /opt/runcvm/kernels/ubuntu/$BASENAME/ && \
     cp -a /boot/config-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/modules/$BASENAME/config && \
