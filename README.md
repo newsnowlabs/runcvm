@@ -133,7 +133,7 @@ A hosted runner (4 vCPUs and 16 GB for public repositories) has room for a few C
 - **Very short-lived containers in large numbers.** Each Container/VM boots a kernel, which takes a few seconds, and runs a VM of its own, sized by its memory and CPU limits.
 - **Hosts without KVM, or not x86-64 Linux.** Without KVM, a Container/VM fails to start, unless it is allowed QEMU's software emulation, which is much slower (see [`RUNCVM_QEMU_ACCEL`](#--envruncvm_qemu_accelkvmautotcg)).
 - **Podman**, whose support is experimental.
-- **Workloads that rely on container features RunCVM does not provide**, such as networks connected to a running Container/VM. See [Features and limitations](#features-and-limitations).
+- **Workloads that rely on container features RunCVM does not provide**, such as adding networks to, or removing them from, a running Container/VM (i.e. using `docker network connect` and `disconnect`); networks may be attached at creation time, before the container is started, or after it is subsequently stopped. See [Features and limitations](#features-and-limitations).
 
 ## More examples
 
