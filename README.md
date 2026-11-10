@@ -362,7 +362,7 @@ RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. 
 - Command-line and image-embedded options for customising the a container's VM specifications, devices, kernel
 - Intelligent kernel selection, according to the distribution used in the image being launched
 - No external dependencies, except for Docker/Podman and relevant Linux kernel modules (`kvm` and `tun`)
-- Support multiple Docker network interfaces attached to a created (but not yet running) container using `docker run --network=<network>` and `docker network connect`
+- Support multiple Docker network interfaces attached to a container that is not running (created but not yet started, or stopped) using `docker run --network=<network>` and `docker network connect`
 - Dual-stack (IPv4 and IPv6) networking, where the host and Docker are already configured to support it
 
 ## Project ambitions
@@ -617,12 +617,12 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
    - Networking
       - [+] The default bridge network is supported
       - [+] Custom/user-defined networks specified using `--network` are supported, including Docker DNS resolution of container names and respect for custom network MTU
-      - [+] Multiple network interfaces - when attached via `docker run --network` or `docker network connect` (but only to a created and not yet running container) - are supported (including `scope=overlay` networks and those with multiple subnets)
+      - [+] Multiple network interfaces - when attached via `docker run --network`, or via `docker network connect` to a container that is not running (created but not yet started, or stopped) - are supported (including `scope=overlay` networks and those with multiple subnets); likewise, `docker network disconnect` on a container that is not running takes effect when it next starts
       - [+] `--publish` (or `-p`) is supported
       - [+] `--dns`, `--dns-option`, `--dns-search` are supported
       - [+] `--ip` is supported
       - [+] `--hostname` (or `-h`) is supported
-      - [-] `docker network connect` on a running container is not supported
+      - [-] `docker network connect` and `docker network disconnect` on a running container are not supported
       - [-] `--network=host` and `--network=container:name|id` are not supported (`--network=host` is rejected when the Container/VM is created)
       - [-] `--network=none`, and attaching only to `--internal` networks, are not supported: a Container/VM needs a network that provides a default route, over which `docker exec` reaches the VM
       - [+] Dual-stack (IPv4 and IPv6) networking is supported, automatically, where the host and Docker are already configured for IPv6 (see `--env=RUNCVM_IPV6=<0|1>`)
