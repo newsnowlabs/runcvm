@@ -403,6 +403,8 @@ RunCVM works with Docker's default configuration. It also works with `"userland-
 
 ### Install on AWS
 
+The commands below can all be run in [AWS CloudShell](https://docs.aws.amazon.com/cloudshell/latest/userguide/welcome.html), the browser-based shell in the AWS console, which has the AWS CLI installed and signed in to your account, and uses the console's current region. Run there, the security group allows SSH from CloudShell, and the key pair file is kept in CloudShell's home directory, so the `ssh` command below works from CloudShell too.
+
 RunCVM needs an EC2 instance with nested virtualisation, so that it has `/dev/kvm`: a bare-metal instance (`*.metal`), or a virtual instance of a type that supports nested virtualisation, launched with it enabled. The types that support it are Intel-based families such as `m7i`, `c7i`, `r7i`, `m8i`, `c8i` and `r8i` (AWS's [nested virtualisation guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/amazon-ec2-nested-virtualization.html) has the current list). To list them for a region:
 
 ```console
