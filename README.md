@@ -48,16 +48,18 @@ Launch with VNC:
 docker run --runtime=runcvm --name ubuntu2 --env=RUNCVM_DISPLAY_MODE=vnc -p 5900:5900 ubuntu
 ```
 
-Launch a VM with 1G memory and a 1G ext4-formatted backing file, stored in the underlying container's filesystem, holding `/var/lib/docker` and `/var/lib/containerd` (as `dockerd` needs: see [Running Docker in a RunCVM Container/VM](#running-docker-in-a-runcvm-containervm)):
+Launch Docker (from the `docker:dind` image) in a VM with 1G memory and a 1G ext4-formatted backing file, stored in the underlying container's filesystem, holding `/var/lib/docker` and `/var/lib/containerd` (as `dockerd` needs: see [Running Docker in a RunCVM Container/VM](#running-docker-in-a-runcvm-containervm)); then run a container within it:
 
 ```console
-docker run -it --runtime=runcvm --init --memory=1G --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,1G <docker-image>
+docker run -d --runtime=runcvm --init --name=dind1 --memory=1G --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,1G docker:dind
+docker exec dind1 docker run --rm hello-world
 ```
 
-Launch a VM with 2G memory and a 5G ext4-formatted backing file, stored in a dedicated Docker volume on the host, holding `/var/lib/docker` and `/var/lib/containerd`:
+Launch Docker in a VM with 2G memory and a 5G ext4-formatted backing file, stored in a dedicated Docker volume on the host, holding `/var/lib/docker` and `/var/lib/containerd`, so that Docker's images and containers persist when the Container/VM is removed and relaunched:
 
 ```console
-docker run -it --runtime=runcvm --init --memory=2G --mount=type=volume,src=runcvm-disks,dst=/disks --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,5G <docker-image>
+docker run -d --runtime=runcvm --init --name=dind2 --memory=2G --mount=type=volume,src=dind2-disks,dst=/disks --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,5G docker:dind
+docker exec dind2 docker run --rm hello-world
 ```
 
 Launch a 3-node Docker Swarm on a network with 9000 MTU and, on the swarm, an http global service:
@@ -557,10 +559,10 @@ Some points to bear in mind:
 
 ### Docker volumes mounted at `/var/lib/docker` and `/var/lib/containerd` (NOT RECOMMENDED)
 
-Instead of a disk, you can mount Docker volumes at `/var/lib/docker` and `/var/lib/containerd` and launch with `--env=RUNCVM_SYS_ADMIN=1`. This lets `dockerd` use overlay filesystems on the volumes, at the cost of security. It is _not recommended_, and is not covered by RunCVM's tests. e.g.
+Instead of a disk, you can mount Docker volumes at `/var/lib/docker` and `/var/lib/containerd` and launch with `--env=RUNCVM_SYS_ADMIN=1`. This lets `dockerd` use overlay filesystems on the volumes, at the cost of security. It is _not recommended_, and is not covered by RunCVM's automated tests. e.g.
 
 ```console
-docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker --mount=type=volume,src=mycontainerd1,dst=/var/lib/containerd --env=RUNCVM_SYS_ADMIN=1 <docker-image>
+docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker --mount=type=volume,src=mycontainerd1,dst=/var/lib/containerd --env=RUNCVM_SYS_ADMIN=1 docker:dind
 ```
 
 > N.B. This option adds `CAP_SYS_ADMIN` capabilities to the container and then launches `virtiofsd` with `-o modcaps=+sys_admin`.
@@ -885,7 +887,7 @@ This example behaves similarly, except that the `runcvm-disks` persistent Docker
 docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=/disks/data,/var/lib/docker:/var/lib/containerd:/home,ext4,40G' <docker-image>
 ```
 
-In this example, a single 40G backing file at `/disks/data`, in the `runcvm-disks` volume, holds `/var/lib/docker`, `/var/lib/containerd` and `/home`, in its directories `var-lib-docker`, `var-lib-containerd` and `home`.
+In this example, a single 40G backing file at `/disks/data`, in the `runcvm-disks` volume, holds `/var/lib/docker`, `/var/lib/containerd` and `/home`, in its directories `var-lib-docker`, `var-lib-containerd` and `home`. `<docker-image>` would typically run `dockerd`: e.g. `docker:dind`, or an image that runs Docker under systemd, like those in [System workloads](#system-workloads).
 
 The same disk, in the keyed form:
 
