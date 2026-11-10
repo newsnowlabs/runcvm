@@ -348,7 +348,17 @@ if [ "$COMMAND" = "create" ]; then
   ID="$1"
 
   CFG="$BUNDLE/config.json"
+
+  # A Kubernetes pod's sandbox container (CRI's "pause" container, which only holds the pod's
+  # namespaces) runs under runc as given; the pod's other containers run as Container/VMs.
+  if [ "$(jq -r '.annotations["io.kubernetes.cri.container-type"] // empty' "$CFG")" = "sandbox" ]; then
+    exec "$RUNC" "${COMMAND_LINE[@]}"
+  fi
+
+  # The image's root filesystem: the OCI spec allows root.path relative to the bundle, as
+  # containerd's CRI gives it (Docker and Podman give an absolute path).
   ROOT=$(jq -r .root.path $CFG)
+  [[ "$ROOT" = /* ]] || ROOT="$BUNDLE/$ROOT"
 
   # The container's environment, as given by Docker/Podman, for the workload (see below)
   WORKLOAD_ENV=$(jq -c '.process.env // []' "$CFG")
