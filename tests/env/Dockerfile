@@ -110,7 +110,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked <<_EOE_
 apt-get update
 apt-get install -y podman
-mkdir -p /etc/containers
+mkdir -p /etc/containers/registries.conf.d
 printf '[engine.runtimes]\nruncvm = ["/opt/runcvm/scripts/runcvm-runtime"]\n' >/etc/containers/containers.conf
 # Resolve short image names (e.g. alpine) on Docker Hub, as Docker does.
 printf 'unqualified-search-registries = ["docker.io"]\n' >/etc/containers/registries.conf.d/50-runcvm-l1-docker-io.conf
