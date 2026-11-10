@@ -493,7 +493,7 @@ When you have finished with it, terminate the instance, which also deletes its r
 aws ec2 terminate-instances --instance-ids $ID
 ```
 
-### Install on Azure
+### Install on Azure (Untested)
 
 RunCVM needs an Azure VM with nested virtualisation, so that it has `/dev/kvm`. Azure documents nested virtualisation as supported on, among others, its Dv5 and Dsv5 series (Intel): the "Feature support" table on each size series' page in the [Azure VM sizes documentation](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/overview) says whether that series supports it.
 
