@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.3-labs
 
-# Alpine version to build with
+# Alpine version to build RunCVM's own binaries and libraries with
 ARG ALPINE_VERSION=3.19
 
 # BuildKit predefines the platform args (TARGETARCH, TARGETPLATFORM) in the
@@ -9,6 +9,20 @@ ARG ALPINE_VERSION=3.19
 # that needs $TARGETARCH in a RUN declares ARG TARGETARCH after its own FROM
 # (see the "binaries" stage). Giving either a default here would override the
 # predefined value.
+
+# Alpine version whose kernel (linux-virt) RunCVM bundles as its Alpine and OpenWrt kernels, with
+# an initramfs built by that version's (patched) mkinitfs. It may differ from ALPINE_VERSION, but
+# the kernel's modules must stay loadable by ALPINE_VERSION's busybox modprobe, which
+# runcvm-vm-init uses.
+ARG ALPINE_KERNEL_VERSION=3.24
+
+# Compression of the Debian, Ubuntu, AlmaLinux, Fedora and openSUSE kernels' modules: 'xz' (the
+# default), which busybox modprobe (used by runcvm-vm-init) and the kmod of Debian 10 (Buster),
+# Ubuntu 20.04 LTS (Focal Fossa), the RHEL family's releases 7 and later, and current Fedora and
+# openSUSE releases read; or 'none', for images whose own modprobe reads only uncompressed
+# modules, such as Debian 9 (Stretch) and Ubuntu 18.04 LTS (Bionic Beaver). The Alpine and
+# OpenWrt kernels' modules are unaffected.
+ARG KERNEL_MODULE_COMPRESSION=xz
 
 # --- BUILD STAGE ---
 # Build base alpine-sdk image for later build stages
@@ -28,7 +42,22 @@ RUN apk update && apk add --no-cache alpine-sdk coreutils && \
       --branch ${ALPINE_VERSION}-stable \
       https://gitlab.alpinelinux.org/alpine/aports.git ~/aports && \
     cd ~/aports/ && \
-    git sparse-checkout set main/seabios main/dnsmasq main/dropbear main/mkinitfs
+    git sparse-checkout set main/seabios main/dnsmasq main/dropbear
+
+# --- BUILD STAGE ---
+# Build base alpine-sdk image, at ALPINE_KERNEL_VERSION, for the patched mkinitfs's build stage
+FROM alpine:$ALPINE_KERNEL_VERSION as alpine-sdk-kernel
+
+ARG ALPINE_KERNEL_VERSION
+
+RUN apk update && apk add --no-cache alpine-sdk coreutils && \
+    abuild-keygen -an && \
+    cp -a /root/.abuild/*.pub /etc/apk/keys && \
+    git clone --depth 1 --single-branch --filter=blob:none --sparse \
+      --branch ${ALPINE_KERNEL_VERSION}-stable \
+      https://gitlab.alpinelinux.org/alpine/aports.git ~/aports && \
+    cd ~/aports/ && \
+    git sparse-checkout set main/mkinitfs
 
 # --- BUILD STAGE ---
 # Build patched SeaBIOS packages (x86_64 only: SeaBIOS uses the ISA bus, which ARM64 lacks)
@@ -70,8 +99,9 @@ abuild -rFf
 EOF
 
 # --- BUILD STAGE ---
-# Build patched dropbear with epka plugin
-# that does not require /etc/passwd or PAM to run
+# Build patched dropbear with epka plugin, which accepts only the plugin's keys
+# and runs commands with RunCVM's bash, without reading the image's /etc/passwd,
+# /etc/shadow, /etc/shells or authorized_keys
 FROM alpine-sdk as alpine-dropbear
 
 ADD patches/dropbear/runcvm.patch /root/aports/main/dropbear/runcvm.patch
@@ -100,7 +130,7 @@ EOF
 # --- BUILD STAGE ---
 # Build patched mkinitfs/nlplug-findfs
 # with a shorter maximum device-event timeout than upstream (1s, not 5s), for faster boot
-FROM alpine-sdk as alpine-mkinitfs
+FROM alpine-sdk-kernel as alpine-mkinitfs
 
 ADD patches/mkinitfs/nlplug-findfs.patch /root/aports/main/mkinitfs/nlplug-findfs.patch
 
@@ -153,9 +183,14 @@ RUN apk update && \
         qemu-hw-display-virtio-vga \
         $UEFI_PKG \
         jq iproute2 netcat-openbsd blkid util-linux \
-        s6 dnsmasq iptables nftables \
+        s6 dnsmasq nftables \
         ncurses coreutils \
         patchelf
+
+# Install the packages of each filesystem that disks in RUNCVM_DISKS may have
+ADD runcvm-etc/disk-filesystems /tmp/disk-filesystems
+RUN packages=$(awk '$1 !~ /^#/ && NF && $3 != "-" { gsub(",", " ", $3); print $3 }' /tmp/disk-filesystems) && \
+    if [ -n "$packages" ]; then apk add --no-cache $packages; fi
 
 # Install patched SeaBIOS (x86_64 only: SeaBIOS is x86-specific)
 COPY --from=alpine-seabios /root/packages/main /tmp/seabios-pkgs/
@@ -175,9 +210,9 @@ RUN ALPINE_ARCH=$(uname -m) && \
 COPY --from=e2fsprogs /usr/local/sbin/mke2fs /sbin/mke2fs
 
 # Install patched dropbear
-# libepka_file.so must land in /tmp/dropbear/, where BUNDELF_EXTRA_LIBS expects it
+# dropbear's EPKA plugin, libepka_file.so, is bundled from /usr/lib/dropbear (see BUNDELF_EXTRA_LIBS)
 COPY --from=alpine-dropbear /root/packages/main /tmp/dropbear-pkgs/
-COPY --from=alpine-dropbear /usr/local/lib/libepka_file.so /tmp/dropbear/
+COPY --from=alpine-dropbear /usr/local/lib/libepka_file.so /usr/lib/dropbear/
 RUN ALPINE_ARCH=$(uname -m) && \
     apk add --allow-untrusted /tmp/dropbear-pkgs/$ALPINE_ARCH/dropbear-ssh*.apk \
                               /tmp/dropbear-pkgs/$ALPINE_ARCH/dropbear-dbclient*.apk \
@@ -185,15 +220,19 @@ RUN ALPINE_ARCH=$(uname -m) && \
 
 # Patch the binaries and set up symlinks
 COPY build-utils/make-bundelf-bundle.sh /usr/local/bin/make-bundelf-bundle.sh
-ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq xtables-legacy-multi nft xtables-nft-multi nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey"
-ENV BUNDELF_EXTRA_LIBS="/usr/lib/xtables /usr/libexec/coreutils /tmp/dropbear/libepka_file.so /usr/lib/qemu/*.so"
-ENV BUNDELF_EXTRA_SYSTEM_LIB_PATHS="/usr/lib/xtables"
+ENV BUNDELF_BINARIES="busybox bash jq ip nc mke2fs blkid findmnt dnsmasq nft mount s6-applyuidgid qemu-system-x86_64 qemu-ga /usr/lib/qemu/virtiofsd tput coreutils getent dropbear dbclient dropbearkey"
+ENV BUNDELF_EXTRA_LIBS="/usr/libexec/coreutils /usr/lib/dropbear/libepka_file.so /usr/lib/qemu/*.so"
 ENV BUNDELF_CODE_PATH="/opt/runcvm"
 ENV BUNDELF_EXEC_PATH="/.runcvm/guest"
 
+# Bundle, as well, each filesystem's mkfs command (field 6 of disk-filesystems), and the QEMU
+# system emulator for the target architecture
 RUN QEMU_BIN=$([ "$TARGETARCH" = "arm64" ] && echo qemu-system-aarch64 || echo qemu-system-x86_64) && \
-    export BUNDELF_BINARIES=$(echo "$BUNDELF_BINARIES" | sed "s/qemu-system-x86_64/$QEMU_BIN/") && \
-    /usr/local/bin/make-bundelf-bundle.sh --bundle && \
+    BUNDELF_BINARIES=$(echo "$BUNDELF_BINARIES" | sed "s/qemu-system-x86_64/$QEMU_BIN/") && \
+    for cmd in $(awk '$1 !~ /^#/ && NF { print $6 }' /tmp/disk-filesystems); do \
+      case " $BUNDELF_BINARIES " in *" $cmd "*) ;; *) BUNDELF_BINARIES="$BUNDELF_BINARIES $cmd" ;; esac; \
+    done && \
+    BUNDELF_BINARIES="$BUNDELF_BINARIES" /usr/local/bin/make-bundelf-bundle.sh --bundle && \
     mkdir -p $BUNDELF_CODE_PATH/bin && \
     cd $BUNDELF_CODE_PATH/bin && \
     for cmd in \
@@ -210,8 +249,9 @@ RUN QEMU_BIN=$([ "$TARGETARCH" = "arm64" ] && echo qemu-system-aarch64 || echo q
     else \
       cp -a /usr/share/OVMF $BUNDELF_CODE_PATH/usr/share; \
     fi && \
-    # Remove setuid/setgid bits from any/all binaries
-    chmod -R -s $BUNDELF_CODE_PATH/
+    # Remove setuid/setgid bits from any/all binaries; make the package readable by all users, and
+    # writable by root only (see the check at the end of the installer stage)
+    chmod -R -s,a+rX,go-w $BUNDELF_CODE_PATH/
 
 # --- BUILD STAGE ---
 # Build static runcvm-init
@@ -235,14 +275,15 @@ RUN cd /root/qemu-exit && cc -o /root/qemu-exit/qemu-exit -std=gnu99 -static -s 
 
 # --- BUILD STAGE ---
 # Build alpine kernel and initramfs with virtiofs module
-FROM alpine:$ALPINE_VERSION as alpine-kernel
+FROM alpine:$ALPINE_KERNEL_VERSION as alpine-kernel
 
 # Install patched mkinitfs
 # NB: no coreutils in this stage, so avoid relying on GNU cp semantics
 COPY --from=alpine-mkinitfs /root/packages/main /tmp/mkinitfs-pkgs/
 RUN apk add --allow-untrusted /tmp/mkinitfs-pkgs/$(uname -m)/*.apk
 RUN apk add --no-cache linux-virt
-RUN echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules && \
+RUN (grep -qxF 'kernel/fs/fuse/virtiofs*' /etc/mkinitfs/features.d/virtio.modules || \
+      echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules) && \
     sed -ri 's/\b(ata|nvme|raid|scsi|usb|cdrom|kms|mmc)\b//g; s/[ ]+/ /g' /etc/mkinitfs/mkinitfs.conf && \
     sed -ri 's/(nlplug-findfs)/\1 --timeout=1000/' /usr/share/mkinitfs/initramfs-init && \
     mkinitfs $(basename $(ls -d /lib/modules/*))
@@ -251,7 +292,7 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
     cp -a /boot/vmlinuz-virt /opt/runcvm/kernels/alpine/$BASENAME/vmlinuz && \
     cp -a /boot/initramfs-virt /opt/runcvm/kernels/alpine/$BASENAME/initrd && \
     cp -a /lib/modules/ /opt/runcvm/kernels/alpine/$BASENAME/ && \
-    cp -a /boot/config-virt /opt/runcvm/kernels/alpine/$BASENAME/modules/$BASENAME/config && \
+    cp -a /boot/config-$BASENAME /opt/runcvm/kernels/alpine/$BASENAME/modules/$BASENAME/config && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/alpine
 
 FROM alpine-kernel as openwrt-kernel
@@ -260,62 +301,156 @@ RUN mkdir -p /opt/runcvm/kernels/openwrt/$(basename $(ls -d /lib/modules/*))/mod
     cp -a /boot/vmlinuz-virt vmlinuz && \
     cp -a /boot/initramfs-virt initrd && \
     find /lib/modules/ -type f -name '*.ko*' -exec cp -a {} modules/$(basename $(ls -d /lib/modules/*)) \; && \
-    gunzip modules/$(basename $(ls -d /lib/modules/*))/*.gz && \
+    find modules/ -name '*.ko.gz' -exec gunzip {} + && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/openwrt
 
 # --- BUILD STAGE ---
-# Build Debian bookworm kernel and initramfs with virtiofs module
-FROM --platform=$TARGETPLATFORM debian:bookworm as debian-kernel
+# Build Debian trixie kernel and initramfs with virtiofs module
+FROM --platform=$TARGETPLATFORM debian:trixie as debian-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG KERNEL_MODULE_COMPRESSION
 RUN apt update && \
     DEB_ARCH=$(dpkg --print-architecture) && \
-    apt install -y linux-image-${DEB_ARCH}:${DEB_ARCH} && \
+    apt install -y linux-image-${DEB_ARCH}:${DEB_ARCH} xz-utils && \
     echo 'virtiofs' >>/etc/initramfs-tools/modules && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
+# Debian compresses its kernel modules with xz.
 RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
+    case "$KERNEL_MODULE_COMPRESSION" in \
+      xz) ;; \
+      none) find /lib/modules/$BASENAME -name '*.ko.xz' -print0 | xargs -0 -r -n 64 -P "$(nproc)" xz -q -d && \
+            depmod $BASENAME ;; \
+      *) echo "KERNEL_MODULE_COMPRESSION must be 'xz' or 'none'" >&2; exit 1 ;; \
+    esac && \
     mkdir -p /opt/runcvm/kernels/debian/$BASENAME && \
-    cp -aL /vmlinuz /opt/runcvm/kernels/debian/$BASENAME/vmlinuz && \
-    cp -aL /initrd.img /opt/runcvm/kernels/debian/$BASENAME/initrd && \
+    cp -aL /boot/vmlinuz-$BASENAME /opt/runcvm/kernels/debian/$BASENAME/vmlinuz && \
+    cp -aL /boot/initrd.img-$BASENAME /opt/runcvm/kernels/debian/$BASENAME/initrd && \
     cp -a /lib/modules/ /opt/runcvm/kernels/debian/$BASENAME/ && \
     cp -a /boot/config-$BASENAME /opt/runcvm/kernels/debian/$BASENAME/modules/$BASENAME/config && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/debian
 
 # --- BUILD STAGE ---
-# Build Ubuntu jammy kernel and initramfs with virtiofs module
-FROM --platform=$TARGETPLATFORM ubuntu:jammy as ubuntu-kernel
+# Build Ubuntu 26.04 (resolute) kernel and initramfs with virtiofs module
+FROM --platform=$TARGETPLATFORM ubuntu:resolute as ubuntu-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG KERNEL_MODULE_COMPRESSION
+# The initrd must be built by initramfs-tools, not dracut (Ubuntu's default initrd generator), as
+# runcvm-runtime boots the Ubuntu kernel with initramfs-tools' arguments for a virtiofs root
+# (rootfstype=virtiofs root=runcvmfs).
 RUN apt update && \
     DEB_ARCH=$(dpkg --print-architecture) && \
-    apt install -y linux-generic:${DEB_ARCH} && \
+    apt install -y linux-generic:${DEB_ARCH} initramfs-tools zstd xz-utils && \
     echo 'virtiofs' >>/etc/initramfs-tools/modules && \
     echo 'virtio_console' >>/etc/initramfs-tools/modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
+# Ubuntu compresses its kernel modules with zstd, which busybox modprobe (used by runcvm-vm-init,
+# and by busybox-based images) cannot read, so decompress them, and for 'xz' recompress them with
+# xz, which it can, as Debian's, AlmaLinux's and Fedora's modules are compressed, with the options the
+# kernel's own build uses for xz.
 RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
+    case "$KERNEL_MODULE_COMPRESSION" in \
+      xz|none) ;; \
+      *) echo "KERNEL_MODULE_COMPRESSION must be 'xz' or 'none'" >&2; exit 1 ;; \
+    esac && \
+    find /lib/modules/$BASENAME -name '*.ko.zst' -print0 | \
+      xargs -0 -r -n 64 -P "$(nproc)" sh -ec 'm=$1; shift; for f; do zstd -q -d --rm "$f"; [ "$m" = none ] || xz -q --check=crc32 --lzma2=dict=1MiB "${f%.zst}"; done' sh "$KERNEL_MODULE_COMPRESSION" && \
+    depmod $BASENAME && \
     mkdir -p /opt/runcvm/kernels/ubuntu/$BASENAME && \
-    cp -aL /boot/vmlinuz /opt/runcvm/kernels/ubuntu/$BASENAME/vmlinuz && \
-    cp -aL /boot/initrd.img /opt/runcvm/kernels/ubuntu/$BASENAME/initrd && \
+    cp -aL /boot/vmlinuz-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/vmlinuz && \
+    cp -aL /boot/initrd.img-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/initrd && \
     cp -a /lib/modules/ /opt/runcvm/kernels/ubuntu/$BASENAME/ && \
     cp -a /boot/config-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/modules/$BASENAME/config && \
     chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/ubuntu
 
 # --- BUILD STAGE ---
-# Build Oracle Linux kernel and initramfs with virtiofs module
-FROM --platform=$TARGETPLATFORM oraclelinux:9 as oracle-kernel
+# Build AlmaLinux 10 kernel and initramfs with virtiofs module: the kernel for images of the RHEL
+# family (see RUNCVM_KERNEL_RHEL_FAMILY in runcvm-runtime)
+FROM --platform=$TARGETPLATFORM almalinux:10 as almalinux-kernel
 
-RUN dnf install -y kernel
-ADD ./kernels/oraclelinux/addvirtiofs.conf /etc/dracut.conf.d/addvirtiofs.conf
-ADD ./kernels/oraclelinux/95virtiofs /usr/lib/dracut/modules.d/95virtiofs
-RUN dracut --force --kver $(basename /lib/modules/*) --kmoddir /lib/modules/*
-RUN mkdir -p /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*)) && \
-    mv /lib/modules/*/vmlinuz /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*))/vmlinuz && \
-    cp -aL /boot/initramfs* /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*))/initrd && \
-    cp -a /lib/modules/ /opt/runcvm/kernels/ol/$(basename $(ls -d /lib/modules/*))/ && \
-    chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/ol
+ARG KERNEL_MODULE_COMPRESSION
+# The almalinux image has no /boot, where the kernel package and dracut install the kernel and
+# initramfs. kernel-modules-extra provides br_netfilter, which k3s loads, as does dockerd with its
+# userland proxy or inter-container communication disabled.
+RUN mkdir -p /boot && dnf install -y kernel kernel-modules-extra xz
+ADD ./kernels/dracut/addvirtiofs.conf /etc/dracut.conf.d/addvirtiofs.conf
+ADD ./kernels/dracut/95virtiofs /usr/lib/dracut/modules.d/95virtiofs
+# AlmaLinux's dracut builds host-only initramfses by default, so build a generic one: the build
+# container's host is not the VM.
+RUN dracut --force --no-hostonly --no-hostonly-cmdline --kver $(basename /lib/modules/*) --kmoddir /lib/modules/*
+# AlmaLinux compresses its kernel modules with xz.
+RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
+    case "$KERNEL_MODULE_COMPRESSION" in \
+      xz) ;; \
+      none) find /lib/modules/$BASENAME -name '*.ko.xz' -print0 | xargs -0 -r -n 64 -P "$(nproc)" xz -q -d && \
+            depmod $BASENAME ;; \
+      *) echo "KERNEL_MODULE_COMPRESSION must be 'xz' or 'none'" >&2; exit 1 ;; \
+    esac && \
+    mkdir -p /opt/runcvm/kernels/almalinux/$BASENAME && \
+    mv /lib/modules/$BASENAME/vmlinuz /opt/runcvm/kernels/almalinux/$BASENAME/vmlinuz && \
+    cp -aL /boot/initramfs-$BASENAME.img /opt/runcvm/kernels/almalinux/$BASENAME/initrd && \
+    cp -a /lib/modules/ /opt/runcvm/kernels/almalinux/$BASENAME/ && \
+    chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/almalinux
+
+# --- BUILD STAGE ---
+# Build Fedora 45 kernel and initramfs with virtiofs module
+FROM fedora:45 as fedora-kernel
+
+ARG KERNEL_MODULE_COMPRESSION
+RUN dnf install -y kernel xz
+# Fedora's dracut has a virtiofs module of its own (74virtiofs), which takes precedence over
+# RunCVM's (kernels/dracut/95virtiofs), so it is used instead.
+ADD ./kernels/dracut/addvirtiofs.conf /etc/dracut.conf.d/addvirtiofs.conf
+# Fedora's dracut builds host-only initramfses by default, so build a generic one: the build
+# container's host is not the VM.
+RUN dracut --force --no-hostonly --no-hostonly-cmdline --kver $(basename /lib/modules/*) --kmoddir /lib/modules/*
+# Fedora compresses its kernel modules with xz.
+RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
+    case "$KERNEL_MODULE_COMPRESSION" in \
+      xz) ;; \
+      none) find /lib/modules/$BASENAME -name '*.ko.xz' -print0 | xargs -0 -r -n 64 -P "$(nproc)" xz -q -d && \
+            depmod $BASENAME ;; \
+      *) echo "KERNEL_MODULE_COMPRESSION must be 'xz' or 'none'" >&2; exit 1 ;; \
+    esac && \
+    mkdir -p /opt/runcvm/kernels/fedora/$BASENAME && \
+    mv /lib/modules/$BASENAME/vmlinuz /opt/runcvm/kernels/fedora/$BASENAME/vmlinuz && \
+    cp -aL /boot/initramfs-$BASENAME.img /opt/runcvm/kernels/fedora/$BASENAME/initrd && \
+    cp -a /lib/modules/ /opt/runcvm/kernels/fedora/$BASENAME/ && \
+    chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/fedora
+
+# --- BUILD STAGE ---
+# Build openSUSE Leap 16.1 kernel and initramfs with virtiofs module: the kernel for images of the
+# SUSE family (see RUNCVM_KERNEL_SUSE_FAMILY in runcvm-runtime)
+FROM opensuse/leap:16.1 as opensuse-kernel
+
+ARG KERNEL_MODULE_COMPRESSION
+RUN zypper -n install kernel-default dracut xz zstd
+ADD ./kernels/dracut/addvirtiofs.conf /etc/dracut.conf.d/addvirtiofs.conf
+ADD ./kernels/dracut/95virtiofs /usr/lib/dracut/modules.d/95virtiofs
+# openSUSE's dracut builds host-only initramfses by default, so build a generic one: the build
+# container's host is not the VM.
+RUN dracut --force --no-hostonly --no-hostonly-cmdline --kver $(basename /lib/modules/*) --kmoddir /lib/modules/*
+# openSUSE compresses its kernel modules with zstd, which busybox modprobe (used by
+# runcvm-vm-init) cannot read, so decompress them, and for 'xz' recompress them with xz, as the
+# Ubuntu stage does.
+RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
+    case "$KERNEL_MODULE_COMPRESSION" in \
+      xz|none) ;; \
+      *) echo "KERNEL_MODULE_COMPRESSION must be 'xz' or 'none'" >&2; exit 1 ;; \
+    esac && \
+    find /lib/modules/$BASENAME -name '*.ko.zst' -print0 | \
+      xargs -0 -r -n 64 -P "$(nproc)" sh -ec 'm=$1; shift; for f; do zstd -q -d --rm "$f"; [ "$m" = none ] || xz -q --check=crc32 --lzma2=dict=1MiB "${f%.zst}"; done' sh "$KERNEL_MODULE_COMPRESSION" && \
+    depmod $BASENAME && \
+    mkdir -p /opt/runcvm/kernels/opensuse/$BASENAME && \
+    mv /lib/modules/$BASENAME/vmlinuz /opt/runcvm/kernels/opensuse/$BASENAME/vmlinuz && \
+    rm -f /lib/modules/$BASENAME/vmlinux.xz && \
+    cp -aL /boot/initrd-$BASENAME /opt/runcvm/kernels/opensuse/$BASENAME/initrd && \
+    cp -a /lib/modules/ /opt/runcvm/kernels/opensuse/$BASENAME/ && \
+    chmod -R u+rwX,g+rX,o+rX /opt/runcvm/kernels/opensuse
 
 # --- BUILD STAGE ---
 # Build RunCVM installer
@@ -329,9 +464,20 @@ RUN apk update && apk add --no-cache rsync
 
 ADD runcvm-scripts /opt/runcvm/scripts/
 ADD runcvm-etc /opt/runcvm/etc/
+COPY LICENSE NOTICE /opt/runcvm/
 
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]
+
+# OCI labels. GitHub links the image's package on ghcr.io to the repository named by 'source', and
+# shows 'description'. build/build.sh gives the image's index on ghcr.io the same keys as
+# annotations, which GitHub reads in place of labels where a tag names an index. 'authors' names
+# the maintainer, in place of Docker's deprecated MAINTAINER instruction.
+LABEL org.opencontainers.image.source="https://github.com/newsnowlabs/runcvm" \
+      org.opencontainers.image.authors="Struan Bartlett (https://github.com/struanb)" \
+      org.opencontainers.image.vendor="NewsNow Labs" \
+      org.opencontainers.image.description="Experimental open-source container runtime for Linux that launches standard container workloads, and system workloads such as systemd, Docker and OpenWrt, in VMs" \
+      org.opencontainers.image.licenses="Apache-2.0"
 
 # Install needed kernels.
 # Comment out any kernels that are unneeded.
@@ -339,7 +485,9 @@ COPY --from=alpine-kernel /opt/runcvm/kernels/alpine /opt/runcvm/kernels/alpine
 COPY --from=debian-kernel /opt/runcvm/kernels/debian /opt/runcvm/kernels/debian
 COPY --from=openwrt-kernel /opt/runcvm/kernels/openwrt /opt/runcvm/kernels/openwrt
 COPY --from=ubuntu-kernel /opt/runcvm/kernels/ubuntu /opt/runcvm/kernels/ubuntu
-COPY --from=oracle-kernel /opt/runcvm/kernels/ol     /opt/runcvm/kernels/ol
+COPY --from=almalinux-kernel /opt/runcvm/kernels/almalinux /opt/runcvm/kernels/almalinux
+COPY --from=fedora-kernel /opt/runcvm/kernels/fedora /opt/runcvm/kernels/fedora
+COPY --from=opensuse-kernel /opt/runcvm/kernels/opensuse /opt/runcvm/kernels/opensuse
 
 # Add 'latest' symlinks for available kernels
 RUN for d in /opt/runcvm/kernels/*; do \
@@ -347,3 +495,11 @@ RUN for d in /opt/runcvm/kernels/*; do \
       tgt="$(ls -d */ 2>/dev/null | sed 's:/$::' | grep -v '^latest$' | sort -Vr | head -n 1)"; \
       [ -n "$tgt" ] && ln -sfn "$tgt" latest; \
     done
+
+# Every file in the package must be readable, and every directory searchable, by all users, as
+# RunCVM's binaries load their libraries (and Podman may run the runtime) as users other than root;
+# and everything writable by root only, as the VM's dropbear, running as root, loads its plugin
+# from the package.
+RUN bad=$(find /opt/runcvm ! -type l \( ! -perm -o=r -o -type d ! -perm -o=x -o -perm /022 \)) || \
+      { echo "Checking permissions in /opt/runcvm failed" >&2; exit 1; } && \
+    [ -z "$bad" ] || { echo "Files with the wrong permissions in /opt/runcvm:" >&2; echo "$bad" | head -20 >&2; exit 1; }

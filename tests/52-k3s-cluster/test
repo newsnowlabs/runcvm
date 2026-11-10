@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""A three-node k3s cluster of RunCVM Container/VMs, from compose.yaml.
+
+compose.yaml runs the stock rancher/k3s image as three Container/VMs on one
+Docker network: a server and two agents, each with a RUNCVM_DISKS disk for
+containerd and kubelet. The test loads the images in images.txt into every
+node (pulled on the host, so no node downloads anything), starts the
+cluster, deploys manifest.yaml, and checks that:
+
+- all three nodes are Ready;
+- the web Deployment runs one pod on each node;
+- each pod reaches the other pods by their pod addresses, across nodes
+  (over flannel's VXLAN network between the VMs);
+- a pod reaches the web Service by its name, through CoreDNS;
+- a container on the Docker network, run with runc, reaches the
+  web-nodeport Service on each node's port 30080.
+"""
+
+import atexit
+import json
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SLOW = t.ACCEL == "tcg"
+READY_TIMEOUT = 1500 if SLOW else 300
+NODES = ["server", "agent-1", "agent-2"]
+KUBECTL = ["kubectl", "--kubeconfig", "/etc/rancher/k3s/k3s.yaml"]
+
+project = t.unique("k3s").lower().replace(".", "-")
+env = dict(os.environ, K3S_PROJECT=project, RUNCVM_TEST_NAME=t.TEST_NAME, RUNCVM_TEST_RUN_ID=t.RUN_ID,
+           RUNCVM_QEMU_ACCEL=t.ACCEL or "kvm")
+
+
+def compose(*args, check=False, timeout=None):
+    return subprocess.run(["docker", "compose", "-f", os.path.join(HERE, "compose.yaml"), *args], env=env,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
+                          check=check, timeout=timeout)
+
+
+def kubectl(*args, timeout=60):
+    """Runs kubectl on the server node, through 'docker exec' into its VM."""
+    return t.docker("exec", "%s-server-1" % project, *KUBECTL, *args, timeout=timeout)
+
+
+def down():
+    r = compose("down", "--volumes", "--timeout", "30", timeout=300)
+    if r.returncode != 0:
+        t.log("docker compose down: %s" % r.stdout)
+
+
+atexit.register(down)
+
+# Load the images into the images volume, as one archive that k3s imports as each node starts.
+images = [line.split()[0] for line in open(os.path.join(HERE, "images.txt"))
+          if line.strip() and not line.startswith("#")]
+pulled = all(t.docker("pull", "-q", image, timeout=600).returncode == 0 for image in images)
+if not t.check("images in images.txt pulled", True, pulled):
+    t.finish()
+r = compose("create", timeout=600)
+if not t.check("cluster created (docker compose create)", 0, r.returncode):
+    t.log(r.stdout)
+    t.finish()
+save = subprocess.Popen(["docker", "save", *images], stdout=subprocess.PIPE)
+load = subprocess.run(["docker", "run", "--rm", "-i", *t.labels(), "-v", "%s_images:/images" % project,
+                       "busybox:1.37", "sh", "-c", "cat >/images/images.tar"], stdin=save.stdout, timeout=600)
+save.stdout.close()
+if not t.check("images loaded into the images volume", True,
+               save.wait(timeout=60) == 0 and load.returncode == 0):
+    t.finish()
+
+r = compose("up", "-d", timeout=600)
+if not t.check("cluster starts (docker compose up)", 0, r.returncode):
+    t.log(r.stdout)
+    t.finish()
+
+
+def ready_nodes():
+    r = kubectl("get", "nodes", "-o", "json")
+    if r.returncode != 0:
+        return []
+    return [n["metadata"]["name"] for n in json.loads(r.stdout)["items"]
+            if any(c["type"] == "Ready" and c["status"] == "True" for c in n["status"]["conditions"])]
+
+
+if not t.check_cmd("all three nodes are Ready", lambda: t.wait_for(
+        "three Ready nodes", READY_TIMEOUT, lambda: sorted(ready_nodes()) == sorted(NODES), interval=5)):
+    t.log("nodes: %s" % kubectl("get", "nodes", "-o", "wide").stdout)
+    for node in NODES:
+        t.log("%s's log (last 30 lines):\n%s" % (node, "\n".join(
+            compose("logs", "--no-log-prefix", node, timeout=60).stdout.splitlines()[-30:])))
+    t.finish()
+
+with open(os.path.join(HERE, "manifest.yaml")) as f:
+    r = t.docker("exec", "-i", "%s-server-1" % project, *KUBECTL, "apply", "-f", "-", input=f.read(), timeout=60)
+t.check("manifest applies", 0, r.returncode)
+
+
+def pods():
+    r = kubectl("get", "pods", "-l", "app=web", "-o", "json")
+    if r.returncode != 0:
+        return []
+    return [p for p in json.loads(r.stdout)["items"]
+            if any(c["type"] == "Ready" and c["status"] == "True" for c in p["status"].get("conditions", []))]
+
+
+if not t.check_cmd("three web pods are Ready", lambda: t.wait_for(
+        "three Ready web pods", READY_TIMEOUT, lambda: len(pods()) == 3, interval=5)):
+    t.log("pods: %s" % kubectl("get", "pods", "-A", "-o", "wide").stdout)
+    t.log("events: %s" % kubectl("get", "events", "-A").stdout)
+    t.finish()
+
+web = pods()
+t.check("one web pod on each node", sorted(NODES), sorted(p["spec"]["nodeName"] for p in web))
+
+# Each pod fetches every other pod's page by its pod address: each answers with its own name.
+for src in web:
+    for dst in web:
+        if src is dst:
+            continue
+        desc = "pod on %s reaches pod on %s by its address" % (src["spec"]["nodeName"], dst["spec"]["nodeName"])
+        r = kubectl("exec", src["metadata"]["name"], "--", "wget", "-qO-", "-T", "10",
+                    "http://%s/" % dst["status"]["podIP"])
+        t.check(desc, dst["metadata"]["name"], r.stdout.strip())
+
+names = sorted(p["metadata"]["name"] for p in web)
+r = kubectl("exec", web[0]["metadata"]["name"], "--", "wget", "-qO-", "-T", "10",
+            "http://web.default.svc.cluster.local/")
+t.check("a pod reaches the web Service by name (through CoreDNS)", True, r.stdout.strip() in names)
+
+# A runc container on the cluster's Docker network reaches the NodePort Service on each node.
+for node in NODES:
+    r = t.docker("run", "--rm", *t.labels(), "--runtime=runc", "--network", "%s_default" % project, "busybox:1.37",
+                 "wget", "-qO-", "-T", "10", "http://%s:30080/" % node, timeout=60)
+    t.check("NodePort 30080 on %s answers from outside the cluster" % node, True, r.stdout.strip() in names)
+
+t.finish()

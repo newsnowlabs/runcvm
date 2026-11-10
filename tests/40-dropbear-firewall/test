@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""RunCVM's rule, in the container's network namespace, that keeps others from dropbear.
+
+A Container/VM, with and without --init, and a runc peer share a user-defined network. The VM's
+dropbear, which serves 'docker exec', listens on port 22222 on every address, and RunCVM's nft
+table 'bridge runcvm' in the container drops TCP to that port in every frame bridged to the VM:
+
+- the peer reaches a port the VM's workload listens on (8080), so the network is working;
+- the peer cannot connect to port 22222 on the VM's address;
+- 'docker exec' into the VM still works.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+SSHD_PORT = 22222
+LISTEN = "while true; do echo open | nc -l -p 8080; done"
+
+network = t.unique("net")
+t.docker("network", "create", *t.labels(), network, check=True)
+t.cleanup_network(network)
+
+peer = t.unique("peer")
+t.cleanup_container(peer)
+t.docker("run", "-d", "--name", peer, *t.labels(), "--runtime=runc", "--network", network,
+         "alpine", "sleep", "600", check=True)
+
+
+def run(init):
+    label = "init" if init else "noinit"
+    name = t.unique("vm-" + label)
+    t.cleanup_container(name)
+    results = {}
+    r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 *(["--init"] if init else []), "--network", network, "alpine", "sh", "-c", LISTEN)
+    if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
+        results["error"] = r.stdout + t.docker("logs", name).stdout
+        return results
+
+    address = t.docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                       name).stdout.strip()
+    results["workload-port"] = t.docker("exec", peer, "nc", "-w", "5", address, "8080").stdout.strip()
+    results["dropbear-port"] = t.docker("exec", peer, "nc", "-z", "-w", "5", address,
+                                        str(SSHD_PORT)).returncode
+    results["exec"] = t.docker("exec", name, "echo", "exec-ok").stdout.strip()
+    return results
+
+
+t.param("init", "no, yes")
+for init, results in zip((False, True), t.parallel(run, (False, True))):
+    mode = "--init" if init else "no --init"
+    if "error" in results:
+        t.check("%s: Container/VM started" % mode, True, False)
+        t.log(results["error"])
+        continue
+    t.check("%s: peer reaches the workload's port 8080" % mode, "open", results["workload-port"])
+    t.check("%s: peer cannot connect to dropbear's port %d (nc exit status non-zero)" % (mode, SSHD_PORT),
+            True, results["dropbear-port"] != 0)
+    t.check("%s: docker exec works" % mode, "exec-ok", results["exec"])
+
+t.finish()

@@ -1,0 +1,51 @@
+# A three-node k3s cluster, each node a RunCVM Container/VM booted from the stock rancher/k3s
+# image: a server, which also runs workloads, and two agents. See README.md for running it by
+# hand; tests/52-k3s-cluster/test runs it as an integration test.
+#
+# Each node needs:
+# - a RUNCVM_DISKS disk for containerd's and kubelet's directories: containerd's overlayfs
+#   snapshotter cannot use the VM's virtiofs root as its upper layer, and kubelet reads its
+#   directory's filesystem statistics from a block device;
+# - a kernel from RunCVM: the image's os-release names no distribution, so RUNCVM_KERNEL picks
+#   Debian's.
+# The kernel loads the modules k3s needs (overlay, br_netfilter, vxlan, netfilter's) on demand.
+
+name: ${K3S_PROJECT:-runcvm-k3s}
+
+x-node: &node
+  image: rancher/k3s:${K3S_VERSION:-v1.34.1-k3s1}
+  runtime: runcvm
+  mem_limit: ${K3S_NODE_MEMORY:-1536m}
+  cpus: 2
+  environment:
+    RUNCVM_KERNEL: debian
+    RUNCVM_DISKS: /disks/k3s,/var/lib/rancher/k3s/agent/containerd:/var/lib/kubelet,ext4,4G
+    RUNCVM_QEMU_ACCEL: ${RUNCVM_QEMU_ACCEL:-kvm}
+    K3S_TOKEN: ${K3S_TOKEN:-runcvm-k3s-example}
+  volumes:
+    # Image archives that k3s imports into each node's containerd as it starts (see images.txt).
+    - images:/var/lib/rancher/k3s/agent/images:ro
+  labels: &labels
+    runcvm-test.run: ${RUNCVM_TEST_RUN_ID:-}
+    runcvm-test.test: ${RUNCVM_TEST_NAME:-}
+
+services:
+  server:
+    <<: *node
+    command: server --node-name=server --disable=traefik,metrics-server,servicelb,local-storage
+  agent-1:
+    <<: *node
+    command: agent --server=https://server:6443 --node-name=agent-1
+    depends_on: [server]
+  agent-2:
+    <<: *node
+    command: agent --server=https://server:6443 --node-name=agent-2
+    depends_on: [server]
+
+volumes:
+  images:
+    labels: *labels
+
+networks:
+  default:
+    labels: *labels

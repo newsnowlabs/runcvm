@@ -1,0 +1,11 @@
+#!/bin/sh
+# Run by runcvm-l1-unsupported.service when L1 was launched with arguments: batch mode is not
+# implemented by this image. Reports this, sets L1's exit status to 2, and leaves the unit to
+# power L1 off.
+
+args=$(tr '\0' ' ' </etc/runcvm-l1/args | sed 's/ $//')
+echo "runcvm-l1: launched with arguments ($args): batch mode is not implemented in this image;" \
+  "launch L1 with no arguments for dev mode. Powering off with exit status 2."
+
+# RunCVM's runcvm-ctr-exit takes the Container/VM's exit status from this file.
+echo 2 >/.runcvm/exitcode

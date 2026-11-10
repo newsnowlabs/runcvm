@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""RUNCVM_DISKS: prealloc=on and prealloc=off.
+
+For ext4, which mke2fs formats and populates in the container, and xfs,
+which is formatted empty and populated in the VM:
+
+- With prealloc=on, the new disk's backing file has every block allocated
+  once the VM has booted, and still has after the VM writes and removes a
+  file, syncs and runs fstrim: QEMU ignores the VM's discards and writes its
+  zeroes as data.
+- With prealloc=off (the default), the backing file is sparse, and stays so
+  after the same writes and fstrim.
+- An existing sparse disk, attached to a new Container/VM with
+  prealloc=on, has every block allocated, and keeps its contents.
+
+The backing file's allocation is read with stat, from a runc container
+sharing its volume.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+IMAGE = "alpine"
+# XFS needs at least 300M.
+SIZES = {"ext4": 64 << 20, "xfs": 400 << 20}
+FILESYSTEMS = tuple(SIZES)
+
+
+def allocated(volume):
+    """Return (bytes allocated, apparent size) of the backing file /disks/d in VOLUME."""
+    r = t.docker("run", "--rm", *t.labels(), "--runtime=runc", "--network=none", "-v", volume + ":/disks",
+                 IMAGE, "stat", "-c", "%b %B %s", "/disks/d")
+    try:
+        blocks, unit, size = (int(n) for n in r.stdout.split())
+        return blocks * unit, size
+    except ValueError:
+        t.log("stat failed: %s" % r.stdout)
+        return None, None
+
+
+def start(name, volume, spec):
+    t.cleanup_container(name)
+    r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 "--mount", "type=volume,src=%s,dst=/disks" % volume, "--env", "RUNCVM_DISKS=" + spec,
+                 IMAGE, "sleep", "infinity")
+    if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
+        return r.stdout + t.docker("logs", name).stdout
+    return None
+
+
+def churn(name):
+    """Write, remove and discard 16M of data on the disk; return fstrim's exit status."""
+    t.docker("exec", name, "sh", "-c",
+             "dd if=/dev/urandom of=/srv/d/churn bs=1M count=16 2>/dev/null && sync && rm /srv/d/churn && sync")
+    return t.docker("exec", name, "fstrim", "/srv/d").returncode
+
+
+def run(item):
+    fs, prealloc = item
+    label = "%s-%s" % (fs, prealloc)
+    size = SIZES[fs]
+    volume = t.unique("disk-prealloc-" + label)
+    t.volume_create(volume)
+    name = t.unique("disk-prealloc-" + label)
+    results = {}
+
+    error = start(name, volume, "/disks/d,/srv/d,%s,%d,prealloc=%s" % (fs, size, prealloc))
+    if error:
+        results["error"] = error
+        return results
+    results["boot"] = allocated(volume)
+    results["fstrim"] = churn(name)
+    results["churned"] = allocated(volume)
+
+    if prealloc == "off":
+        # The same disk, now sparse, attached to a new Container/VM with prealloc=on.
+        t.docker("exec", name, "sh", "-c", "echo kept >/srv/d/marker && sync")
+        t.docker("stop", "-t", "30", name)
+        t.docker("rm", name)
+        error = start(name, volume, "src=/disks/d,dst=/srv/d,fs=%s,prealloc=on" % fs)
+        if error:
+            results["convert-error"] = error
+            return results
+        results["converted"] = allocated(volume)
+        results["marker"] = t.docker("exec", name, "cat", "/srv/d/marker").stdout.strip()
+    return results
+
+
+items = [(fs, prealloc) for fs in FILESYSTEMS for prealloc in ("on", "off")]
+t.param("fs", ", ".join(FILESYSTEMS))
+t.param("prealloc", "on, off")
+for (fs, prealloc), results in zip(items, t.parallel(run, items)):
+    mode = "%s, prealloc=%s" % (fs, prealloc)
+    size = SIZES[fs]
+
+    if "error" in results:
+        t.check("%s: Container/VM started" % mode, True, False)
+        t.log(results["error"])
+        continue
+
+    boot, apparent = results["boot"]
+    t.check("%s: backing file is the disk's size" % mode, size, apparent)
+    churned, _ = results["churned"]
+    if prealloc == "on":
+        t.check("%s: backing file fully allocated once booted" % mode, True, boot is not None and boot >= size)
+        t.check("%s: still fully allocated after writes, removal and fstrim" % mode, True,
+                churned is not None and churned >= size)
+    else:
+        t.check("%s: backing file sparse once booted" % mode, True, boot is not None and boot < size)
+        t.check("%s: fstrim succeeds" % mode, 0, results["fstrim"])
+        t.check("%s: still sparse after writes, removal and fstrim" % mode, True,
+                churned is not None and churned < size)
+
+        if "convert-error" in results:
+            t.check("%s: Container/VM with prealloc=on started on the existing disk" % mode, True, False)
+            t.log(results["convert-error"])
+            continue
+        converted, _ = results["converted"]
+        t.check("%s: existing disk fully allocated with prealloc=on" % mode, True,
+                converted is not None and converted >= size)
+        t.check("%s: existing disk keeps its contents" % mode, "kept", results["marker"])
+
+t.finish()

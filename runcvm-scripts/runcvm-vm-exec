@@ -1,9 +1,10 @@
 #!/.runcvm/guest/bin/bash
 
-# Runs before runcvm-ctr-defaults is loaded (RUNCVM_GUEST is not yet set), with dropbear's PATH,
-# so must name RunCVM's own 'tr' explicitly.
-from_bin() {
-  /.runcvm/guest/bin/tr '\200\201\202\203\204\205' "\011\012\040\047\042\134"
+# Decodes runcvm-ctr-exec's encoding: base64 of NUL-terminated values. Runs before
+# runcvm-ctr-defaults is loaded (RUNCVM_GUEST is not yet set), with dropbear's PATH, so must name
+# RunCVM's own busybox explicitly.
+decode() {
+  /.runcvm/guest/bin/busybox base64 -d
 }
 
 error() {
@@ -12,17 +13,17 @@ error() {
 }
 
 uidgid="$1"
-cwd_bin="$2"
+cwd_enc="$2"
 shift 2
 
 IFS=':' read -r uid gid additionalGids <<< "$uidgid"
 
-args_bin="$1"
-env_bin="$2"
+args_enc="$1"
+env_enc="$2"
 
-mapfile -t args < <(echo -n "$args_bin" | from_bin)
-mapfile -t env < <(echo -n "$env_bin" | from_bin)
-cwd=$(echo -n "$cwd_bin" | from_bin)
+mapfile -t -d '' args < <(echo -n "$args_enc" | decode)
+mapfile -t -d '' env < <(echo -n "$env_enc" | decode)
+IFS= read -r -d '' cwd < <(echo -n "$cwd_enc" | decode)
 
 cd "$cwd" 2>/dev/null && unset OLDPWD || error
 

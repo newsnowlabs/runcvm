@@ -20,6 +20,7 @@ RUNCVM_ENV_VARS=(
   RUNCVM_CPUS
   RUNCVM_DISKS
   RUNCVM_DISPLAY_MODE
+  RUNCVM_DNS_IP
   RUNCVM_GUEST
   RUNCVM_HAS_HOME
   RUNCVM_HUGETLB
@@ -28,7 +29,9 @@ RUNCVM_ENV_VARS=(
   RUNCVM_KERNEL
   RUNCVM_KERNEL_APPEND
   RUNCVM_KERNEL_DEBUG
+  RUNCVM_KERNEL_FALLBACK
   RUNCVM_KERNEL_INITRAMFS_PATH
+  RUNCVM_KERNEL_MODULES
   RUNCVM_KERNEL_MOUNT_LIB_MODULES
   RUNCVM_KERNEL_PATH
   RUNCVM_KERNEL_ROOT
@@ -79,6 +82,35 @@ workload_env() {
   _entries=("${_kept[@]}")
 }
 
+# disk_fs <fs>
+# Looks up filesystem <fs> in $RUNCVM_GUEST/etc/disk-filesystems, the filesystems that disks in
+# RUNCVM_DISKS may have, setting DISK_FS_MODULES (an array of kernel modules), DISK_FS_LABEL_OPT,
+# DISK_FS_SUBDIRS_LABEL and DISK_FS_MKFS (an array: the mkfs command and its options). Returns 1
+# if <fs> is not listed. Fields are split at whitespace, whatever the caller's IFS.
+disk_fs() {
+  local fs modules packages label_opt label mkfs
+  local IFS=$' \t\n'
+
+  while read -r fs modules packages label_opt label mkfs
+  do
+    [[ -z "$fs" || "$fs" = \#* || "$fs" != "$1" ]] && continue
+    IFS=',' read -r -a DISK_FS_MODULES <<< "$modules"
+    DISK_FS_LABEL_OPT="$label_opt"
+    DISK_FS_SUBDIRS_LABEL="$label"
+    read -r -a DISK_FS_MKFS <<< "$mkfs"
+    return 0
+  done <"$RUNCVM_GUEST/etc/disk-filesystems"
+
+  return 1
+}
+
+# disk_fs_list <field>
+# Prints field <field> (1, the name; 5, the subdirs label) of each filesystem in
+# $RUNCVM_GUEST/etc/disk-filesystems, one per line.
+disk_fs_list() {
+  awk -v f="$1" '$1 !~ /^#/ && NF { print $f }' "$RUNCVM_GUEST/etc/disk-filesystems"
+}
+
 load_network() {
   local if="${1:-default}"
   [ -d /.runcvm/network/devices ] && [ -s /.runcvm/network/devices/$if ] || return 1
@@ -102,10 +134,12 @@ load_network6() {
   return 0
 }
 
+# Prints the path of command $1 in RunCVM's own tool directories (RUNCVM_PATH), whatever the
+# caller's IFS; returns 1 if it is not there.
 which() {
-  local cmd="$1"
-  local WHICH_PATH="${RUNCVM_PATH//:/ }" # Replace ':' with ' '
-  for p in $WHICH_PATH; do [ -x "$p/$cmd" ] && echo "$p/$cmd" && return 0; done
+  local cmd="$1" p
+  local IFS=':'
+  for p in $RUNCVM_PATH; do [ -x "$p/$cmd" ] && echo "$p/$cmd" && return 0; done
   return 1
 }
 
@@ -138,6 +172,7 @@ create_aliases() {
     mke2fs
     mount
     nc
+    nft
     poweroff
     ps
     qemu-ga
@@ -150,8 +185,6 @@ create_aliases() {
     sysctl
     touch
     tr
-    xtables-legacy-multi
-    xtables-nft-multi
   )
 
   local cmd

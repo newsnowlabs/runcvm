@@ -1,0 +1,15 @@
+[Unit]
+Description=RunCVM L1: report an unsupported mode and power off with exit status 2
+Documentation=file:/usr/local/share/doc/runcvm-l1/README.md
+After=basic.target
+SuccessAction=poweroff
+FailureAction=poweroff
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/runcvm-l1-unsupported
+# journald forwards messages of level warning and above to the console (see
+# /etc/systemd/journald.conf.d/90-runcvm-l1.conf), which the container's stdout shows.
+SyslogLevel=warning
+StandardOutput=journal+console
+StandardError=journal+console
