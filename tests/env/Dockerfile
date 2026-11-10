@@ -104,6 +104,18 @@ COPY --from=runcvm /opt/runcvm /opt/runcvm
 RUN rm -f /etc/init.d/docker && \
     sh /opt/runcvm/scripts/runcvm-install-runtime.sh --no-dockerd
 
+# Podman (Ubuntu's package), alongside Docker, with RunCVM registered as its 'runcvm' runtime, for
+# 'tests/run --engine podman'. It uses the runc that Docker's containerd.io package installs.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked <<_EOE_
+apt-get update
+apt-get install -y podman
+mkdir -p /etc/containers
+printf '[engine.runtimes]\nruncvm = ["/opt/runcvm/scripts/runcvm-runtime"]\n' >/etc/containers/containers.conf
+# Resolve short image names (e.g. alpine) on Docker Hub, as Docker does.
+printf 'unqualified-search-registries = ["docker.io"]\n' >/etc/containers/registries.conf.d/50-runcvm-l1-docker-io.conf
+_EOE_
+
 # Claude Code (optional): installed for the runcvm user when CLAUDE_CODE_VERSION is set, with
 # CLAUDE_CODE_SHA256 the SHA-256 of that version's linux-x64 binary (from the version's
 # manifest.json; see README.md). It reads its API key from /secrets/anthropic-api-key, a read-only

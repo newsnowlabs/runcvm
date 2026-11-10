@@ -131,6 +131,7 @@ A generator decides the mode before any unit starts. For each further mode it ne
 - **Base:** Ubuntu 24.04 LTS (`ubuntu:24.04`).
 - **Everyday tools:** systemd, udev, D-Bus, git, Python 3 (for `tests/run`), kmod, iproute2, jq, curl, sudo, procps, psmisc and less.
 - **Docker:** Docker CE from Docker's own repository (see [Building](#building)), with the buildx and compose plugins. buildx provides the BuildKit that `./build/build.sh` needs.
+- **Podman:** Ubuntu's `podman` package, with RunCVM registered as its `runcvm` runtime in `/etc/containers/containers.conf`, for running the tests with rootful Podman (`tests/run --engine podman`). It uses the runc that Docker's `containerd.io` package installs.
 
 During the build, `systemctl` is diverted to a stand-in, `build/systemctl`. No systemd is running, so the stand-in:
 
