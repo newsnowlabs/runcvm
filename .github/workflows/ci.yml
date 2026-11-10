@@ -1,0 +1,95 @@
+# RunCVM's CI: on each pull request, and each push to main, builds RunCVM on a GitHub-hosted
+# runner, installs it, and runs the integration tests' core tier in real Container/VMs under KVM.
+# GitHub's ubuntu-24.04 runners provide nested KVM; the job opens /dev/kvm to the runner user.
+# The test framework's selftest runs in a separate, quicker job.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tests:
+        description: tests/run arguments (e.g. "--tier all", or tests by name)
+        default: --tier core
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  selftest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test framework selftest
+        run: tests/selftest/run-selftest --docker
+
+  kvm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      TESTS: ${{ inputs.tests || '--tier core' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the latest Docker release
+        run: |
+          # The runner image's Docker can lag Docker's releases; RunCVM's tests need 29.4 or later.
+          sudo apt-get remove -y moby-engine moby-cli moby-buildx moby-compose moby-containerd moby-runc || true
+          curl -fsSL https://get.docker.com -o "$RUNNER_TEMP/get-docker.sh"
+          sudo sh "$RUNNER_TEMP/get-docker.sh"
+          sudo systemctl restart docker
+
+      - name: Runner facts
+        run: |
+          uname -a; nproc; free -m; df -h / | tail -1
+          echo "=== CPU virtualisation flags: $(grep -cE '\b(vmx|svm)\b' /proc/cpuinfo || true)"
+          lsmod | grep -E '^(kvm|br_netfilter)' || true
+          docker version --format 'Docker: client {{.Client.Version}}, server {{.Server.Version}}'
+
+      - name: Open /dev/kvm to the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+          [ -r /dev/kvm ] && [ -w /dev/kvm ]
+
+      - name: Build RunCVM
+        run: |
+          # gitlab.alpinelinux.org refuses requests from GitHub-hosted runners (HTTP 418), so the
+          # Alpine build stages use aports' GitHub mirror and Alpine's distfiles mirror.
+          time ./build/build.sh --tag ci -- \
+            --build-arg APORTS_URL=https://github.com/alpinelinux/aports.git \
+            --build-arg ALPINE_DISTFILES_MIRROR=https://distfiles.alpinelinux.org/distfiles
+
+      - name: Install RunCVM
+        run: |
+          sudo REPO=newsnowlabs/runcvm:ci ./runcvm-scripts/runcvm-install-runtime.sh </dev/null
+          docker info --format '{{.Runtimes.runcvm.Path}}'
+
+      - name: Run a Container/VM under KVM
+        run: |
+          # With RUNCVM_QEMU_ACCEL=kvm, RunCVM refuses to start the VM without /dev/kvm rather
+          # than falling back to software emulation.
+          docker run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=kvm alpine \
+            sh -c 'dmesg | grep -iE "hypervisor detected" | head -1; echo vcpus: $(nproc)'
+
+      - name: Integration tests (${{ env.TESTS }})
+        run: |
+          # Two tests at a time suits a hosted runner's 4 CPUs and 16 GB of memory.
+          RUNCVM_TEST_JOBS=2 tests/run $TESTS --results "$RUNNER_TEMP/results"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: ${{ runner.temp }}/results
+          if-no-files-found: ignore

@@ -17,12 +17,22 @@ ARG ALPINE_KERNEL_VERSION=3.24
 # OpenWrt kernels' modules are unaffected.
 ARG KERNEL_MODULE_COMPRESSION=xz
 
+# Where the Alpine build stages fetch aports (Alpine's package build recipes) from, and, if set,
+# the base URL of an Alpine distfiles mirror (with a v<version> directory per Alpine version) from
+# which abuild fetches the packages' sources before trying their upstream URLs. The defaults are
+# Alpine's own; CI on GitHub-hosted runners, which gitlab.alpinelinux.org refuses, uses
+# https://github.com/alpinelinux/aports.git and https://distfiles.alpinelinux.org/distfiles.
+ARG APORTS_URL=https://gitlab.alpinelinux.org/alpine/aports.git
+ARG ALPINE_DISTFILES_MIRROR=
+
 # --- BUILD STAGE ---
 # Build base alpine-sdk image for later build stages
 FROM alpine:$ALPINE_VERSION as alpine-sdk
 
-# Redeclare so $ALPINE_VERSION is visible inside this stage's RUN
+# Redeclare so these are visible inside this stage's RUN
 ARG ALPINE_VERSION
+ARG APORTS_URL
+ARG ALPINE_DISTFILES_MIRROR
 
 # aports must be checked out at the stable branch matching the base image:
 # APKBUILDs on master can depend on abuild features that the base release
@@ -31,9 +41,11 @@ RUN apk update && apk add --no-cache alpine-sdk coreutils && \
     abuild-keygen -an && \
     # Copy the public keys to the system keys
     cp -a /root/.abuild/*.pub /etc/apk/keys && \
+    { [ -z "$ALPINE_DISTFILES_MIRROR" ] || \
+      echo "DISTFILES_MIRROR=$ALPINE_DISTFILES_MIRROR/v${ALPINE_VERSION}" >>/etc/abuild.conf; } && \
     git clone --depth 1 --single-branch --filter=blob:none --sparse \
       --branch ${ALPINE_VERSION}-stable \
-      https://gitlab.alpinelinux.org/alpine/aports.git ~/aports && \
+      "$APORTS_URL" ~/aports && \
     cd ~/aports/ && \
     git sparse-checkout set main/seabios main/dnsmasq main/dropbear
 
@@ -42,13 +54,17 @@ RUN apk update && apk add --no-cache alpine-sdk coreutils && \
 FROM alpine:$ALPINE_KERNEL_VERSION as alpine-sdk-kernel
 
 ARG ALPINE_KERNEL_VERSION
+ARG APORTS_URL
+ARG ALPINE_DISTFILES_MIRROR
 
 RUN apk update && apk add --no-cache alpine-sdk coreutils && \
     abuild-keygen -an && \
     cp -a /root/.abuild/*.pub /etc/apk/keys && \
+    { [ -z "$ALPINE_DISTFILES_MIRROR" ] || \
+      echo "DISTFILES_MIRROR=$ALPINE_DISTFILES_MIRROR/v${ALPINE_KERNEL_VERSION}" >>/etc/abuild.conf; } && \
     git clone --depth 1 --single-branch --filter=blob:none --sparse \
       --branch ${ALPINE_KERNEL_VERSION}-stable \
-      https://gitlab.alpinelinux.org/alpine/aports.git ~/aports && \
+      "$APORTS_URL" ~/aports && \
     cd ~/aports/ && \
     git sparse-checkout set main/mkinitfs
 
