@@ -195,7 +195,7 @@ Launch an Ubuntu desktop, with a graphical login:
 
 ```console
 cat <<EOF | docker build --tag=ubuntu-x -
-FROM ubuntu:jammy
+FROM ubuntu:noble
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt update && apt -y install --install-recommends apt-utils kmod wget iproute2 systemd ca-certificates curl gnupg udev dbus lightdm
 ENTRYPOINT ["/lib/systemd/systemd"]
@@ -211,7 +211,7 @@ docker run -d --runtime=runcvm -m 2g --name=vnc -p 5900:5900 ubuntu-x
 
 ```console
 cat <<EOF | docker build --tag=ubuntu-docker-runcvm -
-FROM ubuntu:jammy
+FROM ubuntu:noble
 RUN apt update && apt -y install apt-utils kmod wget iproute2 systemd \
     ca-certificates curl gnupg udev dbus && \
     curl -fsSL https://get.docker.com | bash
@@ -235,7 +235,7 @@ docker rm -fv ubuntu-docker-runcvm
 
 ```console
 cat <<EOF | docker build --tag=ubuntu-docker-gvisor -
-FROM ubuntu:jammy
+FROM ubuntu:noble
 RUN apt update && apt -y install apt-utils kmod wget iproute2 systemd \
     ca-certificates curl gnupg udev dbus jq && \
     curl -fsSL https://get.docker.com | bash
@@ -260,7 +260,7 @@ docker rm -fv ubuntu-docker-gvisor
 
 ```console
 cat <<EOF | docker build --tag=ubuntu-docker-sysbox -
-FROM ubuntu:jammy
+FROM ubuntu:noble
 RUN apt update && apt -y install apt-utils kmod wget iproute2 systemd \
     ca-certificates curl gnupg udev dbus && \
     curl -fsSL https://get.docker.com | bash
@@ -284,10 +284,10 @@ docker rm -fv ubuntu-docker-sysbox
 **Launch [OpenWrt](https://openwrt.org/)** - with port forward to LuCI web UI on port 10080:
 
 ```console
-docker import --change='ENTRYPOINT ["/sbin/init"]' https://archive.openwrt.org/releases/23.05.2/targets/x86/generic/openwrt-23.05.2-x86-generic-rootfs.tar.gz openwrt-23.05.2 && \
+docker import --change='ENTRYPOINT ["/sbin/init"]' https://downloads.openwrt.org/releases/25.12.6/targets/x86/generic/openwrt-25.12.6-x86-generic-rootfs.tar.gz openwrt-25.12.6 && \
 docker network create --subnet 172.128.0.0/24 runcvm-openwrt && \
 echo -e "config interface 'loopback'\n\toption device 'lo'\n\toption proto 'static'\n\toption ipaddr '127.0.0.1'\n\toption netmask '255.0.0.0'\n\nconfig device\n\toption name 'br-lan'\n\toption type 'bridge'\n\tlist ports 'eth0'\n\nconfig interface 'lan'\n\toption device 'br-lan'\n\toption proto 'static'\n\toption ipaddr '172.128.0.5'\n\toption netmask '255.255.255.0'\n\toption gateway '172.128.0.1'\n" >/tmp/runcvm-openwrt-network && \
-docker run -it --rm --runtime=runcvm --name=openwrt --network=runcvm-openwrt --ip=172.128.0.5 -v /tmp/runcvm-openwrt-network:/etc/config/network -p 10080:80 openwrt-23.05.2
+docker run -it --rm --runtime=runcvm --name=openwrt --network=runcvm-openwrt --ip=172.128.0.5 -v /tmp/runcvm-openwrt-network:/etc/config/network -p 10080:80 openwrt-25.12.6
 ```
 
 - [Watch on Asciinema](https://asciinema.org/a/631857)
@@ -506,7 +506,7 @@ runcvm = [ "/opt/runcvm/scripts/runcvm-runtime" ]
 Create an image that will allow instances to have VMX capability:
 
 ```console
-gcloud compute images create debian-12-vmx --source-image-project=debian-cloud --source-image-family=debian-12   --licenses="https://compute.googleapis.com/compute/v1/projects/vm-options/global/licenses/enable-vmx"
+gcloud compute images create debian-13-vmx --source-image-project=debian-cloud --source-image-family=debian-13   --licenses="https://compute.googleapis.com/compute/v1/projects/vm-options/global/licenses/enable-vmx"
 ```
 
 Now launch a VM, install Docker and RunCVM:
@@ -521,7 +521,7 @@ apt update && apt -y install apt-utils kmod wget iproute2 systemd \
     curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=newsnowlabs/runcvm:latest sh
 EOF
 
-gcloud compute instances create runcvm-vmx-test --zone=us-central1-a --machine-type=n2-highmem-2 --network-interface=network-tier=PREMIUM,stack-type=IPV4_ONLY,subnet=default --metadata-from-file=startup-script=/tmp/startup-script.sh --no-restart-on-failure --maintenance-policy=TERMINATE --provisioning-model=SPOT --instance-termination-action=STOP  --no-service-account --no-scopes --create-disk=auto-delete=yes,boot=yes,image=debian-12-vmx,mode=rw,size=50,type=pd-ssd --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --labels=goog-ec-src=vm_add-gcloud --reservation-affinity=any
+gcloud compute instances create runcvm-vmx-test --zone=us-central1-a --machine-type=n2-highmem-2 --network-interface=network-tier=PREMIUM,stack-type=IPV4_ONLY,subnet=default --metadata-from-file=startup-script=/tmp/startup-script.sh --no-restart-on-failure --maintenance-policy=TERMINATE --provisioning-model=SPOT --instance-termination-action=STOP  --no-service-account --no-scopes --create-disk=auto-delete=yes,boot=yes,image=debian-13-vmx,mode=rw,size=50,type=pd-ssd --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --labels=goog-ec-src=vm_add-gcloud --reservation-affinity=any
 ```
 
 RunCVM works with Docker's default configuration. It also works with `"userland-proxy": false` in `/etc/docker/daemon.json`, with which Docker (as of Docker 29) loads the `br_netfilter` module on the host, and does not start if it cannot; RunCVM itself does not need `br_netfilter`.
