@@ -387,7 +387,7 @@ gcloud compute images create debian-12-vmx --source-image-project=debian-cloud -
 Now launch a VM, install Docker and RunCVM:
 
 ```console
-cat >/tmp/startup-script.sh <<EOF
+cat >/tmp/startup-script.sh <<'EOF'
 #!/bin/bash
 
 apt update && apt -y install apt-utils kmod wget iproute2 systemd \
