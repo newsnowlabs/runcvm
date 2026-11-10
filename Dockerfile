@@ -427,6 +427,11 @@ ADD runcvm-scripts /opt/runcvm/scripts/
 ADD runcvm-etc /opt/runcvm/etc/
 COPY LICENSE NOTICE /opt/runcvm/
 
+# Files copied from the build context keep the checkout's permissions, which follow the umask of
+# whoever checked it out (e.g. group-writable under Ubuntu's default umask for users, 002), so give
+# them the package's own (see the check below).
+RUN chmod -R a+rX,go-w /opt/runcvm/scripts /opt/runcvm/etc /opt/runcvm/LICENSE /opt/runcvm/NOTICE
+
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]
 
