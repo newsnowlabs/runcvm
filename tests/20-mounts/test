@@ -13,6 +13,11 @@ container over virtiofs:
   options.
 - Two Container/VMs sharing a volume with RUNCVM_VIRTIOFSD_CACHE=none see
   each other's writes at once.
+- With RUNCVM_VIRTIOFSD_CACHE=always,writeback, virtiofsd runs with
+  --writeback; a file written and closed in the VM is on the host at once,
+  appends ('>>') extend a file rather than overwrite it, and data written
+  to a file the VM still holds open reaches the host by the time a
+  'docker stop' completes.
 
 The expected values describe current behaviour. A change to it must update
 them deliberately.
@@ -96,7 +101,31 @@ def case_shared_volume():
     return results
 
 
-for results in t.parallel(lambda f: f(), [case_volume_and_binds, case_shared_volume], jobs=2):
+def case_writeback():
+    volume = t.unique("writeback")
+    t.volume_create(volume)
+    name = start("writeback", "-v", volume + ":/vol", "--env=RUNCVM_VIRTIOFSD_CACHE=always,writeback")
+    if not name:
+        return [("writeback: Container/VM started", True, False)]
+    top = t.docker("top", name).stdout
+    ex(name, "sh", "-c", "echo closed >/vol/closed && echo a >>/vol/appended && echo b >>/vol/appended")
+    closed = t.volume_read(volume, "closed")
+    appended = t.volume_read(volume, "appended")
+    # The background shell keeps /vol/open open until the Container/VM stops.
+    ex(name, "sh", "-c", "(exec 3>/vol/open; echo held-open >&3; exec sleep 600) >/dev/null 2>&1 &")
+    stopped = t.docker("stop", name).returncode == 0
+    return [
+        ("writeback: virtiofsd runs with --writeback", True,
+         any("virtiofsd" in line and "--writeback" in line for line in top.splitlines())),
+        ("writeback: file written and closed in the VM is on the host", "closed\n", closed),
+        ("writeback: appends extend the file", "a\nb\n", appended),
+        ("writeback: 'docker stop' succeeded", True, stopped),
+        ("writeback: data in a file held open is on the host after 'docker stop'", "held-open\n",
+         t.volume_read(volume, "open")),
+    ]
+
+
+for results in t.parallel(lambda f: f(), [case_volume_and_binds, case_shared_volume, case_writeback], jobs=3):
     for desc, expected, actual in results:
         t.check(desc, expected, actual)
 

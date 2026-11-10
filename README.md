@@ -886,7 +886,7 @@ Specify whether QEMU VM memory should be preallocated, or allocated on the host 
 
 Default is `off`, but `on` may deliver improved performance in some scenarios at expense of ability to overcommit.
 
-### `--env=RUNCVM_VIRTIOFSD_CACHE=<auto|always|metadata|none>`
+### `--env=RUNCVM_VIRTIOFSD_CACHE=<auto|always|metadata|none>[,writeback]`
 
 Sets how the VM caches the files it reads over virtiofs: their names, their attributes (such as size, ownership and modification time) and their contents. The container's root filesystem, its volumes and its bind mounts are all served by one `virtiofsd`, so one policy applies to all of them. The policy is passed to `virtiofsd` as `--cache=<value>`; `none` is passed as `never`, which is also accepted. The default is `auto`.
 
@@ -897,11 +897,20 @@ Sets how the VM caches the files it reads over virtiofs: their names, their attr
 | `metadata` | cached for up to a day | not cached | the same restriction as `always`, with slower reads; rarely useful |
 | `none` | not cached | not cached | volumes or bind mounts through which several Container/VMs, or a Container/VM and the host, exchange files and must see each other's changes; the slowest policy |
 
-Under every policy, the VM's writes reach the host's filesystem as each write is made, so the policy affects only how soon the VM sees changes made outside it: by the host, by other containers sharing a volume, by `docker cp`, or by Docker itself, which can rewrite files such as `/etc/hosts`. Under `always` and `metadata`, the VM may go on seeing a file's old name, attributes or contents for up to a day after it changes, and a program that acts on them can overwrite the newer version.
+Without `writeback`, the VM's writes reach the host's filesystem as each write is made, so the policy affects only how soon the VM sees changes made outside it: by the host, by other containers sharing a volume, by `docker cp`, or by Docker itself, which can rewrite files such as `/etc/hosts`. Under `always` and `metadata`, the VM may go on seeing a file's old name, attributes or contents for up to a day after it changes, and a program that acts on them can overwrite the newer version.
 
 For volumes that several Container/VMs share, use `none`. Under `auto`, files that one Container/VM writes to a shared volume can stay invisible to the others for many seconds; `tests/50-http-docker-swarm`, whose nodes exchange files through a shared volume, uses `none` for this reason. Where the files exchanged are few and small, as there, `none` costs little.
 
 Reads under `always` can be several times faster than under `none`: e.g. rereading a Debian image's `/usr`, about 230 MB, takes roughly a quarter of the time. Choose a faster policy only where its restriction holds for every file the Container/VM can see.
+
+Adding `writeback` to `auto` or `always`, e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always,writeback`, launches `virtiofsd` with `--writeback`. The VM then holds writes in its own memory and passes them on to the host in batches: whenever a file is closed or synced (`fsync`), and otherwise within seconds. This makes many small writes faster, e.g. writing a file 512 bytes at a time can take as little as half as long, but makes large copies little faster. It comes with these restrictions, so use it only where nothing outside the VM reads or writes the Container/VM's files while it runs, such as a build whose output is collected after it finishes:
+
+- Until a file is closed or synced, the host and other containers may see old contents, size or modification time for it.
+- Appending (`>>`, `O_APPEND`) is done by the VM at the end of the file as the VM knows it, so data appended at the same time from outside the VM can be overwritten.
+- If the Container/VM is killed (e.g. `docker kill`, or `docker stop` timing out), writes not yet passed on are lost, as they would be on a machine that loses power. A clean stop passes them all on.
+- `virtiofsd` opens files the VM opens write-only for reading as well, so a file `virtiofsd` cannot read, e.g. on a network filesystem that denies root, cannot be written.
+
+`writeback` cannot be combined with `metadata` or `none`, which do not cache file contents, and RunCVM refuses to create the Container/VM if it is.
 
 ### `--env=RUNCVM_CGROUPFS=<value>`
 
