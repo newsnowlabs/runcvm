@@ -357,6 +357,12 @@ read -r CONSOLE_DEVICE </.runcvm/console
 # specify 'ConditionVirtualization=!container'
 [ -f "/.dockerenv" ] && busybox mv /.dockerenv /.dockerenv.runcvm
 
+# A read-only root (docker run --read-only; Kubernetes' readOnlyRootFilesystem) is made so once
+# RunCVM has finished writing to it. Mounts below it, such as volumes, keep their own modes.
+if [ "$RUNCVM_ROOT_READONLY" = "1" ]; then
+  mount -i --options-source=disable -o remount,ro /
+fi
+
 if [ "$RUNCVM_INIT" = "1" ]; then
   # If launched with '--init' (or --env=RUNCVM_INIT=1) then run our own init in place of Docker's/Podman's.
 

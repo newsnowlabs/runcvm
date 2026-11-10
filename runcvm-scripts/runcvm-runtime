@@ -465,6 +465,13 @@ if [ "$COMMAND" = "create" ]; then
 
   # Mount / from container to $RUNCVM_VM_MOUNTPOINT, recursively binding all pre-existing mount points
   # (these being only the ones defined ahead of this item in the mounts[] array - so order matters!)
+  # A read-only root (docker run --read-only; Kubernetes' readOnlyRootFilesystem) is the VM's,
+  # which runcvm-vm-init makes read-only: the container's root, and $RUNCVM_VM_MOUNTPOINT, in which
+  # runc creates mount points, stay writable.
+  if [ "$(jq_get "$CFG" '.root.readonly')" = "true" ]; then
+    set_config_env "RUNCVM_ROOT_READONLY" "1"
+    jq_set "$CFG" '.root.readonly = false'
+  fi
   jq_set "$CFG" --arg root "$ROOT" --arg vm "$RUNCVM_VM_MOUNTPOINT" '.mounts |= [{"destination":$vm,"type":"bind","source":$root,"options":["rbind","private","rw"]}] + .'
 
   # Mount /opt/runcvm from host to container
@@ -746,13 +753,17 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
       else . end'
   fi
 
-  # Add non-default capabilities needed by:
-  # - Docker: CAP_NET_ADMIN
-  # - Podman: CAP_NET_ADMIN, CAP_NET_RAW, CAP_MKNOD, CAP_AUDIT_WRITE
-  for field in bounding effective permitted
-  do
-    jq_set "$CFG" --arg field "bounding" '.process.capabilities[$field] |= (.+ ["CAP_NET_ADMIN","CAP_NET_RAW","CAP_MKNOD","CAP_AUDIT_WRITE"] | unique)'
-  done
+  # The container's capabilities are those of RunCVM's own processes (QEMU, virtiofsd, dnsmasq and
+  # the network configuration), which run as root; the workload runs under the VM's kernel. They
+  # hold Docker's default capabilities and CAP_NET_ADMIN, whatever the container was given (e.g.
+  # docker run --cap-drop, or a Kubernetes pod's capabilities and allowPrivilegeEscalation), in
+  # each set that a process under no_new_privs keeps across exec.
+  jq_set "$CFG" --argjson caps '[
+    "CAP_AUDIT_WRITE","CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_KILL",
+    "CAP_MKNOD","CAP_NET_ADMIN","CAP_NET_BIND_SERVICE","CAP_NET_RAW","CAP_SETFCAP","CAP_SETGID",
+    "CAP_SETPCAP","CAP_SETUID","CAP_SYS_CHROOT"]' '
+    reduce ("bounding", "effective", "permitted") as $set (.;
+      .process.capabilities[$set] = ((.process.capabilities[$set] // []) + $caps | unique))'
   
   # Filter for RUNCVM_SYS_ADMIN=1
   RUNCVM_SYS_ADMIN=$(get_config_env "RUNCVM_SYS_ADMIN")
