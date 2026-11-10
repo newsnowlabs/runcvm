@@ -43,6 +43,13 @@ Optional per-test metadata files, in each test directory:
                     dockerd's version is at least <major>.<minor>, e.g.
                     docker>=29.0
 
+Container engine (--engine docker|podman, or RUNCVM_TEST_ENGINE; default
+docker). With podman, tests/engines/podman goes first in PATH, so that the
+runner's and the tests' 'docker' commands run rootful Podman (through sudo
+when not root), and RunCVM must be registered with Podman in
+/etc/containers/containers.conf. Tests see RUNCVM_TEST_ENGINE, and
+'docker>=<major>.<minor>' requirements are not met.
+
 Stand-in mode (--mock, or RUNCVM_TEST_MOCK=1) runs tests with a standard
 runtime (runc, unless --runtime or a non-RunCVM $RUNTIME is given) in place
 of RunCVM, for developing the tests and the runner where KVM is unavailable.
@@ -160,7 +167,8 @@ def warn(msg):
 
 
 class Environment:
-    def __init__(self, runtime, mock, run_id, use_docker, accel=None, tcg_cases=False):
+    def __init__(self, runtime, mock, run_id, use_docker, accel=None, tcg_cases=False, engine="docker"):
+        self.engine = engine
         self.runtime = runtime
         self.mock = mock
         self.accel = accel
@@ -172,6 +180,16 @@ class Environment:
         self._probe_notes = {}  # requirement -> why it is unmet, where known
 
     def preflight(self):
+        if self.engine == "podman":
+            # Podman's info names only its default OCI runtime, not those in containers.conf.
+            r = docker("info", "--format", "{{.Version.Version}}")
+            if r.returncode != 0:
+                raise HarnessError("cannot run rootful Podman ('podman info' failed: %s)"
+                                   % (r.stderr.strip().splitlines() or ["?"])[-1])
+            r = docker("run", "--rm", "--runtime", self.runtime, "--help")
+            if r.returncode != 0:
+                raise HarnessError("Podman cannot use runtime '%s'" % self.runtime)
+            return
         if docker("info", "--format", "{{json .ServerVersion}}").returncode != 0:
             raise HarnessError("cannot reach the Docker daemon ('docker info' failed)")
         r = docker("info", "--format", "{{json .Runtimes}}")
@@ -215,6 +233,9 @@ class Environment:
         m = DOCKER_VERSION_REQUIREMENT.match(req)
         if m:
             if not self.use_docker:
+                return False
+            if self.engine != "docker":
+                self._probe_notes[req] = "the engine is %s, not Docker" % self.engine
                 return False
             r = docker("info", "--format", "{{.ServerVersion}}")
             version = (r.stdout or "").strip()
@@ -336,6 +357,7 @@ def run_test(test, env, logs_dir, kill_after, verbose=False):
     child_env = dict(os.environ)
     child_env.update({
         "RUNTIME": env.runtime,
+        "RUNCVM_TEST_ENGINE": env.engine,
         "RUNCVM_TEST_MOCK": "1" if env.mock else "0",
         "RUNCVM_TEST_ACCEL": env.accel or "",
         "RUNCVM_TEST_TCG_CASES": "1" if env.tcg_cases else "0",
@@ -560,7 +582,7 @@ def parse_args(argv):
         description="Run RunCVM integration tests. TEST may be a test directory name "
                     "(e.g. 10-user-workdir) or a shell pattern (e.g. '1*'). With no TEST, "
                     "all tests in the selected tier run.",
-        epilog="Environment: RUNTIME, RUNCVM_TEST_MOCK, RUNCVM_TEST_ACCEL, RUNCVM_TEST_TCG_CASES, "
+        epilog="Environment: RUNTIME, RUNCVM_TEST_ENGINE, RUNCVM_TEST_MOCK, RUNCVM_TEST_ACCEL, RUNCVM_TEST_TCG_CASES, "
                "RUNCVM_TEST_RUN_ID, RUNCVM_TEST_RESULTS, "
                "RUNCVM_TEST_KILL_AFTER (seconds between SIGTERM and SIGKILL on timeout; "
                "default %d), RUNCVM_TEST_JOBS (Container/VMs a test may run at once; default 3). See the comment at the top of this file for details." % DEFAULT_KILL_AFTER)
@@ -575,6 +597,10 @@ def parse_args(argv):
     p.add_argument("-d", "--dir", default=here, help="tests directory (default: this script's directory)")
     p.add_argument("--runtime", default=None,
                    help="container runtime under test (default: $RUNTIME, else runcvm; runc with --mock)")
+    p.add_argument("--engine", choices=("docker", "podman"),
+                   default=os.environ.get("RUNCVM_TEST_ENGINE") or "docker",
+                   help="container engine whose CLI runs the tests: docker (default), or rootful "
+                        "podman, through its Docker-compatible CLI")
     p.add_argument("--mock", action="store_true", default=truthy(os.environ.get("RUNCVM_TEST_MOCK")),
                    help="stand-in mode: use a standard runtime and skip tests requiring 'vm'")
     p.add_argument("--accel", choices=ACCELS, default=os.environ.get("RUNCVM_TEST_ACCEL") or None,
@@ -628,8 +654,10 @@ def main(argv):
         raise HarnessError("no tests selected (tier '%s'%s)"
                            % (args.tier, ", patterns: " + " ".join(args.tests) if args.tests else ""))
 
+    if args.engine == "podman":
+        os.environ["PATH"] = os.path.join(tests_dir, "engines", "podman") + os.pathsep + os.environ.get("PATH", "")
     env = Environment(runtime, args.mock, run_id, use_docker=not args.no_preflight, accel=args.accel,
-                      tcg_cases=args.tcg_cases)
+                      tcg_cases=args.tcg_cases, engine=args.engine)
     if not args.no_preflight:
         env.preflight()
 
@@ -645,6 +673,7 @@ def main(argv):
 
     say("Running RunCVM integration tests")
     say("  run id:   %s" % run_id)
+    say("  engine:   %s" % args.engine)
     say("  runtime:  %s%s" % (runtime, " (stand-in mode)" if args.mock else ""))
     say("  accel:    %s" % (args.accel or "(RunCVM default)"))
     say("  tcg:      %s" % ("cases run" if env.tcg_cases else "cases skipped (--tcg-cases to run them)"))
