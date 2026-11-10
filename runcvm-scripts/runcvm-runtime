@@ -351,7 +351,9 @@ if [ "$COMMAND" = "create" ]; then
 
   # A Kubernetes pod's sandbox container (CRI's "pause" container, which only holds the pod's
   # namespaces) runs under runc as given; the pod's other containers run as Container/VMs.
-  if [ "$(jq -r '.annotations["io.kubernetes.cri.container-type"] // empty' "$CFG")" = "sandbox" ]; then
+  # A container whose environment sets RUNCVM_RUNC=1 (e.g. a pod's sidecar) also runs under runc.
+  if [ "$(jq -r '.annotations["io.kubernetes.cri.container-type"] // empty' "$CFG")" = "sandbox" ] || \
+     [ "$(get_config_env RUNCVM_RUNC)" = "1" ]; then
     exec "$RUNC" "${COMMAND_LINE[@]}"
   fi
 
@@ -677,6 +679,14 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     RUNCVM_CONTAINER_MEM_TCG="$RUNCVM_QEMU_TCG_TB_MEM_SIZE"
   fi
 
+  # A Kubernetes pod's container: connections to localhost in the pod's network namespace (as
+  # 'kubectl port-forward' makes) are forwarded to the VM (see runcvm-ctr-entrypoint), which needs
+  # packets from 127.0.0.1 routed off the loopback device.
+  if [ -n "$(jq -r '.annotations["io.kubernetes.cri.container-type"] // empty' "$CFG")" ]; then
+    set_config_env "RUNCVM_LOCALHOST_TO_VM" "1"
+    jq_set "$CFG" '.linux.sysctl["net.ipv4.conf.all.route_localnet"] = "1"'
+  fi
+
   # Configure devices
   # /dev/net/tun — always needed
   jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":200,"access":"rwm"}]'
@@ -798,6 +808,12 @@ elif [ "$COMMAND" = "exec" ]; then
       *) break; ;;
     esac
   done
+
+  # A process in a container that runs under runc (see 'create' above) runs as given. The process
+  # has the container's environment.
+  if [ "$(get_process_env "$PROCESS" 'RUNCVM_RUNC' '0')" = "1" ]; then
+    exec "$RUNC" "${COMMAND_LINE[@]}"
+  fi
 
   # Allow user to enable debug logging
   if [ "$(get_process_env "$PROCESS" 'RUNCVM_RUNTIME_DEBUG' '0')" = "1" ]; then

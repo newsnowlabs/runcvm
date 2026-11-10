@@ -90,6 +90,54 @@ printf '%s\0' "$PWD" >/.runcvm/pwd
 # DEBUG
 if [[ "$RUNCVM_BREAK" =~ prenet ]]; then bash; fi
 
+# RESTORE A NETWORK CONFIGURED BY AN EARLIER CONTAINER/VM
+# A network namespace can outlive its Container/VM: a Kubernetes pod's containers, and each of a
+# container's restarts, share the pod's. The configuration below leaves each interface in a bridge,
+# br-<interface>, without its addresses, which it records in the interface's alias, as the namespace
+# keeps no other record once the container has gone. A Container/VM started in such a namespace
+# first returns each interface to its addresses and routes, and removes the bridges and firewall
+# rules, so that it finds the network as the earlier one did.
+restore_network() {
+  local bri if alias addr route
+
+  # A tap device exists only while its QEMU runs.
+  if [ -n "$(ip -json link show | jq -r '.[].ifname | select(startswith("tap-"))')" ]; then
+    echo "RunCVM: Error: another Container/VM is running in this container's network namespace (e.g. another container of the same Kubernetes pod); only one Container/VM can use a network namespace" >&2
+    exit 1
+  fi
+
+  for bri in $(ip -json link show type bridge | jq -r '.[].ifname | select(startswith("br-"))')
+  do
+    if="${bri#br-}"
+    alias=$(ip -json link show dev "$if" 2>/dev/null | jq -r '.[0].ifalias // empty')
+    [[ "$alias" =~ ^runcvm: ]] || continue
+
+    # Routes via the bridge, to be routed via the interface again, as 'ip route' arguments.
+    local routes=()
+    while read -r route; do routes+=("$route"); done < <(
+      { ip -N -json route show dev "$bri"; ip -N -6 -json route show dev "$bri"; } | \
+        jq -r '.[] | select(.protocol != "2" and .dst != "fe80::/64") | [.dst, (.gateway // empty | "via " + .)] | join(" ")'
+    )
+
+    ip link del "$bri"
+    for addr in ${alias#runcvm:}
+    do
+      if [[ "$addr" =~ : ]]; then ip -6 addr add "$addr" dev "$if" nodad; else ip addr add "$addr" dev "$if"; fi
+    done
+    for route in "${routes[@]}"
+    do
+      ip route replace $route dev "$if"
+    done
+    ip link set dev "$if" alias ""
+  done
+
+  nft list tables | while read -r _ family table; do
+    [ "$table" = "runcvm" ] && nft delete table "$family" runcvm
+  done
+}
+
+restore_network
+
 # SAVE NETWORKING CONFIG AND CONFIGURE BRIDGES
 
 # Identify default gateway device and IP address. '|| true' keeps 'bash -e' from exiting silently
@@ -194,6 +242,8 @@ do
   fi
 
   # RECONFIGURE CONTAINER NETWORK
+  # Record the interface's addresses for restore_network (above).
+  ip link set dev "$if" alias "runcvm:${DOCKER_IF_IP:+ $DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX}${DOCKER_IF6_IP:+ $DOCKER_IF6_IP/$DOCKER_IF6_IP_NETPREFIX}"
   ip addr flush dev "$if"
 
   QEMU_BRIDGE="br-$if"
@@ -271,6 +321,19 @@ divert() {
 
 BRIDGE_RULES=$(divert "tap-$QEMU_BRIDGE_IF" "$RUNCVM_DNS_IP" "tcp sport $SSHD_PORT")
 NAT_PREROUTING_RULES=""
+NAT_OUTPUT_RULES=""
+NAT_POSTROUTING_RULES=""
+
+# - localhost (RUNCVM_LOCALHOST_TO_VM=1, in a Kubernetes pod): TCP connections to 127.0.0.1 in the
+#   namespace, but for dnsmasq's port, are forwarded to the VM, as 'kubectl port-forward' connects
+#   there. They are source-NATed to $RUNCVM_DNS_IP, with ports in a range of their own, by which the
+#   VM's replies are diverted.
+LOCALHOST_PORTS="61000-61999"
+if [ "$RUNCVM_LOCALHOST_TO_VM" = "1" ]; then
+  BRIDGE_RULES+=$'\n'$(divert "tap-$QEMU_BRIDGE_IF" "$RUNCVM_DNS_IP" "tcp dport $LOCALHOST_PORTS")
+  NAT_OUTPUT_RULES+=$'\n'"ip daddr 127.0.0.1 tcp dport != 53 dnat to $QEMU_BRIDGE_IF_IP"
+  NAT_POSTROUTING_RULES+=$'\n'"oifname \"br-$QEMU_BRIDGE_IF\" ip saddr 127.0.0.1 meta l4proto tcp snat to $RUNCVM_DNS_IP:$LOCALHOST_PORTS"
+fi
 
 if [ "$RUNCVM_DNS" = "1" ]; then
   BRIDGE_RULES+=$'\n'$(divert "tap-$QEMU_BRIDGE_IF" "$RUNCVM_DNS_IP" "udp dport 53")
@@ -303,9 +366,14 @@ table ip runcvm {
     type nat hook prerouting priority dstnat; policy accept;
     $NAT_PREROUTING_RULES
   }
+  chain output {
+    type nat hook output priority dstnat; policy accept;
+    $NAT_OUTPUT_RULES
+  }
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
     oifname "br-$QEMU_BRIDGE_IF" ip saddr $QEMU_BRIDGE_IP tcp dport $SSHD_PORT snat to $RUNCVM_DNS_IP
+    $NAT_POSTROUTING_RULES
   }
 }
 table arp runcvm {
