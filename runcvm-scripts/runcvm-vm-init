@@ -6,6 +6,12 @@
 # Load defaults and aliases
 . $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
+# Keep the console's device out of runtime power management, where it has it (e.g. the arm64 virt
+# machine's UART, ttyAMA0, in RUNCVM_DISPLAY_MODE=serial): a runtime-suspended UART defers output
+# until it resumes, so output written just before the VM powers off would be lost.
+console_pm=/sys/class/tty/$(cat /.runcvm/console)/device/power/control
+[ -w "$console_pm" ] && echo on >"$console_pm" || true
+
 # Alpine initrd doesn't honour command-line rw flag.
 # -i keeps mount from running any /sbin/mount.<type> helper from the image, and
 # --options-source=disable keeps the image's /etc/fstab from adding options to the remount (e.g.
