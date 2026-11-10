@@ -68,6 +68,11 @@ the terminal only with --verbose (or RUNCVM_TEST_VERBOSE=1). A detail line is
 one that starts with the ASCII record separator (0x1e), which the runner
 removes.
 
+Shards (--shard I/N) split a run across hosts, e.g. CI runners: of the tests
+otherwise selected (by tier and TEST), in name order, shard I runs every Nth,
+starting with the Ith, so that shards 1/N to N/N together run each test once.
+A shard with no tests runs none, and exits 0.
+
 Requires only Python 3.6+ and the docker CLI.
 """
 
@@ -553,6 +558,13 @@ def truthy(value):
     return (value or "").strip().lower() in ("1", "yes", "true", "on")
 
 
+def shard_arg(value):
+    m = re.match(r"^(\d+)/(\d+)$", value)
+    if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
+        raise argparse.ArgumentTypeError("'%s' is not I/N, with 1 <= I <= N" % value)
+    return int(m.group(1)), int(m.group(2))
+
+
 def parse_args(argv):
     here = os.path.dirname(os.path.abspath(__file__))
     p = argparse.ArgumentParser(
@@ -587,6 +599,10 @@ def parse_args(argv):
                    help="show tests' detail lines on the terminal as well as in their logs")
     p.add_argument("-x", "--exitfirst", action="store_true", help="stop after the first failure or timeout")
     p.add_argument("-l", "--list", action="store_true", help="list selected tests and exit")
+    p.add_argument("--shard", type=shard_arg, metavar="I/N",
+                   help="run only shard I of N: of the tests otherwise selected, in name order, "
+                        "every Nth, starting with the Ith; for splitting a run across hosts. A "
+                        "shard with no tests runs none, and exits 0")
     p.add_argument("--no-preflight", action="store_true",
                    help="skip Docker checks and clean-up (for tests that do not use Docker)")
     return p.parse_args(argv)
@@ -619,6 +635,13 @@ def main(argv):
             if req not in KNOWN_REQUIREMENTS and not DOCKER_VERSION_REQUIREMENT.match(req):
                 raise HarnessError("test '%s' has unknown requirement '%s' (known: %s)"
                                    % (t.name, req, ", ".join(KNOWN_REQUIREMENTS + ("docker>=<major>.<minor>",))))
+
+    if args.shard:
+        index, count = args.shard
+        selected = selected[index - 1::count]
+        if not selected and not args.list:
+            print("No tests in shard %d/%d." % (index, count))
+            return 0
 
     if args.list:
         for t in selected:
