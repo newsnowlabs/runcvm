@@ -409,20 +409,43 @@ RunCVM needs an EC2 instance with nested virtualisation, so that it has `/dev/kv
 aws ec2 describe-instance-types --filters "Name=processor-info.supported-features,Values=nested-virtualization" --query "InstanceTypes[].InstanceType" --output text | tr '\t' '\n' | sort
 ```
 
+Create a key pair to log in with, and a security group that allows SSH from your current IP address (or use ones you already have):
+
+```console
+aws ec2 create-key-pair --key-name runcvm-test --query KeyMaterial --output text >runcvm-test.pem && chmod 600 runcvm-test.pem
+SG=$(aws ec2 create-security-group --group-name runcvm-test --description runcvm-test --query GroupId --output text)
+aws ec2 authorize-security-group-ingress --group-id $SG --protocol tcp --port 22 --cidr $(curl -s https://checkip.amazonaws.com)/32
+```
+
 Launch an Ubuntu 24.04 LTS instance with nested virtualisation enabled, and a user-data script that installs Docker and RunCVM:
 
 ```console
-cat >/tmp/user-data.sh <<EOF
+cat >/tmp/user-data.sh <<'EOF'
 #!/bin/bash
 
 curl -fsSL https://get.docker.com | sh && \
     curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sh
 EOF
 
-aws ec2 run-instances --image-id resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id --instance-type m8i.large --cpu-options "NestedVirtualization=enabled" --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=50,VolumeType=gp3}' --user-data file:///tmp/user-data.sh --key-name <your-key-pair> --security-group-ids <your-security-group> --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=runcvm-test}]'
+ID=$(aws ec2 run-instances --image-id resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id --instance-type m8i.large --cpu-options "NestedVirtualization=enabled" --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=50,VolumeType=gp3}' --user-data file:///tmp/user-data.sh --key-name runcvm-test --security-group-ids $SG --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=runcvm-test}]' --query 'Instances[0].InstanceId' --output text)
 ```
 
+This launches the instance into the region's default VPC, whose subnets give instances a public IP address. In an account without a default VPC, or to use another subnet, add `--subnet-id <subnet>` and `--associate-public-ip-address` (and create the security group in that subnet's VPC with `--vpc-id`).
+
 To enable nested virtualisation on an existing instance of a supported type, stop it, then choose Actions > Instance settings > Change CPU options in the EC2 console.
+
+Log in as `ubuntu`, at the instance's public IP address:
+
+```console
+aws ec2 wait instance-running --instance-ids $ID
+ssh -i runcvm-test.pem ubuntu@$(aws ec2 describe-instances --instance-ids $ID --query 'Reservations[].Instances[].PublicIpAddress' --output text)
+```
+
+When you have finished with it, terminate the instance, which also deletes its root disk:
+
+```console
+aws ec2 terminate-instances --instance-ids $ID
+```
 
 ### Install on Azure
 
@@ -431,7 +454,7 @@ RunCVM needs an Azure VM with nested virtualisation, so that it has `/dev/kvm`. 
 Create a resource group, then an Ubuntu 24.04 LTS VM with a cloud-init script that installs Docker and RunCVM:
 
 ```console
-cat >/tmp/cloud-init.sh <<EOF
+cat >/tmp/cloud-init.sh <<'EOF'
 #!/bin/bash
 
 curl -fsSL https://get.docker.com | sh && \
@@ -442,7 +465,9 @@ az group create --name runcvm-test --location <your-region>
 az vm create --resource-group runcvm-test --name runcvm-test --image Canonical:ubuntu-24_04-lts:server:latest --size Standard_D2s_v5 --os-disk-size-gb 50 --admin-username azureuser --generate-ssh-keys --custom-data /tmp/cloud-init.sh
 ```
 
-On either platform, log in to the instance with SSH, as `ubuntu` on AWS (with your key pair; the security group must allow SSH) or `azureuser` on Azure, at its public IP address, which `aws ec2 describe-instances` and `az vm create`'s output show. Once the script has finished, `ls -l /dev/kvm` shows the KVM device, and `sudo docker run --runtime=runcvm --rm hello-world` runs a Container/VM.
+Log in as `azureuser`, at the public IP address that `az vm create`'s output shows (`publicIpAddress`). When you have finished with the VM, `az group delete --name runcvm-test` deletes it, with everything else in the resource group.
+
+On either platform, once the first-boot script has finished (`cloud-init status --wait` waits for it), `ls -l /dev/kvm` shows the KVM device, and `sudo docker run --runtime=runcvm --rm hello-world` runs a Container/VM.
 
 ## Upgrading
 
