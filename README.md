@@ -847,7 +847,7 @@ Under software emulation (see `RUNCVM_QEMU_ACCEL`), sets the size of QEMU's cach
 
 ### `--env=RUNCVM_SYS_ADMIN=1`
 
-By default, `virtiofsd` is not launched with `-o modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.
+By default, `virtiofsd` is not launched with `--modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.
 
 ### `--env=RUNCVM_KERNEL_MOUNT_LIB_MODULES=1`
 
@@ -944,7 +944,7 @@ Doing this is _not recommended_, but if running Docker within a VM, you can enab
 docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker --env=RUNCVM_SYS_ADMIN=1 <docker-image>
 ```
 
-> N.B. This option adds `CAP_SYS_ADMIN` capabilities to the container and then launches `virtiofsd` with `-o modcaps=+sys_admin`. 
+> N.B. This option adds `CAP_SYS_ADMIN` capabilities to the container and then launches `virtiofsd` with `--modcaps=+sys_admin`. 
 
 ## Developing
 
