@@ -117,7 +117,7 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
 
 - **System services that need `systemd` as PID 1**, and the units, timers and socket activation it manages, such as a package's services, or configuration-management code (e.g. Ansible roles) that manages them. [Quick start](#quick-start) and [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm) have examples of images that run `systemd`.
 - **Docker, Docker Swarm or [Kubernetes](https://kubernetes.io/) inside a VM**, without `--privileged`: Docker tooling tested against its own dockerd, which its tests may reconfigure, restart or break, or a multi-node cluster on one host, each node a VM with its own kernel, firewall and cgroups. See [Running Docker in a RunCVM Container/VM](#running-docker-in-a-runcvm-containervm), and the k3s and Docker Swarm examples in [Quick start](#quick-start).
-- **Software that needs a kernel of its own**: kernel modules, eBPF tools, sysctls, netfilter and routing (e.g. firewalls, VPNs and routing daemons), memory pressure and out-of-memory handling in the VM's own kernel (sized by the container's memory and CPU limits), or a kernel version other than the host's. An image of a supported distribution boots RunCVM's kernel for that distribution, unless the image has a kernel of its own; other images need `RUNCVM_KERNEL`. See [Kernel auto-detection](#kernel-auto-detection) and [`RUNCVM_KERNEL`](#--envruncvm_kerneldistversion).
+- **Software that needs a kernel of its own**: kernel modules, eBPF tools, sysctls, netfilter and routing (e.g. firewalls, VPNs and routing daemons), memory pressure and out-of-memory handling in the VM's own kernel (sized by the container's memory and CPU limits), or a kernel version other than the host's. An image of a supported distribution boots RunCVM's kernel for that distribution, unless the image has a kernel of its own; other images need `RUNCVM_KERNEL`. See [Kernel selection and auto-detection](#kernel-selection-and-auto-detection) and [`RUNCVM_KERNEL`](#--envruncvm_kerneldistversion).
 - **Kernel development and bug-hunting** in realistic machine environments: boot a patched kernel under a real distribution's userland, with systemd, Docker, real networking or a multi-node cluster around it, run the reproducer or the tests, and iterate on the patch, with each attempt as quick as launching a container. See [Booting your own kernel](#booting-your-own-kernel).
 - **Developing, testing or experimenting with container runtimes**, such as gVisor, Sysbox or RunCVM itself, run by Docker inside a disposable VM, where a broken runtime, kernel module or daemon configuration cannot affect the host. See [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm).
 - **Storage tools that need block devices**, to make filesystems, mount them, or use btrfs or xfs features. See [`RUNCVM_DISKS`](#--envruncvm_disksdisk1disk2).
@@ -142,7 +142,7 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
 - [System requirements](#system-requirements)
 - [Installation](#installation)
 - [Supported distributions](#supported-distributions)
-- [Kernel auto-detection](#kernel-auto-detection)
+- [Kernel selection and auto-detection](#kernel-selection-and-auto-detection)
 - [Features and limitations](#features-and-limitations)
 - [Option reference](#option-reference)
 - [More examples](#more-examples)
@@ -158,8 +158,8 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
 - [Project aims](#project-aims)
 - [Project ambitions](#project-ambitions)
 - [Upgrading](#upgrading)
-- [Developing](#developing)
 - [Building](#building)
+- [Developing](#developing)
 - [Testing](#testing)
 - [Uninstallation](#uninstallation)
 - [Contributing](#contributing)
@@ -346,7 +346,7 @@ On either platform, once the first-boot script has finished (`cloud-init status 
 
 ## Supported distributions
 
-RunCVM aims to support each distribution's latest release and one or two before it (for Ubuntu, its LTS releases), while they remain supported upstream, as the image a Container/VM runs. It bundles a kernel for each of these distributions, built from the release shown, which a Container/VM boots unless its image has a kernel of its own (see [Kernel auto-detection](#kernel-auto-detection)). The table lists the image releases that the integration tests (`tests/25-images-kernels`) boot:
+RunCVM aims to support each distribution's latest release and one or two before it (for Ubuntu, its LTS releases), while they remain supported upstream, as the image a Container/VM runs. It bundles a kernel for each of these distributions, built from the release shown, which a Container/VM boots unless its image has a kernel of its own (see [Kernel selection and auto-detection](#kernel-selection-and-auto-detection)). The table lists the image releases that the integration tests (`tests/25-images-kernels`) boot:
 
 | Distribution | Image releases tested | RunCVM's kernel (`RUNCVM_KERNEL`) | Kernel built from | Kernel series | Module compression | Image releases whose own `modprobe` can load the kernel's modules |
 |---|---|---|---|---|---|---|
@@ -386,7 +386,9 @@ RunCVM bundles no kernel for other distributions. It looks at the distributions 
 
 A Container/VM launched with `RUNCVM_KERNEL` boots the named kernel, whatever the image. A distribution of either family may be named in place of its family's kernel, e.g. `RUNCVM_KERNEL=ol` boots AlmaLinux's.
 
-## Kernel auto-detection
+## Kernel selection and auto-detection
+
+<a id="kernel-auto-detection"></a>
 
 When creating a container, RunCVM will examine the image being launched to try to determine a suitable kernel to boot the VM with. Its process is as follows:
 
@@ -908,7 +910,7 @@ docker run -it --rm --runtime=runcvm --name=openwrt --network=runcvm-openwrt --i
 
 ### Booting your own kernel
 
-RunCVM boots a kernel found in the image, at its distribution's usual location, in preference to its own (see [Kernel auto-detection](#kernel-auto-detection)). That makes it a quick way to run a patched kernel in a realistic machine environment: install the kernel in an image, with whatever userland, services and tools reproduce the problem, and launch it with `docker run`.
+RunCVM boots a kernel found in the image, at its distribution's usual location, in preference to its own (see [Kernel selection and auto-detection](#kernel-selection-and-auto-detection)). That makes it a quick way to run a patched kernel in a realistic machine environment: install the kernel in an image, with whatever userland, services and tools reproduce the problem, and launch it with `docker run`.
 
 For example, this image installs Ubuntu 24.04's own kernel package, standing in for a kernel of your own. The kernel's initramfs must include the `virtiofs` module, to mount the VM's root filesystem:
 
@@ -924,7 +926,7 @@ docker run --rm --runtime=runcvm ubuntu-own-kernel uname -r
 
 This prints the version of the image's kernel (e.g. `6.8.0-149-generic`), not that of RunCVM's Ubuntu kernel, and the VM loads modules from the image's own `/lib/modules`.
 
-To boot your own build, install its package instead (e.g. one made with `make bindeb-pkg`), checking that the kernel and its initramfs end up at the locations that [Kernel auto-detection](#kernel-auto-detection) gives for the image's distribution (for Ubuntu, `/boot/vmlinuz` and `/boot/initrd.img`). Each iteration on a patch is then a rebuild of the image and a fresh `docker run`; a change confined to modules can instead be rebuilt and reloaded in the running VM, with `rmmod` and `insmod`. With `--env=RUNCVM_KERNEL_DEBUG=1`, the Container/VM's output includes the kernel's console messages, such as its boot log and any oops.
+To boot your own build, install its package instead (e.g. one made with `make bindeb-pkg`), checking that the kernel and its initramfs end up at the locations that [Kernel selection and auto-detection](#kernel-selection-and-auto-detection) gives for the image's distribution (for Ubuntu, `/boot/vmlinuz` and `/boot/initrd.img`). Each iteration on a patch is then a rebuild of the image and a fresh `docker run`; a change confined to modules can instead be rebuilt and reloaded in the running VM, with `rmmod` and `insmod`. With `--env=RUNCVM_KERNEL_DEBUG=1`, the Container/VM's output includes the kernel's console messages, such as its boot log and any oops.
 
 ### RunCVM in CI
 
@@ -1057,6 +1059,23 @@ To upgrade, follow this procedure:
 2. Rerun the installation command, which installs the latest release, or the release named in `REPO` (see [Installation](#installation)), and runs that release's own installer.
 3. Start any RunCVM containers.
 
+## Building
+
+Building RunCVM requires Docker. To build RunCVM, first clone the repo, then run the build script, as follows:
+
+```console
+cd runcvm
+./build/build.sh
+```
+
+The build script creates a Docker image named `newsnowlabs/runcvm:latest`. To tag it otherwise, give `--tag <tag>`, once or more, e.g. `--tag dev` for a development build, or `--tag v1.2.3 --tag latest` for a release. Arguments after `--` are passed to `docker build`.
+
+To publish the build, add `--push`, which after a successful build pushes each tag to Docker Hub (`newsnowlabs/runcvm:<tag>`), then copies it to GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`) with `docker buildx imagetools create`, giving the copy's index the image's `org.opencontainers.image.*` labels (its source repository, description and licence) as annotations, which GitHub uses to link the package on ghcr.io to this repository; `--push=dockerhub` pushes to Docker Hub only. Both need `docker login` to the registries concerned, and `--push` (with `all`) needs Docker's [containerd image store](https://docs.docker.com/engine/storage/containerd/) (the default for new installations of Docker Engine 29 and later): with Docker's classic store, the copy on ghcr.io would be a Docker manifest list, which cannot carry annotations, so the script stops before building. `./build/build.sh --help` lists the options.
+
+To install a build tagged other than `latest`, name it in `REPO` when running the installation script, e.g. `sudo REPO=newsnowlabs/runcvm:dev ./runcvm-scripts/runcvm-install-runtime.sh`.
+
+Now follow the main [installation instructions](#installation) to install your built RunCVM from the Docker image.
+
 ## Developing
 
 The following deep dive should help explain the inner workings of RunCVM, and which files to modify to implement fixes, improvements and extensions.
@@ -1144,23 +1163,6 @@ The RunCVM runtime `exec` process:
 
 The `runcvm-ctr-exec` script:
 - Uses the Dropbear `dbclient` SSH client to execute the intended command, with the intended arguments and environment variables (without RunCVM's own `RUNCVM_*` settings) within the VM, via the `runcvm-vm-exec` process, propagate the returned stdout and stderr and return the command's exit code.
-
-## Building
-
-Building RunCVM requires Docker. To build RunCVM, first clone the repo, then run the build script, as follows:
-
-```console
-cd runcvm
-./build/build.sh
-```
-
-The build script creates a Docker image named `newsnowlabs/runcvm:latest`. To tag it otherwise, give `--tag <tag>`, once or more, e.g. `--tag dev` for a development build, or `--tag v1.2.3 --tag latest` for a release. Arguments after `--` are passed to `docker build`.
-
-To publish the build, add `--push`, which after a successful build pushes each tag to Docker Hub (`newsnowlabs/runcvm:<tag>`), then copies it to GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`) with `docker buildx imagetools create`, giving the copy's index the image's `org.opencontainers.image.*` labels (its source repository, description and licence) as annotations, which GitHub uses to link the package on ghcr.io to this repository; `--push=dockerhub` pushes to Docker Hub only. Both need `docker login` to the registries concerned, and `--push` (with `all`) needs Docker's [containerd image store](https://docs.docker.com/engine/storage/containerd/) (the default for new installations of Docker Engine 29 and later): with Docker's classic store, the copy on ghcr.io would be a Docker manifest list, which cannot carry annotations, so the script stops before building. `./build/build.sh --help` lists the options.
-
-To install a build tagged other than `latest`, name it in `REPO` when running the installation script, e.g. `sudo REPO=newsnowlabs/runcvm:dev ./runcvm-scripts/runcvm-install-runtime.sh`.
-
-Now follow the main [installation instructions](#installation) to install your built RunCVM from the Docker image.
 
 ## Testing
 
