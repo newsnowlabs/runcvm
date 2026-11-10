@@ -343,14 +343,15 @@ ARG KERNEL_MODULE_COMPRESSION
 # The initrd must be built by initramfs-tools, not dracut (Ubuntu's default initrd generator), as
 # runcvm-runtime boots the Ubuntu kernel with initramfs-tools' arguments for a virtiofs root
 # (rootfstype=virtiofs root=runcvmfs).
-# The initrd holds only the modules listed (MODULES=list) that the kernel needs to mount the
-# virtiofs root, rather than most of the kernel's modules (initramfs-tools' default): a VM unpacks
-# its initrd into memory as it boots, before RunCVM's module loader loads anything else from the
-# bundled modules.
+# The initrd holds only the modules listed (MODULES=list), those the VM needs as it boots: its
+# virtual devices' drivers (runcvm-vm-init needs the network device from the start) and virtiofs,
+# for its root, rather than most of the kernel's modules (initramfs-tools' default). A VM unpacks
+# its initrd into memory as it boots, and RunCVM loads any other module the VM needs from the
+# kernel's bundled modules once the root is mounted.
 RUN apt update && \
     DEB_ARCH=$(dpkg --print-architecture) && \
     apt install -y linux-generic:${DEB_ARCH} initramfs-tools zstd xz-utils binutils && \
-    printf '%s\n' virtio_pci virtiofs virtio_console >>/etc/initramfs-tools/modules && \
+    printf '%s\n' virtio_pci virtio_blk virtio_console virtio_net virtio_rng virtio_scsi virtiofs >>/etc/initramfs-tools/modules && \
     echo "MODULES=list" >/etc/initramfs-tools/conf.d/runcvm-modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
