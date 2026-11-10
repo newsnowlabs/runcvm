@@ -538,13 +538,16 @@ do_root_disk() {
 # Adds disk backing file $1 to the QEMU command line, as disk number $2, with prealloc $3 ('on' or
 # 'off').
 disk_add_device() {
-  local src="$1" id="$2" prealloc="$3" queues discard
+  local src="$1" id="$2" prealloc="$3" queues iothreads discard
 
   if [ "${RUNCVM_CPUS:-1}" -gt 8 ]; then
     queues=8
   else
     queues="${RUNCVM_CPUS:-1}"
   fi
+  # RUNCVM_DISK_IOTHREADS (validated by runcvm-runtime; by default 1), at most one per queue
+  iothreads="${RUNCVM_DISK_IOTHREADS:-1}"
+  [ "$iothreads" -gt "$queues" ] && iothreads=$queues
 
   # A preallocated disk ignores the VM's discards and writes zeroes as data, keeping its blocks
   # allocated; a sparse disk passes both on to the backing file, freeing its blocks.
@@ -568,18 +571,24 @@ disk_add_device() {
     #                          discard=ignore,detect-zeroes=off does neither (see above)
     -drive id=drv$id,file=$src,if=none,format=raw,media=disk,cache=none,aio=io_uring,$discard
 
-    # Create a dedicated I/O thread (dataplane) to offload block I/O
-    # -object iothread,id=ioth$id : defines an iothread with a unique identifier
-    -object iothread,id=ioth$id
-
-    # Attach a virtio-blk PCI frontend to the backend and iothread
-    # -device virtio-blk-pci     : create a virtio block device on PCI bus
-    # drive=drv$id               : connect to backend created above
-    # iothread=ioth$id           : process requests in dedicated I/O thread
-    # queue-size=1024            : set depth of each virtqueue
-    # num-queues=4               : create 4 queues, allowing parallel I/O across vCPUs
-    -device virtio-blk-pci,drive=drv$id,iothread=ioth$id,queue-size=1024,num-queues=$queues
   )
+
+  # Dedicated I/O threads (dataplane) to offload block I/O, $iothreads of them, among which the
+  # disk's queues are shared round-robin (iothread-vq-mapping), so that I/O from several vCPUs
+  # proceeds in parallel.
+  local i mapping=""
+  for ((i = 0; i < iothreads; i++)); do
+    DISKS+=(-object iothread,id=ioth$id-$i)
+    mapping+="${mapping:+,}{\"iothread\":\"ioth$id-$i\"}"
+  done
+
+  # Attach a virtio-blk PCI frontend to the backend and I/O threads. iothread-vq-mapping takes a
+  # list, which only QEMU's JSON syntax for -device can give.
+  # drive                : connect to backend created above
+  # iothread-vq-mapping  : the I/O threads that process the disk's queues
+  # queue-size           : depth of each virtqueue
+  # num-queues           : number of queues, allowing parallel I/O across vCPUs
+  DISKS+=(-device "{\"driver\":\"virtio-blk-pci\",\"drive\":\"drv$id\",\"iothread-vq-mapping\":[$mapping],\"queue-size\":1024,\"num-queues\":$queues}")
 }
 
 # Argument e.g. /disk1,/home,ext4,5G;/disk2,/var,ext4,1G

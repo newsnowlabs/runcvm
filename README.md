@@ -783,6 +783,12 @@ docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=
 
 > N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints, these are *NOT* mounted into the VM but only into the container, and are therefore suitable for use for mounting VM disks from backing files that cannot be accessed within the VM's filesystem.
 
+### `--env=RUNCVM_DISK_IOTHREADS=<n>`
+
+Sets the number of QEMU I/O threads that serve each `RUNCVM_DISKS` disk, from 1 (the default) to 8. Each disk has one queue per vCPU, up to 8, and the queues are shared among the disk's I/O threads in turn, so with more than one thread, I/O from several vCPUs is processed in parallel. A disk has at most one I/O thread per queue, so a VM with fewer vCPUs than `<n>` gets as many threads as it has vCPUs.
+
+More threads can raise a disk's throughput for parallel I/O, such as a database's, on hosts with fast storage and CPU cores to spare for them; on hosts without, the threads compete with the VM's vCPUs, and can lower it. Measure with the workload before choosing a value above 1.
+
 ### `--env=RUNCVM_DISPLAY_MODE=<value>`
 
 Shortcut to select a display mode:

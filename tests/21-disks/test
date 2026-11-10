@@ -13,6 +13,9 @@
 - A pre-existing backing file whose filesystem has a label of its own (made
   here with RunCVM's own mke2fs, from /opt/runcvm) is mounted at its
   destination, with its contents at its root.
+- With RUNCVM_DISK_IOTHREADS=4, a disk of a 2-vCPU Container/VM, which has
+  two queues, is served by two I/O threads (at most one per queue), and
+  data written to it reads back.
 """
 
 import os
@@ -72,5 +75,24 @@ t.check("/disks is not visible in the VM", False, t.docker("exec", name, "test",
 t.check("backing files created in the volume", "labelled one two",
         " ".join(sorted((t.docker("run", "--rm", "--runtime=runc", *t.labels(), "-v", volume + ":/v:ro",
                                   "alpine", "ls", "/v").stdout.split()))))
+
+
+# RUNCVM_DISK_IOTHREADS: a 2-vCPU Container/VM's disk has two queues, so at most two I/O threads.
+io_name = t.unique("disks-iothreads")
+t.cleanup_container(io_name)
+t.docker("run", "-d", "--name", io_name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(), "--cpus=2",
+         "--env=RUNCVM_DISK_IOTHREADS=4", "--env=RUNCVM_DISKS=/disks/io,/io,ext4,64M",
+         "alpine", "sleep", "600", check=True)
+if t.check("RUNCVM_DISK_IOTHREADS=4: Container/VM started", True, t.wait_for_exec(io_name, BOOT_TIMEOUT)):
+    qemu = [line for line in t.docker("top", io_name).stdout.splitlines() if "qemu-system" in line]
+    iothreads = sorted(set(w.split(",")[1] for line in qemu for w in line.split()
+                           if w.startswith("iothread,id=ioth0-")))
+    t.check("RUNCVM_DISK_IOTHREADS=4 with 2 vCPUs: the disk's I/O threads", ["id=ioth0-0", "id=ioth0-1"], iothreads)
+    r = t.docker("exec", io_name, "sh", "-c",
+                 "dd if=/dev/urandom of=/io/f bs=1M count=16 2>/dev/null && sync && "
+                 "md5sum /io/f | cut -d' ' -f1 && echo 3 >/proc/sys/vm/drop_caches && md5sum /io/f | cut -d' ' -f1")
+    sums = r.stdout.split()
+    t.check("RUNCVM_DISK_IOTHREADS=4: data written to the disk reads back", True,
+            r.returncode == 0 and len(sums) == 2 and sums[0] == sums[1])
 
 t.finish()
