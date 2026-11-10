@@ -466,7 +466,9 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
       xargs -0 -r -n 64 -P "$(nproc)" sh -ec 'm=$1; shift; for f; do zstd -q -d --rm "$f"; [ "$m" = none ] || xz -q --check=crc32 --lzma2=dict=1MiB "${f%.zst}"; done' sh "$KERNEL_MODULE_COMPRESSION" && \
     depmod $BASENAME && \
     mkdir -p /opt/runcvm/kernels/opensuse/$BASENAME && \
-    mv /lib/modules/$BASENAME/vmlinuz /opt/runcvm/kernels/opensuse/$BASENAME/vmlinuz && \
+    # The kernel image is vmlinuz on x86_64, Image on arm64
+    KIMAGE=$(ls /lib/modules/$BASENAME/vmlinuz /lib/modules/$BASENAME/Image 2>/dev/null | head -n 1) && \
+    mv "$KIMAGE" /opt/runcvm/kernels/opensuse/$BASENAME/vmlinuz && \
     rm -f /lib/modules/$BASENAME/vmlinux.xz && \
     cp -aL /boot/initrd-$BASENAME /opt/runcvm/kernels/opensuse/$BASENAME/initrd && \
     cp -a /lib/modules/ /opt/runcvm/kernels/opensuse/$BASENAME/ && \
