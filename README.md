@@ -129,10 +129,10 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
 
 ### When RunCVM is not the right fit
 
-- **Very short-lived containers in large numbers.** Each Container/VM boots a kernel, which takes a few seconds, and runs a VM of its own, sized by its memory and CPU limits.
-- **Hosts without KVM, or not x86-64 Linux.** Without KVM, a Container/VM fails to start, unless it is allowed QEMU's software emulation, which is much slower (see [`RUNCVM_QEMU_ACCEL`](#--envruncvm_qemu_accelkvmautotcg)).
-- **Podman**, whose support is experimental.
-- **Workloads that rely on container features RunCVM does not provide**, such as adding networks to, or removing them from, a running Container/VM (i.e. using `docker network connect` and `disconnect`); networks may be attached at creation time, before the container is started, or after it is subsequently stopped. See [Features and limitations](#features-and-limitations).
+- **Very short-lived containers in large numbers.** Each Container/VM boots a kernel, taking a few seconds, and runs a VM of its own, sized by its memory and CPU limits.
+- **Workloads that rely on container features RunCVM does not provide**, such as adding networks to, or removing them from, a running Container/VM (`docker network connect` and `disconnect`): networks may be attached before a Container/VM starts, or while it is stopped. See [Features and limitations](#features-and-limitations).
+- **Hosts without KVM.** Without KVM, a Container/VM runs only under QEMU's software emulation, which is much slower, and only when allowed to (see [`RUNCVM_QEMU_ACCEL`](#--envruncvm_qemu_accelkvmautotcg)).
+- **Podman, and arm64 hosts.** Podman support is experimental, and arm64 support is in development.
 
 ## Contents
 
@@ -142,8 +142,8 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
 - [System requirements](#system-requirements)
 - [Installation](#installation)
 - [Supported distributions](#supported-distributions)
-- [Features and limitations](#features-and-limitations)
 - [Kernel auto-detection](#kernel-auto-detection)
+- [Features and limitations](#features-and-limitations)
 - [Option reference](#option-reference)
 - [More examples](#more-examples)
   - [Running Docker in a RunCVM Container/VM](#running-docker-in-a-runcvm-containervm)
@@ -386,6 +386,25 @@ RunCVM bundles no kernel for other distributions. It looks at the distributions 
 
 A Container/VM launched with `RUNCVM_KERNEL` boots the named kernel, whatever the image. A distribution of either family may be named in place of its family's kernel, e.g. `RUNCVM_KERNEL=ol` boots AlmaLinux's.
 
+## Kernel auto-detection
+
+When creating a container, RunCVM will examine the image being launched to try to determine a suitable kernel to boot the VM with. Its process is as follows:
+
+1. If `--env=RUNCVM_KERNEL=<dist>[/<version>]` specified, use the indicated kernel
+2. Otherwise, identify distro from `/etc/os-release`
+   1. If RunCVM bundles a kernel for the image's own distribution (its `ID`), and one is found in the appropriate distro-specific location in the image, select an in-image kernel. The locations are:
+      - Debian: `/vmlinuz` and `/initrd.img`
+      - Ubuntu: `/boot/vmlinuz` and `/boot/initrd.img`
+      - Alpine: `/boot/vmlinuz-virt` `/boot/initramfs-virt`
+      - AlmaLinux, Fedora: `/boot/vmlinuz` and `/boot/initramfs`
+      - openSUSE images, whose `ID` is e.g. `opensuse-leap`, never `opensuse`, always boot RunCVM's kernel
+   2. Otherwise, select the latest RunCVM kernel for the first distro named by `ID`, then by each word of `ID_LIKE`, for which RunCVM has a kernel (`debian`, `ubuntu`, `almalinux`, `fedora`, `opensuse`, `alpine` or `openwrt`), counting the RHEL family as AlmaLinux's and the SUSE family as openSUSE's (see [Other distributions](#other-distributions))
+   3. If the image has no `/etc/os-release`, or it gives no `ID`, use the Debian kernel from the RunCVM package; if it gives an `ID`, but names no distro RunCVM has a kernel for, use the Debian kernel, with a warning in the Container/VM's output
+
+RunCVM reads `/etc/os-release`, or else `/usr/lib/os-release`, resolving any symbolic links within the image's own filesystem, never the host's.
+
+An in-image kernel's initramfs must include the `virtiofs` module (or the kernel must have it built in), as the VM's root filesystem is served over virtiofs: without it, the VM cannot mount its root filesystem, and halts. See [Booting your own kernel](#booting-your-own-kernel).
+
 ## Features and limitations
 
 In the below summary of RunCVM's current main features and limitations, [+] is used to indicate an area of compatibility with standard container runtimes and [-] is used indicate a feature of standard container runtimes that is unsupported.
@@ -445,25 +464,6 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
 - Firmware
   - [+] [SeaBIOS](https://github.com/qemu/seabios)
   - [+] [OVMF EFI](https://github.com/tianocore/tianocore.github.io/wiki/OVMF)
-
-## Kernel auto-detection
-
-When creating a container, RunCVM will examine the image being launched to try to determine a suitable kernel to boot the VM with. Its process is as follows:
-
-1. If `--env=RUNCVM_KERNEL=<dist>[/<version>]` specified, use the indicated kernel
-2. Otherwise, identify distro from `/etc/os-release`
-   1. If RunCVM bundles a kernel for the image's own distribution (its `ID`), and one is found in the appropriate distro-specific location in the image, select an in-image kernel. The locations are:
-      - Debian: `/vmlinuz` and `/initrd.img`
-      - Ubuntu: `/boot/vmlinuz` and `/boot/initrd.img`
-      - Alpine: `/boot/vmlinuz-virt` `/boot/initramfs-virt`
-      - AlmaLinux, Fedora: `/boot/vmlinuz` and `/boot/initramfs`
-      - openSUSE images, whose `ID` is e.g. `opensuse-leap`, never `opensuse`, always boot RunCVM's kernel
-   2. Otherwise, select the latest RunCVM kernel for the first distro named by `ID`, then by each word of `ID_LIKE`, for which RunCVM has a kernel (`debian`, `ubuntu`, `almalinux`, `fedora`, `opensuse`, `alpine` or `openwrt`), counting the RHEL family as AlmaLinux's and the SUSE family as openSUSE's (see [Other distributions](#other-distributions))
-   3. If the image has no `/etc/os-release`, or it gives no `ID`, use the Debian kernel from the RunCVM package; if it gives an `ID`, but names no distro RunCVM has a kernel for, use the Debian kernel, with a warning in the Container/VM's output
-
-RunCVM reads `/etc/os-release`, or else `/usr/lib/os-release`, resolving any symbolic links within the image's own filesystem, never the host's.
-
-An in-image kernel's initramfs must include the `virtiofs` module (or the kernel must have it built in), as the VM's root filesystem is served over virtiofs: without it, the VM cannot mount its root filesystem, and halts. See [Booting your own kernel](#booting-your-own-kernel).
 
 ## Option reference
 
