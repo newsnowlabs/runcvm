@@ -36,6 +36,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <signal.h>
 #include <stdio.h>
@@ -336,9 +337,13 @@ int main(int argc, char *argv[]) {
      *
      * We want the child to be able to be the session leader of the TTY so that
      * it can do normal job control.
+     *
+     * The controlling tty, opened as /dev/tty, need not be stdin: after a
+     * dracut initramfs, the VM's PID 1 holds tty1, and stdin is the console.
      */
     if (use_setsid) {
-        if (ioctl(STDIN_FILENO, TIOCNOTTY) == -1) {
+        int tty_fd = open("/dev/tty", O_RDWR | O_NOCTTY);
+        if (tty_fd == -1 || ioctl(tty_fd, TIOCNOTTY) == -1) {
             DEBUG(
                 "Unable to detach from controlling tty (errno=%d %s).\n",
                 errno,
@@ -359,6 +364,9 @@ int main(int argc, char *argv[]) {
             } else {
                 DEBUG("Detached from controlling tty, but was not session leader.\n");
             }
+        }
+        if (tty_fd != -1) {
+            close(tty_fd);
         }
     }
 
