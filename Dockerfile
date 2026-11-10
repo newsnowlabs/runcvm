@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.3-labs
 
 # Alpine version to build RunCVM's own binaries and libraries with
-ARG ALPINE_VERSION=3.19
+ARG ALPINE_VERSION=3.24
 
 # BuildKit predefines the platform args (TARGETARCH, TARGETPLATFORM) in the
 # global scope, so the FROM lines below use them without an ARG declaration
@@ -199,7 +199,7 @@ ARG TARGETARCH
 RUN apk update && \
     QEMU_SYSTEM=$([ "$TARGETARCH" = "arm64" ] && echo qemu-system-aarch64 || echo qemu-system-x86_64) && \
     UEFI_PKG=$([ "$TARGETARCH" = "arm64" ] && echo aavmf || echo ovmf) && \
-    apk add --no-cache file bash $QEMU_SYSTEM qemu-virtiofsd qemu-ui-curses qemu-guest-agent \
+    apk add --no-cache file bash $QEMU_SYSTEM virtiofsd qemu-ui-curses qemu-guest-agent \
         qemu-hw-display-virtio-vga \
         $UEFI_PKG \
         jq iproute2 netcat-openbsd blkid util-linux \
