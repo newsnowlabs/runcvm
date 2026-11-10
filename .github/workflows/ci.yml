@@ -1,13 +1,34 @@
-# RunCVM's CI: on each pull request, and each push to main, builds RunCVM on a GitHub-hosted
-# runner, installs it, and runs the integration tests' core tier in real Container/VMs under KVM.
+# RunCVM's CI: on pull requests and pushes to main, builds RunCVM on a GitHub-hosted runner,
+# installs it, and runs the integration tests (by default the core tier) in real Container/VMs
+# under KVM.
 # GitHub's ubuntu-24.04 runners provide nested KVM; the job opens /dev/kvm to the runner user.
 # The test framework's selftest runs in a separate, quicker job.
+#
+# What runs, and when:
+# - Changes to Markdown files alone (README.md, docs/**, ...) run nothing: neither the build nor
+#   the tests read them. On a pull request, this applies to the pull request's whole diff.
+# - A commit message containing "[skip ci]" (or "[ci skip]", "[no ci]") skips the run for a push
+#   whose latest commit it is: GitHub's own rule, for pull requests and pushes to main alike.
+# - Draft pull requests run nothing; marking one ready for review runs CI.
+# - Labels on a pull request:
+#   - ci:skip      runs nothing while present; removing it runs CI.
+#   - ci:extended  runs the extended tier (tests/run --tier extended) in place of the core tier.
+#   - ci:all       runs every tier (tests/run --tier all); it takes precedence over ci:extended.
+#   Adding ci:extended or ci:all runs the integration tests; other labels run nothing.
+# - By hand (workflow_dispatch), the tests input gives tests/run's arguments.
+# Drafts and labels act through the jobs' if: conditions, not through event filters: if CI
+# becomes a required status check, a skipped job counts as passing, whereas a run that an event
+# filter prevents leaves the check pending and blocks merging. The Markdown paths filter and
+# [skip ci] prevent the run, so they would need the same treatment then.
 name: CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    paths-ignore: ['**.md']
   push:
     branches: [main]
+    paths-ignore: ['**.md']
   workflow_dispatch:
     inputs:
       tests:
@@ -17,12 +38,23 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
+# Concurrency is per job, not per workflow: a run whose jobs are all skipped (e.g. one started by
+# an unrelated label) must not cancel a pull request's run in progress, and a skipped job never
+# joins its concurrency group.
 jobs:
   selftest:
+    # Pull requests: not drafts, nor with ci:skip; and not for label changes, except removing
+    # ci:skip, since labels select the integration tests' tier, which selftest does not use.
+    if: >-
+      github.event_name != 'pull_request' || (
+        !github.event.pull_request.draft &&
+        !contains(github.event.pull_request.labels.*.name, 'ci:skip') &&
+        github.event.action != 'labeled' &&
+        (github.event.action != 'unlabeled' || github.event.label.name == 'ci:skip')
+      )
+    concurrency:
+      group: ci-selftest-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -31,10 +63,28 @@ jobs:
         run: tests/selftest/run-selftest --docker
 
   kvm:
+    # Pull requests: not drafts, nor with ci:skip; for label changes, only adding a ci: label
+    # other than ci:skip, or removing ci:skip.
+    if: >-
+      github.event_name != 'pull_request' || (
+        !github.event.pull_request.draft &&
+        !contains(github.event.pull_request.labels.*.name, 'ci:skip') &&
+        (github.event.action != 'labeled' ||
+          (startsWith(github.event.label.name, 'ci:') && github.event.label.name != 'ci:skip')) &&
+        (github.event.action != 'unlabeled' || github.event.label.name == 'ci:skip')
+      )
+    concurrency:
+      group: ci-kvm-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      TESTS: ${{ inputs.tests || '--tier core' }}
+      # By hand: the tests input. Pull requests: ci:all, then ci:extended, then the core tier.
+      TESTS: >-
+        ${{ inputs.tests
+          || (contains(github.event.pull_request.labels.*.name, 'ci:all') && '--tier all')
+          || (contains(github.event.pull_request.labels.*.name, 'ci:extended') && '--tier extended')
+          || '--tier core' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -83,7 +133,9 @@ jobs:
 
       - name: Integration tests (${{ env.TESTS }})
         run: |
-          # Two tests at a time suits a hosted runner's 4 CPUs and 16 GB of memory.
+          # Two tests at a time suits a hosted runner's 4 CPUs and 16 GB of memory. TESTS holds
+          # several arguments, so it is split into words.
+          # shellcheck disable=SC2086
           RUNCVM_TEST_JOBS=2 tests/run $TESTS --results "$RUNNER_TEMP/results"
 
       - name: Upload test results
