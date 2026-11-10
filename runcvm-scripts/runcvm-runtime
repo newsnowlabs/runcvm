@@ -670,7 +670,7 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   # Writeback caching needs a policy that caches file contents in the VM (auto or always).
   RUNCVM_VIRTIOFSD_CACHE="$(get_config_env 'RUNCVM_VIRTIOFSD_CACHE')"
   if ! valid_virtiofsd_cache "$RUNCVM_VIRTIOFSD_CACHE"; then
-    error "RUNCVM_VIRTIOFSD_CACHE '$RUNCVM_VIRTIOFSD_CACHE' invalid (should be a cache policy, auto, always, metadata or none, optionally with ',writeback', which needs auto or always)"
+    error "RUNCVM_VIRTIOFSD_CACHE '$RUNCVM_VIRTIOFSD_CACHE' invalid (should be one of the cache policies auto, always, metadata and none (or never), optionally with 'writeback', which needs auto or always, e.g. 'always,writeback')"
   fi
 
   # Under software emulation, QEMU keeps a cache of translated code, whose size is set by
