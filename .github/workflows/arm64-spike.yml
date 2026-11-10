@@ -40,14 +40,11 @@ jobs:
         id: build
         continue-on-error: true
         run: |
-          # gitlab.alpinelinux.org refuses requests from GitHub-hosted runners (HTTP 418), so the
-          # build clones aports from its GitHub mirror, and abuild fetches sources from Alpine's
-          # distfiles mirror, which it tries before each source's upstream URL.
-          sed -i -e 's#https://gitlab.alpinelinux.org/alpine/aports.git#https://github.com/alpinelinux/aports.git#' \
-            -e 's#^\( *\)abuild-keygen -an && \\#&\n\1echo "DISTFILES_MIRROR=https://distfiles.alpinelinux.org/distfiles/v${ALPINE_VERSION}" >>/etc/abuild.conf \&\& \\#' Dockerfile
-          git diff --stat
           set -o pipefail
-          time ./build/build.sh --tag arm64 2>&1 | tee "$RUNNER_TEMP/build.log"
+          time ./build/build.sh --tag arm64 -- \
+            --build-arg APORTS_URL=https://github.com/alpinelinux/aports.git \
+            --build-arg ALPINE_DISTFILES_MIRROR=https://distfiles.alpinelinux.org/distfiles \
+            2>&1 | tee "$RUNNER_TEMP/build.log"
 
       - name: Build log tail on failure
         if: steps.build.outcome == 'failure'
