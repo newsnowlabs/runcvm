@@ -25,4 +25,4 @@ mapfile -d '' -t env </.runcvm/env
 
 # Run the entrypoint with the workload's environment alone
 IFS=':' read -r uid gid additionalGids <<< "$RUNCVM_UIDGID"
-exec -c $RUNCVM_GUEST/bin/busybox env -i "${env[@]}" $RUNCVM_GUEST/bin/s6-applyuidgid -u $uid -g $gid -G "$additionalGids" "${ARGS[@]}"
+exec -c $RUNCVM_GUEST/bin/busybox env -i "${env[@]}" $RUNCVM_GUEST/usr/bin/s6-applyuidgid -u $uid -g $gid -G "$additionalGids" "${ARGS[@]}"

@@ -263,7 +263,7 @@ if [ -f /.runcvm/fstab ]; then
 
       mkdir -p "$mnt/$dir"
       if [ -d "$dst" ]; then
-        $RUNCVM_GUEST/usr/bin/coreutils --coreutils-prog=cp -a "$dst/." "$mnt/$dir/" || \
+        $RUNCVM_GUEST/bin/coreutils --coreutils-prog=cp -a "$dst/." "$mnt/$dir/" || \
           vm_init_error "dst '$dst' cannot be populated: copying its contents to its new disk failed"
       fi
     done </.runcvm/disks-populate
