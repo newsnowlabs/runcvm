@@ -899,7 +899,7 @@ Sets how the VM caches the files it reads over virtiofs: their names, their attr
 
 Without `writeback`, the VM's writes reach the host's filesystem as each write is made, so the policy affects only how soon the VM sees changes made outside it: by the host, by other containers sharing a volume, by `docker cp`, or by Docker itself, which can rewrite files such as `/etc/hosts`. Under `always` and `metadata`, the VM may go on seeing a file's old name, attributes or contents for up to a day after it changes, and a program that acts on them can overwrite the newer version.
 
-For volumes that several Container/VMs share, use `none`. Under `auto`, files that one Container/VM writes to a shared volume can stay invisible to the others for many seconds; `tests/50-http-docker-swarm`, whose nodes exchange files through a shared volume, uses `none` for this reason. Where the files exchanged are few and small, as there, `none` costs little.
+For volumes that several Container/VMs share, use `none`. Under `auto`, files that one Container/VM writes to a shared volume can stay invisible to the others for many seconds, far longer than its 1-second timeouts suggest; `tests/50-http-docker-swarm`, whose nodes exchange files through a shared volume, uses `none` for this reason. Where the files exchanged are few and small, as there, `none` costs little.
 
 Reads under `always` can be several times faster than under `none`: e.g. rereading a Debian image's `/usr`, about 230 MB, takes roughly a quarter of the time. Choose a faster policy only where its restriction holds for every file the Container/VM can see.
 
