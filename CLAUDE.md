@@ -51,6 +51,10 @@ the runtime or the scripts.
   so far.
 - `tests/run --mock` (stand-in mode) runs the tests with `runc` in place of RunCVM, skipping
   those that require real VMs. Use it to develop tests and the runner where RunCVM can't run.
+- `tests/run --engine podman` runs the tests with rootful Podman in place of Docker, through a
+  `docker` command (`tests/engines/podman/docker`) that runs Podman's Docker-compatible CLI;
+  RunCVM must be registered with Podman in `/etc/containers/containers.conf`, as L1
+  (`tests/env`) has it. Tests that depend on Docker-specific behaviour may fail under Podman.
 - `tests/run --accel tcg` runs real RunCVM Container/VMs under software emulation where KVM is
   unavailable; tests requiring `kvm` are skipped. Expect each VM to take tens of seconds to
   start, and allow for that in any wait.

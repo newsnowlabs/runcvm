@@ -181,14 +181,12 @@ class Environment:
 
     def preflight(self):
         if self.engine == "podman":
-            # Podman's info names only its default OCI runtime, not those in containers.conf.
+            # Podman's info names only its default OCI runtime, not those in containers.conf, so
+            # a runtime that Podman cannot find shows as failing tests rather than here.
             r = docker("info", "--format", "{{.Version.Version}}")
             if r.returncode != 0:
                 raise HarnessError("cannot run rootful Podman ('podman info' failed: %s)"
                                    % (r.stderr.strip().splitlines() or ["?"])[-1])
-            r = docker("run", "--rm", "--runtime", self.runtime, "--help")
-            if r.returncode != 0:
-                raise HarnessError("Podman cannot use runtime '%s'" % self.runtime)
             return
         if docker("info", "--format", "{{json .ServerVersion}}").returncode != 0:
             raise HarnessError("cannot reach the Docker daemon ('docker info' failed)")
