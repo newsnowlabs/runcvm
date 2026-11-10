@@ -139,6 +139,12 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
 - [Introduction](#introduction)
 - [Quick start](#quick-start)
 - [Use cases](#use-cases)
+- [System requirements](#system-requirements)
+- [Installation](#installation)
+- [Supported distributions](#supported-distributions)
+- [Features and limitations](#features-and-limitations)
+- [Kernel auto-detection](#kernel-auto-detection)
+- [Option reference](#option-reference)
 - [More examples](#more-examples)
   - [Running Docker in a RunCVM Container/VM](#running-docker-in-a-runcvm-containervm)
   - [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm)
@@ -146,233 +152,21 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
   - [OpenWrt](#openwrt)
   - [Booting your own kernel](#booting-your-own-kernel)
   - [RunCVM in CI](#runcvm-in-ci)
+- [How RunCVM works](#how-runcvm-works)
+- [RunCVM vs Kata comparison](#runcvm-vs-kata-comparison)
 - [Motivation](#motivation)
-- [Licence](#licence)
 - [Project aims](#project-aims)
 - [Project ambitions](#project-ambitions)
-- [How RunCVM works](#how-runcvm-works)
-- [System requirements](#system-requirements)
-- [Supported distributions](#supported-distributions)
-- [Installation](#installation)
 - [Upgrading](#upgrading)
-- [Features and Limitations](#features-and-limitations)
-- [RunCVM vs Kata comparison](#runcvm-vs-kata-comparison)
-- [Kernel auto-detection](#kernel-auto-detection)
-- [Option reference](#option-reference)
 - [Developing](#developing)
 - [Building](#building)
 - [Testing](#testing)
+- [Uninstallation](#uninstallation)
 - [Contributing](#contributing)
 - [Support](#support)
-- [Uninstallation](#uninstallation)
 - [RunCVM and Dockside](#runcvm-and-dockside)
+- [Licence](#licence)
 - [Legals](#legals)
-
-## More examples
-
-Examples that build an image or need more setup than those in [Quick start](#quick-start).
-
-### Running Docker in a RunCVM Container/VM
-
-RunCVM runs `dockerd` in a Container/VM without `--privileged` or any special Docker options. All it needs is a disk for Docker's storage.
-
-The VM's root filesystem is the container's own filesystem, served over virtiofs. Neither Docker's `overlay2` storage driver nor containerd's `overlayfs` snapshotter can use virtiofs as its upper layer. Without a disk, with Docker's containerd image store, `dockerd` starts but cannot run containers: its overlay mounts fail with `invalid argument`. With the classic image store, it falls back to the `vfs` storage driver, which copies every image layer in full, and is extremely slow and uses a lot of space. So give `dockerd` a [`RUNCVM_DISKS`](#--envruncvm_disksdisk1disk2) disk that holds both of its storage directories:
-
-- `/var/lib/docker`: containers, volumes, networks and, with Docker's classic image store, images.
-- `/var/lib/containerd`: the storage of the containerd service that Docker's packages (e.g. as installed by `get.docker.com`) run `dockerd` with. With Docker's [containerd image store](https://docs.docker.com/engine/storage/containerd/), the default for new installations of Docker Engine 29 and later, this holds images and their unpacked layers.
-
-One disk can hold both directories, in its subdirectories `var-lib-docker` and `var-lib-containerd` (see [Disk layouts](#disk-layouts)), so the two share the disk's space and you size only one disk. Give the disk both destinations whichever image store `dockerd` uses, and however it was installed: a `dockerd` that starts its own containerd, as in the `docker:dind` image, keeps containerd's storage under `/var/lib/docker`, and leaves `/var/lib/containerd` empty.
-
-For example, to launch `dockerd` from the `docker:dind` image with a 10G disk, whose backing file is in a Docker volume on the host, and run a container in it:
-
-```console
-docker run -d --runtime=runcvm --init --name=dind --memory=2g \
-  --mount=type=volume,src=dind-disks,dst=/disks \
-  --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,10G \
-  docker:dind
-
-docker exec dind sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done; docker run --rm hello-world'
-```
-
-In the keyed form, the same disk is `RUNCVM_DISKS=src=/disks/docker,dst=/var/lib/docker,dst=/var/lib/containerd,fs=ext4,size=10G`.
-
-Images built to run Docker under systemd, such as the one in [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm), can set the disk in their own `ENV RUNCVM_DISKS`, and use `VOLUME /disks` to keep the backing file in a volume.
-
-Some points to bear in mind:
-
-- **Where to keep the backing file.** A backing file under `/disks` in a named Docker volume, as above, is kept outside the container's overlay filesystem, survives removal of the container, and can be reused by a later Container/VM. Without the `--mount`, the backing file is created in the container's own filesystem, and goes when the container is removed.
-- **Disk size.** A backing file is sparse by default, so it takes host space only as `dockerd` writes to it. Size the disk for every image, container and volume `dockerd` will hold. With the containerd image store, each image takes space twice: once compressed, and once unpacked. If the host's filesystem fills up, `dockerd`'s writes to a sparse disk fail with I/O errors, which can leave Docker's storage inconsistent. For a long-lived `dockerd`, consider adding `prealloc=on` (e.g. `RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,10G,prealloc=on`), which takes the disk's full size on the host from the start, and keeps it taken, even after images are removed (see [Preallocated disks](#preallocated-disks)).
-- **Keeping the data.** Launch with `--init`, or from an image whose entrypoint is its own init, such as systemd, so that the VM flushes the disk when it stops (see the warning under [`RUNCVM_DISKS`](#--envruncvm_disksdisk1disk2)). A disk thrown away after each run needs no flushing.
-- **Existing disks.** A destination cannot be added to an existing disk. A disk created for `/var/lib/docker` alone (e.g. with `RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,5G`), by this or an earlier release, has layout `root` and holds only that one destination. To add `/var/lib/containerd`, give the new spec a new backing file, or remove the old one, losing its contents.
-- **Nested RunCVM.** When the inner `dockerd` itself runs RunCVM Container/VMs, as in [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm), consider adding `/opt/runcvm` to the disk's destinations too, so the inner Container/VMs are not served RunCVM over nested virtiofs. RunCVM's own test environment, in `tests/env/Dockerfile`, uses `RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G`.
-
-#### Docker volumes mounted at `/var/lib/docker` and `/var/lib/containerd` (NOT RECOMMENDED)
-
-Instead of a disk, you can mount Docker volumes at `/var/lib/docker` and `/var/lib/containerd` and launch with `--env=RUNCVM_SYS_ADMIN=1`. This lets `dockerd` use overlay filesystems on the volumes, at the cost of security. It is _not recommended_, and is not covered by RunCVM's automated tests. e.g.
-
-```console
-docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker --mount=type=volume,src=mycontainerd1,dst=/var/lib/containerd --env=RUNCVM_SYS_ADMIN=1 docker:dind
-```
-
-> N.B. This option adds `CAP_SYS_ADMIN` capabilities to the container and then launches `virtiofsd` with `-o modcaps=+sys_admin`.
-
-### Container runtimes inside RunCVM
-
-A Container/VM gives Docker a VM of its own, which makes it a disposable sandbox for testing, experimenting with or developing container runtimes: a broken runtime, kernel module or daemon configuration affects only that VM, not the host.
-
-This example builds an Ubuntu image running systemd and Docker, with three more runtimes installed: RunCVM itself, [gVisor](https://gvisor.dev/) and [Sysbox](https://github.com/nestybox/sysbox). It launches the image as a Container/VM and, inside it, runs a container with each runtime: under gVisor, the `hello-world` image; and under Sysbox and under RunCVM, an Alpine container that itself runs Docker, which runs `hello-world`. RunCVM inside RunCVM needs a host with nested virtualisation (on AMD hosts, replace `kvm_intel` with `kvm_amd`).
-
-```console
-cat <<EOF | docker build --tag=ubuntu-docker-runtimes -
-FROM ubuntu:noble
-RUN apt update && apt -y install apt-utils kmod wget iproute2 systemd \
-    ca-certificates curl gnupg udev dbus jq fuse3 && \
-    curl -fsSL https://get.docker.com | bash
-COPY --from=newsnowlabs/runcvm:latest /opt /opt/
-RUN rm -f /etc/init.d/docker && \
-    bash /opt/runcvm/scripts/runcvm-install-runtime.sh --no-dockerd && \
-    echo kvm_intel >>/etc/modules
-RUN curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" >/etc/apt/sources.list.d/gvisor.list && \
-    apt update && apt -y install runsc && \
-    jq '.runtimes.runsc.path="/usr/bin/runsc"' /etc/docker/daemon.json >/tmp/daemon.json && \
-    mv /tmp/daemon.json /etc/docker/daemon.json
-RUN wget -O /tmp/sysbox.deb \
-    https://github.com/nestybox/sysbox/releases/download/v0.7.1/sysbox-ce_0.7.1.linux_amd64.deb && \
-    apt -y install /tmp/sysbox.deb
-ENTRYPOINT ["/lib/systemd/systemd"]
-ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker:/var/lib/containerd:/var/lib/sysbox,ext4,2G'
-VOLUME /disks
-EOF
-
-docker run -d --runtime=runcvm -m 2g --name=runtimes ubuntu-docker-runtimes
-
-docker exec runtimes bash -c "until docker info &>/dev/null; do sleep 1; done; docker run --rm --runtime=runsc hello-world"
-
-docker exec runtimes docker run --rm --runtime=sysbox-runc alpine ash -c 'apk add docker; dockerd &>/dev/null & until docker info >/dev/null 2>&1; do sleep 1; done; docker run --rm hello-world'
-
-docker exec runtimes docker run --rm --runtime=runcvm --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,1G alpine ash -c 'apk add docker; dockerd &>/dev/null & until docker info >/dev/null 2>&1; do sleep 1; done; docker run --rm hello-world'
-
-docker rm -fv runtimes
-```
-
-- [Watch an earlier version of the Sysbox demo on Asciinema](https://asciinema.org/a/630032)
-
-### Graphical workloads with VNC
-
-Serve any Container/VM's console over VNC, on port 5900:
-
-```console
-docker run --runtime=runcvm --name ubuntu2 --env=RUNCVM_DISPLAY_MODE=vnc -p 5900:5900 ubuntu
-```
-
-Launch an Ubuntu desktop, with a graphical login:
-
-```console
-cat <<EOF | docker build --tag=ubuntu-x -
-FROM ubuntu:noble
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt update && apt -y install --install-recommends apt-utils kmod wget iproute2 systemd ca-certificates curl gnupg udev dbus lightdm
-ENTRYPOINT ["/lib/systemd/systemd"]
-ENV RUNCVM_DISPLAY_MODE=vnc
-EOF
-
-docker run -d --runtime=runcvm -m 2g --name=vnc -p 5900:5900 ubuntu-x
-```
-
-### OpenWrt
-
-Launch [OpenWrt](https://openwrt.org/), with a port forward to its LuCI web UI on port 10080:
-
-```console
-docker import --change='ENTRYPOINT ["/sbin/init"]' https://downloads.openwrt.org/releases/25.12.6/targets/x86/generic/openwrt-25.12.6-x86-generic-rootfs.tar.gz openwrt-25.12.6 && \
-docker network create --subnet 172.128.0.0/24 runcvm-openwrt && \
-echo -e "config interface 'loopback'\n\toption device 'lo'\n\toption proto 'static'\n\toption ipaddr '127.0.0.1'\n\toption netmask '255.0.0.0'\n\nconfig device\n\toption name 'br-lan'\n\toption type 'bridge'\n\tlist ports 'eth0'\n\nconfig interface 'lan'\n\toption device 'br-lan'\n\toption proto 'static'\n\toption ipaddr '172.128.0.5'\n\toption netmask '255.255.255.0'\n\toption gateway '172.128.0.1'\n" >/tmp/runcvm-openwrt-network && \
-docker run -it --rm --runtime=runcvm --name=openwrt --network=runcvm-openwrt --ip=172.128.0.5 -v /tmp/runcvm-openwrt-network:/etc/config/network -p 10080:80 openwrt-25.12.6
-```
-
-- [Watch on Asciinema](https://asciinema.org/a/631857)
-
-### Booting your own kernel
-
-RunCVM boots a kernel found in the image, at its distribution's usual location, in preference to its own (see [Kernel auto-detection](#kernel-auto-detection)). That makes it a quick way to run a patched kernel in a realistic machine environment: install the kernel in an image, with whatever userland, services and tools reproduce the problem, and launch it with `docker run`.
-
-For example, this image installs Ubuntu 24.04's own kernel package, standing in for a kernel of your own. The kernel's initramfs must include the `virtiofs` module, to mount the VM's root filesystem:
-
-```console
-cat <<EOF | docker build --tag=ubuntu-own-kernel -
-FROM ubuntu:noble
-RUN mkdir -p /etc/initramfs-tools && echo virtiofs >>/etc/initramfs-tools/modules && \
-    apt-get update && apt-get -y install --no-install-recommends linux-image-virtual initramfs-tools kmod
-EOF
-
-docker run --rm --runtime=runcvm ubuntu-own-kernel uname -r
-```
-
-This prints the version of the image's kernel (e.g. `6.8.0-149-generic`), not that of RunCVM's Ubuntu kernel, and the VM loads modules from the image's own `/lib/modules`.
-
-To boot your own build, install its package instead (e.g. one made with `make bindeb-pkg`), checking that the kernel and its initramfs end up at the locations that [Kernel auto-detection](#kernel-auto-detection) gives for the image's distribution (for Ubuntu, `/boot/vmlinuz` and `/boot/initrd.img`). Each iteration on a patch is then a rebuild of the image and a fresh `docker run`; a change confined to modules can instead be rebuilt and reloaded in the running VM, with `rmmod` and `insmod`. With `--env=RUNCVM_KERNEL_DEBUG=1`, the Container/VM's output includes the kernel's console messages, such as its boot log and any oops.
-
-### RunCVM in CI
-
-GitHub Actions' hosted Linux runners (e.g. `ubuntu-24.04`) provide KVM, so a workflow can install RunCVM and run Container/VMs in its jobs, for example to test packages across distributions, configuration-management code against a real `systemd`, or a multi-node cluster described in one Compose file. The runner user needs access to `/dev/kvm`, which a udev rule gives it:
-
-```yaml
-    steps:
-      - name: Install RunCVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
-      - run: docker run --rm --runtime=runcvm alpine uname -a
-```
-
-A hosted runner (4 vCPUs and 16 GB for public repositories) has room for a few Container/VMs at once, depending on their memory limits. On a self-hosted runner with RunCVM installed, a job's `container:` (and its `services:`) can run under RunCVM, with `options: --runtime=runcvm`, giving each a VM of its own: this suits projects that run untrusted pull requests' code on their own hardware.
-
-## Motivation
-
-RunCVM was born out of difficulties experienced using the Docker and Podman CLIs to launch [Kata Containers v2](https://katacontainers.io/), and a belief that launching containerised workloads in VMs using Docker needn't be so complicated.
-
-> Motivations included: efforts to [re-add OCI CLI commands for docker/podman](https://github.com/kata-containers/kata-containers/issues/722) to Kata v2 to support Docker & Podman; other Kata issues [#3358](https://github.com/kata-containers/kata-containers/issues/3358), [#1123](https://github.com/kata-containers/kata-containers/issues/1123), [#1133](https://github.com/kata-containers/kata-containers/issues/1133), [#3038](https://github.com/kata-containers/runtime/issues/3038); [#5321](https://github.com/kata-containers/runtime/issues/5321); [#6861](https://github.com/kata-containers/runtime/issues/6861); Podman issues [#8579](https://github.com/containers/podman/issues/8579) and [#17070](https://github.com/containers/podman/issues/17070); and Kubernetes issue [#40114](https://github.com/kubernetes/website/issues/40114); though please note, since authoring RunCVM some of these issues may have been resolved.
-
-Like Kata, RunCVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualisation technology.
-
-However, while Kata aims to launch standard container images inside a restricted-privileges namespace inside a VM running a single fixed and heavily customised kernel and Linux distribution optimised for this purpose, RunCVM intentionally aims to launch container _or VM_ images as the _VM's root filesystem_ using stock or bespoke Linux kernels, the upshot being RunCVM's can run VM workloads that Kata's security and kernel model would explicitly prevent.
-
-## Licence
-
-RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. See the [LICENSE](LICENSE) file for details.
-
-## Project aims
-
-- Run any standard container workload in a VM using `docker run` with no need to customise images or the command line (except adding `--runtime=runcvm`)
-- Run unusual container workloads, like `dockerd` and `systemd` that will not run in standard container runtimes
-- Maintain a similar experience within a RunCVM VM as within a container: process table, network interfaces, stdio, exit code handling should be broadly similar to maximise compatibility
-- Container start/stop/kill semantics respected, where possible providing clean VM shutdown on stop
-- VM console accessible as one would expect using `docker run -it`, `docker start -ai` and `docker attach` (and so on), generally good support for other `docker container` subcommands
-- Efficient container startup, by using virtiofs to serve a container's filesystem directly to a VM (instead of unpacking an image into a backing file)
-- Improved security compared to the standard container runtime, and as much security as possible without compromising the simplicity of the implementation
-- Command-line and image-embedded options for customising the a container's VM specifications, devices, kernel
-- Intelligent kernel selection, according to the distribution used in the image being launched
-- No external dependencies, except for Docker/Podman and relevant Linux kernel modules (`kvm` and `tun`)
-- Support multiple Docker network interfaces attached to a container that is not running (created but not yet started, or stopped) using `docker run --network=<network>` and `docker network connect`
-- Dual-stack (IPv4 and IPv6) networking, where the host and Docker are already configured to support it
-
-## Project ambitions
-
-- Support running foreign-architecture VMs by using QEMU dynamic CPU emulation for the entire VM (instead of the approach used by [https://github.com/multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static) which uses dynamic CPU emulation for each individual binary)
-- Support for QEMU [microvm](https://qemu.readthedocs.io/en/latest/system/i386/microvm.html) or potentially Amazon Firecracker
-- More natural console support with independent stdout and stderr channels for `docker run -it`
-- Improve VM boot time and other behaviours using custom kernel
-
-## How RunCVM works
-
-RunCVM's 'wrapper' runtime, `runcvm-runtime`, receives container create commands triggered by `docker` `run`/`create` commands, modifies the configuration of the requested container in such a way that the created container will launch a VM that boots from the container's filesystem, and then passes the request on to the standard container runtime (`runc`) to actually create and start the container.
-
-This 'wrapper-runtime' approach keeps RunCVM's code footprint and external dependencies extremely small. RunCVM is written, using off-the-shelf open-source components, almost entirely in shell script, for simplicity, portability and ease of development, so its internals are easy to understand and to tailor for specific purposes. It makes some trade-offs in return for this simplicity: see [Features and limitations](#features-and-limitations).
-
-For a deep dive into RunCVM's internals, see the section on [Developing RunCVM](#developing).
 
 ## System requirements
 
@@ -390,48 +184,6 @@ RunCVM does not need the `br_netfilter` module; [docs/adr/0001-container-firewal
 RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
 RunCVM is tested on x86-64 hosts with KVM running Debian 12 (Bookworm) and Ubuntu 24.04 LTS (Noble Numbat), with Docker Engine, both Docker's own packages and Ubuntu's `docker.io`. The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
-
-## Supported distributions
-
-RunCVM aims to support each distribution's latest release and one or two before it (for Ubuntu, its LTS releases), while they remain supported upstream, as the image a Container/VM runs. It bundles a kernel for each of these distributions, built from the release shown, which a Container/VM boots unless its image has a kernel of its own (see [Kernel auto-detection](#kernel-auto-detection)). The table lists the image releases that the integration tests (`tests/25-images-kernels`) boot:
-
-| Distribution | Image releases tested | RunCVM's kernel (`RUNCVM_KERNEL`) | Kernel built from | Kernel series | Module compression | Image releases whose own `modprobe` can load the kernel's modules |
-|---|---|---|---|---|---|---|
-| Debian | 12 (Bookworm) | `debian` | Debian 13 (Trixie) | 6.12 | xz | 10 (Buster) and later |
-| Ubuntu | 24.04 LTS (Noble Numbat) | `ubuntu` | Ubuntu 26.04 LTS (Resolute Raccoon) | 7.0 | xz (recompressed from Ubuntu's zstd) | 20.04 LTS (Focal Fossa) and later |
-| AlmaLinux, and the RHEL family (see [Other distributions](#other-distributions)) | AlmaLinux 9, and Oracle Linux 9, Rocky Linux 9 and Amazon Linux 2023 | `almalinux` | AlmaLinux 10 | 6.12 | xz | all, once `kmod` is installed |
-| Fedora | the latest (the `fedora` image) | `fedora` | Fedora 45 | 7.2 | xz | all, once `kmod` is installed |
-| openSUSE Leap, openSUSE Tumbleweed | the latest of each (the `opensuse/leap` and `opensuse/tumbleweed` images) | `opensuse` | openSUSE Leap 16.1 | 6.12 | xz (recompressed from openSUSE's zstd) | all, once `kmod` is installed |
-| Alpine Linux | the latest (the `alpine` image) | `alpine` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | gzip | all |
-| OpenWrt | none (the kernel is tested with an Alpine Linux image) | `openwrt` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | none | all |
-
-Each kernel comes from the release in the "Kernel built from" column, which stays fixed for a given RunCVM version: its series (as shown) does not change, and each build of RunCVM takes that release's newest kernel update (e.g. Debian 13's newest 6.12 kernel).
-
-The Debian, Ubuntu, AlmaLinux, Fedora and openSUSE kernels' modules are xz-compressed by default, which the releases RunCVM aims to support all read. For an image whose own `modprobe` reads only uncompressed modules, such as Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) or Ubuntu 18.04 LTS (Bionic Beaver), build RunCVM with the build argument `KERNEL_MODULE_COMPRESSION=none`, which leaves those kernels' modules uncompressed, at the cost of a larger RunCVM image (the Debian and Ubuntu kernels' modules together take of the order of 1 GB uncompressed, and roughly a quarter of that compressed), e.g. `DOCKER_BUILDKIT=1 docker build --build-arg KERNEL_MODULE_COMPRESSION=none -t newsnowlabs/runcvm .`.
-
-The last column concerns the workload's own module loading, e.g. `modprobe`, `dockerd` loading `overlay`, or k3s loading `br_netfilter`, in the VM. It reflects which compressed formats each release's `kmod` (or, for Alpine Linux, BusyBox) can read: for example, Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) and Ubuntu 18.04 LTS (Bionic Beaver) read only uncompressed modules, Debian 10 (Buster), Debian 11 (Bullseye) and Ubuntu 20.04 LTS (Focal Fossa) also read xz, and later releases also read zstd. The AlmaLinux, Rocky Linux, Oracle Linux, Fedora and openSUSE images include no `kmod` until it is installed; their own releases' `kmod` reads xz (AlmaLinux 8's, for example, reads xz and gzip, and later releases' also zstd). RunCVM itself loads the modules it needs, while the VM boots, with its own bundled BusyBox `modprobe`, which reads uncompressed, gzip and xz modules, whatever the image.
-
-Other releases of these distributions, including the older releases RunCVM aims to support, may work, but are not yet tested.
-
-### Other distributions
-
-RunCVM bundles no kernel for other distributions. It looks at the distributions an image's `/etc/os-release` names, first as `ID`, then in `ID_LIKE`, and boots the kernel of the first that RunCVM has a kernel for, counting the RHEL family (`rhel`, `centos`, `rocky`, `amzn`, `ol`) as AlmaLinux's and the SUSE family (`sles`, `sled`, `sles_sap`, `sle-micro`, `sl-micro`, `suse`, and `opensuse` and `opensuse-*`) as openSUSE's. An image whose `ID` names a distribution of any other kind boots the Debian kernel, with a warning in the Container/VM's output. How RunCVM treats some popular distributions:
-
-| Distribution | `ID` | `ID_LIKE` | Kernel |
-|---|---|---|---|
-| Oracle Linux (including the `mysql` image) | `ol` | `fedora` | AlmaLinux's (RHEL family) |
-| Rocky Linux | `rocky` | `rhel centos fedora` | AlmaLinux's (RHEL family) |
-| CentOS Stream | `centos` | `rhel fedora` | AlmaLinux's (RHEL family) |
-| Red Hat Universal Base Image (UBI) | `rhel` | `fedora` | AlmaLinux's (RHEL family) |
-| Amazon Linux | `amzn` | `fedora` | AlmaLinux's (RHEL family) |
-| SUSE Linux Enterprise (SLE BCI) | `sles` | `suse` | openSUSE's (SUSE family) |
-| Kali Linux | `kali` | `debian` | Debian's |
-| Distroless (Debian-based, e.g. `gcr.io/distroless/base-debian12`) | `debian` | | Debian's |
-| BusyBox, and images built `FROM scratch` | (no `/etc/os-release`) | | Debian's |
-| Arch Linux | `arch` | | Debian's, with a warning |
-| Wolfi (Chainguard) | `wolfi` | | Debian's, with a warning |
-
-A Container/VM launched with `RUNCVM_KERNEL` boots the named kernel, whatever the image. A distribution of either family may be named in place of its family's kernel, e.g. `RUNCVM_KERNEL=ol` boots AlmaLinux's.
 
 ## Installation
 
@@ -592,13 +344,47 @@ Log in as `azureuser`, at the public IP address that `az vm create`'s output sho
 
 On either platform, once the first-boot script has finished (`cloud-init status --wait` waits for it), `ls -l /dev/kvm` shows the KVM device, and `sudo docker run --runtime=runcvm --rm hello-world` runs a Container/VM.
 
-## Upgrading
+## Supported distributions
 
-To upgrade, follow this procedure:
+RunCVM aims to support each distribution's latest release and one or two before it (for Ubuntu, its LTS releases), while they remain supported upstream, as the image a Container/VM runs. It bundles a kernel for each of these distributions, built from the release shown, which a Container/VM boots unless its image has a kernel of its own (see [Kernel auto-detection](#kernel-auto-detection)). The table lists the image releases that the integration tests (`tests/25-images-kernels`) boot:
 
-1. Stop all RunCVM containers.
-2. Rerun the installation command, which installs the latest release, or the release named in `REPO` (see [Installation](#installation)), and runs that release's own installer.
-3. Start any RunCVM containers.
+| Distribution | Image releases tested | RunCVM's kernel (`RUNCVM_KERNEL`) | Kernel built from | Kernel series | Module compression | Image releases whose own `modprobe` can load the kernel's modules |
+|---|---|---|---|---|---|---|
+| Debian | 12 (Bookworm) | `debian` | Debian 13 (Trixie) | 6.12 | xz | 10 (Buster) and later |
+| Ubuntu | 24.04 LTS (Noble Numbat) | `ubuntu` | Ubuntu 26.04 LTS (Resolute Raccoon) | 7.0 | xz (recompressed from Ubuntu's zstd) | 20.04 LTS (Focal Fossa) and later |
+| AlmaLinux, and the RHEL family (see [Other distributions](#other-distributions)) | AlmaLinux 9, and Oracle Linux 9, Rocky Linux 9 and Amazon Linux 2023 | `almalinux` | AlmaLinux 10 | 6.12 | xz | all, once `kmod` is installed |
+| Fedora | the latest (the `fedora` image) | `fedora` | Fedora 45 | 7.2 | xz | all, once `kmod` is installed |
+| openSUSE Leap, openSUSE Tumbleweed | the latest of each (the `opensuse/leap` and `opensuse/tumbleweed` images) | `opensuse` | openSUSE Leap 16.1 | 6.12 | xz (recompressed from openSUSE's zstd) | all, once `kmod` is installed |
+| Alpine Linux | the latest (the `alpine` image) | `alpine` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | gzip | all |
+| OpenWrt | none (the kernel is tested with an Alpine Linux image) | `openwrt` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | none | all |
+
+Each kernel comes from the release in the "Kernel built from" column, which stays fixed for a given RunCVM version: its series (as shown) does not change, and each build of RunCVM takes that release's newest kernel update (e.g. Debian 13's newest 6.12 kernel).
+
+The Debian, Ubuntu, AlmaLinux, Fedora and openSUSE kernels' modules are xz-compressed by default, which the releases RunCVM aims to support all read. For an image whose own `modprobe` reads only uncompressed modules, such as Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) or Ubuntu 18.04 LTS (Bionic Beaver), build RunCVM with the build argument `KERNEL_MODULE_COMPRESSION=none`, which leaves those kernels' modules uncompressed, at the cost of a larger RunCVM image (the Debian and Ubuntu kernels' modules together take of the order of 1 GB uncompressed, and roughly a quarter of that compressed), e.g. `DOCKER_BUILDKIT=1 docker build --build-arg KERNEL_MODULE_COMPRESSION=none -t newsnowlabs/runcvm .`.
+
+The last column concerns the workload's own module loading, e.g. `modprobe`, `dockerd` loading `overlay`, or k3s loading `br_netfilter`, in the VM. It reflects which compressed formats each release's `kmod` (or, for Alpine Linux, BusyBox) can read: for example, Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) and Ubuntu 18.04 LTS (Bionic Beaver) read only uncompressed modules, Debian 10 (Buster), Debian 11 (Bullseye) and Ubuntu 20.04 LTS (Focal Fossa) also read xz, and later releases also read zstd. The AlmaLinux, Rocky Linux, Oracle Linux, Fedora and openSUSE images include no `kmod` until it is installed; their own releases' `kmod` reads xz (AlmaLinux 8's, for example, reads xz and gzip, and later releases' also zstd). RunCVM itself loads the modules it needs, while the VM boots, with its own bundled BusyBox `modprobe`, which reads uncompressed, gzip and xz modules, whatever the image.
+
+Other releases of these distributions, including the older releases RunCVM aims to support, may work, but are not yet tested.
+
+### Other distributions
+
+RunCVM bundles no kernel for other distributions. It looks at the distributions an image's `/etc/os-release` names, first as `ID`, then in `ID_LIKE`, and boots the kernel of the first that RunCVM has a kernel for, counting the RHEL family (`rhel`, `centos`, `rocky`, `amzn`, `ol`) as AlmaLinux's and the SUSE family (`sles`, `sled`, `sles_sap`, `sle-micro`, `sl-micro`, `suse`, and `opensuse` and `opensuse-*`) as openSUSE's. An image whose `ID` names a distribution of any other kind boots the Debian kernel, with a warning in the Container/VM's output. How RunCVM treats some popular distributions:
+
+| Distribution | `ID` | `ID_LIKE` | Kernel |
+|---|---|---|---|
+| Oracle Linux (including the `mysql` image) | `ol` | `fedora` | AlmaLinux's (RHEL family) |
+| Rocky Linux | `rocky` | `rhel centos fedora` | AlmaLinux's (RHEL family) |
+| CentOS Stream | `centos` | `rhel fedora` | AlmaLinux's (RHEL family) |
+| Red Hat Universal Base Image (UBI) | `rhel` | `fedora` | AlmaLinux's (RHEL family) |
+| Amazon Linux | `amzn` | `fedora` | AlmaLinux's (RHEL family) |
+| SUSE Linux Enterprise (SLE BCI) | `sles` | `suse` | openSUSE's (SUSE family) |
+| Kali Linux | `kali` | `debian` | Debian's |
+| Distroless (Debian-based, e.g. `gcr.io/distroless/base-debian12`) | `debian` | | Debian's |
+| BusyBox, and images built `FROM scratch` | (no `/etc/os-release`) | | Debian's |
+| Arch Linux | `arch` | | Debian's, with a warning |
+| Wolfi (Chainguard) | `wolfi` | | Debian's, with a warning |
+
+A Container/VM launched with `RUNCVM_KERNEL` boots the named kernel, whatever the image. A distribution of either family may be named in place of its family's kernel, e.g. `RUNCVM_KERNEL=ol` boots AlmaLinux's.
 
 ## Features and limitations
 
@@ -659,72 +445,6 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
 - Firmware
   - [+] [SeaBIOS](https://github.com/qemu/seabios)
   - [+] [OVMF EFI](https://github.com/tianocore/tianocore.github.io/wiki/OVMF)
-
-## RunCVM vs Kata comparison
-
-This table provides a high-level comparison of RunCVM and Kata across various features like kernels, networking/DNS, memory allocation, namespace handling, method of operation, and performance characteristics:
-
-| Feature | RunCVM | Kata |
-|---------|--------|------|
-| **Methodology** | Boots VM from distribution kernels with container's filesystem directly mounted as root filesystem, using virtiofs. VM setup code and kernel modules are bind-mounted into the container. VM's PID1 runs setup code to reproduce the container's networking environment within the VM before executing the container's original entrypoint. | Boots VM from custom kernel with custom root disk image, mounts the virtiofsd-shared host container filesystem to a target folder and executes the container's entrypoint within a restricted namespace having chrooted to that folder. |
-| **Privileges/restrictions** | Container code has full root access to VM and its devices. It may run anything that runs in a VM, mounting filesystems, installing kernel modules, accessing devices. RunCVM helper processes are visible to `ps` etc. | Runs container code inside a VM namespace with restricted privileges. Use of mounts, kernel modules is restricted. Kata helper processes (like kata-agent and chronyd) are invisible to `ps`.|
-| **Kernels** | Launches stock Alpine, Debian, Ubuntu kernels. Kernel `/lib/modules` automatically mounted within VM. Install any needed modules without host reconfiguration. | Launches custom kernels. Kernel modules aren't mounted and need host reconfiguration to be installed. |
-| **Networking/DNS** | Docker container networking + internal/external DNS out-of-the-box. No support for `docker network connect/disconnect` | DNS issues presented: with custom network, external ping works, but DNS lookups fail both for internal docker hosts and external hosts.[^1] |
-| **Memory** | VM assigned and reports total memory as per `--memory <mem>` | VM total memory reported by `free` appears unrelated to `--memory <mem>` specified [^2] |
-| **CPUs** | VM assigned and reports CPUs as per `--cpus <cpus>` | CPUs must be hardcoded in Kata host config |
-| **Performance** | | Custom kernel optimisations may deliver improved startup (~3.2s) or operational performance (~15%) |
-| **virtiofsd** | Runs `virtiofsd` in container namespace | Unknown |
-
-[^1]: `docker network create --scope=local testnet >/dev/null && docker run --name=test --rm --runtime=kata --network=testnet --entrypoint=/bin/ash alpine -c 'for n in test google.com 8.8.8.8; do echo "ping $n ..."; ping -q -c 8 -i 0.5 $n; done'; docker network rm testnet >/dev/null` succeeds on `runc` and `runcvm` but at time of writing (2023-12-31) the DNS lookups needed fail on `kata`.
-    ```
-    $ docker network create --scope=local testnet >/dev/null && docker run --name=test --rm -it --runtime=kata --network=testnet --entrypoint=/bin/ash alpine -c 'for n in test google.com 8.8.8.8; do echo "ping $n ..."; ping -q -c 8 -i 0.5 $n; done'; docker network rm testnet >/dev/null
-    ping test ...
-    ping: bad address 'test'
-    ping google.com ...
-    ping: bad address 'google.com'
-    ping 8.8.8.8 ...
-    PING 8.8.8.8 (8.8.8.8): 56 data bytes
-
-    --- 8.8.8.8 ping statistics ---
-    8 packets transmitted, 8 packets received, 0% packet loss
-    round-trip min/avg/max = 0.911/1.716/3.123 ms
-    
-    $ docker network create --scope=local testnet >/dev/null && docker run --name=test --rm -it --runtime=runcvm --network=testnet --entrypoint=/bin/ash alpine -c 'for n in test google.com 8.8.8.8; do echo "ping $n ..."; ping -q -c 8 -i 0.5 $n; done'; docker network rm testnet >/dev/null
-    ping test ...
-    PING test (172.25.8.2): 56 data bytes
-
-    --- test ping statistics ---
-    8 packets transmitted, 8 packets received, 0% packet loss
-    round-trip min/avg/max = 0.033/0.085/0.137 ms
-    ping google.com ...
-    PING google.com (172.217.16.238): 56 data bytes
-
-    --- google.com ping statistics ---
-    8 packets transmitted, 8 packets received, 0% packet loss
-    round-trip min/avg/max = 8.221/8.398/9.017 ms
-    ping 8.8.8.8 ...
-    PING 8.8.8.8 (8.8.8.8): 56 data bytes
-
-    --- 8.8.8.8 ping statistics ---
-    8 packets transmitted, 8 packets received, 0% packet loss
-    round-trip min/avg/max = 1.074/1.491/1.801 ms
-    ```
-
-[^2]: `docker run --rm -it --runtime=kata --entrypoint=/bin/ash -m 500m alpine -c 'free -h; df -h /dev/shm'`
-    ```
-    $ docker run --rm --runtime=kata --name=test -m 2g --env=RUNCVM_KERNEL_DEBUG=1 -it alpine ash -c 'free -h'
-                total        used        free      shared  buff/cache   available
-    Mem:           3.9G       94.4M        3.8G           0        3.7M        3.8G
-    Swap:             0           0           0
-    $ docker run --rm --runtime=kata --name=test -m 3g --env=RUNCVM_KERNEL_DEBUG=1 -it alpine ash -c 'free -h'
-                total        used        free      shared  buff/cache   available
-    Mem:           4.9G      107.0M        4.8G           0        3.9M        4.8G
-    Swap:             0           0           0
-    $ docker run --rm --runtime=kata --name=test -m 0g --env=RUNCVM_KERNEL_DEBUG=1 -it alpine ash -c 'free -h'
-                total        used        free      shared  buff/cache   available
-    Mem:           1.9G       58.8M        1.9G           0        3.4M        1.9G
-    Swap:             0           0           0
-    ```
 
 ## Kernel auto-detection
 
@@ -1061,6 +781,282 @@ If cgroup2 is already mounted on `/sys/fs/cgroup` when the VM starts, as the sys
 
 Please also note that in the case your distribution is running Systemd you may instead set `--env=RUNCVM_KERNEL_APPEND='systemd.unified_cgroup_hierarchy=<boolean>'` (where `<boolean>` is `0` or `1`) to request Systemd to create either hybrid or cgroup2-only cgroup filesystem(s) itself.
 
+## More examples
+
+Examples that build an image or need more setup than those in [Quick start](#quick-start).
+
+### Running Docker in a RunCVM Container/VM
+
+RunCVM runs `dockerd` in a Container/VM without `--privileged` or any special Docker options. All it needs is a disk for Docker's storage.
+
+The VM's root filesystem is the container's own filesystem, served over virtiofs. Neither Docker's `overlay2` storage driver nor containerd's `overlayfs` snapshotter can use virtiofs as its upper layer. Without a disk, with Docker's containerd image store, `dockerd` starts but cannot run containers: its overlay mounts fail with `invalid argument`. With the classic image store, it falls back to the `vfs` storage driver, which copies every image layer in full, and is extremely slow and uses a lot of space. So give `dockerd` a [`RUNCVM_DISKS`](#--envruncvm_disksdisk1disk2) disk that holds both of its storage directories:
+
+- `/var/lib/docker`: containers, volumes, networks and, with Docker's classic image store, images.
+- `/var/lib/containerd`: the storage of the containerd service that Docker's packages (e.g. as installed by `get.docker.com`) run `dockerd` with. With Docker's [containerd image store](https://docs.docker.com/engine/storage/containerd/), the default for new installations of Docker Engine 29 and later, this holds images and their unpacked layers.
+
+One disk can hold both directories, in its subdirectories `var-lib-docker` and `var-lib-containerd` (see [Disk layouts](#disk-layouts)), so the two share the disk's space and you size only one disk. Give the disk both destinations whichever image store `dockerd` uses, and however it was installed: a `dockerd` that starts its own containerd, as in the `docker:dind` image, keeps containerd's storage under `/var/lib/docker`, and leaves `/var/lib/containerd` empty.
+
+For example, to launch `dockerd` from the `docker:dind` image with a 10G disk, whose backing file is in a Docker volume on the host, and run a container in it:
+
+```console
+docker run -d --runtime=runcvm --init --name=dind --memory=2g \
+  --mount=type=volume,src=dind-disks,dst=/disks \
+  --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,10G \
+  docker:dind
+
+docker exec dind sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done; docker run --rm hello-world'
+```
+
+In the keyed form, the same disk is `RUNCVM_DISKS=src=/disks/docker,dst=/var/lib/docker,dst=/var/lib/containerd,fs=ext4,size=10G`.
+
+Images built to run Docker under systemd, such as the one in [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm), can set the disk in their own `ENV RUNCVM_DISKS`, and use `VOLUME /disks` to keep the backing file in a volume.
+
+Some points to bear in mind:
+
+- **Where to keep the backing file.** A backing file under `/disks` in a named Docker volume, as above, is kept outside the container's overlay filesystem, survives removal of the container, and can be reused by a later Container/VM. Without the `--mount`, the backing file is created in the container's own filesystem, and goes when the container is removed.
+- **Disk size.** A backing file is sparse by default, so it takes host space only as `dockerd` writes to it. Size the disk for every image, container and volume `dockerd` will hold. With the containerd image store, each image takes space twice: once compressed, and once unpacked. If the host's filesystem fills up, `dockerd`'s writes to a sparse disk fail with I/O errors, which can leave Docker's storage inconsistent. For a long-lived `dockerd`, consider adding `prealloc=on` (e.g. `RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,10G,prealloc=on`), which takes the disk's full size on the host from the start, and keeps it taken, even after images are removed (see [Preallocated disks](#preallocated-disks)).
+- **Keeping the data.** Launch with `--init`, or from an image whose entrypoint is its own init, such as systemd, so that the VM flushes the disk when it stops (see the warning under [`RUNCVM_DISKS`](#--envruncvm_disksdisk1disk2)). A disk thrown away after each run needs no flushing.
+- **Existing disks.** A destination cannot be added to an existing disk. A disk created for `/var/lib/docker` alone (e.g. with `RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,5G`), by this or an earlier release, has layout `root` and holds only that one destination. To add `/var/lib/containerd`, give the new spec a new backing file, or remove the old one, losing its contents.
+- **Nested RunCVM.** When the inner `dockerd` itself runs RunCVM Container/VMs, as in [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm), consider adding `/opt/runcvm` to the disk's destinations too, so the inner Container/VMs are not served RunCVM over nested virtiofs. RunCVM's own test environment, in `tests/env/Dockerfile`, uses `RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G`.
+
+#### Docker volumes mounted at `/var/lib/docker` and `/var/lib/containerd` (NOT RECOMMENDED)
+
+Instead of a disk, you can mount Docker volumes at `/var/lib/docker` and `/var/lib/containerd` and launch with `--env=RUNCVM_SYS_ADMIN=1`. This lets `dockerd` use overlay filesystems on the volumes, at the cost of security. It is _not recommended_, and is not covered by RunCVM's automated tests. e.g.
+
+```console
+docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker --mount=type=volume,src=mycontainerd1,dst=/var/lib/containerd --env=RUNCVM_SYS_ADMIN=1 docker:dind
+```
+
+> N.B. This option adds `CAP_SYS_ADMIN` capabilities to the container and then launches `virtiofsd` with `-o modcaps=+sys_admin`.
+
+### Container runtimes inside RunCVM
+
+A Container/VM gives Docker a VM of its own, which makes it a disposable sandbox for testing, experimenting with or developing container runtimes: a broken runtime, kernel module or daemon configuration affects only that VM, not the host.
+
+This example builds an Ubuntu image running systemd and Docker, with three more runtimes installed: RunCVM itself, [gVisor](https://gvisor.dev/) and [Sysbox](https://github.com/nestybox/sysbox). It launches the image as a Container/VM and, inside it, runs a container with each runtime: under gVisor, the `hello-world` image; and under Sysbox and under RunCVM, an Alpine container that itself runs Docker, which runs `hello-world`. RunCVM inside RunCVM needs a host with nested virtualisation (on AMD hosts, replace `kvm_intel` with `kvm_amd`).
+
+```console
+cat <<EOF | docker build --tag=ubuntu-docker-runtimes -
+FROM ubuntu:noble
+RUN apt update && apt -y install apt-utils kmod wget iproute2 systemd \
+    ca-certificates curl gnupg udev dbus jq fuse3 && \
+    curl -fsSL https://get.docker.com | bash
+COPY --from=newsnowlabs/runcvm:latest /opt /opt/
+RUN rm -f /etc/init.d/docker && \
+    bash /opt/runcvm/scripts/runcvm-install-runtime.sh --no-dockerd && \
+    echo kvm_intel >>/etc/modules
+RUN curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" >/etc/apt/sources.list.d/gvisor.list && \
+    apt update && apt -y install runsc && \
+    jq '.runtimes.runsc.path="/usr/bin/runsc"' /etc/docker/daemon.json >/tmp/daemon.json && \
+    mv /tmp/daemon.json /etc/docker/daemon.json
+RUN wget -O /tmp/sysbox.deb \
+    https://github.com/nestybox/sysbox/releases/download/v0.7.1/sysbox-ce_0.7.1.linux_amd64.deb && \
+    apt -y install /tmp/sysbox.deb
+ENTRYPOINT ["/lib/systemd/systemd"]
+ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker:/var/lib/containerd:/var/lib/sysbox,ext4,2G'
+VOLUME /disks
+EOF
+
+docker run -d --runtime=runcvm -m 2g --name=runtimes ubuntu-docker-runtimes
+
+docker exec runtimes bash -c "until docker info &>/dev/null; do sleep 1; done; docker run --rm --runtime=runsc hello-world"
+
+docker exec runtimes docker run --rm --runtime=sysbox-runc alpine ash -c 'apk add docker; dockerd &>/dev/null & until docker info >/dev/null 2>&1; do sleep 1; done; docker run --rm hello-world'
+
+docker exec runtimes docker run --rm --runtime=runcvm --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,1G alpine ash -c 'apk add docker; dockerd &>/dev/null & until docker info >/dev/null 2>&1; do sleep 1; done; docker run --rm hello-world'
+
+docker rm -fv runtimes
+```
+
+- [Watch an earlier version of the Sysbox demo on Asciinema](https://asciinema.org/a/630032)
+
+### Graphical workloads with VNC
+
+Serve any Container/VM's console over VNC, on port 5900:
+
+```console
+docker run --runtime=runcvm --name ubuntu2 --env=RUNCVM_DISPLAY_MODE=vnc -p 5900:5900 ubuntu
+```
+
+Launch an Ubuntu desktop, with a graphical login:
+
+```console
+cat <<EOF | docker build --tag=ubuntu-x -
+FROM ubuntu:noble
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt update && apt -y install --install-recommends apt-utils kmod wget iproute2 systemd ca-certificates curl gnupg udev dbus lightdm
+ENTRYPOINT ["/lib/systemd/systemd"]
+ENV RUNCVM_DISPLAY_MODE=vnc
+EOF
+
+docker run -d --runtime=runcvm -m 2g --name=vnc -p 5900:5900 ubuntu-x
+```
+
+### OpenWrt
+
+Launch [OpenWrt](https://openwrt.org/), with a port forward to its LuCI web UI on port 10080:
+
+```console
+docker import --change='ENTRYPOINT ["/sbin/init"]' https://downloads.openwrt.org/releases/25.12.6/targets/x86/generic/openwrt-25.12.6-x86-generic-rootfs.tar.gz openwrt-25.12.6 && \
+docker network create --subnet 172.128.0.0/24 runcvm-openwrt && \
+echo -e "config interface 'loopback'\n\toption device 'lo'\n\toption proto 'static'\n\toption ipaddr '127.0.0.1'\n\toption netmask '255.0.0.0'\n\nconfig device\n\toption name 'br-lan'\n\toption type 'bridge'\n\tlist ports 'eth0'\n\nconfig interface 'lan'\n\toption device 'br-lan'\n\toption proto 'static'\n\toption ipaddr '172.128.0.5'\n\toption netmask '255.255.255.0'\n\toption gateway '172.128.0.1'\n" >/tmp/runcvm-openwrt-network && \
+docker run -it --rm --runtime=runcvm --name=openwrt --network=runcvm-openwrt --ip=172.128.0.5 -v /tmp/runcvm-openwrt-network:/etc/config/network -p 10080:80 openwrt-25.12.6
+```
+
+- [Watch on Asciinema](https://asciinema.org/a/631857)
+
+### Booting your own kernel
+
+RunCVM boots a kernel found in the image, at its distribution's usual location, in preference to its own (see [Kernel auto-detection](#kernel-auto-detection)). That makes it a quick way to run a patched kernel in a realistic machine environment: install the kernel in an image, with whatever userland, services and tools reproduce the problem, and launch it with `docker run`.
+
+For example, this image installs Ubuntu 24.04's own kernel package, standing in for a kernel of your own. The kernel's initramfs must include the `virtiofs` module, to mount the VM's root filesystem:
+
+```console
+cat <<EOF | docker build --tag=ubuntu-own-kernel -
+FROM ubuntu:noble
+RUN mkdir -p /etc/initramfs-tools && echo virtiofs >>/etc/initramfs-tools/modules && \
+    apt-get update && apt-get -y install --no-install-recommends linux-image-virtual initramfs-tools kmod
+EOF
+
+docker run --rm --runtime=runcvm ubuntu-own-kernel uname -r
+```
+
+This prints the version of the image's kernel (e.g. `6.8.0-149-generic`), not that of RunCVM's Ubuntu kernel, and the VM loads modules from the image's own `/lib/modules`.
+
+To boot your own build, install its package instead (e.g. one made with `make bindeb-pkg`), checking that the kernel and its initramfs end up at the locations that [Kernel auto-detection](#kernel-auto-detection) gives for the image's distribution (for Ubuntu, `/boot/vmlinuz` and `/boot/initrd.img`). Each iteration on a patch is then a rebuild of the image and a fresh `docker run`; a change confined to modules can instead be rebuilt and reloaded in the running VM, with `rmmod` and `insmod`. With `--env=RUNCVM_KERNEL_DEBUG=1`, the Container/VM's output includes the kernel's console messages, such as its boot log and any oops.
+
+### RunCVM in CI
+
+GitHub Actions' hosted Linux runners (e.g. `ubuntu-24.04`) provide KVM, so a workflow can install RunCVM and run Container/VMs in its jobs, for example to test packages across distributions, configuration-management code against a real `systemd`, or a multi-node cluster described in one Compose file. The runner user needs access to `/dev/kvm`, which a udev rule gives it:
+
+```yaml
+    steps:
+      - name: Install RunCVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
+      - run: docker run --rm --runtime=runcvm alpine uname -a
+```
+
+A hosted runner (4 vCPUs and 16 GB for public repositories) has room for a few Container/VMs at once, depending on their memory limits. On a self-hosted runner with RunCVM installed, a job's `container:` (and its `services:`) can run under RunCVM, with `options: --runtime=runcvm`, giving each a VM of its own: this suits projects that run untrusted pull requests' code on their own hardware.
+
+## How RunCVM works
+
+RunCVM's 'wrapper' runtime, `runcvm-runtime`, receives container create commands triggered by `docker` `run`/`create` commands, modifies the configuration of the requested container in such a way that the created container will launch a VM that boots from the container's filesystem, and then passes the request on to the standard container runtime (`runc`) to actually create and start the container.
+
+This 'wrapper-runtime' approach keeps RunCVM's code footprint and external dependencies extremely small. RunCVM is written, using off-the-shelf open-source components, almost entirely in shell script, for simplicity, portability and ease of development, so its internals are easy to understand and to tailor for specific purposes. It makes some trade-offs in return for this simplicity: see [Features and limitations](#features-and-limitations).
+
+For a deep dive into RunCVM's internals, see the section on [Developing RunCVM](#developing).
+
+## RunCVM vs Kata comparison
+
+This table provides a high-level comparison of RunCVM and Kata across various features like kernels, networking/DNS, memory allocation, namespace handling, method of operation, and performance characteristics:
+
+| Feature | RunCVM | Kata |
+|---------|--------|------|
+| **Methodology** | Boots VM from distribution kernels with container's filesystem directly mounted as root filesystem, using virtiofs. VM setup code and kernel modules are bind-mounted into the container. VM's PID1 runs setup code to reproduce the container's networking environment within the VM before executing the container's original entrypoint. | Boots VM from custom kernel with custom root disk image, mounts the virtiofsd-shared host container filesystem to a target folder and executes the container's entrypoint within a restricted namespace having chrooted to that folder. |
+| **Privileges/restrictions** | Container code has full root access to VM and its devices. It may run anything that runs in a VM, mounting filesystems, installing kernel modules, accessing devices. RunCVM helper processes are visible to `ps` etc. | Runs container code inside a VM namespace with restricted privileges. Use of mounts, kernel modules is restricted. Kata helper processes (like kata-agent and chronyd) are invisible to `ps`.|
+| **Kernels** | Launches stock Alpine, Debian, Ubuntu kernels. Kernel `/lib/modules` automatically mounted within VM. Install any needed modules without host reconfiguration. | Launches custom kernels. Kernel modules aren't mounted and need host reconfiguration to be installed. |
+| **Networking/DNS** | Docker container networking + internal/external DNS out-of-the-box. No support for `docker network connect/disconnect` | DNS issues presented: with custom network, external ping works, but DNS lookups fail both for internal docker hosts and external hosts.[^1] |
+| **Memory** | VM assigned and reports total memory as per `--memory <mem>` | VM total memory reported by `free` appears unrelated to `--memory <mem>` specified [^2] |
+| **CPUs** | VM assigned and reports CPUs as per `--cpus <cpus>` | CPUs must be hardcoded in Kata host config |
+| **Performance** | | Custom kernel optimisations may deliver improved startup (~3.2s) or operational performance (~15%) |
+| **virtiofsd** | Runs `virtiofsd` in container namespace | Unknown |
+
+[^1]: `docker network create --scope=local testnet >/dev/null && docker run --name=test --rm --runtime=kata --network=testnet --entrypoint=/bin/ash alpine -c 'for n in test google.com 8.8.8.8; do echo "ping $n ..."; ping -q -c 8 -i 0.5 $n; done'; docker network rm testnet >/dev/null` succeeds on `runc` and `runcvm` but at time of writing (2023-12-31) the DNS lookups needed fail on `kata`.
+    ```
+    $ docker network create --scope=local testnet >/dev/null && docker run --name=test --rm -it --runtime=kata --network=testnet --entrypoint=/bin/ash alpine -c 'for n in test google.com 8.8.8.8; do echo "ping $n ..."; ping -q -c 8 -i 0.5 $n; done'; docker network rm testnet >/dev/null
+    ping test ...
+    ping: bad address 'test'
+    ping google.com ...
+    ping: bad address 'google.com'
+    ping 8.8.8.8 ...
+    PING 8.8.8.8 (8.8.8.8): 56 data bytes
+
+    --- 8.8.8.8 ping statistics ---
+    8 packets transmitted, 8 packets received, 0% packet loss
+    round-trip min/avg/max = 0.911/1.716/3.123 ms
+    
+    $ docker network create --scope=local testnet >/dev/null && docker run --name=test --rm -it --runtime=runcvm --network=testnet --entrypoint=/bin/ash alpine -c 'for n in test google.com 8.8.8.8; do echo "ping $n ..."; ping -q -c 8 -i 0.5 $n; done'; docker network rm testnet >/dev/null
+    ping test ...
+    PING test (172.25.8.2): 56 data bytes
+
+    --- test ping statistics ---
+    8 packets transmitted, 8 packets received, 0% packet loss
+    round-trip min/avg/max = 0.033/0.085/0.137 ms
+    ping google.com ...
+    PING google.com (172.217.16.238): 56 data bytes
+
+    --- google.com ping statistics ---
+    8 packets transmitted, 8 packets received, 0% packet loss
+    round-trip min/avg/max = 8.221/8.398/9.017 ms
+    ping 8.8.8.8 ...
+    PING 8.8.8.8 (8.8.8.8): 56 data bytes
+
+    --- 8.8.8.8 ping statistics ---
+    8 packets transmitted, 8 packets received, 0% packet loss
+    round-trip min/avg/max = 1.074/1.491/1.801 ms
+    ```
+
+[^2]: `docker run --rm -it --runtime=kata --entrypoint=/bin/ash -m 500m alpine -c 'free -h; df -h /dev/shm'`
+    ```
+    $ docker run --rm --runtime=kata --name=test -m 2g --env=RUNCVM_KERNEL_DEBUG=1 -it alpine ash -c 'free -h'
+                total        used        free      shared  buff/cache   available
+    Mem:           3.9G       94.4M        3.8G           0        3.7M        3.8G
+    Swap:             0           0           0
+    $ docker run --rm --runtime=kata --name=test -m 3g --env=RUNCVM_KERNEL_DEBUG=1 -it alpine ash -c 'free -h'
+                total        used        free      shared  buff/cache   available
+    Mem:           4.9G      107.0M        4.8G           0        3.9M        4.8G
+    Swap:             0           0           0
+    $ docker run --rm --runtime=kata --name=test -m 0g --env=RUNCVM_KERNEL_DEBUG=1 -it alpine ash -c 'free -h'
+                total        used        free      shared  buff/cache   available
+    Mem:           1.9G       58.8M        1.9G           0        3.4M        1.9G
+    Swap:             0           0           0
+    ```
+
+## Motivation
+
+RunCVM was born out of difficulties experienced using the Docker and Podman CLIs to launch [Kata Containers v2](https://katacontainers.io/), and a belief that launching containerised workloads in VMs using Docker needn't be so complicated.
+
+> Motivations included: efforts to [re-add OCI CLI commands for docker/podman](https://github.com/kata-containers/kata-containers/issues/722) to Kata v2 to support Docker & Podman; other Kata issues [#3358](https://github.com/kata-containers/kata-containers/issues/3358), [#1123](https://github.com/kata-containers/kata-containers/issues/1123), [#1133](https://github.com/kata-containers/kata-containers/issues/1133), [#3038](https://github.com/kata-containers/runtime/issues/3038); [#5321](https://github.com/kata-containers/runtime/issues/5321); [#6861](https://github.com/kata-containers/runtime/issues/6861); Podman issues [#8579](https://github.com/containers/podman/issues/8579) and [#17070](https://github.com/containers/podman/issues/17070); and Kubernetes issue [#40114](https://github.com/kubernetes/website/issues/40114); though please note, since authoring RunCVM some of these issues may have been resolved.
+
+Like Kata, RunCVM aims to be a secure container runtime with lightweight virtual machines that feel and perform like containers, but provide stronger workload isolation using hardware virtualisation technology.
+
+However, while Kata aims to launch standard container images inside a restricted-privileges namespace inside a VM running a single fixed and heavily customised kernel and Linux distribution optimised for this purpose, RunCVM intentionally aims to launch container _or VM_ images as the _VM's root filesystem_ using stock or bespoke Linux kernels, the upshot being RunCVM's can run VM workloads that Kata's security and kernel model would explicitly prevent.
+
+## Project aims
+
+- Run any standard container workload in a VM using `docker run` with no need to customise images or the command line (except adding `--runtime=runcvm`)
+- Run unusual container workloads, like `dockerd` and `systemd` that will not run in standard container runtimes
+- Maintain a similar experience within a RunCVM VM as within a container: process table, network interfaces, stdio, exit code handling should be broadly similar to maximise compatibility
+- Container start/stop/kill semantics respected, where possible providing clean VM shutdown on stop
+- VM console accessible as one would expect using `docker run -it`, `docker start -ai` and `docker attach` (and so on), generally good support for other `docker container` subcommands
+- Efficient container startup, by using virtiofs to serve a container's filesystem directly to a VM (instead of unpacking an image into a backing file)
+- Improved security compared to the standard container runtime, and as much security as possible without compromising the simplicity of the implementation
+- Command-line and image-embedded options for customising the a container's VM specifications, devices, kernel
+- Intelligent kernel selection, according to the distribution used in the image being launched
+- No external dependencies, except for Docker/Podman and relevant Linux kernel modules (`kvm` and `tun`)
+- Support multiple Docker network interfaces attached to a container that is not running (created but not yet started, or stopped) using `docker run --network=<network>` and `docker network connect`
+- Dual-stack (IPv4 and IPv6) networking, where the host and Docker are already configured to support it
+
+## Project ambitions
+
+- Support running foreign-architecture VMs by using QEMU dynamic CPU emulation for the entire VM (instead of the approach used by [https://github.com/multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static) which uses dynamic CPU emulation for each individual binary)
+- Support for QEMU [microvm](https://qemu.readthedocs.io/en/latest/system/i386/microvm.html) or potentially Amazon Firecracker
+- More natural console support with independent stdout and stderr channels for `docker run -it`
+- Improve VM boot time and other behaviours using custom kernel
+
+## Upgrading
+
+To upgrade, follow this procedure:
+
+1. Stop all RunCVM containers.
+2. Rerun the installation command, which installs the latest release, or the release named in `REPO` (see [Installation](#installation)), and runs that release's own installer.
+3. Start any RunCVM containers.
+
 ## Developing
 
 The following deep dive should help explain the inner workings of RunCVM, and which files to modify to implement fixes, improvements and extensions.
@@ -1220,22 +1216,6 @@ Checks that launch a Container/VM explicitly under software emulation, whatever 
 
 `tests/selftest/run-selftest` tests the runner and both sets of helpers using fake tests, without Docker; add `--docker` to also run the repository's tests and further real-Docker scenarios in stand-in mode.
 
-## Support
-
-**Support launching images:** If you encounter any Docker image that launches in a standard container runtime that does not launch in RunCVM, or launches but with unexpected behaviour, please [raise an issue](https://github.com/newsnowlabs/runcvm/issues) titled _Launch failure for image `<image>`_ or _Unexpected behaviour for image `<image>`_ and include log excerpts and an explanation of the failure, or expected and unexpected behaviour.
-
-**For all other issues:** please still [raise an issue](https://github.com/newsnowlabs/runcvm/issues)
-
-You can also reach out to us on the [NewsNow Labs Slack Workspace](https://join.slack.com/t/newsnowlabs/shared_invite/zt-wp54l05w-0DTxuc_n8uISJRtks3Xw3A).
-
-We are typically available to respond to queries Monday-Friday, 9am-5pm UK time, and will be happy to help.
-
-## Contributing
-
-RunCVM is maintained by [Struan Bartlett](https://github.com/struanb) at [NewsNow Labs](https://github.com/newsnowlabs).
-
-If you would like to contribute a feature suggestion or code, please raise an issue or submit a pull request.
-
 ## Uninstallation
 
 1. Stop and remove all RunCVM containers.
@@ -1251,6 +1231,22 @@ If you would like to contribute a feature suggestion or code, please raise an is
 
 Installation scripts from RunCVM v1.7.0 and earlier may have changed `rp_filter` settings in `/etc/sysctl.conf` or `/etc/sysctl.d/`, marking each change with `# DISABLED BY RUNCVM` (the original line, commented out) and `# ADDED BY RUNCVM` (its replacement); to undo them, uncomment the original lines and delete the replacements.
 
+## Contributing
+
+RunCVM is maintained by [Struan Bartlett](https://github.com/struanb) at [NewsNow Labs](https://github.com/newsnowlabs).
+
+If you would like to contribute a feature suggestion or code, please raise an issue or submit a pull request.
+
+## Support
+
+**Support launching images:** If you encounter any Docker image that launches in a standard container runtime that does not launch in RunCVM, or launches but with unexpected behaviour, please [raise an issue](https://github.com/newsnowlabs/runcvm/issues) titled _Launch failure for image `<image>`_ or _Unexpected behaviour for image `<image>`_ and include log excerpts and an explanation of the failure, or expected and unexpected behaviour.
+
+**For all other issues:** please still [raise an issue](https://github.com/newsnowlabs/runcvm/issues)
+
+You can also reach out to us on the [NewsNow Labs Slack Workspace](https://join.slack.com/t/newsnowlabs/shared_invite/zt-wp54l05w-0DTxuc_n8uISJRtks3Xw3A).
+
+We are typically available to respond to queries Monday-Friday, 9am-5pm UK time, and will be happy to help.
+
 ## RunCVM and Dockside
 
 RunCVM and [Dockside](https://dockside.io/) are designed to work together in two alternative ways.
@@ -1261,6 +1257,10 @@ RunCVM and [Dockside](https://dockside.io/) are designed to work together in two
 ```
 docker run --rm -it --runtime=runcvm  --memory=2g --name=docksidevm -p 443:443 -p 80:80 --mount=type=volume,src=dockside-data,dst=/data --mount=type=volume,src=dockside-disks,dst=/disks --env=RUNCVM_DISKS=/disks/disk1,/var/lib/docker:/var/lib/containerd,ext4,5G newsnowlabs/dockside --run-dockerd --ssl-builtin
 ```
+
+## Licence
+
+RunCVM is free and open-source, licensed under the Apache Licence, Version 2.0. See the [LICENSE](LICENSE) file for details.
 
 ## Legals
 
