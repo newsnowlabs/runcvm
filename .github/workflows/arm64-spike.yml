@@ -1,0 +1,86 @@
+# Spike: builds #28's arm64 support (with main merged in) natively on a GitHub-hosted arm64
+# runner, reports whether the runner has KVM, installs the build, and runs Container/VMs, under
+# KVM if available, else under software emulation (TCG). Each step carries on after a failure,
+# so that one run answers as much as it can. Runs on a push to its own branch, or by hand.
+name: arm64 spike
+
+on:
+  push:
+    branches: [claude/spike-arm64-build]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Runner facts
+        run: |
+          uname -a; nproc; free -m; df -h / | tail -1
+          lscpu | grep -iE 'model name|architecture|virtuali|hypervisor' || true
+          ls -l /dev/kvm || echo "no /dev/kvm"
+          lsmod | grep -E '^kvm' || echo "no kvm modules listed"
+          docker version --format 'Docker: client {{.Client.Version}}, server {{.Server.Version}}'
+
+      - name: Open /dev/kvm to the runner user
+        continue-on-error: true
+        run: |
+          [ -e /dev/kvm ] || { echo "no /dev/kvm"; exit 1; }
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Build RunCVM for arm64
+        id: build
+        continue-on-error: true
+        run: |
+          # gitlab.alpinelinux.org refuses requests from GitHub-hosted runners (HTTP 418), so the
+          # build clones aports from its GitHub mirror, and abuild fetches sources from Alpine's
+          # distfiles mirror, which it tries before each source's upstream URL.
+          sed -i -e 's#https://gitlab.alpinelinux.org/alpine/aports.git#https://github.com/alpinelinux/aports.git#' \
+            -e 's#^\( *\)abuild-keygen -an && \\#&\n\1echo "DISTFILES_MIRROR=https://distfiles.alpinelinux.org/distfiles/v${ALPINE_VERSION}" >>/etc/abuild.conf \&\& \\#' Dockerfile
+          git diff --stat
+          set -o pipefail
+          time ./build/build.sh --tag arm64 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Build log tail on failure
+        if: steps.build.outcome == 'failure'
+        run: tail -150 "$RUNNER_TEMP/build.log"
+
+      - name: Package facts
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        run: |
+          docker run --rm --entrypoint /bin/sh newsnowlabs/runcvm:arm64 -c \
+            'uname -m; ls /opt/runcvm/kernels/*/; ls /opt/runcvm/usr/bin | grep -E "qemu-system" ; du -sh /opt/runcvm'
+
+      - name: Install RunCVM
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        run: |
+          sudo REPO=newsnowlabs/runcvm:arm64 ./runcvm-scripts/runcvm-install-runtime.sh </dev/null
+          docker info --format '{{.Runtimes.runcvm.Path}}'
+
+      - name: Run Container/VMs
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set +e
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then accel=kvm; else accel=tcg; fi
+          echo "=== acceleration: $accel"
+          for image in alpine debian:trixie ubuntu:24.04 almalinux:10 fedora:45 opensuse/leap:16.1; do
+            echo "=== $image"
+            timeout 600 docker run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=$accel $image sh -c 'uname -mr; echo ok'
+            echo "=== $image exit status: $? (expect 0)"
+          done
+          docker run -d --name ex --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=$accel alpine sleep 600
+          sleep 60
+          timeout 120 docker exec ex echo exec-ok; echo "=== docker exec exit status: $? (expect 0)"
+          docker logs ex 2>&1 | tail -20
+          docker rm -f ex
