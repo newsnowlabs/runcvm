@@ -70,10 +70,14 @@ FALLBACK_WARNING = "RunCVM has no kernel for the image's distribution"
 CASES = [("kernel-" + k, ["--env=RUNCVM_KERNEL=" + k], ["alpine", "sh", "-c", PROBE], k, k != "openwrt")
          for k in ("alpine", "debian", "ubuntu", "almalinux", "fedora", "opensuse", "openwrt")]
 CASES += [("kernel-ol", ["--env=RUNCVM_KERNEL=ol"], ["alpine", "sh", "-c", PROBE], "almalinux", True)]
-CASES += [("image-" + i.split(":")[0].replace("/", "-"), [], [i, "sh", "-c", PROBE], k, None)
-          for i, k in (("alpine", "alpine"), ("debian:bookworm-slim", "debian"), ("ubuntu:24.04", "ubuntu"),
+# Each case is named after its image, tag included, so that releases of one distribution have distinct names.
+CASES += [("image-" + i.replace(":", "-").replace("/", "-"), [], [i, "sh", "-c", PROBE], k, None)
+          for i, k in (("alpine", "alpine"),
+                       ("debian:bookworm-slim", "debian"), ("debian:trixie-slim", "debian"),
+                       ("ubuntu:24.04", "ubuntu"), ("ubuntu:26.04", "ubuntu"),
                        ("busybox", "debian"), ("oraclelinux:9", "almalinux"),
-                       ("rockylinux:9", "almalinux"), ("almalinux:9", "almalinux"), ("fedora", "fedora"),
+                       ("rockylinux:9", "almalinux"), ("almalinux:9", "almalinux"), ("almalinux:10", "almalinux"),
+                       ("fedora", "fedora"),
                        ("amazonlinux:2023", "almalinux"), ("kalilinux/kali-rolling", "debian"),
                        ("opensuse/leap", "opensuse"), ("opensuse/tumbleweed", "opensuse"),
                        ("archlinux", "debian"),

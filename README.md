@@ -320,9 +320,9 @@ RunCVM aims to support each distribution's latest release and one or two before 
 
 | Distribution | Image releases tested | RunCVM's kernel (`RUNCVM_KERNEL`) | Kernel built from | Kernel series | Module compression | Image releases whose own `modprobe` can load the kernel's modules |
 |---|---|---|---|---|---|---|
-| Debian | 12 (Bookworm) | `debian` | Debian 13 (Trixie) | 6.12 | xz | 10 (Buster) and later |
-| Ubuntu | 24.04 LTS (Noble Numbat) | `ubuntu` | Ubuntu 26.04 LTS (Resolute Raccoon) | 7.0 | xz (recompressed from Ubuntu's zstd) | 20.04 LTS (Focal Fossa) and later |
-| AlmaLinux, and the RHEL family (see [Other distributions](#other-distributions)) | AlmaLinux 9, and Oracle Linux 9, Rocky Linux 9 and Amazon Linux 2023 | `almalinux` | AlmaLinux 10 | 6.12 | xz | all, once `kmod` is installed |
+| Debian | 12 (Bookworm) and 13 (Trixie) | `debian` | Debian 13 (Trixie) | 6.12 | xz | 10 (Buster) and later |
+| Ubuntu | 24.04 LTS (Noble Numbat) and 26.04 LTS (Resolute Raccoon) | `ubuntu` | Ubuntu 26.04 LTS (Resolute Raccoon) | 7.0 | xz (recompressed from Ubuntu's zstd) | 20.04 LTS (Focal Fossa) and later |
+| AlmaLinux, and the RHEL family (see [Other distributions](#other-distributions)) | AlmaLinux 9 and 10, and Oracle Linux 9, Rocky Linux 9 and Amazon Linux 2023 | `almalinux` | AlmaLinux 10 | 6.12 | xz | all, once `kmod` is installed |
 | Fedora | the latest (the `fedora` image) | `fedora` | Fedora 45 | 7.2 | xz | all, once `kmod` is installed |
 | openSUSE Leap, openSUSE Tumbleweed | the latest of each (the `opensuse/leap` and `opensuse/tumbleweed` images) | `opensuse` | openSUSE Leap 16.1 | 6.12 | xz (recompressed from openSUSE's zstd) | all, once `kmod` is installed |
 | Alpine Linux | the latest (the `alpine` image) | `alpine` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | gzip | all |
