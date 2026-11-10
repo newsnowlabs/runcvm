@@ -492,6 +492,7 @@ spec:
 The pod's container runs as a Container/VM, with its own kernel (chosen from its image, as with Docker), in the pod's network namespace: it has the pod's address, reaches and is reached by other pods and Services, resolves names through the cluster's DNS, and `kubectl exec` runs commands in the VM. The pod's sandbox container, which only holds the pod's namespaces, runs under runc as usual.
 
 Limitations:
+
 - **One container per pod.** Each container in a pod would be a VM taking over the pod's one network interface, so a pod with more than one container fails.
 - **No memory limits.** A pod with a memory limit fails to start: RunCVM sizes the VM to the container's memory limit, then raises the limit to make room for QEMU and RunCVM's own processes, which the pod's own cgroup limit does not allow. Without a limit, the VM has RunCVM's default memory size.
 - **Readiness.** Kubernetes considers the container started once the VM starts, before its workload runs; give the pod a readiness probe, so that Services send it traffic only once it is ready.
