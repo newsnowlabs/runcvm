@@ -76,7 +76,6 @@ t.check("backing files created in the volume", "labelled one two",
         " ".join(sorted((t.docker("run", "--rm", "--runtime=runc", *t.labels(), "-v", volume + ":/v:ro",
                                   "alpine", "ls", "/v").stdout.split()))))
 
-
 # RUNCVM_DISK_IOTHREADS: a 2-vCPU Container/VM's disk has two queues, so at most two I/O threads.
 io_name = t.unique("disks-iothreads")
 t.cleanup_container(io_name)
