@@ -141,6 +141,10 @@ set -e
 cd /root/aports/main/mkinitfs
 echo 'sha512sums="${sha512sums}$(sha512sum nlplug-findfs.patch)"' >>APKBUILD
 echo 'source="${source} nlplug-findfs.patch"' >>APKBUILD
+# Skip mkinitfs's own test suite, which Alpine runs in its own CI: some of its cases have
+# 5-second time limits, which a loaded build host (e.g. a CI runner building every stage at once)
+# can exceed, failing the build.
+echo 'options="$options !check"' >>APKBUILD
 abuild -rFf
 EOF
 
