@@ -764,21 +764,20 @@ case "${RUNCVM_DISPLAY_MODE:-headless}" in
 
     # Creates a stdio backend connected to the virtual console.
     # Use with /dev/hvc0
+    CONSOLE+=(
+      -chardev stdio,id=char0,mux=off,signal=off
+      -device virtconsole,chardev=char0,id=console0
+    )
+
     if [ "$RUNCVM_QEMU_ARCH" = "arm64" ] && [ "$RUNCVM_KERNEL_DEBUG" = "1" ]; then
-      # The arm64 VM's kernel has no console until its virtio console driver loads, so its early
-      # messages go to the virt machine's UART (ttyAMA0, see EARLY_CONSOLE_DEV), which shares
-      # stdio with the virtual console. The virtual console, attached last, receives the input.
+      # The arm64 VM's kernel has no console until its virtio console driver loads, so it writes
+      # its early messages to the virt machine's UART (ttyAMA0) as an early console (earlycon,
+      # below), which the container's stderr receives.
       CONSOLE+=(
-        -chardev stdio,id=char0,mux=on,signal=off
-        -serial chardev:char0
-        -device virtconsole,chardev=char0,id=console0
+        -chardev file,id=earlycon0,path=/dev/stderr
+        -serial chardev:earlycon0
       )
-      EARLY_CONSOLE_DEV="ttyAMA0"
-    else
-      CONSOLE+=(
-        -chardev stdio,id=char0,mux=off,signal=off
-        -device virtconsole,chardev=char0,id=console0
-      )
+      EARLY_CONSOLE="earlycon"
     fi
 
     CONSOLE_DEV="hvc0"
@@ -925,8 +924,7 @@ APPEND+=(scsi_mod.scan=none tsc=reliable no_timer_check rcupdate.rcu_expedited=1
 APPEND+=(systemd.show_status=1)
 
 if [ "$RUNCVM_KERNEL_DEBUG" = "1" ]; then
-  # The last console named is /dev/console
-  APPEND+=(${EARLY_CONSOLE_DEV:+console=$EARLY_CONSOLE_DEV} console=$CONSOLE_DEV)
+  APPEND+=($EARLY_CONSOLE console=$CONSOLE_DEV)
 else
   APPEND+=(quiet)
 fi

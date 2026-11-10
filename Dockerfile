@@ -199,8 +199,10 @@ ARG TARGETARCH
 RUN apk update && \
     QEMU_SYSTEM=$([ "$TARGETARCH" = "arm64" ] && echo qemu-system-aarch64 || echo qemu-system-x86_64) && \
     UEFI_PKG=$([ "$TARGETARCH" = "arm64" ] && echo aavmf || echo ovmf) && \
+    # arm64's virt machine has no VGA, so its virtio display is virtio-gpu-pci
+    DISPLAY_PKG=$([ "$TARGETARCH" = "arm64" ] && echo qemu-hw-display-virtio-gpu-pci || echo qemu-hw-display-virtio-vga) && \
     apk add --no-cache file bash $QEMU_SYSTEM virtiofsd qemu-ui-curses qemu-guest-agent \
-        qemu-hw-display-virtio-vga \
+        $DISPLAY_PKG \
         $UEFI_PKG \
         jq iproute2 netcat-openbsd blkid util-linux \
         s6 dnsmasq nftables \
