@@ -316,17 +316,17 @@ RunCVM is tested on x86-64 hosts with KVM running Debian 12 (Bookworm) and Ubunt
 
 ## Supported distributions
 
-RunCVM aims to support each distribution's latest release and one or two before it (for Ubuntu, its LTS releases), while they remain supported upstream, as the image a Container/VM runs. It bundles a kernel for each of these distributions, built from the release shown, which a Container/VM boots unless its image has a kernel of its own (see [Kernel auto-detection](#kernel-auto-detection)). The table lists the image releases that the integration tests (`tests/25-images-kernels`) boot:
+RunCVM aims to support each distribution's latest release and one or two before it (for Ubuntu, its LTS releases), while they remain supported upstream, as the image a Container/VM runs. It bundles a kernel for each of these distributions, built from the release shown, which a Container/VM boots unless its image has a kernel of its own (see [Kernel auto-detection](#kernel-auto-detection)). The table lists the image releases that the integration tests (`tests/25-images-kernels`) boot, and the image tag each is booted from. A tag is re-pointed upstream as its release is updated, so a host tests the copy of each tag it first pulled, unless the tests are run with `tests/run --pull` (see [Testing](#testing)):
 
 | Distribution | Image releases tested | RunCVM's kernel (`RUNCVM_KERNEL`) | Kernel built from | Kernel series | Module compression | Image releases whose own `modprobe` can load the kernel's modules |
 |---|---|---|---|---|---|---|
-| Debian | 12 (Bookworm) and 13 (Trixie) | `debian` | Debian 13 (Trixie) | 6.12 | xz | 10 (Buster) and later |
-| Ubuntu | 24.04 LTS (Noble Numbat) and 26.04 LTS (Resolute Raccoon) | `ubuntu` | Ubuntu 26.04 LTS (Resolute Raccoon) | 7.0 | xz (recompressed from Ubuntu's zstd) | 20.04 LTS (Focal Fossa) and later |
-| AlmaLinux, and the RHEL family (see [Other distributions](#other-distributions)) | AlmaLinux 9 and 10, and Oracle Linux 9, Rocky Linux 9 and Amazon Linux 2023 | `almalinux` | AlmaLinux 10 | 6.12 | xz | all, once `kmod` is installed |
-| Fedora | the latest (the `fedora` image) | `fedora` | Fedora 45 | 7.2 | xz | all, once `kmod` is installed |
-| openSUSE Leap, openSUSE Tumbleweed | the latest of each (the `opensuse/leap` and `opensuse/tumbleweed` images) | `opensuse` | openSUSE Leap 16.1 | 6.12 | xz (recompressed from openSUSE's zstd) | all, once `kmod` is installed |
-| Alpine Linux | the latest (the `alpine` image) | `alpine` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | gzip | all |
-| OpenWrt | none (the kernel is tested with an Alpine Linux image) | `openwrt` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | none | all |
+| Debian | 12 (Bookworm) and 13 (Trixie): `debian:bookworm-slim`, `debian:trixie-slim` | `debian` | Debian 13 (Trixie) | 6.12 | xz | 10 (Buster) and later |
+| Ubuntu | 22.04 LTS (Jammy Jellyfish), 24.04 LTS (Noble Numbat) and 26.04 LTS (Resolute Raccoon): `ubuntu:22.04`, `ubuntu:24.04`, `ubuntu:26.04` | `ubuntu` | Ubuntu 26.04 LTS (Resolute Raccoon) | 7.0 | xz (recompressed from Ubuntu's zstd) | 20.04 LTS (Focal Fossa) and later |
+| AlmaLinux, and the RHEL family (see [Other distributions](#other-distributions)) | AlmaLinux 8, 9 and 10 (`almalinux:<n>`), Rocky Linux 8, 9 and 10 (`rockylinux/rockylinux:<n>`), Oracle Linux 8, 9 and 10 (`oraclelinux:<n>`), and Amazon Linux 2023 (`amazonlinux:2023`) | `almalinux` | AlmaLinux 10 | 6.12 | xz | all, once `kmod` is installed |
+| Fedora | 44 and 45: `fedora:44`, `fedora:45` | `fedora` | Fedora 45 | 7.2 | xz | all, once `kmod` is installed |
+| openSUSE Leap, openSUSE Tumbleweed | Leap 16.0 and 16.1: `opensuse/leap:16.0`, `opensuse/leap:16.1`; Tumbleweed, a rolling release: `opensuse/tumbleweed` | `opensuse` | openSUSE Leap 16.1 | 6.12 | xz (recompressed from openSUSE's zstd) | all, once `kmod` is installed |
+| Alpine Linux | 3.22, 3.23 and 3.24: `alpine:3.22`, `alpine:3.23`, `alpine:3.24` | `alpine` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | gzip | all |
+| OpenWrt | 25.12.6, imported from OpenWrt's x86 rootfs, as OpenWrt publishes no container image | `openwrt` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | none | all |
 
 Each kernel comes from the release in the "Kernel built from" column, which stays fixed for a given RunCVM version: its series (as shown) does not change, and each build of RunCVM takes that release's newest kernel update (e.g. Debian 13's newest 6.12 kernel).
 
@@ -1168,6 +1168,8 @@ Helpers for tests are in `tests/framework.sh` (bash) and `tests/framework.py` (P
 `--accel kvm|auto|tcg` (or `RUNCVM_TEST_ACCEL`) selects QEMU acceleration for the tests' RunCVM Container/VMs, which tests pass on as `RUNCVM_QEMU_ACCEL` using the `vm_opts` helper (where the RunCVM version under test supports it). With `--accel tcg`, real RunCVM Container/VMs run under software emulation where KVM is unavailable: slow, but it exercises RunCVM itself; tests that require `kvm` are skipped.
 
 Checks that launch a Container/VM explicitly under software emulation, whatever `--accel` says (such as `13-qemu-accel`'s `tcg` cases), are slow on a host with KVM, so there they run only with `--tcg-cases` (or `RUNCVM_TEST_TCG_CASES=1`) and are otherwise recorded as skipped. With `--accel tcg`, or without `/dev/kvm`, they always run. Tests guard them with the `tcg_cases` helper (`TCG_CASES` in Python).
+
+Tests boot images by tag, and Docker pulls an image only when the host has no copy of it, so a host goes on testing the copy of each tag it first pulled, even after the tag is re-pointed upstream (e.g. to a rebuilt `alpine:3.24` or a point release of `almalinux:9`). With `--pull` (or `RUNCVM_TEST_PULL=1`), tests pull the images they boot before using them, with the `pull_images` helper (Python), recording a check for each pull, so that each tag is tested as published now. This needs network access, and a run's result can then change because an image did. `tests/25-images-kernels` also imports its OpenWrt image from OpenWrt's rootfs once per host, or again with `--pull`.
 
 #### Developing the tests without KVM (stand-in mode)
 

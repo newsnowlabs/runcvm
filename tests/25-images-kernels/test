@@ -12,6 +12,13 @@
   (ID_LIKE=debian) the Debian kernel.
 - RUNCVM_KERNEL naming a distribution of a family (ol) boots the family's
   kernel.
+- Each release of each distribution that RunCVM aims to support boots, from
+  an image tagged with that release (listed in README.md's Supported
+  distributions), so that each case names the release it tests. With
+  tests/run --pull, the images are pulled first, so that each tag is tested
+  as published now; otherwise the host's copies are used.
+- An OpenWrt image, imported from OpenWrt's x86 rootfs (once per host, or
+  again with --pull), gets the OpenWrt kernel.
 - An image with no os-release gets Debian's kernel silently. An image of any
   other distribution (Arch Linux, Wolfi) gets Debian's kernel and shows the
   fallback-kernel warning; no other image shows it.
@@ -47,6 +54,37 @@ def kernel_version(dist):
         return None
 
 
+# (image, expected kernel dist): an image tagged with each release that RunCVM aims to support (see
+# README.md's Supported distributions), then rolling and other distributions' images.
+IMAGES = (("alpine:3.22", "alpine"), ("alpine:3.23", "alpine"), ("alpine:3.24", "alpine"),
+          ("debian:bookworm-slim", "debian"), ("debian:trixie-slim", "debian"),
+          ("ubuntu:22.04", "ubuntu"), ("ubuntu:24.04", "ubuntu"), ("ubuntu:26.04", "ubuntu"),
+          ("almalinux:8", "almalinux"), ("almalinux:9", "almalinux"), ("almalinux:10", "almalinux"),
+          ("rockylinux/rockylinux:8", "almalinux"), ("rockylinux/rockylinux:9", "almalinux"),
+          ("rockylinux/rockylinux:10", "almalinux"),
+          ("oraclelinux:8", "almalinux"), ("oraclelinux:9", "almalinux"), ("oraclelinux:10", "almalinux"),
+          ("amazonlinux:2023", "almalinux"),
+          ("fedora:44", "fedora"), ("fedora:45", "fedora"),
+          ("opensuse/leap:16.0", "opensuse"), ("opensuse/leap:16.1", "opensuse"),
+          ("opensuse/tumbleweed", "opensuse"),
+          ("kalilinux/kali-rolling", "debian"),
+          ("busybox", "debian"),
+          ("archlinux", "debian"),
+          ("cgr.dev/chainguard/wolfi-base", "debian"))
+
+t.pull_images(["alpine"] + [i for i, _ in IMAGES])
+
+# OpenWrt publishes no container image: import its x86 rootfs as one, once per host (or again with
+# --pull). Like a pulled image, it is kept for later runs.
+OPENWRT_RELEASE = "25.12.6"
+OPENWRT_IMAGE = "runcvm-test/openwrt:" + OPENWRT_RELEASE
+OPENWRT_ROOTFS = ("https://downloads.openwrt.org/releases/{0}/targets/x86/generic/"
+                  "openwrt-{0}-x86-generic-rootfs.tar.gz".format(OPENWRT_RELEASE))
+if t.PULL or t.docker("image", "inspect", OPENWRT_IMAGE).returncode != 0:
+    r = t.docker("import", OPENWRT_ROOTFS, OPENWRT_IMAGE, timeout=600)
+    if not t.check("imported OpenWrt %s" % OPENWRT_RELEASE, 0, r.returncode):
+        t.log(r.stdout)
+
 # An image declaring a non-root USER and a WORKDIR, built locally from alpine.
 user_image = t.unique("user-image").lower()
 subprocess.run(["docker", "build", "-q", *t.labels(), "-t", user_image, "-"], check=True,
@@ -72,16 +110,8 @@ CASES = [("kernel-" + k, ["--env=RUNCVM_KERNEL=" + k], ["alpine", "sh", "-c", PR
 CASES += [("kernel-ol", ["--env=RUNCVM_KERNEL=ol"], ["alpine", "sh", "-c", PROBE], "almalinux", True)]
 # Each case is named after its image, tag included, so that releases of one distribution have distinct names.
 CASES += [("image-" + i.replace(":", "-").replace("/", "-"), [], [i, "sh", "-c", PROBE], k, None)
-          for i, k in (("alpine", "alpine"),
-                       ("debian:bookworm-slim", "debian"), ("debian:trixie-slim", "debian"),
-                       ("ubuntu:24.04", "ubuntu"), ("ubuntu:26.04", "ubuntu"),
-                       ("busybox", "debian"), ("oraclelinux:9", "almalinux"),
-                       ("rockylinux:9", "almalinux"), ("almalinux:9", "almalinux"), ("almalinux:10", "almalinux"),
-                       ("fedora", "fedora"),
-                       ("amazonlinux:2023", "almalinux"), ("kalilinux/kali-rolling", "debian"),
-                       ("opensuse/leap", "opensuse"), ("opensuse/tumbleweed", "opensuse"),
-                       ("archlinux", "debian"),
-                       ("cgr.dev/chainguard/wolfi-base", "debian"))]
+          for i, k in IMAGES]
+CASES += [("image-openwrt-" + OPENWRT_RELEASE, [], [OPENWRT_IMAGE, "sh", "-c", PROBE], "openwrt", None)]
 CASES += [("image-os-release-link", [], [link_image, "sh", "-c", PROBE], "alpine", None)]
 
 # The cases whose image's distribution has no RunCVM kernel, so whose output shows the warning.
