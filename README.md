@@ -136,12 +136,37 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
 
 ## Contents
 
-- **Getting started:** [Introduction](#introduction) · [Quick start](#quick-start) · [Use cases](#use-cases)
-- **About RunCVM:** [How RunCVM works](#how-runcvm-works) · [Motivation](#motivation) · [Project aims](#project-aims) · [Project ambitions](#project-ambitions)
-- **Installing:** [System requirements](#system-requirements) · [Installation](#installation)
-- **Using RunCVM:** [Supported distributions](#supported-distributions) · [Kernel selection and auto-detection](#kernel-selection-and-auto-detection) · [Features and limitations](#features-and-limitations) · [RunCVM vs Kata comparison](#runcvm-vs-kata-comparison) · [More examples](#more-examples) · [Option reference](#option-reference)
-- **Maintaining and developing:** [Upgrading](#upgrading) · [Building](#building) · [Developing](#developing) · [Testing](#testing) · [Uninstallation](#uninstallation) · [Contributing](#contributing)
-- **The project:** [Support](#support) · [RunCVM and Dockside](#runcvm-and-dockside) · [Licence](#licence) · [Legals](#legals)
+- **Getting started**
+  - [Introduction](#introduction)
+  - [Quick start](#quick-start)
+  - [Use cases](#use-cases)
+- **About RunCVM**
+  - [How RunCVM works](#how-runcvm-works)
+  - [Motivation](#motivation)
+  - [Project aims](#project-aims)
+  - [Project ambitions](#project-ambitions)
+- **Installing**
+  - [System requirements](#system-requirements)
+  - [Installation](#installation)
+- **Using RunCVM**
+  - [Supported distributions](#supported-distributions)
+  - [Kernel selection and auto-detection](#kernel-selection-and-auto-detection)
+  - [Features and limitations](#features-and-limitations)
+  - [RunCVM vs Kata comparison](#runcvm-vs-kata-comparison)
+  - [More examples](#more-examples)
+  - [Option reference](#option-reference)
+- **Maintaining and developing**
+  - [Upgrading](#upgrading)
+  - [Building](#building)
+  - [Developing](#developing)
+  - [Testing](#testing)
+  - [Uninstallation](#uninstallation)
+  - [Contributing](#contributing)
+- **The project**
+  - [Support](#support)
+  - [RunCVM and Dockside](#runcvm-and-dockside)
+  - [Licence](#licence)
+  - [Legals](#legals)
 
 ## How RunCVM works
 
