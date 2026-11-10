@@ -547,6 +547,8 @@ docker run -d --runtime=runcvm --init --name=dind --memory=2g \
 docker exec dind docker run --rm hello-world
 ```
 
+In the keyed form, the same disk is `RUNCVM_DISKS=src=/disks/docker,dst=/var/lib/docker,dst=/var/lib/containerd,fs=ext4,size=10G`.
+
 Images built to run Docker under systemd, such as those in [System workloads](#system-workloads), can set the disk in their own `ENV RUNCVM_DISKS`, and use `VOLUME /disks` to keep the backing file in a volume.
 
 Some points to bear in mind:
