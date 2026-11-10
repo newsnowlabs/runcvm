@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""An image whose entrypoint is systemd, booted with each kernel.
+
+RunCVM starts its own daemons (dropbear, for 'docker exec', and the QEMU
+guest agent) before running the entrypoint. systemd gives up the
+controlling terminal as it starts; this must not end them, including
+after a dracut initramfs, whose systemd leaves the VM's PID 1 holding the
+console as its controlling terminal (the AlmaLinux, Fedora and openSUSE
+kernels).
+
+For each kernel, with almalinux/9-init:
+- 'docker exec' works once the VM has booted.
+- systemd reaches 'running' (or 'degraded', if some unit of the image's
+  own fails in a VM).
+- The QEMU guest agent is still running.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+IMAGE = "almalinux/9-init"
+KERNELS = ["almalinux", "fedora", "opensuse", "debian", "ubuntu"]
+TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+t.docker("pull", "-q", IMAGE, check=True)
+
+
+def run(kernel):
+    container = t.unique("systemd-%s" % kernel)
+    t.cleanup_container(container)
+    r = t.docker("run", "-d", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 "--env=RUNCVM_KERNEL=%s" % kernel, IMAGE)
+    if r.returncode != 0:
+        return False, r.stdout, None, None
+    if not t.wait_for_exec(container, TIMEOUT):
+        return False, t.docker("logs", container).stdout, None, None
+    state = t.docker("exec", container, "timeout", str(TIMEOUT), "systemctl", "is-system-running", "--wait")
+    agent = t.docker("exec", container, "sh", "-c", "grep -qx qemu-ga /proc/[0-9]*/comm")
+    return True, "", state.stdout.strip(), agent.returncode == 0
+
+
+results = t.parallel(run, KERNELS)
+
+for kernel, (booted, output, state, agent) in zip(KERNELS, results):
+    if not t.check("%s kernel: 'docker exec' works" % kernel, True, booted):
+        t.log("output:\n%s" % output)
+        continue
+    t.check("%s kernel: systemd running or degraded" % kernel, True, state in ("running", "degraded"))
+    t.log("%s kernel: systemd state %r" % (kernel, state))
+    t.check("%s kernel: QEMU guest agent running" % kernel, True, agent)
+
+t.finish()
