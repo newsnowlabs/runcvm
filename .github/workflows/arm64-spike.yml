@@ -1,7 +1,8 @@
-# Spike: builds #28's arm64 support (with main merged in) natively on a GitHub-hosted arm64
-# runner, reports whether the runner has KVM, installs the build, and runs Container/VMs, under
-# KVM if available, else under software emulation (TCG). Each step carries on after a failure,
-# so that one run answers as much as it can. Runs on a push to its own branch, or by hand.
+# Spike: builds #28's arm64 support (with main and the Alpine 3.24 upgrade merged in) natively on
+# GitHub-hosted arm64 runners, installs it, and runs a Container/VM of each image in a job of its
+# own, under KVM if the runner has it, else under software emulation (TCG). Each Container/VM runs
+# detached and is removed at its deadline, so a VM that never exits or never powers off cannot
+# hold up the others. Runs on a push to its own branch, or by hand.
 name: arm64 spike
 
 on:
@@ -13,19 +14,22 @@ permissions:
   contents: read
 
 jobs:
-  arm64:
+  vm:
+    name: ${{ matrix.image }}
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 150
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [alpine, debian:trixie, ubuntu:24.04, almalinux:10, fedora:45, opensuse/leap:16.1, exec]
     steps:
       - uses: actions/checkout@v4
 
       - name: Runner facts
         run: |
-          uname -a; nproc; free -m; df -h / | tail -1
+          uname -a; nproc; free -m
           lscpu | grep -iE 'model name|architecture|virtuali|hypervisor' || true
           ls -l /dev/kvm || echo "no /dev/kvm"
-          lsmod | grep -E '^kvm' || echo "no kvm modules listed"
-          docker version --format 'Docker: client {{.Client.Version}}, server {{.Server.Version}}'
 
       - name: Open /dev/kvm to the runner user
         continue-on-error: true
@@ -34,50 +38,54 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-          ls -l /dev/kvm
 
       - name: Build RunCVM for arm64
-        id: build
-        continue-on-error: true
         run: |
-          set -o pipefail
-          time ./build/build.sh --tag arm64 -- \
+          ./build/build.sh --tag arm64 -- \
             --build-arg APORTS_URL=https://github.com/alpinelinux/aports.git \
             --build-arg ALPINE_DISTFILES_MIRROR=https://distfiles.alpinelinux.org/distfiles \
-            2>&1 | tee "$RUNNER_TEMP/build.log"
-
-      - name: Build log tail on failure
-        if: steps.build.outcome == 'failure'
-        run: tail -150 "$RUNNER_TEMP/build.log"
-
-      - name: Package facts
-        if: steps.build.outcome == 'success'
-        continue-on-error: true
-        run: |
+            >"$RUNNER_TEMP/build.log" 2>&1 || { tail -150 "$RUNNER_TEMP/build.log"; exit 1; }
           docker run --rm --entrypoint /bin/sh newsnowlabs/runcvm:arm64 -c \
-            'uname -m; ls /opt/runcvm/kernels/*/; ls /opt/runcvm/usr/bin | grep -E "qemu-system" ; du -sh /opt/runcvm'
+            'ls /opt/runcvm/usr/bin | grep qemu-system; /opt/runcvm/lib/ld-musl-aarch64.so.1 --library-path /opt/runcvm/lib:/opt/runcvm/usr/lib /opt/runcvm/usr/bin/qemu-system-aarch64 --version | head -1' || true
 
       - name: Install RunCVM
-        if: steps.build.outcome == 'success'
-        continue-on-error: true
-        run: |
-          sudo REPO=newsnowlabs/runcvm:arm64 ./runcvm-scripts/runcvm-install-runtime.sh </dev/null
-          docker info --format '{{.Runtimes.runcvm.Path}}'
+        run: sudo REPO=newsnowlabs/runcvm:arm64 ./runcvm-scripts/runcvm-install-runtime.sh </dev/null
 
-      - name: Run Container/VMs
-        if: steps.build.outcome == 'success'
-        continue-on-error: true
+      - name: Run a Container/VM
+        env:
+          IMAGE: ${{ matrix.image }}
         run: |
-          set +e
           if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then accel=kvm; else accel=tcg; fi
           echo "=== acceleration: $accel"
-          for image in alpine debian:trixie ubuntu:24.04 almalinux:10 fedora:45 opensuse/leap:16.1; do
-            echo "=== $image"
-            timeout 600 docker run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=$accel $image sh -c 'uname -mr; echo ok'
-            echo "=== $image exit status: $? (expect 0)"
-          done
-          docker run -d --name ex --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=$accel alpine sleep 600
-          sleep 60
-          timeout 120 docker exec ex echo exec-ok; echo "=== docker exec exit status: $? (expect 0)"
-          docker logs ex 2>&1 | tail -20
-          docker rm -f ex
+          # Runs a detached Container/VM of image $2 with command $3..., named $1, and waits up to
+          # $DEADLINE seconds for it to exit, then shows its output and status, and removes it.
+          DEADLINE=900
+          vm() {
+            local name=$1 image=$2; shift 2
+            docker pull -q "$image" >/dev/null
+            local start; start=$(date +%s)
+            docker run -d --name "$name" --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=$accel "$image" "$@" >/dev/null || return 1
+            local status
+            status=$(timeout -k 10 $DEADLINE docker wait "$name") || status="none: still running after ${DEADLINE}s"
+            echo "=== $image output ($(( $(date +%s) - start ))s):"
+            timeout -k 10 60 docker logs "$name" 2>&1 | tail -40
+            echo "=== $image exit status: $status (expect 0)"
+            timeout -k 10 120 docker rm -f "$name" >/dev/null || echo "=== docker rm -f $name did not complete"
+            [ "$status" = 0 ]
+          }
+          if [ "$IMAGE" = exec ]; then
+            docker run -d --name ex --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=$accel alpine sleep 1800 >/dev/null
+            start=$(date +%s); ok=0
+            while [ $(( $(date +%s) - start )) -lt $DEADLINE ]; do
+              timeout -k 5 60 docker exec ex echo exec-ok && { ok=1; break; }
+              sleep 10
+            done
+            echo "=== docker exec after $(( $(date +%s) - start ))s: $([ $ok = 1 ] && echo succeeded || echo failed) (expect succeeded)"
+            timeout -k 10 60 docker logs ex 2>&1 | tail -40
+            start=$(date +%s)
+            timeout -k 10 300 docker stop ex >/dev/null; echo "=== docker stop: status $?, $(( $(date +%s) - start ))s (expect 0, well under 300s)"
+            timeout -k 10 120 docker rm -f ex >/dev/null
+            [ $ok = 1 ]
+          else
+            vm vm "$IMAGE" sh -c 'uname -mr; echo ok'
+          fi
