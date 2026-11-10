@@ -2,7 +2,7 @@
 
 ## Introduction
 
-RunCVM (Run Container Virtual Machine) is an experimental open-source Docker container runtime for Linux, created by Struan Bartlett at NewsNow Labs, that makes launching standard containerised workloads and system workloads (e.g. Systemd, Docker, even OpenWrt) in VMs as easy as launching a container.
+RunCVM (Run Container Virtual Machine) is an open-source Docker container runtime for Linux, created by Struan Bartlett at NewsNow Labs, that makes launching standard containerised workloads and system workloads (e.g. Systemd, Docker, even OpenWrt) in VMs as easy as launching a container.
 
 RunCVM:
 
@@ -483,12 +483,14 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
    - stdio/Terminals
       - [+] `--detach` (or `-d`) is supported
       - [+] `--interactive` (or `-i`) is supported
+      - [-] Without `--tty` (or `-t`), the end of standard input is not passed on to the workload, so a workload reading piped input until its end (e.g. `printf abc | docker run -i --runtime=runcvm alpine cat`) does not finish; a stdio bridge to address this is in development (see [Project ambitions](#project-ambitions))
       - [+] `--tty` (or `-t`) is supported (but to enter CTRL-T one must press CTRL-T twice)
       - [+] `--attach` (or `-a`) is supported
       - [+] Stdout and Stderr output should be broadly similar to running the same workload in a standard `runc` container
       - [-] Stdout and Stderr are not independently multiplexed so `docker run --runtime=runcvm debian bash -c 'echo stdout; echo stderr >&2' >/tmp/stdout 2>/tmp/stderr` does not produce the expected result
       - [-] Stdout and Stderr sent very soon after VM launch might be corrupted due to serial console issues
       - [-] Stdout and Stderr sent immediately before VM shutdown might not always be fully flushed
+      - [-] Without `--tty` (or `-t`), each newline in Stdout and Stderr reaches `docker run` as a carriage return and newline (`\r\n`), so, for example, `docker run --runtime=runcvm alpine cat <file> >copy` does not produce an exact copy
    - Resource allocation and limits
       - [+] `--cpus` is supported to specify number of VM CPUs
       - [+] `--memory` (or `-m`) is supported to specify VM memory (and limit container memory to this value plus a 256Mb contingency)
@@ -502,6 +504,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
    - [+] `--user` (or `-u`), `--workdir` (or `-w`), `--env` (or `-e`), `--env-file`, `--detach` (or `-d`), `--interactive` (or `-i`) and `--tty` (or `-t`) are all supported
    - [+] Stdout and Stderr _are_ independently multiplexed so `docker exec <container> bash -c 'echo stdout; echo stderr >&2' >/tmp/stdout 2>/tmp/stderr` _does_ produce the expected result
 - Security
+   - [-] The container's seccomp filter is removed, so the processes RunCVM runs in the container on the host (QEMU, `virtiofsd` and `dnsmasq`) are not seccomp-filtered, as a standard container's processes are by Docker's default profile; a profile given with `--security-opt seccomp=…` is also ignored. The workload itself runs in the VM, behind the VM's kernel.
    - The RunCVM software package at `/opt/runcvm` is mounted read-only within RunCVM containers. Container applications cannot compromise RunCVM, but they can execute binaries from within the RunCVM package. The set of binaries available to the VM may be reduced to a minimum in a later version.
 - Kernels
    - [+] Use any kernel, either one pre-packaged with RunCVM or roll your own
