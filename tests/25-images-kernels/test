@@ -13,8 +13,9 @@
 - RUNCVM_KERNEL naming a distribution of a family (ol) boots the family's
   kernel.
 - An image with no os-release gets Debian's kernel silently. An image of any
-  other distribution (Arch Linux, Wolfi) gets Debian's kernel and shows the
-  fallback-kernel warning; no other image shows it.
+  other distribution (Arch Linux, on x86-64 hosts only, as its image has no
+  arm64 build; Wolfi) gets Debian's kernel and shows the fallback-kernel
+  warning; no other image shows it.
 - /etc/os-release is read within the image: an absolute symbolic link names
   a file in the image, not the host's.
 - An image's USER and WORKDIR apply in the VM.
@@ -28,6 +29,7 @@ them deliberately.
 
 import atexit
 import os
+import platform
 import subprocess
 import sys
 
@@ -76,7 +78,7 @@ CASES += [("image-" + i.split(":")[0].replace("/", "-"), [], [i, "sh", "-c", PRO
                        ("rockylinux:9", "almalinux"), ("almalinux:9", "almalinux"), ("fedora", "fedora"),
                        ("amazonlinux:2023", "almalinux"), ("kalilinux/kali-rolling", "debian"),
                        ("opensuse/leap", "opensuse"), ("opensuse/tumbleweed", "opensuse"),
-                       ("archlinux", "debian"),
+                       *([("archlinux", "debian")] if platform.machine() == "x86_64" else []),
                        ("cgr.dev/chainguard/wolfi-base", "debian"))]
 CASES += [("image-os-release-link", [], [link_image, "sh", "-c", PROBE], "alpine", None)]
 
