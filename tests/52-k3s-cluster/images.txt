@@ -1,0 +1,7 @@
+# Images the cluster in compose.yaml needs, for the k3s release it pins (K3S_VERSION): k3s's own
+# (the pause sandbox and CoreDNS; compose.yaml disables k3s's other packaged components) and the
+# workload's, in manifest.yaml. The test pulls them on the host and loads them into every node,
+# so that no node needs to download anything.
+docker.io/rancher/mirrored-pause:3.6
+docker.io/rancher/mirrored-coredns-coredns:1.12.3
+docker.io/library/busybox:1.37

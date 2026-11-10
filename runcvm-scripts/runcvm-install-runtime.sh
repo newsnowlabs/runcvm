@@ -1,5 +1,14 @@
 #!/bin/sh
 
+# Installs RunCVM from the image $REPO (default newsnowlabs/runcvm, i.e. the latest release):
+# - copies the RunCVM package from the image to /opt/runcvm;
+# - then runs the installer in that package, with --no-dockerd, which registers the runtime with
+#   Docker. So the host-side steps are always those of the release being installed, whichever
+#   version of this script installs it.
+#
+# With --no-dockerd, it skips the dockerd check and the package copy, and registers the package
+# already in /opt/runcvm. Every release from v1.5.0 accepts --no-dockerd in the same way.
+
 RUNCVM=/opt/runcvm
 RUNCVM_LD=$RUNCVM/lib/ld
 RUNCVM_JQ=$RUNCVM/usr/bin/jq
@@ -38,7 +47,9 @@ jq_get() {
 usage() {
   cat <<_EOE_ >&2
 
-Usage: sudo $0
+Usage: sudo [REPO=<image>] $0 [--no-dockerd]
+
+e.g. sudo REPO=newsnowlabs/runcvm:v1.7.0 $0
 _EOE_
   exit 1
 }
@@ -127,15 +138,29 @@ else
   fi
 fi
 
-# Install RunCVM package to $MNT
+# Install the RunCVM package to /opt/runcvm, which the installer image sees mounted at $MNT
 if [ -z "$NO_DOCKERD" ]; then
-  log "- Installing RunCVM package to $MNT ..."
+  log "- Installing RunCVM package to /opt/runcvm ..."
   if docker run --rm -v /opt/runcvm:$MNT $REPO --quiet; then
     log "- Installed RunCVM package to /opt/runcvm"
   else
     log "- Failed to install RunCVM package to /opt/runcvm; aborting!"
     exit 1
   fi
+
+  # Hand over to the installed package's own installer, for the host-side steps of its release.
+  # Its prompt to restart dockerd reads from the terminal, if there is one; otherwise (e.g. when
+  # this script is piped to sh) the prompt reads nothing, which accepts the restart.
+  PACKAGE_INSTALLER=$RUNCVM/scripts/runcvm-install-runtime.sh
+  if [ -x "$PACKAGE_INSTALLER" ]; then
+    log "- Running the installed package's installer, $PACKAGE_INSTALLER --no-dockerd ..."
+    if [ -t 0 ]; then
+      exec "$PACKAGE_INSTALLER" --no-dockerd
+    else
+      exec "$PACKAGE_INSTALLER" --no-dockerd </dev/null
+    fi
+  fi
+  log "- No installer in the installed package; continuing with this one"
 fi
 
 if [ -d "/etc/docker" ]; then
@@ -147,11 +172,12 @@ if [ -d "/etc/docker" ]; then
     echo '{}' >/etc/docker/daemon.json
   fi
 
-  if [ $(jq_get "/etc/docker/daemon.json" ".runtimes.runcvm.path") != "/opt/runcvm/scripts/runcvm-runtime" ]; then
-    log "  - Adding runcvm to daemon.json runtimes property ..."
+  if [ "$(jq_get "/etc/docker/daemon.json" ".runtimes.runcvm.path")" != "/opt/runcvm/scripts/runcvm-runtime" ]; then
+    log "  - Setting runtimes.runcvm.path in /etc/docker/daemon.json to \"/opt/runcvm/scripts/runcvm-runtime\" ..."
 
     if jq_set  "/etc/docker/daemon.json" '.runtimes.runcvm.path |= "/opt/runcvm/scripts/runcvm-runtime"'; then
-      log "    - Done"
+      log "    - Done; daemon.json's runtimes property is now:"
+      jq '.runtimes' /etc/docker/daemon.json | sed 's/^/        /'
     else
       log "    - Failed: $!"
       exit 1
@@ -162,7 +188,7 @@ if [ -d "/etc/docker" ]; then
     docker_restart
 
   else
-    log "  - Valid runcvm property already found in daemon.json"
+    log "  - runtimes.runcvm.path in /etc/docker/daemon.json is already \"/opt/runcvm/scripts/runcvm-runtime\""
   fi
 
   if docker info 2>/dev/null | grep -q runcvm; then
@@ -187,4 +213,7 @@ _EOE_
 fi
 
 log "- RunCVM installation/upgrade complete."
+log
+log "RunCVM is copyright 2022-2026 NewsNow Publishing Limited, Struan Bartlett, and contributors,"
+log "and licensed under the Apache License, Version 2.0: see $RUNCVM/LICENSE and $RUNCVM/NOTICE."
 log

@@ -85,6 +85,7 @@ docker exec runcvm-l1 runcvm-l1-check
 - systemd is PID 1;
 - the system has finished starting, with no failed units;
 - the mode;
+- the number of `RUNCVM_L1_*` variables `runcvm-l1-entrypoint` saved to `/etc/runcvm-l1/env` (a `NOTE`);
 - dockerd is running, with the `runcvm` runtime;
 - `/dev/kvm` exists, or else a notice that L2s must use software emulation;
 - the verdict of the unit that loads the KVM modules;
@@ -167,6 +168,16 @@ A single disk holds `/var/lib/docker`, `/var/lib/containerd`, `/opt/runcvm` and 
 
 The disk's backing file, `/disks/l1`, is sparse: 40G is a ceiling, and it takes only as much of L0's storage as L1 writes.
 
+Being sparse, the backing file can outgrow the free space on L0's filesystem while L1 runs, and L1's writes to the disk then fail with I/O errors. To reserve the disk's full size on L0 from the start, launch L1 with `prealloc=on` added to the disk's spec (see the RunCVM README's "Preallocated disks"), which also keeps L1's discards (e.g. Ubuntu's weekly `fstrim.timer`) from freeing its blocks again:
+
+```sh
+docker run -d --runtime=runcvm -m 4g --cpus=4 --stop-timeout=120 --name=runcvm-l1 \
+  --env=RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G,prealloc=on runcvm-l1
+docker exec runcvm-l1 runcvm-l1-check --disks=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G,prealloc=on
+```
+
+`prealloc=on` also applies to an existing disk, which it allocates in full when L1 next starts.
+
 The disk has these consequences:
 
 - **Populated once:** the disk is populated from the image only when it is created, on L1's first boot.
@@ -189,11 +200,12 @@ A whole-root disk copies the whole image when it is created, and its root, not j
 
 - loads `kvm_intel` or `kvm_amd`, according to the CPU's `vmx` or `svm` flag;
 - loads `vhost_net` (needed for `RUNCVM_QEMU_NET_VHOST=1` in L2s) and `tun`, unless already loaded or built in;
-- loads `br_netfilter`, without which `docker exec` into an L2 fails: RunCVM's `docker exec` connects from the container to the VM through a source NAT on the container's bridge, and the VM's replies, addressed to the network's gateway, reach the container only if `br_netfilter` passes bridged traffic through netfilter, which reverses the NAT. Docker does not always load it;
 - logs each module's state beforehand, after udev has processed its start-up events, which shows whether udev had loaded it already;
 - logs a warning, and succeeds, if the CPU has neither flag, i.e. L0 does not offer nested virtualisation.
 
 It does not run where systemd finds itself in a container (`ConditionVirtualization=!container`). `runcvm-l1-check` shows its log.
+
+It does not load `br_netfilter`, which RunCVM does not need ([docs/adr/0001-container-firewall-without-br-netfilter.md](../../docs/adr/0001-container-firewall-without-br-netfilter.md)), so L2s run as on a host without it. Docker loads it in L1 only if L1's dockerd is configured to need it, e.g. with `"userland-proxy": false`. To test RunCVM with it loaded, run `sudo modprobe br_netfilter` in L1; `sudo modprobe -r br_netfilter` unloads it again, once no dockerd configuration needs it.
 
 ### IPv6
 

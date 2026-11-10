@@ -1,6 +1,11 @@
 #!/.runcvm/guest/bin/bash
 
-# Exit on errors
+# Exit on errors, so that a failure while preparing the VM stops it from launching.
+#
+# Under pipefail, every command after a pipe in a pipeline whose status matters must read all its
+# input: not grep -q, -m or -l, head, sed's q, awk's exit or a single read, which can exit first
+# and leave the command writing to them killed by SIGPIPE, failing the pipeline at random. Use e.g.
+# 'grep ... >/dev/null', or capture the output first. tests/43-pipefail-readers checks this.
 set -o errexit -o pipefail
 
 # Load RunCVM's own environment, saved by runcvm-ctr-entrypoint
@@ -143,11 +148,21 @@ disk_create_file() {
   busybox truncate -s "$size" "$src" >&2 || error "Error: disk spec '$spec' invalid: truncate on '$src' with size '$size' failed"
 }
 
-# Argument, in positional form: <src>,<dst>[:<dst2>:...],<fs>[,<size>][,layout=subdirs|root]
+# Allocates every block of disk backing file $2, for disk spec $1, keeping its contents, so that the
+# filesystem holding it cannot run out of space while the VM runs. mkfs commands may discard a
+# file's blocks (mke2fs punches holes in a plain file), so a new disk is allocated after its mkfs.
+disk_prealloc() {
+  local spec="$1" src="$2" size
+
+  size=$(busybox stat -c %s "$src") && busybox fallocate -l "$size" "$src" >&2 || \
+    error "Error: disk spec '$spec': fallocate on '$src' failed (the filesystem holding it may lack the space, or not support fallocate)"
+}
+
+# Argument, in positional form: <src>,<dst>[:<dst2>:...],<fs>[,<size>][,layout=subdirs|root][,prealloc=on|off]
 # e.g. /volume/disk1,/var/lib/docker:/var/lib/containerd:/home,ext4,5G
 #
 # or in keyed form, when the first field begins with one of the keys followed by '=':
-#   src=<src>,dst=<dst>[,dst=<dst2>...],fs=<fs>[,size=<size>][,layout=subdirs|root]
+#   src=<src>,dst=<dst>[,dst=<dst2>...],fs=<fs>[,size=<size>][,layout=subdirs|root][,prealloc=on|off]
 # with fields in any order, 'source' accepted for 'src', and 'target' and 'destination' for 'dst';
 # e.g. src=/volume/disk1,dst=/var/lib/docker,dst=/home,fs=ext4,size=5G
 #
@@ -164,20 +179,25 @@ disk_create_file() {
 # A disk with layout 'root' has exactly one destination, holds its contents at its root, and is
 # mounted at that destination.
 #
+# With prealloc=on, every block of the disk's backing file is allocated (see disk_prealloc), whether
+# the file is new or existing, and QEMU attaches the disk ignoring the VM's discard requests and
+# writing zeroes as data, so that the allocation stays. With prealloc=off (the default), the file is
+# sparse, and the VM's discards and zero writes free its blocks.
+#
 # A disk with destination '/' (a whole-root disk) holds the VM's whole root filesystem: see
 # do_root_disk. It must be the disk's only destination, have fs 'ext4' and layout 'root', and be the
 # only such disk.
 do_disk() {
   local spec="$1"
   local id="$2"
-  local src="" dsts dst fs="" size="" layout layout_opt="" field key value UUID LABEL TYPE i j path
+  local src="" dsts dst fs="" size="" layout layout_opt="" prealloc="off" field key value UUID LABEL TYPE i j path
   local whole_root=0 created=0
   local -a fields=() dests=() subdirs=() resolved=() populate=() fss=()
   local -A seen=()
 
   IFS=',' read -r -a fields <<< "$spec"
 
-  if [[ "${fields[0]}" =~ ^(src|source|dst|target|destination|fs|size|layout)= ]]; then
+  if [[ "${fields[0]}" =~ ^(src|source|dst|target|destination|fs|size|layout|prealloc)= ]]; then
     # Keyed form: every field is <key>=<value>, split at the first '='; only dst may be repeated.
     for field in "${fields[@]}"
     do
@@ -191,7 +211,7 @@ do_disk() {
       esac
 
       case "$key" in
-        src|fs|size|layout)
+        src|fs|size|layout|prealloc)
           [ -z "${seen[$key]}" ] || error "Error: disk spec '$spec' invalid: $key specified more than once"
           seen[$key]=1
           ;;
@@ -209,6 +229,7 @@ do_disk() {
         fs) fs="$value" ;;
         size) size="$value" ;;
         layout) layout_opt="$value" ;;
+        prealloc) prealloc="$value" ;;
       esac
     done
   else
@@ -226,6 +247,11 @@ do_disk() {
         layout=*)
           [ -z "$layout_opt" ] || error "Error: disk spec '$spec' invalid: layout specified more than once"
           layout_opt="${field#layout=}"
+          ;;
+        prealloc=*)
+          [ -z "${seen[prealloc]}" ] || error "Error: disk spec '$spec' invalid: prealloc specified more than once"
+          seen[prealloc]=1
+          prealloc="${field#prealloc=}"
           ;;
         *=*)
           error "Error: disk spec '$spec' invalid: unknown option '${field%%=*}'"
@@ -252,6 +278,10 @@ do_disk() {
     error "Error: disk spec '$spec' invalid: layout must be 'subdirs' or 'root'"
   fi
 
+  if [[ "$prealloc" != "on" && "$prealloc" != "off" ]]; then
+    error "Error: disk spec '$spec' invalid: prealloc must be 'on' or 'off'"
+  fi
+
   if ! disk_fs "$fs"; then
     mapfile -t fss < <(disk_fs_list 1)
     error "Error: disk spec '$spec' invalid: fs '$fs' unsupported; fs must be one of: $(IFS=' '; echo "${fss[*]}")"
@@ -270,7 +300,8 @@ do_disk() {
     fi
 
     LABEL=$(blkid -p -s LABEL -o value "$src") || true
-    if [[ -n "$LABEL" ]] && disk_fs_list 5 | grep -qxF -- "$LABEL"; then
+    # grep reads all of disk_fs_list's output (no -q), as the pipefail note at the top requires.
+    if [[ -n "$LABEL" ]] && disk_fs_list 5 | grep -xF -- "$LABEL" >/dev/null; then
       layout="subdirs"
     else
       layout="root"
@@ -325,6 +356,7 @@ do_disk() {
     ROOT_DISK_SRC="$src"
     ROOT_DISK_SIZE="$size"
     ROOT_DISK_ID="$id"
+    ROOT_DISK_PREALLOC="$prealloc"
     return 0
   fi
 
@@ -458,7 +490,9 @@ do_disk() {
     DISK_EXCLUDES+=("$path")
   done
 
-  disk_add_device "$src" "$id"
+  [ "$prealloc" = "off" ] || disk_prealloc "$spec" "$src"
+
+  disk_add_device "$src" "$id" "$prealloc"
 }
 
 # Creates and populates a new whole-root disk, and records it for runcvm-vm-init, which switches the
@@ -496,17 +530,28 @@ do_root_disk() {
   echo "$UUID" >/.runcvm/rootdisk
   disk_vm_mounts >/.runcvm/rootdisk-mounts
 
-  disk_add_device "$src" "$ROOT_DISK_ID"
+  [ "$ROOT_DISK_PREALLOC" = "off" ] || disk_prealloc "$spec" "$src"
+
+  disk_add_device "$src" "$ROOT_DISK_ID" "$ROOT_DISK_PREALLOC"
 }
 
-# Adds disk backing file $1 to the QEMU command line, as disk number $2.
+# Adds disk backing file $1 to the QEMU command line, as disk number $2, with prealloc $3 ('on' or
+# 'off').
 disk_add_device() {
-  local src="$1" id="$2" queues
+  local src="$1" id="$2" prealloc="$3" queues discard
 
   if [ "${RUNCVM_CPUS:-1}" -gt 8 ]; then
     queues=8
   else
     queues="${RUNCVM_CPUS:-1}"
+  fi
+
+  # A preallocated disk ignores the VM's discards and writes zeroes as data, keeping its blocks
+  # allocated; a sparse disk passes both on to the backing file, freeing its blocks.
+  if [ "$prealloc" = "on" ]; then
+    discard="discard=ignore,detect-zeroes=off"
+  else
+    discard="discard=unmap,detect-zeroes=unmap"
   fi
 
   DISKS+=(
@@ -518,9 +563,10 @@ disk_add_device() {
     # media=disk             : marks this as a disk, not a CD-ROM
     # cache=none             : use O_DIRECT, bypass host page cache, rely on guest flushes for durability
     # aio=io_uring           : use Linux io_uring for asynchronous I/O (lower overhead than libaio)
-    # discard=unmap          : propagate guest TRIM/UNMAP to host (space reclamation)
-    # detect-zeroes=unmap    : convert guest zero writes into UNMAPs for efficiency
-    -drive id=drv$id,file=$src,if=none,format=raw,media=disk,cache=none,aio=io_uring,discard=unmap,detect-zeroes=unmap
+    # $discard              : discard=unmap,detect-zeroes=unmap passes guest TRIM/UNMAP, and
+    #                          converts guest zero writes into UNMAPs, to the backing file;
+    #                          discard=ignore,detect-zeroes=off does neither (see above)
+    -drive id=drv$id,file=$src,if=none,format=raw,media=disk,cache=none,aio=io_uring,$discard
 
     # Create a dedicated I/O thread (dataplane) to offload block I/O
     # -object iothread,id=ioth$id : defines an iothread with a unique identifier
@@ -639,6 +685,12 @@ case "${RUNCVM_QEMU_ACCEL:-kvm}" in
     ACCEL="kvm"
     ;;
 esac
+
+# runcvm-runtime sets RUNCVM_KERNEL_FALLBACK to '<ID> <kernel>' when it found no kernel for the
+# image's distribution (its os-release ID), or any it names in ID_LIKE, and chose its default.
+if [ -n "$RUNCVM_KERNEL_FALLBACK" ]; then
+  echo "RunCVM: Warning: RunCVM has no kernel for the image's distribution ('${RUNCVM_KERNEL_FALLBACK% *}'), so is booting its '${RUNCVM_KERNEL_FALLBACK##* }' kernel; launch with --env=RUNCVM_KERNEL=<dist> to choose another" >&2
+fi
 
 # Software emulation (TCG) keeps a cache of translated code which, by default, may grow to
 # 1GiB. Size it to RUNCVM_QEMU_TCG_TB_MEM_SIZE (Mb), which runcvm-runtime adds to the

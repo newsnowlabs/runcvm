@@ -320,38 +320,41 @@ RunCVM aims to support each distribution's latest release and one or two before 
 
 | Distribution | Image releases tested | RunCVM's kernel (`RUNCVM_KERNEL`) | Kernel built from | Kernel series | Module compression | Image releases whose own `modprobe` can load the kernel's modules |
 |---|---|---|---|---|---|---|
-| Debian | 12 (Bookworm) | `debian` | Debian 12 (Bookworm) | 6.1 | none | all |
-| Ubuntu | 24.04 LTS (Noble Numbat) | `ubuntu` | Ubuntu 22.04 LTS (Jammy Jellyfish) | 5.15 | none | all |
-| Oracle Linux | none (the kernel is tested with an Alpine Linux image) | `ol` | Oracle Linux 9 | 5.14 | xz | 7 and later (9 and 10 once `kmod` is installed) |
-| Alpine Linux | the latest (the `alpine` image) | `alpine` | Alpine Linux 3.19 (`linux-virt`) | 6.6 | gzip | all |
-| OpenWrt | none (the kernel is tested with an Alpine Linux image) | `openwrt` | Alpine Linux 3.19 (`linux-virt`) | 6.6 | none | all |
+| Debian | 12 (Bookworm) | `debian` | Debian 13 (Trixie) | 6.12 | xz | 10 (Buster) and later |
+| Ubuntu | 24.04 LTS (Noble Numbat) | `ubuntu` | Ubuntu 26.04 LTS (Resolute Raccoon) | 7.0 | xz (recompressed from Ubuntu's zstd) | 20.04 LTS (Focal Fossa) and later |
+| AlmaLinux, and the RHEL family (see [Other distributions](#other-distributions)) | AlmaLinux 9, and Oracle Linux 9, Rocky Linux 9 and Amazon Linux 2023 | `almalinux` | AlmaLinux 10 | 6.12 | xz | all, once `kmod` is installed |
+| Fedora | the latest (the `fedora` image) | `fedora` | Fedora 45 | 7.2 | xz | all, once `kmod` is installed |
+| openSUSE Leap, openSUSE Tumbleweed | the latest of each (the `opensuse/leap` and `opensuse/tumbleweed` images) | `opensuse` | openSUSE Leap 16.1 | 6.12 | xz (recompressed from openSUSE's zstd) | all, once `kmod` is installed |
+| Alpine Linux | the latest (the `alpine` image) | `alpine` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | gzip | all |
+| OpenWrt | none (the kernel is tested with an Alpine Linux image) | `openwrt` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | none | all |
 
-Each kernel comes from the release in the "Kernel built from" column, which stays fixed for a given RunCVM version: its series (as shown) does not change, and each build of RunCVM takes that release's newest kernel update (e.g. Debian 12's newest 6.1 kernel).
+Each kernel comes from the release in the "Kernel built from" column, which stays fixed for a given RunCVM version: its series (as shown) does not change, and each build of RunCVM takes that release's newest kernel update (e.g. Debian 13's newest 6.12 kernel).
 
-The last column concerns the workload's own module loading, e.g. `modprobe`, or `dockerd` loading `overlay` or `br_netfilter`, in the VM. It reflects which compressed formats each release's `kmod` (or, for Alpine Linux, BusyBox) can read: for example, Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) and Ubuntu 18.04 LTS (Bionic Beaver) read only uncompressed modules, Debian 10 (Buster), Debian 11 (Bullseye) and Ubuntu 20.04 LTS (Focal Fossa) also read xz, and later releases also read zstd. Oracle Linux 9 and 10 images include no `kmod` until it is installed. RunCVM itself loads the modules it needs, while the VM boots, with its own bundled BusyBox `modprobe`, which reads uncompressed, gzip and xz modules, whatever the image.
+The Debian, Ubuntu, AlmaLinux, Fedora and openSUSE kernels' modules are xz-compressed by default, which the releases RunCVM aims to support all read. For an image whose own `modprobe` reads only uncompressed modules, such as Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) or Ubuntu 18.04 LTS (Bionic Beaver), build RunCVM with the build argument `KERNEL_MODULE_COMPRESSION=none`, which leaves those kernels' modules uncompressed, at the cost of a larger RunCVM image (the Debian and Ubuntu kernels' modules together take of the order of 1 GB uncompressed, and roughly a quarter of that compressed), e.g. `DOCKER_BUILDKIT=1 docker build --build-arg KERNEL_MODULE_COMPRESSION=none -t newsnowlabs/runcvm .`.
+
+The last column concerns the workload's own module loading, e.g. `modprobe`, `dockerd` loading `overlay`, or k3s loading `br_netfilter`, in the VM. It reflects which compressed formats each release's `kmod` (or, for Alpine Linux, BusyBox) can read: for example, Debian 9 (Stretch), Ubuntu 16.04 LTS (Xenial Xerus) and Ubuntu 18.04 LTS (Bionic Beaver) read only uncompressed modules, Debian 10 (Buster), Debian 11 (Bullseye) and Ubuntu 20.04 LTS (Focal Fossa) also read xz, and later releases also read zstd. The AlmaLinux, Rocky Linux, Oracle Linux, Fedora and openSUSE images include no `kmod` until it is installed; their own releases' `kmod` reads xz (AlmaLinux 8's, for example, reads xz and gzip, and later releases' also zstd). RunCVM itself loads the modules it needs, while the VM boots, with its own bundled BusyBox `modprobe`, which reads uncompressed, gzip and xz modules, whatever the image.
 
 Other releases of these distributions, including the older releases RunCVM aims to support, may work, but are not yet tested.
 
 ### Other distributions
 
-RunCVM bundles no kernel for other distributions. How it treats some popular ones, as named by their images' `/etc/os-release`:
+RunCVM bundles no kernel for other distributions. It looks at the distributions an image's `/etc/os-release` names, first as `ID`, then in `ID_LIKE`, and boots the kernel of the first that RunCVM has a kernel for, counting the RHEL family (`rhel`, `centos`, `rocky`, `amzn`, `ol`) as AlmaLinux's and the SUSE family (`sles`, `sled`, `sles_sap`, `sle-micro`, `sl-micro`, `suse`, and `opensuse` and `opensuse-*`) as openSUSE's. An image whose `ID` names a distribution of any other kind boots the Debian kernel, with a warning in the Container/VM's output. How RunCVM treats some popular distributions:
 
-| Distribution | `ID` | `ID_LIKE` | Status |
+| Distribution | `ID` | `ID_LIKE` | Kernel |
 |---|---|---|---|
-| Rocky Linux | `rocky` | `rhel centos fedora` | Refused, unless launched with `--env=RUNCVM_KERNEL=<dist>` (e.g. `ol`) |
-| AlmaLinux | `almalinux` | `rhel centos fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
-| CentOS Stream | `centos` | `rhel fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
-| Red Hat Universal Base Image (UBI) | `rhel` | `fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
-| Amazon Linux | `amzn` | `fedora` | Refused, unless launched with `RUNCVM_KERNEL` |
-| Fedora | `fedora` | | Refused, unless launched with `RUNCVM_KERNEL` |
-| openSUSE Leap, openSUSE Tumbleweed | `opensuse-leap`, `opensuse-tumbleweed` | `suse opensuse` | Refused, unless launched with `RUNCVM_KERNEL` |
-| Arch Linux | `arch` | | Refused, unless launched with `RUNCVM_KERNEL` |
-| Kali Linux | `kali` | `debian` | Refused, unless launched with `RUNCVM_KERNEL` (e.g. `debian`) |
-| Wolfi (Chainguard) | `wolfi` | | Refused, unless launched with `RUNCVM_KERNEL` |
-| Distroless (Debian-based, e.g. `gcr.io/distroless/base-debian12`) | `debian` | | Debian's kernel, as for Debian |
-| BusyBox, and images built `FROM scratch` | (no `/etc/os-release`) | | Debian's kernel |
+| Oracle Linux (including the `mysql` image) | `ol` | `fedora` | AlmaLinux's (RHEL family) |
+| Rocky Linux | `rocky` | `rhel centos fedora` | AlmaLinux's (RHEL family) |
+| CentOS Stream | `centos` | `rhel fedora` | AlmaLinux's (RHEL family) |
+| Red Hat Universal Base Image (UBI) | `rhel` | `fedora` | AlmaLinux's (RHEL family) |
+| Amazon Linux | `amzn` | `fedora` | AlmaLinux's (RHEL family) |
+| SUSE Linux Enterprise (SLE BCI) | `sles` | `suse` | openSUSE's (SUSE family) |
+| Kali Linux | `kali` | `debian` | Debian's |
+| Distroless (Debian-based, e.g. `gcr.io/distroless/base-debian12`) | `debian` | | Debian's |
+| BusyBox, and images built `FROM scratch` | (no `/etc/os-release`) | | Debian's |
+| Arch Linux | `arch` | | Debian's, with a warning |
+| Wolfi (Chainguard) | `wolfi` | | Debian's, with a warning |
 
-A Container/VM launched with `RUNCVM_KERNEL` boots the named kernel, whatever the image.
+A Container/VM launched with `RUNCVM_KERNEL` boots the named kernel, whatever the image. A distribution of either family may be named in place of its family's kernel, e.g. `RUNCVM_KERNEL=ol` boots AlmaLinux's.
 
 ## Installation
 
@@ -361,19 +364,60 @@ Run:
 curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
 ```
 
-This will:
-- Install the RunCVM software package to `/opt/runcvm` (installation elsewhere is currently unsupported)
-- For Docker support:
-  - Enable the RunCVM runtime, by patching `/etc/docker/daemon.json` to add `runcvm` to the `runtimes` property
-  - Restart `dockerd`, if it can be detected how for your system (e.g. `systemctl restart docker`)
-  - Verify that RunCVM is recognised via `docker info`
-- For Podman support (experimental)
-  - Display instructions on patching `/etc/containers/containers.conf`
+This installs the latest release of RunCVM, the image `newsnowlabs/runcvm:latest`. To install another release, name its image in `REPO`, e.g. for v1.7.0:
+
+```sh
+curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=newsnowlabs/runcvm:v1.7.0 sh
+```
+
+The [releases](https://github.com/newsnowlabs/runcvm/releases) are tagged `v<version>`, on Docker Hub (`newsnowlabs/runcvm:<tag>`) and on GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`).
+
+To build RunCVM from source and install that instead, see [Building](#building).
+
+The installation script:
+- Installs the RunCVM software package from the image to `/opt/runcvm` (installation elsewhere is currently unsupported)
+- Runs the installer in that package, `/opt/runcvm/scripts/runcvm-install-runtime.sh --no-dockerd`, so the remaining steps are those of the release installed, whichever version of the script was downloaded. In the version of RunCVM this README describes, the package's installer:
+  - For Docker support:
+    - Enables the RunCVM runtime, by setting `runtimes.runcvm.path` in `/etc/docker/daemon.json` to `/opt/runcvm/scripts/runcvm-runtime`, leaving any other runtimes there unchanged (see [Registering the runtime by hand](#registering-the-runtime-by-hand))
+    - Restarts `dockerd`, if it can be detected how for your system (e.g. `systemctl restart docker`)
+    - Verifies that RunCVM is recognised via `docker info`
+  - For Podman support (experimental):
+    - Displays instructions on patching `/etc/containers/containers.conf`
 
 Following installation, launch a basic test RunCVM Container/VM:
 
 ```console
 docker run --runtime=runcvm --rm -it hello-world
+```
+
+### Registering the runtime by hand
+
+The installation script registers RunCVM with Docker by adding a `runcvm` entry to the `runtimes` property of `/etc/docker/daemon.json`, creating the file if there is none. To do the same yourself, for example where `daemon.json` is managed by configuration management, add the entry alongside any runtimes already there. For instance, a `daemon.json` that makes [crun](https://github.com/containers/crun) the default runtime, with RunCVM registered, reads:
+
+```json
+{
+  "default-runtime": "crun",
+  "runtimes": {
+    "crun": {
+      "path": "/opt/crun/bin/crun"
+    },
+    "runcvm": {
+      "path": "/opt/runcvm/scripts/runcvm-runtime"
+    }
+  }
+}
+```
+
+Then restart `dockerd` (e.g. `sudo systemctl restart docker`), and check that Docker lists the runtime, which prints its path:
+
+```console
+docker info --format '{{.Runtimes.runcvm.Path}}'
+```
+
+For Podman (experimental), add the following to the `[engine.runtimes]` section of `/etc/containers/containers.conf`:
+
+```toml
+runcvm = [ "/opt/runcvm/scripts/runcvm-runtime" ]
 ```
 
 ### Install on Google Cloud
@@ -476,7 +520,7 @@ On either platform, once the first-boot script has finished (`cloud-init status 
 To upgrade, follow this procedure:
 
 1. Stop all RunCVM containers.
-2. Run `/opt/runcvm/scripts/runcvm-install-runtime.sh` (or rerun the installation command - which runs the same script)
+2. Rerun the installation command, which installs the latest release, or the release named in `REPO` (see [Installation](#installation)), and runs that release's own installer.
 3. Start any RunCVM containers.
 
 ## Features and limitations
@@ -611,14 +655,16 @@ When creating a container, RunCVM will examine the image being launched to try t
 
 1. If `--env=RUNCVM_KERNEL=<dist>[/<version>]` specified, use the indicated kernel
 2. Otherwise, identify distro from `/etc/os-release`
-   1. If one is found in the appropriate distro-specific location in the image, select an in-image kernel. The locations are:
+   1. If RunCVM bundles a kernel for the image's own distribution (its `ID`), and one is found in the appropriate distro-specific location in the image, select an in-image kernel. The locations are:
       - Debian: `/vmlinuz` and `/initrd.img`
       - Ubuntu: `/boot/vmlinuz` and `/boot/initrd.img`
       - Alpine: `/boot/vmlinuz-virt` `/boot/initramfs-virt`
-   2. Otherwise, select the latest RunCVM kernel for the distro: `debian`, `ubuntu`, `ol` (Oracle Linux), `alpine` or `openwrt`
-   3. If the image has no `/etc/os-release`, or it gives no `ID`, use the Debian kernel from the RunCVM package
+      - AlmaLinux, Fedora: `/boot/vmlinuz` and `/boot/initramfs`
+      - openSUSE images, whose `ID` is e.g. `opensuse-leap`, never `opensuse`, always boot RunCVM's kernel
+   2. Otherwise, select the latest RunCVM kernel for the first distro named by `ID`, then by each word of `ID_LIKE`, for which RunCVM has a kernel (`debian`, `ubuntu`, `almalinux`, `fedora`, `opensuse`, `alpine` or `openwrt`), counting the RHEL family as AlmaLinux's and the SUSE family as openSUSE's (see [Other distributions](#other-distributions))
+   3. If the image has no `/etc/os-release`, or it gives no `ID`, use the Debian kernel from the RunCVM package; if it gives an `ID`, but names no distro RunCVM has a kernel for, use the Debian kernel, with a warning in the Container/VM's output
 
-An image whose `/etc/os-release` `ID` is none of `debian`, `ubuntu`, `ol`, `alpine` and `openwrt` (e.g. Fedora) cannot be launched without `--env=RUNCVM_KERNEL=<dist>`, even if it has a kernel of its own.
+RunCVM reads `/etc/os-release`, or else `/usr/lib/os-release`, resolving any symbolic links within the image's own filesystem, never the host's.
 
 ## Option reference
 
@@ -633,22 +679,33 @@ Specify with which RunCVM kernel (from `/opt/runcvm/kernels`) to boot the VM. Va
 $ find /opt/runcvm/kernels/ -maxdepth 2 | sed 's!^/opt/runcvm/kernels/!!; /^$/d'
 debian
 debian/latest
-debian/5.10.0-16-amd64
+debian/6.12.115+deb13.1-amd64
 alpine
 alpine/latest
-alpine/5.15.59-0-virt
+alpine/6.18.60-0-virt
+openwrt
+openwrt/latest
+openwrt/6.18.60-0-virt
 ubuntu
 ubuntu/latest
-ubuntu/5.15.0-43-generic
-ol
-ol/5.14.0-70.22.1.0.1.el9_0.x86_64
-ol/latest
+ubuntu/7.0.0-14-generic
+almalinux
+almalinux/6.12.0-211.73.1.el10_2.x86_64
+almalinux/latest
+fedora
+fedora/7.2.15-300.fc45.x86_64
+fedora/latest
+opensuse
+opensuse/6.12.0-160100.8-default
+opensuse/latest
 ```
+
+RunCVM bundles the kernels of Debian 13 (trixie), Ubuntu 26.04 (resolute), AlmaLinux 10, Fedora 45, openSUSE Leap 16.1 and Alpine (`linux-virt`, also used for OpenWrt images), each at the version its distribution provides when the RunCVM image is built. The Alpine kernel's release is set by the build argument `ALPINE_KERNEL_VERSION` (by default `3.24`), separately from `ALPINE_VERSION` (by default `3.19`), the release RunCVM's own binaries and libraries are built from, e.g. `DOCKER_BUILDKIT=1 docker build --build-arg ALPINE_KERNEL_VERSION=3.23 -t newsnowlabs/runcvm .`.
 
 Example:
 
 ```console
-docker run --rm --runtime=runcvm --env=RUNCVM_KERNEL=ol hello-world
+docker run --rm --runtime=runcvm --env=RUNCVM_KERNEL=almalinux hello-world
 ```
 
 ### `--env=RUNCVM_KERNEL_APPEND=1`
@@ -665,8 +722,8 @@ Automatically create, format, prepopulate and mount backing files as virtual dis
 
 Each `<diskN>` is a comma-separated list of fields, in either of two forms:
 
-- positional: `<src>,<dst>[:<dst2>:...],<filesystem>[,<size>][,layout=subdirs|root]`
-- keyed: `src=<src>,dst=<dst>[,dst=<dst2>...],fs=<filesystem>[,size=<size>][,layout=subdirs|root]`, with the fields in any order, recognised by its first field beginning with one of these keys and `=`; as in Docker's `--mount`, `source` may be given for `src`, and `target` or `destination` for `dst`
+- positional: `<src>,<dst>[:<dst2>:...],<filesystem>[,<size>][,layout=subdirs|root][,prealloc=on|off]`
+- keyed: `src=<src>,dst=<dst>[,dst=<dst2>...],fs=<filesystem>[,size=<size>][,layout=subdirs|root][,prealloc=on|off]`, with the fields in any order, recognised by its first field beginning with one of these keys and `=`; as in Docker's `--mount`, `source` may be given for `src`, and `target` or `destination` for `dst`
 
 where:
 
@@ -675,6 +732,7 @@ where:
 - `<filesystem>` is the filesystem with which the backing disk should be formatted when first created: by default, `ext4`, `xfs` or `btrfs` (see [Disk filesystems](#disk-filesystems) below).
 - `<size>` is the size of the backing file (in `truncate` format), and must be specified if `<src>` does not exist.
 - `layout=subdirs` or `layout=root` chooses the disk's layout (see [Disk layouts](#disk-layouts) below). It applies when the disk is created, and defaults to `subdirs`.
+- `prealloc=on` allocates every block of the backing file, so that it takes its full size on the host from the start, and keeps it allocated (see [Preallocated disks](#preallocated-disks) below). `prealloc=off`, the default, leaves the backing file sparse.
 
 In the keyed form, each field is split at its first `=`, so values may contain `=`; only `dst` may be given more than once. In either form, no value may contain `,` or `;`, and an unknown or repeated option is rejected.
 
@@ -694,6 +752,14 @@ When RunCVM creates a Container/VM, fstab entries will be drafted, identifying e
 > To keep a disk's data without `--init`, the workload must flush the disk before its entrypoint exits, with `sync -f <dst>` for one `<dst>` of each disk, which flushes only that disk's file system and needs no special privileges. A workload running as root may instead unmount the disk once nothing still uses it, which also leaves the disk's file system clean, needing no journal recovery. That means unmounting the disk's own mount: `umount <dst>` does so only where the disk is mounted directly at `<dst>`. Where `<dst>` is a bind mount from the disk, `umount <dst>` removes only the bind mount and leaves the disk mounted, unflushed. A plain `sync` also works, but flushes every file system in the VM, including its root file system, whether that is shared with the container or is a whole-root disk.
 >
 > A disk whose contents are thrown away after each run, such as a `/var/lib/docker` for a disposable test, needs no flushing.
+
+#### Preallocated disks
+
+A backing file is sparse by default: it takes space on the host only as the VM writes to the disk, and QEMU passes the VM's discards (e.g. from `fstrim`) and its writes of zeroes on to the backing file, freeing that space again. So the host's filesystem can fill up while the VM runs, after which the VM's writes to the disk fail with I/O errors.
+
+With `prealloc=on`, every time the Container/VM starts, RunCVM allocates every block of the backing file with `fallocate`, keeping its contents: a new disk once it is formatted and, for `ext4`, prepopulated (as `mke2fs` frees the blocks of a backing file it formats), and an existing disk, sparse or not, before the VM boots. QEMU then attaches the disk ignoring the VM's discards, and writing its zeroes as data, so the backing file stays fully allocated. Allocating fails, and the Container/VM does not start, if the host's filesystem lacks the space or does not support `fallocate`. A preallocated disk's blocks are allocated on the host, but they are not necessarily contiguous.
+
+`prealloc=on` applies to a disk of any filesystem, including a whole-root disk. Removing it again leaves the backing file allocated until the VM discards its free blocks.
 
 #### Disk layouts
 
@@ -1019,7 +1085,7 @@ The `runcvm-vm-init` process:
 - Launches the container's pre-existing entrypoint, in one of two ways.
    1. If `RUNCVM_INIT` is `1` (i.e. the container was originally intended to be launched with Docker's own init process) then it configures and execs busybox `init`, which becomes the VM's PID1, to supervise `dropbear`, run `runcvm-vm-start` and `poweroff` the VM if signalled to do so.
    2. Else, it backgrounds `dropbear`, then execs (via `runcvm-init`, purely to create a controlling tty) `runcvm-vm-start`, which runs as the VM's PID1.
-- In both cases, `dropbear` accepts only RunCVM's own key (used by `docker exec`), with password logins and port forwarding disabled. It ignores the image's `/etc/passwd`, `/etc/shadow`, `/etc/shells` and `authorized_keys`, and runs `runcvm-vm-exec` with RunCVM's own `bash`, so `docker exec` works whatever shell, if any, the image gives root.
+- In both cases, `dropbear` accepts only RunCVM's own key (used by `docker exec`), with password logins and port forwarding disabled. It ignores the image's `/etc/passwd`, `/etc/shadow`, `/etc/shells` and `authorized_keys`, and runs `runcvm-vm-exec` with RunCVM's own `bash`, so `docker exec` works whatever shell, if any, the image gives root. `dropbear` listens on port 22222 on every address of the VM, but RunCVM's nft rules in the container's network namespace drop TCP to that port in every frame bridged to the VM, on any of its networks, so other containers and hosts cannot reach it; `docker exec` connects from the container's own network namespace, which those rules do not filter. The VM's own firewall is left to the workload.
 
 The `runcvm-vm-start` script:
 - Execs the container's originally-intended entrypoint with the workload's environment variables alone, and with its `<uid>`, `<gid>`, `<additionalGids>` and `<cwd>`.
@@ -1121,13 +1187,24 @@ We are typically available to respond to queries Monday-Friday, 9am-5pm UK time,
 
 ## Contributing
 
+RunCVM is maintained by [Struan Bartlett](https://github.com/struanb) at [NewsNow Labs](https://github.com/newsnowlabs).
+
 If you would like to contribute a feature suggestion or code, please raise an issue or submit a pull request.
 
 ## Uninstallation
 
-Shut down any RunCVM containers.
+1. Stop and remove all RunCVM containers.
+2. Remove the `runcvm` entry from the `runtimes` property of `/etc/docker/daemon.json` (see [Registering the runtime by hand](#registering-the-runtime-by-hand)), then restart `dockerd` (e.g. `sudo systemctl restart docker`). With `jq` installed, this removes the entry:
+   ```console
+   sudo sh -c 'jq "del(.runtimes.runcvm)" /etc/docker/daemon.json >/etc/docker/daemon.json.new && mv /etc/docker/daemon.json.new /etc/docker/daemon.json'
+   ```
+   For Podman, remove the `runcvm` line from `/etc/containers/containers.conf`.
+3. Remove the RunCVM software package:
+   ```console
+   sudo rm -rf /opt/runcvm
+   ```
 
-Then run `sudo rm -f /opt/runcvm`.
+Installation scripts from RunCVM v1.7.0 and earlier may have changed `rp_filter` settings in `/etc/sysctl.conf` or `/etc/sysctl.d/`, marking each change with `# DISABLED BY RUNCVM` (the original line, commented out) and `# ADDED BY RUNCVM` (its replacement); to undo them, uncomment the original lines and delete the replacements.
 
 ## RunCVM and Dockside
 
@@ -1144,7 +1221,7 @@ docker run --rm -it --runtime=runcvm  --memory=2g --name=docksidevm -p 443:443 -
 
 This project (known as "RunCVM"), comprising the files in this Git repository
 (but excluding files containing a conflicting copyright notice and licence),
-is copyright 2023 NewsNow Publishing Limited, Struan Bartlett, and contributors.
+is copyright 2022-2026 NewsNow Publishing Limited, Struan Bartlett, and contributors.
 
 RunCVM is an open-source project licensed under the Apache License, Version 2.0
 (the "License"); you may not use RunCVM or its constituent files except in
