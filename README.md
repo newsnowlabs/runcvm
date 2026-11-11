@@ -484,13 +484,13 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [+] `--detach` (or `-d`) is supported
       - [+] `--interactive` (or `-i`) is supported
       - [-] Without `--tty` (or `-t`), the end of standard input is not passed on to the workload, so a workload reading piped input until its end (e.g. `printf abc | docker run -i --runtime=runcvm alpine cat`) does not finish; a stdio bridge to address this is in development (see [Project ambitions](#project-ambitions))
+      - [-] With `--interactive` (or `-i`) but without `--tty` (or `-t`), input that reaches the VM while it boots, before the workload starts, is echoed into the output
       - [+] `--tty` (or `-t`) is supported (but to enter CTRL-T one must press CTRL-T twice)
       - [+] `--attach` (or `-a`) is supported
       - [+] Stdout and Stderr output should be broadly similar to running the same workload in a standard `runc` container
       - [-] Stdout and Stderr are not independently multiplexed so `docker run --runtime=runcvm debian bash -c 'echo stdout; echo stderr >&2' >/tmp/stdout 2>/tmp/stderr` does not produce the expected result
       - [-] Stdout and Stderr sent very soon after VM launch might be corrupted due to serial console issues
       - [-] Stdout and Stderr sent immediately before VM shutdown might not always be fully flushed
-      - [-] Without `--tty` (or `-t`), each newline in Stdout and Stderr reaches `docker run` as a carriage return and newline (`\r\n`), so, for example, `docker run --runtime=runcvm alpine cat <file> >copy` does not produce an exact copy
    - Resource allocation and limits
       - [+] `--cpus` is supported to specify number of VM CPUs
       - [+] `--memory` (or `-m`) is supported to specify VM memory (and limit container memory to this value plus a 256Mb contingency)
