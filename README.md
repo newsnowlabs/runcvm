@@ -325,17 +325,17 @@ Check that `/dev/kvm` exists inside the VM (e.g. `limactl shell <vm> ls -l /dev/
 
 ## Supported distributions
 
-RunCVM aims to support each distribution's latest release and one or two before it (for Ubuntu, its LTS releases), while they remain supported upstream, as the image a Container/VM runs. It bundles a kernel for each of these distributions, built from the release shown, which a Container/VM boots unless its image has a kernel of its own (see [Kernel auto-detection](#kernel-auto-detection)). The table lists the image releases that the integration tests (`tests/25-images-kernels`) boot:
+RunCVM aims to support each distribution's latest release and one or two before it (for Ubuntu, its LTS releases), while they remain supported upstream, as the image a Container/VM runs. It bundles a kernel for each of these distributions, built from the release shown, which a Container/VM boots unless its image has a kernel of its own (see [Kernel auto-detection](#kernel-auto-detection)). The table lists the image releases that the integration tests (`tests/25-images-kernels`) boot, and the image tag each is booted from. A tag is re-pointed upstream as its release is updated, so a host tests the copy of each tag it first pulled, unless the tests are run with `tests/run --pull` (see [Testing](#testing)):
 
 | Distribution | Image releases tested | RunCVM's kernel (`RUNCVM_KERNEL`) | Kernel built from | Kernel series | Module compression | Image releases whose own `modprobe` can load the kernel's modules |
 |---|---|---|---|---|---|---|
-| Debian | 12 (Bookworm) | `debian` | Debian 13 (Trixie) | 6.12 | xz | 10 (Buster) and later |
-| Ubuntu | 24.04 LTS (Noble Numbat) | `ubuntu` | Ubuntu 26.04 LTS (Resolute Raccoon) | 7.0 | xz (recompressed from Ubuntu's zstd) | 20.04 LTS (Focal Fossa) and later |
-| AlmaLinux, and the RHEL family (see [Other distributions](#other-distributions)) | AlmaLinux 9, and Oracle Linux 9, Rocky Linux 9 and Amazon Linux 2023 | `almalinux` | AlmaLinux 10 | 6.12 | xz | all, once `kmod` is installed |
-| Fedora | the latest (the `fedora` image) | `fedora` | Fedora 45 | 7.2 | xz | all, once `kmod` is installed |
-| openSUSE Leap, openSUSE Tumbleweed | the latest of each (the `opensuse/leap` and `opensuse/tumbleweed` images) | `opensuse` | openSUSE Leap 16.1 | 6.12 | xz (recompressed from openSUSE's zstd) | all, once `kmod` is installed |
-| Alpine Linux | the latest (the `alpine` image) | `alpine` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | gzip | all |
-| OpenWrt | none (the kernel is tested with an Alpine Linux image) | `openwrt` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | none | all |
+| Debian | 12 (Bookworm) and 13 (Trixie): `debian:bookworm-slim`, `debian:trixie-slim` | `debian` | Debian 13 (Trixie) | 6.12 | xz | 10 (Buster) and later |
+| Ubuntu | 22.04 LTS (Jammy Jellyfish), 24.04 LTS (Noble Numbat) and 26.04 LTS (Resolute Raccoon): `ubuntu:22.04`, `ubuntu:24.04`, `ubuntu:26.04` | `ubuntu` | Ubuntu 26.04 LTS (Resolute Raccoon) | 7.0 | xz (recompressed from Ubuntu's zstd) | 20.04 LTS (Focal Fossa) and later |
+| AlmaLinux, and the RHEL family (see [Other distributions](#other-distributions)) | AlmaLinux 8, 9 and 10 (`almalinux:<n>`), Rocky Linux 8, 9 and 10 (`rockylinux/rockylinux:<n>`), Oracle Linux 8, 9 and 10 (`oraclelinux:<n>`), and Amazon Linux 2023 (`amazonlinux:2023`) | `almalinux` | AlmaLinux 10 | 6.12 | xz | all, once `kmod` is installed |
+| Fedora | 44 and 45: `fedora:44`, `fedora:45` | `fedora` | Fedora 45 | 7.3 | xz | all, once `kmod` is installed |
+| openSUSE Leap, openSUSE Tumbleweed | Leap 16.0 and 16.1: `opensuse/leap:16.0`, `opensuse/leap:16.1`; Tumbleweed, a rolling release: `opensuse/tumbleweed` | `opensuse` | openSUSE Leap 16.1 | 6.12 | xz (recompressed from openSUSE's zstd) | all, once `kmod` is installed |
+| Alpine Linux | 3.22, 3.23 and 3.24: `alpine:3.22`, `alpine:3.23`, `alpine:3.24` | `alpine` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | gzip | all |
+| OpenWrt | 25.12.6, imported from OpenWrt's x86 rootfs, as OpenWrt publishes no container image | `openwrt` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | none | all |
 
 Each kernel comes from the release in the "Kernel built from" column, which stays fixed for a given RunCVM version: its series (as shown) does not change, and each build of RunCVM takes that release's newest kernel update (e.g. Debian 13's newest 6.12 kernel).
 
@@ -440,7 +440,7 @@ gcloud compute images create debian-12-vmx --source-image-project=debian-cloud -
 Now launch a VM, install Docker and RunCVM:
 
 ```console
-cat >/tmp/startup-script.sh <<EOF
+cat >/tmp/startup-script.sh <<'EOF'
 #!/bin/bash
 
 apt update && apt -y install apt-utils kmod wget iproute2 systemd \
@@ -453,6 +453,76 @@ gcloud compute instances create runcvm-vmx-test --zone=us-central1-a --machine-t
 ```
 
 RunCVM works with Docker's default configuration. It also works with `"userland-proxy": false` in `/etc/docker/daemon.json`, with which Docker (as of Docker 29) loads the `br_netfilter` module on the host, and does not start if it cannot; RunCVM itself does not need `br_netfilter`.
+
+### Install on AWS
+
+The commands below can all be run in [AWS CloudShell](https://docs.aws.amazon.com/cloudshell/latest/userguide/welcome.html), the browser-based shell in the AWS console, which has the AWS CLI installed and signed in to your account, and uses the console's current region. Run there, the security group allows SSH from CloudShell, and the key pair file is kept in CloudShell's home directory, so the `ssh` command below works from CloudShell too.
+
+RunCVM needs an EC2 instance with nested virtualisation, so that it has `/dev/kvm`: a bare-metal instance (`*.metal`), or a virtual instance of a type that supports nested virtualisation, launched with it enabled. The types that support it are Intel-based families such as `m7i`, `c7i`, `r7i`, `m8i`, `c8i` and `r8i` (AWS's [nested virtualisation guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/amazon-ec2-nested-virtualization.html) has the current list). To list them for a region:
+
+```console
+aws ec2 describe-instance-types --filters "Name=processor-info.supported-features,Values=nested-virtualization" --query "InstanceTypes[].InstanceType" --output text | tr '\t' '\n' | sort
+```
+
+Create a key pair to log in with, and a security group that allows SSH from your current IP address (or use ones you already have):
+
+```console
+aws ec2 create-key-pair --key-name runcvm-test --query KeyMaterial --output text >runcvm-test.pem && chmod 600 runcvm-test.pem
+SG=$(aws ec2 create-security-group --group-name runcvm-test --description runcvm-test --query GroupId --output text)
+aws ec2 authorize-security-group-ingress --group-id $SG --protocol tcp --port 22 --cidr $(curl -s https://checkip.amazonaws.com)/32
+```
+
+Launch an Ubuntu 24.04 LTS instance with nested virtualisation enabled, and a user-data script that installs Docker and RunCVM:
+
+```console
+cat >/tmp/user-data.sh <<'EOF'
+#!/bin/bash
+
+curl -fsSL https://get.docker.com | sh && \
+    curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sh
+EOF
+
+ID=$(aws ec2 run-instances --image-id resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id --instance-type m8i.large --cpu-options "NestedVirtualization=enabled" --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=50,VolumeType=gp3}' --user-data file:///tmp/user-data.sh --key-name runcvm-test --security-group-ids $SG --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=runcvm-test}]' --query 'Instances[0].InstanceId' --output text)
+```
+
+This launches the instance into the region's default VPC, whose subnets give instances a public IP address. In an account without a default VPC, or to use another subnet, add `--subnet-id <subnet>` and `--associate-public-ip-address` (and create the security group in that subnet's VPC with `--vpc-id`).
+
+To enable nested virtualisation on an existing instance of a supported type, stop it, then choose Actions > Instance settings > Change CPU options in the EC2 console.
+
+Log in as `ubuntu`, at the instance's public IP address:
+
+```console
+aws ec2 wait instance-running --instance-ids $ID
+ssh -i runcvm-test.pem ubuntu@$(aws ec2 describe-instances --instance-ids $ID --query 'Reservations[].Instances[].PublicIpAddress' --output text)
+```
+
+When you have finished with it, terminate the instance, which also deletes its root disk:
+
+```console
+aws ec2 terminate-instances --instance-ids $ID
+```
+
+### Install on Azure (Untested)
+
+RunCVM needs an Azure VM with nested virtualisation, so that it has `/dev/kvm`. Azure documents nested virtualisation as supported on, among others, its Dv5 and Dsv5 series (Intel): the "Feature support" table on each size series' page in the [Azure VM sizes documentation](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/overview) says whether that series supports it.
+
+Create a resource group, then an Ubuntu 24.04 LTS VM with a cloud-init script that installs Docker and RunCVM:
+
+```console
+cat >/tmp/cloud-init.sh <<'EOF'
+#!/bin/bash
+
+curl -fsSL https://get.docker.com | sh && \
+    curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sh
+EOF
+
+az group create --name runcvm-test --location <your-region>
+az vm create --resource-group runcvm-test --name runcvm-test --image Canonical:ubuntu-24_04-lts:server:latest --size Standard_D2s_v5 --os-disk-size-gb 50 --admin-username azureuser --generate-ssh-keys --custom-data /tmp/cloud-init.sh
+```
+
+Log in as `azureuser`, at the public IP address that `az vm create`'s output shows (`publicIpAddress`). When you have finished with the VM, `az group delete --name runcvm-test` deletes it, with everything else in the resource group.
+
+On either platform, once the first-boot script has finished (`cloud-init status --wait` waits for it), `ls -l /dev/kvm` shows the KVM device, and `sudo docker run --runtime=runcvm --rm hello-world` runs a Container/VM.
 
 ## Upgrading
 
@@ -502,7 +572,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [-] Stdout and Stderr sent very soon after VM launch might be corrupted due to serial console issues
       - [-] Stdout and Stderr sent immediately before VM shutdown might not always be fully flushed
    - Resource allocation and limits
-      - [+] `--cpus` is supported to specify number of VM CPUs
+      - [+] `--cpus` is supported: it sets the container's CPU quota, as usual, and also the number of VM CPUs, rounded up to a whole number (e.g. `--cpus=0.5` gives one CPU, limited to half a CPU's time)
       - [+] `--memory` (or `-m`) is supported to specify VM memory (and limit container memory to this value plus a 256Mb contingency)
       - [-] Other container resource limit options such as (`--cpu-*`), block IO (`--blkio-*`), kernel memory (`--kernel-memory`) are unsupported or untested
    - Exit code
@@ -1107,6 +1177,8 @@ Helpers for tests are in `tests/framework.sh` (bash) and `tests/framework.py` (P
 `--accel kvm|auto|tcg` (or `RUNCVM_TEST_ACCEL`) selects QEMU acceleration for the tests' RunCVM Container/VMs, which tests pass on as `RUNCVM_QEMU_ACCEL` using the `vm_opts` helper (where the RunCVM version under test supports it). With `--accel tcg`, real RunCVM Container/VMs run under software emulation where KVM is unavailable: slow, but it exercises RunCVM itself; tests that require `kvm` are skipped.
 
 Checks that launch a Container/VM explicitly under software emulation, whatever `--accel` says (such as `13-qemu-accel`'s `tcg` cases), are slow on a host with KVM, so there they run only with `--tcg-cases` (or `RUNCVM_TEST_TCG_CASES=1`) and are otherwise recorded as skipped. With `--accel tcg`, or without `/dev/kvm`, they always run. Tests guard them with the `tcg_cases` helper (`TCG_CASES` in Python).
+
+Tests boot images by tag, and Docker pulls an image only when the host has no copy of it, so a host goes on testing the copy of each tag it first pulled, even after the tag is re-pointed upstream (e.g. to a rebuilt `alpine:3.24` or a point release of `almalinux:9`). With `--pull` (or `RUNCVM_TEST_PULL=1`), tests pull the images they boot before using them, with the `pull_images` helper (Python), recording a check for each pull, so that each tag is tested as published now. This needs network access, and a run's result can then change because an image did. `tests/25-images-kernels` also imports its OpenWrt image from OpenWrt's rootfs once per host, or again with `--pull`.
 
 #### Developing the tests without KVM (stand-in mode)
 

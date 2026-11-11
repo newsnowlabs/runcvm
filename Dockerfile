@@ -312,11 +312,16 @@ FROM --platform=$TARGETPLATFORM debian:trixie as debian-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG KERNEL_MODULE_COMPRESSION
+# The initrd holds only the modules listed (MODULES=list), those the VM needs as it boots: its
+# virtual devices' drivers (runcvm-vm-init needs the network device from the start) and virtiofs,
+# for its root, rather than most of the kernel's modules (initramfs-tools' default). A VM unpacks
+# its initrd into memory as it boots, and RunCVM loads any other module the VM needs from the
+# kernel's bundled modules once the root is mounted.
 RUN apt update && \
     DEB_ARCH=$(dpkg --print-architecture) && \
     apt install -y linux-image-${DEB_ARCH}:${DEB_ARCH} xz-utils && \
-    echo 'virtiofs' >>/etc/initramfs-tools/modules && \
-    echo 'virtio_console' >>/etc/initramfs-tools/modules && \
+    printf '%s\n' virtio_pci virtio_blk virtio_console virtio_net virtio_rng virtio_scsi virtiofs >>/etc/initramfs-tools/modules && \
+    echo "MODULES=list" >/etc/initramfs-tools/conf.d/runcvm-modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
 # Debian compresses its kernel modules with xz.
@@ -480,6 +485,11 @@ RUN apk update && apk add --no-cache rsync
 ADD runcvm-scripts /opt/runcvm/scripts/
 ADD runcvm-etc /opt/runcvm/etc/
 COPY LICENSE NOTICE /opt/runcvm/
+
+# Files copied from the build context keep the checkout's permissions, which follow the umask of
+# whoever checked it out (e.g. group-writable under Ubuntu's default umask for users, 002), so give
+# them the package's own (see the check below).
+RUN chmod -R a+rX,go-w /opt/runcvm/scripts /opt/runcvm/etc /opt/runcvm/LICENSE /opt/runcvm/NOTICE
 
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]

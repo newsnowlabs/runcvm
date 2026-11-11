@@ -187,23 +187,19 @@ the branch.
 
 ## Merging to `main`
 
-`main` takes only clean commits. How a pull request lands depends on its branch:
-
-- **Rebase merge** when the branch is already clean: every commit is a self-contained,
-  logically coherent change that builds; every message meets the rules above; there are no
-  merge, fixup or work-in-progress commits; and every commit has the right author.
-- **Squash merge** otherwise, with a commit message written for `main` (not GitHub's default
-  concatenation of the branch's commit subjects). Before merging, preserve the branch's
-  history with a tag, `git tag raw/<branch> origin/<branch> && git push origin raw/<branch>`,
-  and end the squash message with a trailer citing it:
-  ```
-  Raw-History: raw/<branch> (<original-tip-short-hash>)
-  ```
-  A single-commit branch needs no tag or trailer.
+`main` takes only clean commits. Every pull request lands by squash merge, with a commit
+message written for `main` (not GitHub's default concatenation of the branch's commit
+subjects), its subject ending in the pull request's number (e.g. `(#60)`). Before merging a
+branch with more than one commit, preserve its history with a tag,
+`git tag raw/<branch> origin/<branch> && git push origin raw/<branch>`, and end the squash
+message with a trailer citing it:
+```
+Raw-History: raw/<branch> (<original-tip-short-hash>)
+```
 
 Once the changes in a pull request whose branch has more than one commit are complete (its
 tests may still be running), its description ends with a "Squash commit message" section, for
-use if it is squash-merged; a clean branch may still be rebase-merged instead. The section
+use when it is squash-merged. The section
 holds the subject and body in a fenced block, which keeps the body's 72-column wrapping. They
 follow the rules in "Commit messages", with the subject ending in the pull request's number
 (e.g. `(#60)`) as GitHub's own squash subjects do, and the body ending with the

@@ -69,6 +69,7 @@ class FakeTests:
         e.pop("RUNCVM_TEST_MOCK", None)
         e.pop("RUNCVM_TEST_ACCEL", None)
         e.pop("RUNCVM_TEST_TCG_CASES", None)
+        e.pop("RUNCVM_TEST_PULL", None)
         if env:
             e.update(env)
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -351,6 +352,29 @@ class RunnerTests(unittest.TestCase):
                 r = ft.run(*opts, env=dict(env, EXPECT=expect))
                 self.assertEqual(r.rc, 0, r.out)
                 self.assertEqual(r.json()["tcg_cases"], expect == "1")
+        finally:
+            ft.cleanup()
+
+    def test_pull(self):
+        ft = FakeTests()
+        try:
+            ft.add("t-pull-bash", """\
+                #!/bin/bash -e
+                . ../framework.sh
+                check "RUNCVM_TEST_PULL" "$EXPECT" "$RUNCVM_TEST_PULL"
+                finish
+                """)
+            ft.add("u-pull-python", PY_PREAMBLE + textwrap.dedent("""\
+                t.check("PULL", os.environ["EXPECT"] == "1", t.PULL)
+                t.check("pull_images without --pull", True, t.pull_images([] if t.PULL else ["no-such/image:x"]))
+                t.finish()
+                """))
+            for opts, env, expect in [([], {}, "0"),
+                                      (["--pull"], {}, "1"),
+                                      ([], {"RUNCVM_TEST_PULL": "1"}, "1")]:
+                r = ft.run(*opts, env=dict(env, EXPECT=expect))
+                self.assertEqual(r.rc, 0, r.out)
+                self.assertEqual(r.json()["pull"], expect == "1")
         finally:
             ft.cleanup()
 
