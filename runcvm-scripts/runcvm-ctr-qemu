@@ -653,8 +653,9 @@ fstab_add_mount() {
 }
 
 # Records each tmpfs mount, which runcvm-runtime passes in RUNCVM_TMPFS as fstab entries, one per
-# line: its entry, for write_fstab, and its destination in TMPFS_DESTS, as a path in the image's
-# filesystem with symbolic links resolved (or as given, where that fails), for do_disk's check.
+# line: its entry in TMPFS_ENTRIES, for write_fstab, after the disks', and its destination in
+# TMPFS_DESTS, as a path in the image's filesystem with symbolic links resolved (or as given, where
+# that fails), for do_disk's check.
 tmpfs_mounts() {
   local line dst path
 
@@ -666,18 +667,23 @@ tmpfs_mounts() {
     [ -n "$dst" ] || continue
     path=$(disk_normalise_path "$dst") && path=$(disk_resolve_path "$path") || path="$dst"
     TMPFS_DESTS+=("$path")
-    fstab_add_mount "$line" "$dst"
+    TMPFS_ENTRIES+=("$line" "$dst")
   done <<< "$RUNCVM_TMPFS"
 }
 
 # Writes /.runcvm/fstab, for runcvm-vm-init to mount in order: first each disk with layout
 # 'subdirs' at /.runcvm/disks/<n>, the source of its destinations' bind mounts; then every mount at
-# a destination (the disks', and the tmpfs mounts), in order of depth, and otherwise in the order
-# added. So a mount is made only once every mount at a path above it has been, as Docker mounts a
+# a destination (the disks', then the tmpfs mounts), in order of depth, and otherwise in that
+# order. So a mount is made only once every mount at a path above it has been, as Docker mounts a
 # deeper mount over a shallower one, whatever the order of the disks in RUNCVM_DISKS. Nothing is
 # written where there are no mounts.
 write_fstab() {
   local depth i max=0
+
+  for ((i = 0; i < ${#TMPFS_ENTRIES[@]}; i += 2))
+  do
+    fstab_add_mount "${TMPFS_ENTRIES[$i]}" "${TMPFS_ENTRIES[$i+1]}"
+  done
 
   [ "${#FSTAB_DISKS[@]}" -gt 0 ] || [ "${#FSTAB_MOUNTS[@]}" -gt 0 ] || return 0
 
@@ -773,6 +779,7 @@ FSTAB_DISKS=()
 FSTAB_MOUNTS=()
 FSTAB_DEPTHS=()
 TMPFS_DESTS=()
+TMPFS_ENTRIES=()
 tmpfs_mounts
 if [ -n "$RUNCVM_DISKS" ]; then
   do_disks "$RUNCVM_DISKS"
