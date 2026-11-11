@@ -189,14 +189,13 @@ the branch.
 
 `main` takes only clean commits. Every pull request lands by squash merge, with a commit
 message written for `main` (not GitHub's default concatenation of the branch's commit
-subjects), its subject ending in the pull request's number (e.g. `(#60)`). Before merging,
-preserve the branch's history with a tag,
+subjects), its subject ending in the pull request's number (e.g. `(#60)`). Before merging a
+branch with more than one commit, preserve its history with a tag,
 `git tag raw/<branch> origin/<branch> && git push origin raw/<branch>`, and end the squash
 message with a trailer citing it:
 ```
 Raw-History: raw/<branch> (<original-tip-short-hash>)
 ```
-A single-commit branch needs no tag or trailer.
 
 Once the changes in a pull request whose branch has more than one commit are complete (its
 tests may still be running), its description ends with a "Squash commit message" section, for
