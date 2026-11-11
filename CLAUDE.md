@@ -187,42 +187,36 @@ the branch.
 
 ## Merging to `main`
 
-`main` takes only clean commits. How a pull request lands depends on its branch:
+Every pull request lands by squash merge, as one commit whose subject ends in the pull
+request's number (e.g. `(#60)`), as GitHub's own squash subjects do, so that `git log
+--oneline` links each change to its review. The commit message is written for `main` (not
+GitHub's default concatenation of the branch's commit subjects):
 
-- **Rebase merge** when the branch is already clean: every commit is a self-contained,
-  logically coherent change that builds; every message meets the rules above, its subject
-  ending in the pull request's number (see below); there are no merge, fixup or
-  work-in-progress commits; and every commit has the right author.
-- **Squash merge** otherwise, with a commit message written for `main` (not GitHub's default
-  concatenation of the branch's commit subjects). Before merging, preserve the branch's
-  history with a tag, `git tag raw/<branch> origin/<branch> && git push origin raw/<branch>`,
-  and end the squash message with a trailer citing it:
+- **A single-commit branch** lands with that commit's own message, the number added to its
+  subject: `gh pr merge <n> --squash --subject "<subject> (#<n>)" --body "<body>"`, taking
+  the subject and body from `git log -1 --format=%s` and `%b` of the branch's commit. It needs
+  no tag or trailer.
+- **A multi-commit branch** lands with the message in its description's "Squash commit
+  message" section (below). Before merging, preserve the branch's history with a tag,
+  `git tag raw/<branch> origin/<branch> && git push origin raw/<branch>`, which the message's
+  trailer cites:
   ```
   Raw-History: raw/<branch> (<original-tip-short-hash>)
   ```
-  A single-commit branch needs no tag or trailer.
 
-Every commit that lands on `main` has a subject ending in its pull request's number (e.g.
-`(#60)`), so that `git log --oneline` links each change to its review. GitHub adds the number
-to a squash merge's subject, but a rebase merge keeps each commit's message as it is. So:
+A branch that lands on `main` without a pull request, where that is warranted, may be
+rebased onto `main` and pushed only if it is already clean: every commit is a self-contained,
+logically coherent change that builds; every message meets the rules above; there are no
+merge, fixup or work-in-progress commits; and every commit has the right author.
 
-- **A clean single-commit branch** lands by squash merge in place of a rebase merge, with the
-  commit's own message and the number added to its subject, which lands the same change:
-  `gh pr merge <n> --squash --subject "<subject> (#<n>)" --body "<body>"`, taking the subject
-  and body from `git log -1 --format=%s` and `%b` of the branch's commit.
-- **A clean multi-commit branch** is rebase-merged only once each commit's subject has been
-  reworded on the branch to end with the number. That rewrites the branch's pushed commits, so
-  it needs the maintainer's sign-off; otherwise the branch is squash-merged.
-
-Once the changes in a pull request whose branch has more than one commit are complete (its
-tests may still be running), its description ends with a "Squash commit message" section, for
-use if it is squash-merged; a clean branch may still be rebase-merged instead. The section
-holds the subject and body in a fenced block, which keeps the body's 72-column wrapping. They
-follow the rules in "Commit messages", with the subject ending in the pull request's number
-(e.g. `(#60)`) as GitHub's own squash subjects do, and the body ending with the
-`Raw-History:` trailer for the branch's tip and any `Co-Authored-By:` trailers. The message
-describes the pull request's final diff against its base, not the branch's commits one by
-one, and is updated whenever the branch changes.
+Once the changes in a pull request whose branch has more than one commit are complete (its tests
+may still be running), its description ends with a "Squash commit message" section, for use when
+it is squash-merged. The section holds the subject and body in a fenced block, which keeps the
+body's 72-column wrapping. They follow the rules in "Commit messages", with the subject ending
+in the pull request's number (e.g. `(#60)`), and the body ending with the `Raw-History:` trailer
+for the branch's tip and any `Co-Authored-By:` trailers. The message describes the pull
+request's final diff against its base, not the branch's commits one by one, and is updated
+whenever the branch changes.
 
 ### Stacked pull requests
 
