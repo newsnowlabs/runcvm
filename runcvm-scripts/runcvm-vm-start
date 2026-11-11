@@ -23,6 +23,11 @@ mapfile -d '' -t ARGS </.runcvm/entrypoint
 # Load the workload's environment, saved NUL-separated by runcvm-ctr-entrypoint
 mapfile -d '' -t env </.runcvm/env
 
+# Without a terminal ('docker run' without -t), the workload's input and output still pass through
+# the VM's console, this script's stdin, whose line discipline would echo input into the output and
+# turn each LF into CR LF. Raw mode, without echo, passes bytes through unchanged, as a pipe does.
+[ "$RUNCVM_TTY" = "1" ] || $RUNCVM_GUEST/bin/busybox stty raw -echo 2>/dev/null
+
 # Run the entrypoint with the workload's environment alone
 IFS=':' read -r uid gid additionalGids <<< "$RUNCVM_UIDGID"
 exec -c $RUNCVM_GUEST/bin/busybox env -i "${env[@]}" $RUNCVM_GUEST/bin/s6-applyuidgid -u $uid -g $gid -G "$additionalGids" "${ARGS[@]}"
