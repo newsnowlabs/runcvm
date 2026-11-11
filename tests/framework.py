@@ -37,6 +37,9 @@ ACCEL = os.environ.get("RUNCVM_TEST_ACCEL") or None
 # it is unset, with --accel tcg or without /dev/kvm
 TCG_CASES = (os.environ["RUNCVM_TEST_TCG_CASES"] == "1" if os.environ.get("RUNCVM_TEST_TCG_CASES")
              else ACCEL == "tcg" or not os.path.exists("/dev/kvm"))
+# Whether tests pull the images they boot before using them, refreshing tags that upstream has
+# re-pointed (see tests/run --pull)
+PULL = os.environ.get("RUNCVM_TEST_PULL") == "1"
 
 errors = 0
 _cleanups = []
@@ -91,6 +94,21 @@ def parallel(func, items, jobs=None):
     jobs = jobs or int(os.environ.get("RUNCVM_TEST_JOBS") or 3)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
         return list(pool.map(func, items))
+
+
+def pull_images(images):
+    """With --pull (RUNCVM_TEST_PULL=1), pull each image, recording a check for each, so that the
+    test boots what each tag points to upstream now; otherwise do nothing, as docker pulls an image
+    the host lacks when it is first used. Returns False if any pull failed."""
+    if not PULL:
+        return True
+    images = list(dict.fromkeys(images))
+    ok = True
+    for image, r in zip(images, parallel(lambda i: docker("pull", "-q", i, timeout=600), images)):
+        if not check("pulled %s" % image, 0, r.returncode):
+            log(r.stdout)
+            ok = False
+    return ok
 
 
 def record_result(status, desc):

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """CPU and memory resources, and kernel arguments, of a RunCVM Container/VM.
 
-- The VM's memory is --memory (default 512M).
-- The VM's CPU count is --cpus rounded down to a whole number. Without
-  --cpus, or with --cpus below 1, the VM has as many CPUs as the container
-  can use.
+- The VM's memory is --memory (default 512M), also where --memory-swap
+  equals it (no swap).
+- The VM's CPU count is --cpus rounded up to a whole number. Without
+  --cpus, the VM has as many CPUs as the container can use.
 - RUNCVM_KERNEL_APPEND is appended to the VM kernel's command line.
 
 The expected values describe current behaviour. A change to it must update
@@ -26,8 +26,9 @@ t.log("CPUs available to a container on this host: %d" % host_cpus)
 CASES = [
     ("defaults", [], host_cpus, 512),
     ("cpus-2-memory-768m", ["--cpus=2", "--memory=768m"], min(2, host_cpus), 768),
-    ("cpus-1.5", ["--cpus=1.5"], 1, 512),
-    ("cpus-0.5", ["--cpus=0.5"], host_cpus, 512),
+    ("memory-768m-swap-768m", ["--memory=768m", "--memory-swap=768m"], host_cpus, 768),
+    ("cpus-1.5", ["--cpus=1.5"], min(2, host_cpus), 512),
+    ("cpus-0.5", ["--cpus=0.5"], 1, 512),
     ("kernel-append", ["--env=RUNCVM_KERNEL_APPEND=runcvm.test=marker"], host_cpus, 512),
 ]
 
