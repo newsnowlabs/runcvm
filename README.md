@@ -323,7 +323,7 @@ RunCVM aims to support each distribution's latest release and one or two before 
 | Debian | 12 (Bookworm) and 13 (Trixie): `debian:bookworm-slim`, `debian:trixie-slim` | `debian` | Debian 13 (Trixie) | 6.12 | xz | 10 (Buster) and later |
 | Ubuntu | 22.04 LTS (Jammy Jellyfish), 24.04 LTS (Noble Numbat) and 26.04 LTS (Resolute Raccoon): `ubuntu:22.04`, `ubuntu:24.04`, `ubuntu:26.04` | `ubuntu` | Ubuntu 26.04 LTS (Resolute Raccoon) | 7.0 | xz (recompressed from Ubuntu's zstd) | 20.04 LTS (Focal Fossa) and later |
 | AlmaLinux, and the RHEL family (see [Other distributions](#other-distributions)) | AlmaLinux 8, 9 and 10 (`almalinux:<n>`), Rocky Linux 8, 9 and 10 (`rockylinux/rockylinux:<n>`), Oracle Linux 8, 9 and 10 (`oraclelinux:<n>`), and Amazon Linux 2023 (`amazonlinux:2023`) | `almalinux` | AlmaLinux 10 | 6.12 | xz | all, once `kmod` is installed |
-| Fedora | 44 and 45: `fedora:44`, `fedora:45` | `fedora` | Fedora 45 | 7.2 | xz | all, once `kmod` is installed |
+| Fedora | 44 and 45: `fedora:44`, `fedora:45` | `fedora` | Fedora 45 | 7.3 | xz | all, once `kmod` is installed |
 | openSUSE Leap, openSUSE Tumbleweed | Leap 16.0 and 16.1: `opensuse/leap:16.0`, `opensuse/leap:16.1`; Tumbleweed, a rolling release: `opensuse/tumbleweed` | `opensuse` | openSUSE Leap 16.1 | 6.12 | xz (recompressed from openSUSE's zstd) | all, once `kmod` is installed |
 | Alpine Linux | 3.22, 3.23 and 3.24: `alpine:3.22`, `alpine:3.23`, `alpine:3.24` | `alpine` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | gzip | all |
 | OpenWrt | 25.12.6, imported from OpenWrt's x86 rootfs, as OpenWrt publishes no container image | `openwrt` | Alpine Linux 3.24 (`linux-virt`) | 6.18 | none | all |
