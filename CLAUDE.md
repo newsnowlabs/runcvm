@@ -204,10 +204,10 @@ GitHub's default concatenation of the branch's commit subjects):
   Raw-History: raw/<branch> (<original-tip-short-hash>)
   ```
 
-A branch that lands on `main` without a pull request, where that is warranted, may be
+A branch that lands on `main` without a pull request, with the maintainer's agreement, may be
 rebased onto `main` and pushed only if it is already clean: every commit is a self-contained,
-logically coherent change that builds; every message meets the rules above; there are no
-merge, fixup or work-in-progress commits; and every commit has the right author.
+logically coherent change that builds; every message meets the rules above; there are no merge,
+fixup or work-in-progress commits; and every commit has the right author.
 
 Once the changes in a pull request whose branch has more than one commit are complete (its tests
 may still be running), its description ends with a "Squash commit message" section, for use when
@@ -239,4 +239,6 @@ git log origin/main --format='%H %s' | while read hash subject; do
 done
 ```
 
-A single-commit branch carries no trailer; check whether its content is already on `main`.
+A single-commit branch carries no trailer; check whether its content is already on `main`. A
+branch rebased onto `main` and pushed without a pull request has landed if its tip is on `main`
+(`git merge-base --is-ancestor <tip> origin/main`).
