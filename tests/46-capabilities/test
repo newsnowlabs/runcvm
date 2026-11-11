@@ -47,7 +47,7 @@ for (init, (name, opts)), (started, caps, logs) in zip(RUNS, t.parallel(run, RUN
         t.log("output:\n%s" % logs)
         continue
     t.check("%s: workload ran" % desc, True, "workload-ran" in logs)
-    t.check("%s: 'docker exec' process has all capabilities in the VM" % desc, True,
+    t.check("%s: 'docker exec' process has CAP_NET_ADMIN in the VM" % desc, True,
             caps != "" and int(caps, 16) != 0 and int(caps, 16) & (1 << 12) != 0)
 
 t.finish()

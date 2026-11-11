@@ -714,8 +714,8 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   # The container's capabilities are those of RunCVM's own processes (QEMU, virtiofsd, dnsmasq and
   # the network configuration), which run as root; the workload runs under the VM's kernel. They
   # hold Docker's default capabilities and CAP_NET_ADMIN, whatever the container was given (e.g.
-  # docker run --cap-drop, or --security-opt no-new-privileges), in each set that a process under
-  # no_new_privs keeps across exec.
+  # docker run --cap-drop, or --security-opt no-new-privileges), in the bounding, effective and
+  # permitted sets, so that they hold under no_new_privs too.
   jq_set "$CFG" --argjson caps '[
     "CAP_AUDIT_WRITE","CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_KILL",
     "CAP_MKNOD","CAP_NET_ADMIN","CAP_NET_BIND_SERVICE","CAP_NET_RAW","CAP_SETFCAP","CAP_SETGID",
