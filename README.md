@@ -683,6 +683,10 @@ When RunCVM creates a Container/VM, fstab entries will be drafted, identifying e
 >
 > A disk whose contents are thrown away after each run, such as a `/var/lib/docker` for a disposable test, needs no flushing.
 
+#### Disk I/O
+
+QEMU accesses each disk's backing file with direct I/O (`cache=none`), bypassing the host's page cache, and asynchronously through Linux io_uring (`aio=io_uring`). Where io_uring is unavailable, because the host kernel has it turned off (`sysctl kernel.io_uring_disabled`) or a seccomp profile applied to the container denies its system calls (as Docker's default profile does), RunCVM uses Linux AIO (`aio=native`) instead or, failing that, a pool of I/O threads (`aio=threads`), and logs a warning to the container's output (`docker logs`).
+
 #### Preallocated disks
 
 A backing file is sparse by default: it takes space on the host only as the VM writes to the disk, and QEMU passes the VM's discards (e.g. from `fstrim`) and its writes of zeroes on to the backing file, freeing that space again. So the host's filesystem can fill up while the VM runs, after which the VM's writes to the disk fail with I/O errors.
