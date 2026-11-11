@@ -117,10 +117,10 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
 
 - **System services that need `systemd` as PID 1**, and the units, timers and socket activation it manages, such as a package's services, or configuration-management code (e.g. Ansible roles) that manages them. [Quick start](#quick-start) and [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm) have examples of images that run `systemd`.
 - **Docker, Docker Swarm or [Kubernetes](https://kubernetes.io/) inside a VM**, without `--privileged`: Docker tooling tested against its own dockerd, which its tests may reconfigure, restart or break, or a multi-node cluster on one host, each node a VM with its own kernel, firewall and cgroups. See [Running Docker in a RunCVM Container/VM](#running-docker-in-a-runcvm-containervm), and the k3s and Docker Swarm examples in [Quick start](#quick-start).
-- **Software that needs a kernel of its own**: kernel modules, eBPF tools, sysctls, netfilter and routing (e.g. firewalls, VPNs and routing daemons), memory pressure and out-of-memory handling in the VM's own kernel (sized by the container's memory and CPU limits), or a kernel version other than the host's. An image of a supported distribution boots RunCVM's kernel for that distribution, unless the image has a kernel of its own; other images need `RUNCVM_KERNEL`. See [Kernel selection and auto-detection](#kernel-selection-and-auto-detection) and [`RUNCVM_KERNEL`](#--envruncvm_kerneldistversion).
+- **Software that needs a kernel of its own**: kernel modules, eBPF tools, sysctls, netfilter and routing (e.g. firewalls, VPNs and routing daemons), memory pressure and out-of-memory handling in the VM's own kernel (sized by the container's memory and CPU limits), or a kernel version other than the host's. An image of a supported distribution boots RunCVM's kernel for that distribution, unless the image has a kernel of its own; other images need `RUNCVM_KERNEL`. See [Kernel selection and auto-detection](#kernel-selection-and-auto-detection) and [`RUNCVM_KERNEL`](#runcvm_kernel).
 - **Kernel development and bug-hunting** in realistic machine environments: boot a patched kernel under a real distribution's userland, with systemd, Docker, real networking or a multi-node cluster around it, run the reproducer or the tests, and iterate on the patch, with each attempt as quick as launching a container. See [Booting your own kernel](#booting-your-own-kernel).
 - **Developing, testing or experimenting with container runtimes**, such as gVisor, Sysbox or RunCVM itself, run by Docker inside a disposable VM, where a broken runtime, kernel module or daemon configuration cannot affect the host. See [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm).
-- **Storage tools that need block devices**, to make filesystems, mount them, or use btrfs or xfs features. See [`RUNCVM_DISKS`](#--envruncvm_disksdisk1disk2).
+- **Storage tools that need block devices**, to make filesystems, mount them, or use btrfs or xfs features. See [`RUNCVM_DISKS`](#runcvm_disks).
 - **Appliances and system images** that expect a machine of their own, such as [OpenWrt](#openwrt), and container workloads intended for VM platforms such as [fly.io](https://fly.io).
 - **Graphical desktops**, served over VNC. See [Graphical workloads with VNC](#graphical-workloads-with-vnc).
 - **Existing container workloads with stronger isolation** than a standard container's, behind hardware virtualisation. For how RunCVM's isolation compares with Kata Containers', see [RunCVM vs Kata comparison](#runcvm-vs-kata-comparison).
@@ -131,7 +131,7 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
 
 - **Very short-lived containers in large numbers.** Each Container/VM boots a kernel, taking a few seconds, and runs a VM of its own, sized by its memory and CPU limits.
 - **Workloads that rely on container features RunCVM does not provide**, such as adding networks to, or removing them from, a running Container/VM (`docker network connect` and `disconnect`): networks may be attached before a Container/VM starts, or while it is stopped. See [Features and limitations](#features-and-limitations).
-- **Hosts without KVM.** Without KVM, a Container/VM runs only under QEMU's software emulation, which is much slower, and only when allowed to (see [`RUNCVM_QEMU_ACCEL`](#--envruncvm_qemu_accelkvmautotcg)).
+- **Hosts without KVM.** Without KVM, a Container/VM runs only under QEMU's software emulation, which is much slower, and only when allowed to (see [`RUNCVM_QEMU_ACCEL`](#runcvm_qemu_accel)).
 - **Podman, and arm64 hosts.** Podman support is experimental, and arm64 support is in development.
 
 ## Contents
@@ -589,7 +589,7 @@ Examples that build an image or need more setup than those in [Quick start](#qui
 
 RunCVM runs `dockerd` in a Container/VM without `--privileged` or any special Docker options. All it needs is a disk for Docker's storage.
 
-The VM's root filesystem is the container's own filesystem, served over virtiofs. Neither Docker's `overlay2` storage driver nor containerd's `overlayfs` snapshotter can use virtiofs as its upper layer. Without a disk, with Docker's containerd image store, `dockerd` starts but cannot run containers: its overlay mounts fail with `invalid argument`. With the classic image store, it falls back to the `vfs` storage driver, which copies every image layer in full, and is extremely slow and uses a lot of space. So give `dockerd` a [`RUNCVM_DISKS`](#--envruncvm_disksdisk1disk2) disk that holds both of its storage directories:
+The VM's root filesystem is the container's own filesystem, served over virtiofs. Neither Docker's `overlay2` storage driver nor containerd's `overlayfs` snapshotter can use virtiofs as its upper layer. Without a disk, with Docker's containerd image store, `dockerd` starts but cannot run containers: its overlay mounts fail with `invalid argument`. With the classic image store, it falls back to the `vfs` storage driver, which copies every image layer in full, and is extremely slow and uses a lot of space. So give `dockerd` a [`RUNCVM_DISKS`](#runcvm_disks) disk that holds both of its storage directories:
 
 - `/var/lib/docker`: containers, volumes, networks and, with Docker's classic image store, images.
 - `/var/lib/containerd`: the storage of the containerd service that Docker's packages (e.g. as installed by `get.docker.com`) run `dockerd` with. With Docker's [containerd image store](https://docs.docker.com/engine/storage/containerd/), the default for new installations of Docker Engine 29 and later, this holds images and their unpacked layers.
@@ -615,7 +615,7 @@ Some points to bear in mind:
 
 - **Where to keep the backing file.** A backing file under `/disks` in a named Docker volume, as above, is kept outside the container's overlay filesystem, survives removal of the container, and can be reused by a later Container/VM. Without the `--mount`, the backing file is created in the container's own filesystem, and goes when the container is removed.
 - **Disk size.** A backing file is sparse by default, so it takes host space only as `dockerd` writes to it. Size the disk for every image, container and volume `dockerd` will hold. With the containerd image store, each image takes space twice: once compressed, and once unpacked. If the host's filesystem fills up, `dockerd`'s writes to a sparse disk fail with I/O errors, which can leave Docker's storage inconsistent. For a long-lived `dockerd`, consider adding `prealloc=on` (e.g. `RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,10G,prealloc=on`), which takes the disk's full size on the host from the start, and keeps it taken, even after images are removed (see [Preallocated disks](#preallocated-disks)).
-- **Keeping the data.** Launch with `--init`, or from an image whose entrypoint is its own init, such as systemd, so that the VM flushes the disk when it stops (see the warning under [`RUNCVM_DISKS`](#--envruncvm_disksdisk1disk2)). A disk thrown away after each run needs no flushing.
+- **Keeping the data.** Launch with `--init`, or from an image whose entrypoint is its own init, such as systemd, so that the VM flushes the disk when it stops (see the warning under [`RUNCVM_DISKS`](#runcvm_disks)). A disk thrown away after each run needs no flushing.
 - **Existing disks.** A destination cannot be added to an existing disk. A disk created for `/var/lib/docker` alone (e.g. with `RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,5G`), by this or an earlier release, has layout `root` and holds only that one destination. To add `/var/lib/containerd`, give the new spec a new backing file, or remove the old one, losing its contents.
 - **Nested RunCVM.** When the inner `dockerd` itself runs RunCVM Container/VMs, as in [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm), consider adding `/opt/runcvm` to the disk's destinations too, so the inner Container/VMs are not served RunCVM over nested virtiofs. RunCVM's own test environment, in `tests/env/Dockerfile`, uses `RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G`.
 
@@ -745,10 +745,17 @@ A hosted runner (4 vCPUs and 16 GB for public repositories) has room for a few C
 
 ## Option reference
 
-RunCVM options are specified either via standard `docker run` options or via  `--env=<RUNCVM_KEY>=<VALUE>` options on the `docker run`
-command line. The following env options are user-configurable:
+RunCVM options are specified either via standard `docker run` options (see [Features and limitations](#features-and-limitations)) or via environment variables named `RUNCVM_*`, below. RunCVM reads these from the container's environment when it creates the Container/VM, so they may be set in any way that sets a container's environment:
 
-### `--env=RUNCVM_KERNEL=<dist>[/<version>]`
+- on the `docker run` or `docker create` command line: `--env=RUNCVM_<KEY>=<VALUE>` (or `-e`), or `--env-file=<file>`;
+- in the image: `ENV RUNCVM_<KEY>=<VALUE>` in its Dockerfile;
+- in Docker Compose: a service's `environment` or `env_file`.
+
+A value set on the command line overrides the image's. Variables set with `docker exec --env` have no effect, except [`RUNCVM_RUNTIME_DEBUG=1`](#runcvm_runtime_debug), which logs the runtime's handling of that `docker exec`. On a shell command line, quote a value that holds shell metacharacters, such as `;` in `--env='RUNCVM_DISKS=<disk1>;<disk2>'`.
+
+### RUNCVM_KERNEL
+
+**`RUNCVM_KERNEL=<dist>[/<version>]`**
 
 Specify with which RunCVM kernel (from `/opt/runcvm/kernels`) to boot the VM. Values must be of the form `<dist>/<version>`, where `<dist>` is a directory under `/opt/runcvm/kernels` and `<version>` is a subdirectory (or symlink to a subdirectory) under that. If `<version>` is omitted, `latest` will be assumed. Here is an example command that will list available values of `<dist>/<version>` on your installation.
 
@@ -785,15 +792,21 @@ Example:
 docker run --rm --runtime=runcvm --env=RUNCVM_KERNEL=almalinux hello-world
 ```
 
-### `--env=RUNCVM_KERNEL_APPEND=1`
+### RUNCVM_KERNEL_APPEND
 
-Any custom kernel command line options e.g. `apparmor=0` or `systemd.unified_cgroup_hierarchy=0`.
+**`RUNCVM_KERNEL_APPEND=<option>[ <option>...]`**
 
-### `--env=RUNCVM_KERNEL_MODULES=<module>[,<module>...]`
+Options to append to the VM kernel's command line, separated by spaces, e.g. `--env='RUNCVM_KERNEL_APPEND=apparmor=0 systemd.unified_cgroup_hierarchy=0'`.
+
+### RUNCVM_KERNEL_MODULES
+
+**`RUNCVM_KERNEL_MODULES=<module>[,<module>...]`**
 
 Kernel modules to load into the VM's kernel when it boots, before the workload starts, e.g. `--env=RUNCVM_KERNEL_MODULES=kvm_intel` for VMs nested in the Container/VM. The kernel loads most modules on demand, when they are first needed (e.g. a filesystem's, on its first mount), so this is for modules that nothing requests. A value that is not a comma-separated list of module names is rejected when the Container/VM is created; a module that the VM's kernel lacks stops the Container/VM before its workload starts, with exit status 1 and an error naming the module.
 
-### `--env='RUNCVM_DISKS=<disk1>[;<disk2>;...]'`
+### RUNCVM_DISKS
+
+**`RUNCVM_DISKS=<disk1>[;<disk2>;...]`**
 
 Automatically create, format, prepopulate and mount backing files as virtual disks on the VM.
 
@@ -930,7 +943,9 @@ docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=
 
 > N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints, these are *NOT* mounted into the VM but only into the container, and are therefore suitable for use for mounting VM disks from backing files that cannot be accessed within the VM's filesystem.
 
-### `--env=RUNCVM_DISPLAY_MODE=<value>`
+### RUNCVM_DISPLAY_MODE
+
+**`RUNCVM_DISPLAY_MODE=<value>`**
 
 Shortcut to select a display mode:
 - `headless` is traditional headless runc-like behaviour over hvc0;
@@ -941,37 +956,53 @@ Shortcut to select a display mode:
 >
 > e.g. `docker run --runtime=runcvm --env=RUNCVM_DISPLAY_MODE=vnc -p 5900:5900 ubuntu`
 
-### `--env=RUNCVM_QEMU_VGA=<value>`
+### RUNCVM_QEMU_VGA
+
+**`RUNCVM_QEMU_VGA=<value>`**
 
 Selects a QEMU guest VGA adaptor: `none`, `virtio`, `std`, `cirrus`. Can be used with `--env=RUNCVM_DISPLAY_MODE=vnc` to override default `virtio` VGA device.
 
-### `--env=RUNCVM_QEMU_VNC_DISPLAY=<display>`
+### RUNCVM_QEMU_VNC_DISPLAY
+
+**`RUNCVM_QEMU_VNC_DISPLAY=<display>`**
 
 With `--env=RUNCVM_DISPLAY_MODE=vnc`, overrides the VNC display number (and hence `<guestport>`).
 
 With `--env=RUNCVM_DISPLAY_MODE=headless`, specifies also that a VNC server should also be launched with the given display number.
 
-### `--env=RUNCVM_QEMU_DISPLAY=<value>` [experimental]
+### RUNCVM_QEMU_DISPLAY
+
+**`RUNCVM_QEMU_DISPLAY=<value>`** (experimental)
 
 Specify a QEMU frontend display. Normally RunCVM runs headless, without any frontend display, so the default is `none`. Currently only `curses` is supported.
 
-### `--env=RUNCVM_QEMU_USB=<value>`
+### RUNCVM_QEMU_USB
+
+**`RUNCVM_QEMU_USB=<value>`**
 
 Enable USB interface.
 
-### `--env=RUNCVM_BIOS=EFI`
+### RUNCVM_BIOS
+
+**`RUNCVM_BIOS=EFI`**
 
 By default SeaBIOS is used to boot the VM. Enable OVMF EFI boot with this option.
 
-### `--env=RUNCVM_QEMU_NET_VHOST=1`
+### RUNCVM_QEMU_NET_VHOST
+
+**`RUNCVM_QEMU_NET_VHOST=1`**
 
 Enable use of [virtio vhost-net](https://www.redhat.com/en/blog/introduction-virtio-networking-and-vhost-net) (reliant on host `vhost_net` module and `/dev/vhost-net` device) to accelerate networking.
 
-### `--env=RUNCVM_IPV6=<0|1>`
+### RUNCVM_IPV6
+
+**`RUNCVM_IPV6=<0|1>`**
 
 By default, IPv6 is enabled in the VM automatically if a global IPv6 address was assigned to the container (i.e. the Docker network is dual-stack), and disabled otherwise. Set to `1` to force IPv6 on regardless, or `0` to force it off (e.g. to keep a container IPv4-only despite being attached to a dual-stack network).
 
-### `--env=RUNCVM_DNS_IP=<IPv4 address>`
+### RUNCVM_DNS_IP
+
+**`RUNCVM_DNS_IP=<IPv4 address>`**
 
 Sets the address, `169.254.53.53` by default, at which the VM reaches RunCVM's own services in the container:
 - on a user-defined network, the VM's DNS server: the VM's `/etc/resolv.conf` names this address in place of Docker's embedded DNS server (`127.0.0.11`), and `dnsmasq` in the container answers it, forwarding to Docker's DNS;
@@ -981,63 +1012,89 @@ The default is link-local, so that the VM's traffic to it is never routed beyond
 
 Set another address only if the default clashes with something in your environment, such as software in the VM that intercepts or blocks it. The address must be a unicast IPv4 address, outside `0.0.0.0/8` and `127.0.0.0/8`, and none of the container's own addresses, its gateway's, or RunCVM's bridge address in the container (`169.254.1.1`); a Container/VM with an invalid one fails to start, with an error saying so. An address in `169.254.0.0/16` keeps the VM's traffic to it on the host.
 
-### `--env=RUNCVM_QEMU_ACCEL=<kvm|auto|tcg>`
+### RUNCVM_QEMU_ACCEL
+
+**`RUNCVM_QEMU_ACCEL=<kvm|auto|tcg>`**
 
 Selects how QEMU runs the VM:
 - `kvm` (the default) uses KVM, and fails with an error if `/dev/kvm` is unavailable on the host;
 - `auto` uses KVM if `/dev/kvm` is available, and otherwise falls back to software emulation (TCG), with a warning;
 - `tcg` always uses software emulation, which is much slower but works without KVM (for example, for testing in environments without nested virtualisation).
 
-### `--env=RUNCVM_QEMU_TCG_TB_MEM_SIZE=<Mb>`
+### RUNCVM_QEMU_TCG_TB_MEM_SIZE
+
+**`RUNCVM_QEMU_TCG_TB_MEM_SIZE=<Mb>`**
 
 Under software emulation (see `RUNCVM_QEMU_ACCEL`), sets the size of QEMU's cache of translated code, in Mb (default 128; from 32 to 4096). This is added to the container's memory limit, in addition to the VM's memory (`--memory`) and the usual allowance for RunCVM's helper processes. Increase it for workloads that run a large amount of code. It has no effect when KVM is used.
 
-### `--env=RUNCVM_SYS_ADMIN=1`
+### RUNCVM_SYS_ADMIN
+
+**`RUNCVM_SYS_ADMIN=1`**
 
 By default, `virtiofsd` is not launched with `-o modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.
 
-### `--env=RUNCVM_KERNEL_MOUNT_LIB_MODULES=1`
+### RUNCVM_KERNEL_MOUNT_LIB_MODULES
+
+**`RUNCVM_KERNEL_MOUNT_LIB_MODULES=1`**
 
 If a RunCVM kernel (as opposed to an in-image kernel) is chosen to launch a VM, by default that kernel's modules will be mounted at `/lib/modules/<version>` in the VM. If this variables is set, that kernel's modules will instead be mounted over `/lib/modules`.
 
-### `--env=RUNCVM_KERNEL_DEBUG=1`
+### RUNCVM_KERNEL_DEBUG
+
+**`RUNCVM_KERNEL_DEBUG=1`**
 
 Enable kernel logging (sets kernel `console=ttyS0`).
 
-### `--env=RUNCVM_BIOS_DEBUG=1`
+### RUNCVM_BIOS_DEBUG
+
+**`RUNCVM_BIOS_DEBUG=1`**
 
 By default BIOS console output is hidden. Enable it with this option. With `--env=RUNCVM_BIOS=EFI`, this option has no effect.
 
-### `--env=RUNCVM_RUNTIME_DEBUG=1`
+### RUNCVM_RUNTIME_DEBUG
+
+**`RUNCVM_RUNTIME_DEBUG=1`**
 
 Enable debug logging for the runtime (the portion of RunCVM directly invoked by `docker run`, `docker exec` etc).
 Debug logs are written to files in `/tmp`.
 
-### `--env=RUNCVM_QEMU_DEBUG=1`
+### RUNCVM_QEMU_DEBUG
+
+**`RUNCVM_QEMU_DEBUG=1`**
 
 Enable logging the exit code from QEMU and OOM statistics.
 
-### `--env=RUNCVM_BREAK=<values>`
+### RUNCVM_BREAK
+
+**`RUNCVM_BREAK=<values>`**
 
 Enable breakpoints (falling to bash shell) during the RunCVM Container/VM boot process.
 
 `<values>` must be a comma-separated list of: `prenet`, `postnet`, `preqemu`.
 
-### `--env=RUNCVM_HUGETLB=1`
+### RUNCVM_HUGETLB
+
+**`RUNCVM_HUGETLB=1`**
 
 **[EXPERIMENTAL]** Enable use of preallocated hugetlb memory backend, which can improve performance in some scenarios.
 
-### `--env=RUNCVM_QEMU_MEM_PREALLOC=<on|off>`
+### RUNCVM_QEMU_MEM_PREALLOC
+
+**`RUNCVM_QEMU_MEM_PREALLOC=<on|off>`**
 
 Specify whether QEMU VM memory should be preallocated, or allocated on the host only as required by the guest.
 
 Default is `off`, but `on` may deliver improved performance in some scenarios at expense of ability to overcommit.
 
-### `--env=RUNCVM_VIRTIOFSD_CACHE=<auto|none|always>`
+### RUNCVM_VIRTIOFSD_CACHE
+
+**`RUNCVM_VIRTIOFSD_CACHE=<auto|none|always>`**
 
 Specifies the cache policy passed to `virtiofsd` via `-o cache=<value>`. The default policy is `auto`. Use `none` to avoid caching issues when multiple RunCVM instances need to share access to a volume or bind-mount on the host.
 
-### `--env=RUNCVM_CGROUPFS=<value>`
+### RUNCVM_CGROUPFS
+
+**`RUNCVM_CGROUPFS=<value>`**
 
 Configures cgroupfs mountpoints in the VM, which may be needed to run applications like Docker if systemd is not running. Acceptable values are:
 
