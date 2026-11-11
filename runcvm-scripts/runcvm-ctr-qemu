@@ -208,7 +208,7 @@ disk_prealloc() {
 #
 # A new disk is populated only from the image's filesystem at each destination, not from the other
 # filesystems mounted below it, such as Docker's volumes and bind mounts: those stay live, mounted
-# again over the disk in the VM (see do_disks).
+# again over the disk in the VM (see do_disks, and runcvm-vm-init).
 #
 # With prealloc=on, every block of the disk's backing file is allocated (see disk_prealloc), whether
 # the file is new or existing, and QEMU attaches the disk ignoring the VM's discard requests and
@@ -465,7 +465,8 @@ do_disk() {
     fi
 
     # mke2fs populates the disk with any pre-existing files from each dst, staying on the
-    # filesystem holding the dst: other filesystems' mountpoints are left as empty directories.
+    # filesystem holding the dst: a directory on which another filesystem is mounted is left
+    # empty, and a file on another filesystem (such as a bind-mounted file) is left out.
     if [ "${DISK_FS_MKFS[0]}" = "mke2fs" ]; then
       populate+=(-E one_file_system)
       if [ "$layout" = "subdirs" ]; then

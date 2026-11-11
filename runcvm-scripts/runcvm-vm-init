@@ -285,8 +285,8 @@ if [ -f /.runcvm/fstab ]; then
   # Populate each new disk that its mkfs command left empty: copy each destination's contents, as
   # the image holds them, to its directory on the disk, with RunCVM's own cp, which preserves
   # ownership, permissions, timestamps, links and extended attributes. cp stays on the filesystem
-  # holding the destination, leaving other filesystems' mountpoints, such as the held mounts above,
-  # as empty directories.
+  # holding the destination, leaving each directory on which another filesystem is mounted, such
+  # as the held mounts above, empty.
   if [ -f /.runcvm/disks-populate ]; then
     while read -r id uuid fs dir dst
     do
@@ -335,7 +335,7 @@ if [ -f /.runcvm/fstab ]; then
     vm_init_error "mounting the filesystems in /.runcvm/fstab failed, leaving unmounted: ${unmounted[*]}"
   fi
 
-  # Mount each held mount again at its path, over the disk that now hides it, as Docker mounts a
+  # Mount each held mount again at its path, over the disk that hides it, as Docker mounts a
   # deeper mount over a shallower one, creating a mountpoint of the same kind if the disk lacks one.
   # Then detach the tmpfs that held them.
   for i in "${!DISK_SUBMOUNTS[@]}"

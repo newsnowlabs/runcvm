@@ -88,7 +88,8 @@ for boot in ("first start", "second start"):
     t.check("%s: /var/cache/app is on its disk" % boot, "xfs", fstype("/var/cache/app"))
     t.check("%s: volume below an xfs disk is visible" % boot, "cache", out("cat", "/var/cache/app/vol/marker"))
 
-    # No disk holds a copy of the volumes' contents: each holds an empty mountpoint.
+    # Neither disk with layout 'subdirs', whose directories are visible at /.runcvm/disks/<n>, holds
+    # a copy of a volume's contents: each holds an empty mountpoint.
     t.check("%s: disk 0 holds an empty mountpoint for the volume" % boot, "",
             out("ls", "-A", "/.runcvm/disks/0/home/user/shared"))
     t.check("%s: xfs disk 2 holds an empty mountpoint for the volume" % boot, "",
