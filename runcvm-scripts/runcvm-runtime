@@ -677,6 +677,14 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     RUNCVM_CONTAINER_MEM_TCG="$RUNCVM_QEMU_TCG_TB_MEM_SIZE"
   fi
 
+  # A Kubernetes pod's container: connections to localhost in the pod's network namespace (as
+  # 'kubectl port-forward' makes) are forwarded to the VM (see runcvm-ctr-entrypoint), which needs
+  # packets from 127.0.0.1 routed off the loopback device.
+  if [ -n "$(jq -r '.annotations["io.kubernetes.cri.container-type"] // empty' "$CFG")" ]; then
+    set_config_env "RUNCVM_LOCALHOST_TO_VM" "1"
+    jq_set "$CFG" '.linux.sysctl["net.ipv4.conf.all.route_localnet"] = "1"'
+  fi
+
   # Configure devices
   # /dev/net/tun — always needed
   jq_set "$CFG" '.linux.resources.devices += [{"allow":true,"type":"c","major":10,"minor":200,"access":"rwm"}]'
