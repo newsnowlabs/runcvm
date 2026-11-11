@@ -112,8 +112,8 @@ restore_network() {
     alias=$(ip -json link show dev "$if" 2>/dev/null | jq -r '.[0].ifalias // empty')
     [[ "$alias" =~ ^runcvm: ]] || continue
 
-    # Routes via the bridge, to be routed via the interface again: each an address family option
-    # ('-4' or '-6') and 'ip route' arguments.
+    # The routes via the bridge, which are restored via the interface. Each entry is an address
+    # family option ('-4' or '-6'), then the route's 'ip route' arguments.
     local routes=() family
     for family in -4 -6
     do

@@ -493,7 +493,7 @@ The pod's container runs as a Container/VM, with its own kernel (chosen from its
 
 Limitations:
 
-- **One container per pod.** Each container in a pod would be a VM taking over the pod's one network interface, so a pod with more than one container fails, saying that only one Container/VM can use a network namespace. Init containers, which run one at a time before the pod's container, run as Container/VMs too.
+- **One container per pod.** Each container in a pod would be a VM taking over the pod's one network interface, so a pod with more than one container running at once fails, saying that only one Container/VM can use a network namespace. Init containers, which run one at a time before the pod's container, run as Container/VMs too.
 - **No memory limits.** A pod with a memory limit fails to start: RunCVM sizes the VM to the container's memory limit, then raises the limit to make room for QEMU and RunCVM's own processes, which the pod's own cgroup limit does not allow. Without a limit, the VM has RunCVM's default memory size.
 - **Readiness.** Kubernetes considers the container started once the VM starts, before its workload runs; give the pod a readiness probe, so that Services send it traffic only once it is ready.
 
