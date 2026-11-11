@@ -251,6 +251,7 @@ RunCVM features:
 - [Supported distributions](#supported-distributions)
 - [Installation](#installation)
 - [Upgrading](#upgrading)
+- [Kubernetes (experimental)](#kubernetes-experimental)
 - [Features and Limitations](#features-and-limitations)
 - [RunCVM vs Kata comparison](#runcvm-vs-kata-comparison)
 - [Kernel auto-detection](#kernel-auto-detection)
@@ -452,6 +453,55 @@ To upgrade, follow this procedure:
 1. Stop all RunCVM containers.
 2. Rerun the installation command, which installs the latest release, or the release named in `REPO` (see [Installation](#installation)), and runs that release's own installer.
 3. Start any RunCVM containers.
+
+## Kubernetes (experimental)
+
+A Kubernetes pod can run as a RunCVM Container/VM on a node whose container runtime is containerd (as in k3s, and kubeadm clusters using containerd), through a [RuntimeClass](https://kubernetes.io/docs/concepts/containers/runtime-class/). Install RunCVM on each such node (see [Installation](#installation); a node needs KVM, as any RunCVM host does), and register it with the node's containerd as a runtime of type `io.containerd.runc.v2` whose binary is RunCVM's runtime. For containerd 2.x, add to `/etc/containerd/config.toml` (configuration version 3), then restart containerd:
+
+```toml
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runcvm]
+  runtime_type = "io.containerd.runc.v2"
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runcvm.options]
+  BinaryName = "/opt/runcvm/scripts/runcvm-runtime"
+  SystemdCgroup = true
+```
+
+`SystemdCgroup` must match the node's cgroup driver, as for containerd's `runc` runtime: `true` where the kubelet uses the `systemd` cgroup driver, as k3s and kubeadm do by default. Otherwise the pod's containers are not placed in the pod's cgroup, and the pod's resource limits do not apply to them.
+
+k3s generates its containerd configuration, so on a k3s node put the same lines, after a first line `{{ template "base" . }}`, in `/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl`, then restart k3s.
+
+Then create a RuntimeClass whose handler is the runtime's name, and name it in a pod's `runtimeClassName`. The RuntimeClass's `overhead` adds the memory RunCVM needs alongside the VM's, for QEMU and its own processes, to each pod's memory limit, and to what the scheduler counts for the pod:
+
+```yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: runcvm
+handler: runcvm
+overhead:
+  podFixed:
+    memory: 256Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vm
+spec:
+  runtimeClassName: runcvm
+  containers:
+    - name: main
+      image: alpine
+      command: ["sh", "-c", "uname -r; sleep infinity"]
+```
+
+The pod's container runs as a Container/VM, with its own kernel (chosen from its image, as with Docker), in the pod's network namespace: it has the pod's address, reaches and is reached by other pods and Services, resolves names through the cluster's DNS, and `kubectl exec` runs commands in the VM. The pod's sandbox container, which only holds the pod's namespaces, runs under runc as usual.
+
+Limitations:
+
+- **One container per pod.** Each container in a pod would be a VM taking over the pod's one network interface, so a pod with more than one container fails.
+- **Memory.** A container's memory limit sets its VM's memory size; without one, the VM has RunCVM's default memory size. Without the RuntimeClass's `overhead`, the pod's memory limit leaves no room for QEMU and RunCVM's own processes, and the pod is killed when its VM uses most of its memory.
+- **Readiness.** Kubernetes considers the container started once the VM starts, before its workload runs; give the pod a readiness probe, so that Services send it traffic only once it is ready.
 
 ## Features and limitations
 
