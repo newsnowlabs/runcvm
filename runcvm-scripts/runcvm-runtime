@@ -422,7 +422,10 @@ if [ "$COMMAND" = "create" ]; then
   log "RUNCVM_UIDGID=$RUNCVM_UIDGID"
 
   # CONFIGURE CPUS
-  RUNCVM_CPUS=$(( $(jq_get "$CFG" '.linux.resources.cpu.quota') / 100000))
+  # A CPU quota (docker run --cpus) gives the VM as many vCPUs as it allows CPUs, rounded up, so
+  # that a fraction of a CPU gives one; without one, RUNCVM_CPUS is 0, which gives the VM as many
+  # vCPUs as the container may use (see runcvm-ctr-entrypoint).
+  RUNCVM_CPUS=$(jq_get "$CFG" '.linux.resources.cpu as $c | if ($c.quota // 0) > 0 then (($c.quota / ($c.period // 100000)) | ceil) else 0 end')
   set_config_env "RUNCVM_CPUS" "$RUNCVM_CPUS"
   log "RUNCVM_CPUS=$RUNCVM_CPUS"
 
