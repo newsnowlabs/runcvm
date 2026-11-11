@@ -553,6 +553,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [+] `--env` (or `-e`), `--env-file` is supported
       - [+] `--entrypoint` is supported
       - [+] `--init` - is supported (but runs RunCVM's own VM init process rather than Docker's default, `tini`)
+      - [-] `--cap-drop` and `--security-opt=no-new-privileges` are accepted, but do not restrict the workload, which runs under the VM's own kernel; RunCVM's own processes in the container keep the capabilities they need
    - stdio/Terminals
       - [+] `--detach` (or `-d`) is supported
       - [+] `--interactive` (or `-i`) is supported
@@ -1053,7 +1054,7 @@ In more detail, the RunCVM runtime `create` process:
    - Add device mounts for `/dev/kvm` and `/dev/net/tun`.
    - Set the seccomp profile to 'unconfined'.
    - Set `/dev/shm` to the size desired for the VM's memory, set `RUNCVM_MEM_SIZE` env var accordingly, and set the container memory limit to the size plus 256Mb (a contingency for QEMU itself, along with virtiofsd, dnsmasq and other container contents)
-   - Add necessary capabilities, if not already present (`NET_ADMIN`, `NET_RAW`, `MKNOD`, `AUDIT_WRITE`).
+   - Give the container the capabilities RunCVM's own processes need, whatever it was given: Docker's default capabilities and `NET_ADMIN`.
    - Only if requested by `--env=SYS_ADMIN=1`, add the `SYS_ADMIN` capability.
    - Pass the container's environment variables (as given by Docker or Podman) to `runcvm-ctr-entrypoint` as arguments: a count, then one `NAME=VALUE` argument per variable, ahead of the original entrypoint and command line. Then reduce the container's environment to RunCVM's own: its `RUNCVM_*` variables, `TERM` (if set), a `PATH` of RunCVM's own tool directories, and `HOME=/.runcvm`. So RunCVM's scripts and tools are unaffected by the workload's environment (e.g. `LD_LIBRARY_PATH`, `BASH_ENV`, `UID`), which only the workload receives.
 - Executes the standard container runtime `runc` with the modified `config.json`.

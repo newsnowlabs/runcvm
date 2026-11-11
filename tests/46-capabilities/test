@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""A RunCVM Container/VM with capabilities taken away from its container.
+
+RunCVM's own processes in the container (QEMU, virtiofsd, dnsmasq and the
+network configuration) need capabilities, which the container keeps whatever
+it was given: a Container/VM launched with --cap-drop=ALL, also with
+--security-opt=no-new-privileges, boots, runs its workload and serves
+'docker exec'. The workload runs under the VM's own kernel, so keeps its
+capabilities there. Each case runs with and without --init.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+# (name, docker run options)
+CASES = [
+    ("cap-drop-all", ["--cap-drop=ALL"]),
+    ("cap-drop-all-no-new-privileges", ["--cap-drop=ALL", "--security-opt=no-new-privileges"]),
+    ("cap-drop-net-admin", ["--cap-drop=NET_ADMIN"]),
+]
+
+RUNS = [(init, case) for init in (False, True) for case in CASES]
+
+
+def run(item):
+    init, (name, opts) = item
+    container = t.unique("%s%s" % (name, "-init" if init else ""))
+    t.cleanup_container(container)
+    r = t.docker("run", "-d", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 *(["--init"] if init else []), *opts, "alpine", "sh", "-c",
+                 "echo workload-ran; sleep 600")
+    if r.returncode != 0 or not t.wait_for_exec(container, BOOT_TIMEOUT):
+        return False, "", t.docker("logs", container).stdout
+    caps = t.docker("exec", container, "grep", "CapEff", "/proc/self/status").stdout.split()
+    return True, caps[1] if len(caps) > 1 else "", t.docker("logs", container).stdout
+
+
+for (init, (name, opts)), (started, caps, logs) in zip(RUNS, t.parallel(run, RUNS)):
+    desc = "%s, %s" % (name, "--init" if init else "no --init")
+    t.param(desc, " ".join(opts))
+    if not t.check("%s: Container/VM boots and 'docker exec' works" % desc, True, started):
+        t.log("output:\n%s" % logs)
+        continue
+    t.check("%s: workload ran" % desc, True, "workload-ran" in logs)
+    t.check("%s: 'docker exec' process has all capabilities in the VM" % desc, True,
+            caps != "" and int(caps, 16) != 0 and int(caps, 16) & (1 << 12) != 0)
+
+t.finish()
