@@ -248,9 +248,45 @@ if [ -f /.runcvm/fstab ]; then
     done
   done
 
+  # Hold on to each mount that a disk will hide once mounted at its destination, as listed in
+  # /.runcvm/disks-submounts (see do_disks in runcvm-ctr-qemu): Docker's volumes, bind mounts and
+  # tmpfs mounts, and files such as /etc/hosts, below a disk's destination. Bind each, recursively,
+  # into a private tmpfs, from where it is mounted again over the disk once the disks are mounted.
+  # A mount below another held mount is carried with it. Binding a Docker volume also mounts it in
+  # the VM, which otherwise sees it only once accessed.
+  DISK_SUBMOUNTS=()
+  if [ -s /.runcvm/disks-submounts ]; then
+    mkdir -p /.runcvm/submounts
+    mount -i --options-source=disable -t tmpfs -o mode=0700 tmpfs /.runcvm/submounts
+    mount -i --make-rprivate /.runcvm/submounts
+
+    while IFS= read -r path
+    do
+      [[ -n "$path" && -e "$path" ]] || continue
+
+      for held in "${DISK_SUBMOUNTS[@]}"
+      do
+        [[ "$path" = "$held"/* ]] && continue 2
+      done
+
+      held="/.runcvm/submounts/${#DISK_SUBMOUNTS[@]}"
+      if [ -d "$path" ]; then
+        mkdir "$held"
+      else
+        touch "$held"
+      fi
+
+      mount -i --options-source=disable --rbind "$path" "$held" || \
+        vm_init_error "'$path' cannot be mounted over its disk: binding it before mounting the disks failed"
+      DISK_SUBMOUNTS+=("$path")
+    done </.runcvm/disks-submounts
+  fi
+
   # Populate each new disk that its mkfs command left empty: copy each destination's contents, as
   # the image holds them, to its directory on the disk, with RunCVM's own cp, which preserves
-  # ownership, permissions, timestamps, links and extended attributes.
+  # ownership, permissions, timestamps, links and extended attributes. cp stays on the filesystem
+  # holding the destination, leaving other filesystems' mountpoints, such as the held mounts above,
+  # as empty directories.
   if [ -f /.runcvm/disks-populate ]; then
     while read -r id uuid fs dir dst
     do
@@ -263,7 +299,7 @@ if [ -f /.runcvm/fstab ]; then
 
       mkdir -p "$mnt/$dir"
       if [ -d "$dst" ]; then
-        $RUNCVM_GUEST/usr/bin/coreutils --coreutils-prog=cp -a "$dst/." "$mnt/$dir/" || \
+        $RUNCVM_GUEST/usr/bin/coreutils --coreutils-prog=cp -a -x "$dst/." "$mnt/$dir/" || \
           vm_init_error "dst '$dst' cannot be populated: copying its contents to its new disk failed"
       fi
     done </.runcvm/disks-populate
@@ -297,6 +333,30 @@ if [ -f /.runcvm/fstab ]; then
     done </.runcvm/fstab
 
     vm_init_error "mounting the filesystems in /.runcvm/fstab failed, leaving unmounted: ${unmounted[*]}"
+  fi
+
+  # Mount each held mount again at its path, over the disk that now hides it, as Docker mounts a
+  # deeper mount over a shallower one, creating a mountpoint of the same kind if the disk lacks one.
+  # Then detach the tmpfs that held them.
+  for i in "${!DISK_SUBMOUNTS[@]}"
+  do
+    path="${DISK_SUBMOUNTS[$i]}"
+    held="/.runcvm/submounts/$i"
+
+    if [ -d "$held" ]; then
+      mkdir -p "$path"
+    else
+      mkdir -p "$(busybox dirname "$path")"
+      [ -e "$path" ] || touch "$path"
+    fi
+
+    mount -i --options-source=disable --rbind "$held" "$path" || \
+      vm_init_error "'$path' cannot be mounted over its disk: binding it after mounting the disks failed"
+  done
+
+  if [ -d /.runcvm/submounts ]; then
+    busybox umount -l /.runcvm/submounts
+    rmdir /.runcvm/submounts
   fi
 
   # Mount our fstab over the image's /etc/fstab, where the image has one. An image without one

@@ -130,6 +130,33 @@ disk_vm_mounts() {
   done </proc/self/mountinfo
 }
 
+# Prints, one per line, each mountpoint below $RUNCVM_VM_MOUNTPOINT, at any depth, that lies
+# strictly below one of the disk destinations $@ (normalised paths, with symbolic links resolved),
+# as its path in the VM: Docker's volumes, bind mounts, tmpfs mounts and files such as /etc/hosts.
+# /.runcvm, and the mounts below it, are left out.
+disk_submounts() {
+  local mnt dst rest
+  local IFS=$' \t\n'
+
+  while read -r _ _ _ _ mnt rest
+  do
+    # Decode mountinfo's octal escapes (e.g. '\040' for a space).
+    mnt=$(printf '%b' "$mnt")
+    [[ "$mnt" = "$RUNCVM_VM_MOUNTPOINT"/* ]] || continue
+    mnt="${mnt#"$RUNCVM_VM_MOUNTPOINT"}"
+
+    [[ "$mnt" = /.runcvm || "$mnt" = /.runcvm/* ]] && continue
+
+    for dst in "$@"
+    do
+      if [[ "$mnt" = "$dst"/* ]]; then
+        echo "$mnt"
+        break
+      fi
+    done
+  done </proc/self/mountinfo
+}
+
 # Creates disk backing file $2, of size $3, for disk spec $1, if it does not already exist.
 disk_create_file() {
   local spec="$1" src="$2" size="$3" dir
@@ -178,6 +205,10 @@ disk_prealloc() {
 #
 # A disk with layout 'root' has exactly one destination, holds its contents at its root, and is
 # mounted at that destination.
+#
+# A new disk is populated only from the image's filesystem at each destination, not from the other
+# filesystems mounted below it, such as Docker's volumes and bind mounts: those stay live, mounted
+# again over the disk in the VM (see do_disks).
 #
 # With prealloc=on, every block of the disk's backing file is allocated (see disk_prealloc), whether
 # the file is new or existing, and QEMU attaches the disk ignoring the VM's discard requests and
@@ -433,8 +464,10 @@ do_disk() {
       populate=("$DISK_FS_LABEL_OPT" "$DISK_FS_SUBDIRS_LABEL")
     fi
 
-    # mke2fs populates the disk with any pre-existing files from each dst.
+    # mke2fs populates the disk with any pre-existing files from each dst, staying on the
+    # filesystem holding the dst: other filesystems' mountpoints are left as empty directories.
     if [ "${DISK_FS_MKFS[0]}" = "mke2fs" ]; then
+      populate+=(-E one_file_system)
       if [ "$layout" = "subdirs" ]; then
         for i in "${!dests[@]}"
         do
@@ -488,6 +521,7 @@ do_disk() {
   do
     path=$(disk_normalise_path "$dst") && path=$(disk_resolve_path "$path") || path="$dst"
     DISK_EXCLUDES+=("$path")
+    DISK_DESTS+=("$path")
   done
 
   [ "$prealloc" = "off" ] || disk_prealloc "$spec" "$src"
@@ -589,12 +623,21 @@ do_disks() {
   local id=0
   ROOT_DISK_SPEC=""
   DISK_EXCLUDES=()
+  DISK_DESTS=()
 
   for disk in $1
   do
     do_disk "$disk" "$id"
     id=$((id+1))
   done
+
+  # A disk mounted at its destination in the VM hides every mount below that destination, so
+  # record those mounts in /.runcvm/disks-submounts, for runcvm-vm-init to mount again over the
+  # disks, as Docker mounts a deeper mount over a shallower one. (A whole-root disk carries the
+  # mounts below / itself.)
+  if [ "${#DISK_DESTS[@]}" -gt 0 ]; then
+    disk_submounts "${DISK_DESTS[@]}" | busybox sort -u >/.runcvm/disks-submounts
+  fi
 
   if [ -n "$ROOT_DISK_SPEC" ]; then
     do_root_disk
