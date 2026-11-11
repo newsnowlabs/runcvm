@@ -325,6 +325,19 @@ divert() {
 
 BRIDGE_RULES=$(divert "tap-$QEMU_BRIDGE_IF" "$RUNCVM_DNS_IP" "tcp sport $SSHD_PORT")
 NAT_PREROUTING_RULES=""
+NAT_OUTPUT_RULES=""
+NAT_POSTROUTING_RULES=""
+
+# - localhost (RUNCVM_LOCALHOST_TO_VM=1, in a Kubernetes pod): TCP connections to 127.0.0.1 in the
+#   namespace, except to dnsmasq's port 53, are forwarded to the VM, as 'kubectl port-forward'
+#   connects there. They are source-NATed to $RUNCVM_DNS_IP, with ports in a range of their own, by which the
+#   VM's replies are diverted.
+LOCALHOST_PORTS="61000-61999"
+if [ "$RUNCVM_LOCALHOST_TO_VM" = "1" ]; then
+  BRIDGE_RULES+=$'\n'$(divert "tap-$QEMU_BRIDGE_IF" "$RUNCVM_DNS_IP" "tcp dport $LOCALHOST_PORTS")
+  NAT_OUTPUT_RULES+=$'\n'"ip daddr 127.0.0.1 tcp dport != 53 dnat to $QEMU_BRIDGE_IF_IP"
+  NAT_POSTROUTING_RULES+=$'\n'"oifname \"br-$QEMU_BRIDGE_IF\" ip saddr 127.0.0.1 meta l4proto tcp snat to $RUNCVM_DNS_IP:$LOCALHOST_PORTS"
+fi
 
 if [ "$RUNCVM_DNS" = "1" ]; then
   BRIDGE_RULES+=$'\n'$(divert "tap-$QEMU_BRIDGE_IF" "$RUNCVM_DNS_IP" "udp dport 53")
@@ -357,9 +370,14 @@ table ip runcvm {
     type nat hook prerouting priority dstnat; policy accept;
     $NAT_PREROUTING_RULES
   }
+  chain output {
+    type nat hook output priority dstnat; policy accept;
+    $NAT_OUTPUT_RULES
+  }
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
     oifname "br-$QEMU_BRIDGE_IF" ip saddr $QEMU_BRIDGE_IP tcp dport $SSHD_PORT snat to $RUNCVM_DNS_IP
+    $NAT_POSTROUTING_RULES
   }
 }
 table arp runcvm {
