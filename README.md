@@ -751,7 +751,7 @@ RunCVM options are specified either via standard `docker run` options (see [Feat
 - in the image: `ENV RUNCVM_<KEY>=<VALUE>` in its Dockerfile;
 - in Docker Compose: a service's `environment` or `env_file`.
 
-A value set on the command line overrides the image's. On a shell command line, quote a value that holds shell metacharacters, such as `;` in `--env='RUNCVM_DISKS=<disk1>;<disk2>'`.
+A value set on the command line overrides the image's. Variables set with `docker exec --env` have no effect, except [`RUNCVM_RUNTIME_DEBUG=1`](#runcvm_runtime_debug), which logs the runtime's handling of that `docker exec`. On a shell command line, quote a value that holds shell metacharacters, such as `;` in `--env='RUNCVM_DISKS=<disk1>;<disk2>'`.
 
 ### RUNCVM_KERNEL
 
