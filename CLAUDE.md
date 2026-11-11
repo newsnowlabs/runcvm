@@ -190,8 +190,9 @@ the branch.
 `main` takes only clean commits. How a pull request lands depends on its branch:
 
 - **Rebase merge** when the branch is already clean: every commit is a self-contained,
-  logically coherent change that builds; every message meets the rules above; there are no
-  merge, fixup or work-in-progress commits; and every commit has the right author.
+  logically coherent change that builds; every message meets the rules above, its subject
+  ending in the pull request's number (see below); there are no merge, fixup or
+  work-in-progress commits; and every commit has the right author.
 - **Squash merge** otherwise, with a commit message written for `main` (not GitHub's default
   concatenation of the branch's commit subjects). Before merging, preserve the branch's
   history with a tag, `git tag raw/<branch> origin/<branch> && git push origin raw/<branch>`,
@@ -203,15 +204,15 @@ the branch.
 
 Every commit that lands on `main` has a subject ending in its pull request's number (e.g.
 `(#60)`), so that `git log --oneline` links each change to its review. GitHub adds the number
-to a squash merge's subject, but a rebase merge keeps each commit's message as it is, without
-one. So:
+to a squash merge's subject, but a rebase merge keeps each commit's message as it is. So:
 
-- **A single-commit branch** lands by squash merge, with the commit's own message and the
-  number added to its subject, which lands the same change as a rebase merge would:
+- **A clean single-commit branch** lands by squash merge in place of a rebase merge, with the
+  commit's own message and the number added to its subject, which lands the same change:
   `gh pr merge <n> --squash --subject "<subject> (#<n>)" --body "<body>"`, taking the subject
   and body from `git log -1 --format=%s` and `%b` of the branch's commit.
-- **A multi-commit branch to be rebase-merged** first has each commit's subject reworded on
-  the branch to end with the number, and the branch force-pushed, before the rebase merge.
+- **A clean multi-commit branch** is rebase-merged only once each commit's subject has been
+  reworded on the branch to end with the number. That rewrites the branch's pushed commits, so
+  it needs the maintainer's sign-off; otherwise the branch is squash-merged.
 
 Once the changes in a pull request whose branch has more than one commit are complete (its
 tests may still be running), its description ends with a "Squash commit message" section, for
