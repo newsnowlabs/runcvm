@@ -711,8 +711,8 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   # emulation) QEMU's translated-code cache.
   jq_set "$CFG" --arg size "$((($RUNCVM_MEM_SIZE + $RUNCVM_CONTAINER_MEM_OVERHEAD + $RUNCVM_CONTAINER_MEM_TCG)*1024*1024))" '.linux.resources.memory.limit = ($size | tonumber)'
 
-  # A memory-and-swap limit (docker run --memory-swap) must be at least the memory limit: raise
-  # it by as much as the memory limit.
+  # A memory-and-swap limit (docker run --memory-swap) must be at least the memory limit: raise it
+  # by the same amount as the memory limit was raised above.
   if [ "$RUNCVM_MEM_LIMIT" != "null" ]; then
     jq_set "$CFG" --arg limit "$RUNCVM_MEM_LIMIT" '
       if (.linux.resources.memory.swap // 0) > 0
