@@ -453,8 +453,8 @@ do_disk() {
   # destination lies above an earlier disk's would be mounted over that disk, hiding it; two disks
   # with one destination would hide one another; and a tmpfs mount at or above a disk's destination
   # would hide the disk. Reject each, before this disk is created. Each destination is compared as
-  # its path in the image's filesystem, with symbolic links resolved, as recorded in DISK_DESTS and
-  # TMPFS_DESTS.
+  # its path in the image's filesystem, with symbolic links resolved (or as given, where that
+  # fails), as recorded in DISK_DESTS and TMPFS_DESTS.
   for dst in "${dests[@]}"
   do
     path=$(disk_normalise_path "$dst") && path=$(disk_resolve_path "$path") || path="$dst"
@@ -468,7 +468,7 @@ do_disk() {
     done
     for i in "${!TMPFS_DESTS[@]}"
     do
-      if [[ "${TMPFS_DESTS[$i]}" = "$path" || "$path" = "${TMPFS_DESTS[$i]}"/* ]]; then
+      if [[ "${TMPFS_DESTS[$i]}" = "$path" || "$path" = "${TMPFS_DESTS[$i]%/}"/* ]]; then
         error "Error: disk spec '$spec' invalid: dst '$dst' lies at or below the tmpfs mount at '${TMPFS_DESTS[$i]}', which would hide this disk"
       fi
     done
