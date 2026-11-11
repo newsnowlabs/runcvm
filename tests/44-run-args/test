@@ -8,10 +8,9 @@ must give its entrypoint exactly what runc gives it, with and without --init:
 
 - the arguments, each printed between angle brackets;
 - a multi-line 'sh -c' script, and one whose first line is empty;
-- the working directory (-w).
-
-A Container/VM's console, without a terminal, ends each line of output with
-CR LF, so the test maps CR LF to LF before comparing; no value holds a CR.
+- the working directory (-w);
+- output holding LFs, CR LFs and a lone CR, which, without a terminal ('docker
+  run' without -t), passes through byte for byte.
 """
 
 import os
@@ -37,6 +36,7 @@ CASES = {
     "multi-line 'sh -c' script": (["sh", "-c", "echo line1\necho line2"], "line1\nline2\n"),
     "'sh -c' script whose first line is empty": (["sh", "-c", "\necho line2"], "line2\n"),
     "working directory": (["-w", WORKDIR, "alpine", "pwd"], WORKDIR + "\n"),
+    "output with CRs and LFs": (["printf", "one\\ntwo\\r\\nthree\\r"], "one\ntwo\r\nthree\r"),
 }
 
 
@@ -53,7 +53,7 @@ def run(item):
                            stderr=subprocess.STDOUT, timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
         return item, "timed out after %ds" % TIMEOUT
-    out = r.stdout.decode("utf-8", "backslashreplace").replace("\r\n", "\n")
+    out = r.stdout.decode("utf-8", "backslashreplace")
     return item, (out if r.returncode == 0 else "exit status %d: %s" % (r.returncode, out))
 
 

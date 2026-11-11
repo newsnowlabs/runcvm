@@ -426,6 +426,14 @@ if [ "$COMMAND" = "create" ]; then
   set_config_env "RUNCVM_CPUS" "$RUNCVM_CPUS"
   log "RUNCVM_CPUS=$RUNCVM_CPUS"
 
+  # CONFIGURE CONSOLE
+  # RUNCVM_TTY: 1 if the container has a terminal ('docker run -t'), else 0. The workload's input
+  # and output pass through the VM's console either way; without a terminal, runcvm-vm-start puts
+  # the console into raw mode, so that they pass through unchanged.
+  RUNCVM_TTY=$(jq_get "$CFG" 'if .process.terminal then 1 else 0 end')
+  set_config_env "RUNCVM_TTY" "$RUNCVM_TTY"
+  log "RUNCVM_TTY=$RUNCVM_TTY"
+
   # CONFIGURE MOUNTS
   set_config_env "RUNCVM_VM_MOUNTPOINT" "$RUNCVM_VM_MOUNTPOINT"
 
