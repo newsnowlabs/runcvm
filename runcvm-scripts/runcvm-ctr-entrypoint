@@ -90,6 +90,58 @@ printf '%s\0' "$PWD" >/.runcvm/pwd
 # DEBUG
 if [[ "$RUNCVM_BREAK" =~ prenet ]]; then bash; fi
 
+# RESTORE A NETWORK CONFIGURED BY AN EARLIER CONTAINER/VM
+# A network namespace can outlive its Container/VM: a Kubernetes pod's containers, and each of a
+# container's restarts, share the pod's. The configuration below leaves each interface in a bridge,
+# br-<interface>, without its addresses, which it records in the interface's alias, as the namespace
+# keeps no other record once the container has gone. A Container/VM started in such a namespace
+# first returns each interface to its addresses and routes, and removes the bridges and firewall
+# rules, so that it finds the network as the earlier one did.
+restore_network() {
+  local bri if alias addr route
+
+  # A tap device exists only while its QEMU runs.
+  if [ -n "$(ip -json link show | jq -r '.[].ifname | select(startswith("tap-"))')" ]; then
+    echo "RunCVM: Error: another Container/VM is running in this container's network namespace (e.g. another container of the same Kubernetes pod); only one Container/VM can use a network namespace" >&2
+    exit 1
+  fi
+
+  for bri in $(ip -json link show type bridge | jq -r '.[].ifname | select(startswith("br-"))')
+  do
+    if="${bri#br-}"
+    alias=$(ip -json link show dev "$if" 2>/dev/null | jq -r '.[0].ifalias // empty')
+    [[ "$alias" =~ ^runcvm: ]] || continue
+
+    # Routes via the bridge, to be routed via the interface again: each an address family option
+    # ('-4' or '-6') and 'ip route' arguments.
+    local routes=() family
+    for family in -4 -6
+    do
+      while read -r route; do routes+=("$family $route"); done < <(
+        ip -N $family -json route show dev "$bri" | \
+          jq -r '.[] | select(.protocol != "2" and .dst != "fe80::/64") | [.dst, (.gateway // empty | "via " + .)] | join(" ")'
+      )
+    done
+
+    ip link del "$bri"
+    for addr in ${alias#runcvm:}
+    do
+      if [[ "$addr" =~ : ]]; then ip -6 addr add "$addr" dev "$if" nodad; else ip addr add "$addr" dev "$if"; fi
+    done
+    for route in "${routes[@]}"
+    do
+      ip ${route%% *} route replace ${route#* } dev "$if"
+    done
+    ip link set dev "$if" alias ""
+  done
+
+  nft list tables | while read -r _ family table; do
+    if [ "$table" = "runcvm" ]; then nft delete table "$family" runcvm; fi
+  done
+}
+
+restore_network
+
 # SAVE NETWORKING CONFIG AND CONFIGURE BRIDGES
 
 # Identify default gateway device and IP address. '|| true' keeps 'bash -e' from exiting silently
@@ -194,6 +246,8 @@ do
   fi
 
   # RECONFIGURE CONTAINER NETWORK
+  # Record the interface's addresses for restore_network (above).
+  ip link set dev "$if" alias "runcvm:${DOCKER_IF_IP:+ $DOCKER_IF_IP/$DOCKER_IF_IP_NETPREFIX}${DOCKER_IF6_IP:+ $DOCKER_IF6_IP/$DOCKER_IF6_IP_NETPREFIX}"
   ip addr flush dev "$if"
 
   QEMU_BRIDGE="br-$if"
