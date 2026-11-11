@@ -91,15 +91,15 @@ jobs:
         run: tests/selftest/run-selftest --docker
 
   build:
-    # Pull requests: not drafts, nor with ci:skip; for label changes, only adding a ci: label
-    # other than ci:skip, or removing ci:skip. The test jobs need this one, so they run or are
-    # skipped with it.
+    # Pull requests: not drafts, nor with ci:skip; for label changes, only adding ci:extended
+    # or ci:all, or removing ci:skip. The test jobs need this one, so they run or are skipped
+    # with it.
     if: >-
       github.event_name != 'pull_request' || (
         !github.event.pull_request.draft &&
         !contains(github.event.pull_request.labels.*.name, 'ci:skip') &&
         (github.event.action != 'labeled' ||
-          (startsWith(github.event.label.name, 'ci:') && github.event.label.name != 'ci:skip')) &&
+          github.event.label.name == 'ci:extended' || github.event.label.name == 'ci:all') &&
         (github.event.action != 'unlabeled' || github.event.label.name == 'ci:skip')
       )
     concurrency:
