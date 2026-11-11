@@ -48,16 +48,18 @@ Launch with VNC:
 docker run --runtime=runcvm --name ubuntu2 --env=RUNCVM_DISPLAY_MODE=vnc -p 5900:5900 ubuntu
 ```
 
-Launch a VM with 1G memory and a 1G ext4-formatted backing file mounted at `/var/lib/docker` and stored in the underlying container's filesystem:
+Launch Docker (from the `docker:dind` image) in a VM with 1G memory and a 1G ext4-formatted backing file, stored in the underlying container's filesystem, holding `/var/lib/docker` and `/var/lib/containerd` (as `dockerd` needs: see [Running Docker in a RunCVM Container/VM](#running-docker-in-a-runcvm-containervm)); then run a container within it:
 
 ```console
-docker run -it --runtime=runcvm --init --memory=1G --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,1G <docker-image>
+docker run -d --runtime=runcvm --init --name=dind1 --memory=1G --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,1G docker:dind
+docker exec dind1 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done; docker run --rm hello-world'
 ```
 
-Launch a VM with 2G memory and a 5G ext4-formatted backing file mounted at `/var/lib/docker` and stored in a dedicated Docker volume on the host:
+Launch Docker in a VM with 2G memory and a 5G ext4-formatted backing file, stored in a dedicated Docker volume on the host, holding `/var/lib/docker` and `/var/lib/containerd`, so that Docker's images and containers persist when the Container/VM is removed and relaunched:
 
 ```console
-docker run -it --runtime=runcvm --init --memory=2G --mount=type=volume,src=runcvm-disks,dst=/disks --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,5G <docker-image>
+docker run -d --runtime=runcvm --init --name=dind2 --memory=2G --mount=type=volume,src=dind2-disks,dst=/disks --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,5G docker:dind
+docker exec dind2 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done; docker run --rm hello-world'
 ```
 
 Launch a 3-node Docker Swarm on a network with 9000 MTU and, on the swarm, an http global service:
@@ -98,7 +100,7 @@ RUN wget -O /tmp/sysbox.deb \
     https://downloads.nestybox.com/sysbox/releases/v0.6.2/sysbox-ce_0.6.2-0.linux_amd64.deb && \
     apt -y install /tmp/sysbox.deb
 ENTRYPOINT ["/lib/systemd/systemd"]
-ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,1G;/disks/sysbox,/var/lib/sysbox,ext4,1G'
+ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,1G;/disks/sysbox,/var/lib/sysbox,ext4,1G'
 VOLUME /disks
 EOF
 
@@ -124,7 +126,7 @@ RUN rm -f /etc/init.d/docker && \
     bash /opt/runcvm/scripts/runcvm-install-runtime.sh --no-dockerd && \
     echo kvm_intel >>/etc/modules
 ENTRYPOINT ["/lib/systemd/systemd"]
-ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,1G'
+ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,1G'
 VOLUME /disks
 EOF
 
@@ -149,7 +151,7 @@ RUN echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.g
     apt-get install -y runsc
 RUN [ ! -f /etc/docker/daemon.json ] && echo '{}' > /etc/docker/daemon.json; cat /etc/docker/daemon.json | jq '.runtimes.runsc.path="/usr/bin/runsc"' | tee /etc/docker/daemon.json
 ENTRYPOINT ["/lib/systemd/systemd"]
-ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker,ext4,1G'
+ENV RUNCVM_DISKS='/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,1G'
 VOLUME /disks
 EOF
 
@@ -251,11 +253,11 @@ RunCVM features:
 - [Supported distributions](#supported-distributions)
 - [Installation](#installation)
 - [Upgrading](#upgrading)
+- [Running Docker in a RunCVM Container/VM](#running-docker-in-a-runcvm-containervm)
 - [Features and Limitations](#features-and-limitations)
 - [RunCVM vs Kata comparison](#runcvm-vs-kata-comparison)
 - [Kernel auto-detection](#kernel-auto-detection)
 - [Option reference](#option-reference)
-- [Advanced usage](#advanced-usage)
 - [Developing](#developing)
 - [Building](#building)
 - [Testing](#testing)
@@ -523,6 +525,50 @@ To upgrade, follow this procedure:
 2. Rerun the installation command, which installs the latest release, or the release named in `REPO` (see [Installation](#installation)), and runs that release's own installer.
 3. Start any RunCVM containers.
 
+## Running Docker in a RunCVM Container/VM
+
+RunCVM runs `dockerd` in a Container/VM without `--privileged` or any special Docker options. All it needs is a disk for Docker's storage.
+
+The VM's root filesystem is the container's own filesystem, served over virtiofs. Neither Docker's `overlay2` storage driver nor containerd's `overlayfs` snapshotter can use virtiofs as its upper layer. Without a disk, `dockerd` falls back to storage that copies every image layer in full, such as the `vfs` storage driver, which is extremely slow and uses a lot of space. So give `dockerd` a [`RUNCVM_DISKS`](#--envruncvm_disksdisk1disk2) disk that holds both of its storage directories:
+
+- `/var/lib/docker`: containers, volumes, networks and, with Docker's classic image store, images.
+- `/var/lib/containerd`: the storage of the containerd service that Docker's packages (e.g. as installed by `get.docker.com`) run `dockerd` with. With Docker's [containerd image store](https://docs.docker.com/engine/storage/containerd/), the default for new installations of Docker Engine 29 and later, this holds images and their unpacked layers.
+
+One disk can hold both directories, in its subdirectories `var-lib-docker` and `var-lib-containerd` (see [Disk layouts](#disk-layouts)), so the two share the disk's space and you size only one disk. Give the disk both destinations whichever image store `dockerd` uses, and however it was installed: a `dockerd` that starts its own containerd, as in the `docker:dind` image, keeps containerd's storage under `/var/lib/docker`, and leaves `/var/lib/containerd` empty.
+
+For example, to launch `dockerd` from the `docker:dind` image with a 10G disk, whose backing file is in a Docker volume on the host, and run a container in it:
+
+```console
+docker run -d --runtime=runcvm --init --name=dind --memory=2g \
+  --mount=type=volume,src=dind-disks,dst=/disks \
+  --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,10G \
+  docker:dind
+
+docker exec dind sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done; docker run --rm hello-world'
+```
+
+In the keyed form, the same disk is `RUNCVM_DISKS=src=/disks/docker,dst=/var/lib/docker,dst=/var/lib/containerd,fs=ext4,size=10G`.
+
+Images built to run Docker under systemd, such as those in [System workloads](#system-workloads), can set the disk in their own `ENV RUNCVM_DISKS`, and use `VOLUME /disks` to keep the backing file in a volume.
+
+Some points to bear in mind:
+
+- **Where to keep the backing file.** A backing file under `/disks` in a named Docker volume, as above, is kept outside the container's overlay filesystem, survives removal of the container, and can be reused by a later Container/VM. Without the `--mount`, the backing file is created in the container's own filesystem, and goes when the container is removed.
+- **Disk size.** A backing file is sparse by default, so it takes host space only as `dockerd` writes to it. Size the disk for every image, container and volume `dockerd` will hold. With the containerd image store, each image takes space twice: once compressed, and once unpacked. If the host's filesystem fills up, `dockerd`'s writes to a sparse disk fail with I/O errors, which can leave Docker's storage inconsistent. For a long-lived `dockerd`, consider adding `prealloc=on` (e.g. `RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,10G,prealloc=on`), which takes the disk's full size on the host from the start, and keeps it taken, even after images are removed (see [Preallocated disks](#preallocated-disks)).
+- **Keeping the data.** Launch with `--init`, or from an image whose entrypoint is its own init, such as systemd, so that the VM flushes the disk when it stops (see the warning under [`RUNCVM_DISKS`](#--envruncvm_disksdisk1disk2)). A disk thrown away after each run needs no flushing.
+- **Existing disks.** A destination cannot be added to an existing disk. A disk created for `/var/lib/docker` alone (e.g. with `RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,5G`), by this or an earlier release, has layout `root` and holds only that one destination. To add `/var/lib/containerd`, give the new spec a new backing file, or remove the old one, losing its contents.
+- **Nested RunCVM.** When the inner `dockerd` itself runs RunCVM Container/VMs, as in the [nested RunCVM demo](#system-workloads), consider adding `/opt/runcvm` to the disk's destinations too, so the inner Container/VMs are not served RunCVM over nested virtiofs. RunCVM's own test environment, in `tests/env/Dockerfile`, uses `RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G`.
+
+### Docker volumes mounted at `/var/lib/docker` and `/var/lib/containerd` (NOT RECOMMENDED)
+
+Instead of a disk, you can mount Docker volumes at `/var/lib/docker` and `/var/lib/containerd` and launch with `--env=RUNCVM_SYS_ADMIN=1`. This lets `dockerd` use overlay filesystems on the volumes, at the cost of security. It is _not recommended_, and is not covered by RunCVM's automated tests. e.g.
+
+```console
+docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker --mount=type=volume,src=mycontainerd1,dst=/var/lib/containerd --env=RUNCVM_SYS_ADMIN=1 docker:dind
+```
+
+> N.B. This option adds `CAP_SYS_ADMIN` capabilities to the container and then launches `virtiofsd` with `-o modcaps=+sys_admin`.
+
 ## Features and limitations
 
 In the below summary of RunCVM's current main features and limitations, [+] is used to indicate an area of compatibility with standard container runtimes and [-] is used indicate a feature of standard container runtimes that is unsupported.
@@ -563,14 +609,14 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [-] Stdout and Stderr sent very soon after VM launch might be corrupted due to serial console issues
       - [-] Stdout and Stderr sent immediately before VM shutdown might not always be fully flushed
    - Resource allocation and limits
-      - [+] `--cpus` is supported to specify number of VM CPUs
+      - [+] `--cpus` is supported: it sets the container's CPU quota, as usual, and also the number of VM CPUs, rounded up to a whole number (e.g. `--cpus=0.5` gives one CPU, limited to half a CPU's time)
       - [+] `--memory` (or `-m`) is supported to specify VM memory (and limit container memory to this value plus a 256Mb contingency)
       - [-] Other container resource limit options such as (`--cpu-*`), block IO (`--blkio-*`), kernel memory (`--kernel-memory`) are unsupported or untested
    - Exit code
       - [+] Returning an exit code is supported, but it currently requires application support, which must either write the exit code to `/.runcvm/exitcode` (supported exit codes 0-255) or call `/.runcvm/guest/sbin/qemu-exit <code>` (supported exit codes 0-127). Both require the application to run as root, as `/.runcvm` is accessible only to root. Automatic handling of exit codes from the entrypoint may be provided in a later release.
    - Disk performance
       - [+] No mountpoints are required for basic operation for most applications. Volume or disk mountpoints may be needed for running `dockerd` or to improve disk performance
-      - [-] `dockerd` mileage will vary unless a volume or disk is mounted over `/var/lib/docker`
+      - [-] `dockerd` needs a disk holding `/var/lib/docker` and `/var/lib/containerd`: see [Running Docker in a RunCVM Container/VM](#running-docker-in-a-runcvm-containervm)
 - `docker exec`
    - [+] `--user` (or `-u`), `--workdir` (or `-w`), `--env` (or `-e`), `--env-file`, `--detach` (or `-d`), `--interactive` (or `-i`) and `--tty` (or `-t`) are all supported
    - [+] Stdout and Stderr _are_ independently multiplexed so `docker exec <container> bash -c 'echo stdout; echo stderr >&2' >/tmp/stdout 2>/tmp/stderr` _does_ produce the expected result
@@ -845,7 +891,7 @@ This example behaves similarly, except that the `runcvm-disks` persistent Docker
 docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=/disks/data,/var/lib/docker:/var/lib/containerd:/home,ext4,40G' <docker-image>
 ```
 
-In this example, a single 40G backing file at `/disks/data`, in the `runcvm-disks` volume, holds `/var/lib/docker`, `/var/lib/containerd` and `/home`, in its directories `var-lib-docker`, `var-lib-containerd` and `home`.
+In this example, a single 40G backing file at `/disks/data`, in the `runcvm-disks` volume, holds `/var/lib/docker`, `/var/lib/containerd` and `/home`, in its directories `var-lib-docker`, `var-lib-containerd` and `home`. `<docker-image>` would typically run `dockerd`: e.g. `docker:dind`, or an image that runs Docker under systemd, like those in [System workloads](#system-workloads).
 
 The same disk, in the keyed form:
 
@@ -983,40 +1029,6 @@ Use `1` or `hybrid` only for software that requires cgroup v1. A kernel built wi
 If cgroup2 is already mounted on `/sys/fs/cgroup` when the VM starts, as the systemd-based initramfs of some distributions (such as Oracle Linux) leaves it, RunCVM mounts nothing more, whatever the value.
 
 Please also note that in the case your distribution is running Systemd you may instead set `--env=RUNCVM_KERNEL_APPEND='systemd.unified_cgroup_hierarchy=<boolean>'` (where `<boolean>` is `0` or `1`) to request Systemd to create either hybrid or cgroup2-only cgroup filesystem(s) itself.
-
-## Advanced usage
-
-### Running Docker in a RunCVM Container/VM
-
-#### ext4 disk backing file mounted at `/var/lib/docker`
-
-If running Docker within a VM, it is recommended that you mount a disk backing file at `/var/lib/docker` to allow `dockerd` to use the preferred overlay filesystem and avoid it opting to use the extremely sub-performant `vfs` storage driver.
-
-e.g. To launch a VM with a 1G ext4-formatted backing file, stored in the underlying container's overlay filesystem, and mounted at `/var/lib/docker`, run:
-
-```sh
-docker run -it --runtime=runcvm --init --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,1G <docker-image>
-```
-
-To launch a VM with a 5G ext4-formatted backing file, stored in a dedicated Docker volume on the host, and mounted at `/var/lib/docker`, run:
-
-```sh
-docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env=RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,5G <docker-image>
-```
-
-In both cases, RunCVM will check for existence of a file `/disks/docker` and, if not found, will create the disk backing file of the given size and format as an ext4 filesystem. It will add the disk to `/etc/fstab`.
-
-For full documentation of `RUNCVM_DISKS`, see above.
-
-#### Docker volume mounted at `/var/lib/docker` (NOT RECOMMENDED)
-
-Doing this is _not recommended_, but if running Docker within a VM, you can enable `dockerd` to use the overlay filesystem (at the cost of security) by launching with `--env=RUNCVM_SYS_ADMIN=1`. e.g. 
-
-```sh
-docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker --env=RUNCVM_SYS_ADMIN=1 <docker-image>
-```
-
-> N.B. This option adds `CAP_SYS_ADMIN` capabilities to the container and then launches `virtiofsd` with `-o modcaps=+sys_admin`. 
 
 ## Developing
 
@@ -1218,7 +1230,7 @@ RunCVM and [Dockside](https://dockside.io/) are designed to work together in two
 2. Dockside can itself be launched inside a RunCVM VM with its own `dockerd` to provide increased security and compartmentalisation from a host. e.g.
 
 ```
-docker run --rm -it --runtime=runcvm  --memory=2g --name=docksidevm -p 443:443 -p 80:80 --mount=type=volume,src=dockside-data,dst=/data --mount=type=volume,src=dockside-disks,dst=/disks --env=RUNCVM_DISKS=/disks/disk1,/var/lib/docker,ext4,5G newsnowlabs/dockside --run-dockerd --ssl-builtin
+docker run --rm -it --runtime=runcvm  --memory=2g --name=docksidevm -p 443:443 -p 80:80 --mount=type=volume,src=dockside-data,dst=/data --mount=type=volume,src=dockside-disks,dst=/disks --env=RUNCVM_DISKS=/disks/disk1,/var/lib/docker:/var/lib/containerd,ext4,5G newsnowlabs/dockside --run-dockerd --ssl-builtin
 ```
 
 ## Legals
