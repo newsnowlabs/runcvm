@@ -81,7 +81,6 @@ def run(init):
         """The filesystem type of the topmost mount at path, as /proc/mounts lists it last."""
         return out("awk", "$2 == \"%s\" { fs = $3 } END { print fs }" % path, "/proc/mounts")
 
-
     for boot in ("first start", "second start"):
         t.docker("start", name, check=True)
         if not t.wait_for_exec(name, BOOT_TIMEOUT):
@@ -107,7 +106,8 @@ def run(init):
                 out("cat", "/var/cache/app/vol/marker"))
 
         # Neither disk with layout 'subdirs', whose directories are visible at /.runcvm/disks/<n>,
-        # holds a copy of a mount's contents: each holds an empty mountpoint.
+        # holds a copy of a mount's contents: each holds an empty mountpoint (an empty file, for
+        # the file bind mount).
         t.check("%s, %s: disk 0 holds an empty mountpoint for the volume" % (mode, boot), "",
                 out("ls", "-A", "/.runcvm/disks/0/home/user/shared"))
         t.check("%s, %s: disk 0 holds an empty file for the file bind mount" % (mode, boot), "0",
@@ -135,7 +135,7 @@ def run(init):
         t.check("%s: file written to the disk persists" % mode, "first", out("cat", "/home/user/on-disk-first"))
     else:
         t.check("%s: Container/VM started a third time" % mode, True, False)
-    t.docker("stop", "-t", "30", name)
+    t.docker("stop", "-t", "30", name, check=True)
 
 
 t.param("init", "no, yes")
