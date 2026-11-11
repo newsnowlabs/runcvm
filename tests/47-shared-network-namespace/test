@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Container/VMs in a network namespace that outlives them.
+
+A Kubernetes pod's containers, and each of a container's restarts, share
+the pod's network namespace, as Container/VMs launched with
+--network=container:<name> share another container's. A Container/VM's
+network configuration leaves the namespace's interface in a bridge without
+its address; a Container/VM started after it returns the interface to its
+address first. For each mode, with and without --init, in the network
+namespace of an ordinary (runc) container:
+
+- two Container/VMs, one after the other, each have the namespace's address
+  and reach another container on the network;
+- while one is running, another fails, saying that only one Container/VM
+  can use a network namespace;
+- once it has gone, a third starts.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+MESSAGE = "only one Container/VM can use a network namespace"
+
+network = t.unique("net")
+t.docker("network", "create", *t.labels(), network, check=True)
+t.cleanup_network(network)
+
+peer = t.unique("peer")
+t.cleanup_container(peer)
+t.docker("run", "-d", "--name", peer, *t.labels(), "--network", network, "alpine", "sleep", "900", check=True)
+peer_address = t.docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                        peer).stdout.strip()
+
+
+def vm(holder, init, label, *args, detach=False):
+    name = t.unique("%s%s" % (label, "-init" if init else ""))
+    t.cleanup_container(name)
+    return name, t.docker("run", *(["-d"] if detach else ["--rm"]), "--name", name, *t.labels(),
+                          "--runtime=" + t.RUNTIME, *t.vm_opts(), *(["--init"] if init else []),
+                          "--network", "container:" + holder, "alpine", *args)
+
+
+def case(init):
+    mode = "--init" if init else "no --init"
+    results = []
+    holder = t.unique("holder%s" % ("-init" if init else ""))
+    t.cleanup_container(holder)
+    t.docker("run", "-d", "--name", holder, *t.labels(), "--network", network, "alpine", "sleep", "900",
+             check=True)
+    address = t.docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                       holder).stdout.strip()
+
+    probe = "ip -4 -o addr show eth0; ping -c 1 -W 5 %s >/dev/null && echo peer-reached" % peer_address
+    for run in ("first", "second"):
+        _, r = vm(holder, init, run, "sh", "-c", probe)
+        t.log_detail("%s, %s Container/VM output:\n%s" % (mode, run, r.stdout))
+        results.append(("%s, %s Container/VM: has the namespace's address %s" % (mode, run, address),
+                        True, (" %s/" % address) in r.stdout))
+        results.append(("%s, %s Container/VM: reaches another container" % (mode, run),
+                        True, "peer-reached" in r.stdout))
+
+    running, r = vm(holder, init, "running", "sleep", "600", detach=True)
+    started = r.returncode == 0 and t.wait_for_exec(running, BOOT_TIMEOUT)
+    results.append(("%s: a Container/VM runs in the namespace" % mode, True, started))
+    _, r = vm(holder, init, "alongside", "echo", "workload-ran")
+    t.log_detail("%s, Container/VM alongside output:\n%s" % (mode, r.stdout))
+    results.append(("%s: a second, alongside it, fails" % mode, True, r.returncode != 0))
+    results.append(("%s: a second, alongside it, gives RunCVM's message" % mode, True,
+                    MESSAGE in r.stdout))
+    results.append(("%s: a second, alongside it, does not run its workload" % mode, False,
+                    "workload-ran" in r.stdout))
+    t.docker("rm", "-f", running)
+
+    _, r = vm(holder, init, "third", "sh", "-c", probe)
+    t.log_detail("%s, third Container/VM output:\n%s" % (mode, r.stdout))
+    results.append(("%s: once it has gone, a third reaches another container" % mode, True,
+                    "peer-reached" in r.stdout))
+    return results
+
+
+for results in t.parallel(case, [False, True]):
+    for desc, expected, actual in results:
+        t.check(desc, expected, actual)
+
+t.finish()
