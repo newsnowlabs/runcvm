@@ -449,6 +449,31 @@ do_disk() {
     fi
   done
 
+  # Disks are mounted in RUNCVM_DISKS order, and tmpfs mounts after them all, so a disk whose
+  # destination lies above an earlier disk's would be mounted over that disk, hiding it; two disks
+  # with one destination would hide one another; and a tmpfs mount at or above a disk's destination
+  # would hide the disk. Reject each, before this disk is created. Each destination is compared as
+  # its path in the image's filesystem, with symbolic links resolved, as recorded in DISK_DESTS and
+  # TMPFS_DESTS.
+  for dst in "${dests[@]}"
+  do
+    path=$(disk_normalise_path "$dst") && path=$(disk_resolve_path "$path") || path="$dst"
+    for i in "${!DISK_DESTS[@]}"
+    do
+      if [ "${DISK_DESTS[$i]}" = "$path" ]; then
+        error "Error: disk spec '$spec' invalid: dst '$dst' is also the dst of an earlier disk"
+      elif [[ "${DISK_DESTS[$i]}" = "$path"/* ]]; then
+        error "Error: disk spec '$spec' invalid: dst '$dst' lies above an earlier disk's dst '${DISK_DESTS[$i]}', which this disk would hide: list this disk before that one in RUNCVM_DISKS"
+      fi
+    done
+    for i in "${!TMPFS_DESTS[@]}"
+    do
+      if [[ "${TMPFS_DESTS[$i]}" = "$path" || "$path" = "${TMPFS_DESTS[$i]}"/* ]]; then
+        error "Error: disk spec '$spec' invalid: dst '$dst' lies at or below the tmpfs mount at '${TMPFS_DESTS[$i]}', which would hide this disk"
+      fi
+    done
+  done
+
   # Create each destination directory, if it doesn't already exist: it is the source from which
   # a new disk is populated, and the mountpoint within the VM.
   for dst in "${dests[@]}"
@@ -622,9 +647,21 @@ do_disks() {
   local IFS=';'
   local disk
   local id=0
+  local tmpfs_dst path
   ROOT_DISK_SPEC=""
   DISK_EXCLUDES=()
   DISK_DESTS=()
+
+  # The destination of each tmpfs mount, which runcvm-runtime passes in RUNCVM_TMPFS as fstab
+  # entries, one per line, for do_disk's check, as a path in the image's filesystem with symbolic
+  # links resolved.
+  TMPFS_DESTS=()
+  while IFS=$' \t' read -r _ tmpfs_dst _
+  do
+    [ -n "$tmpfs_dst" ] || continue
+    path=$(disk_normalise_path "$tmpfs_dst") && path=$(disk_resolve_path "$path") || path="$tmpfs_dst"
+    TMPFS_DESTS+=("$path")
+  done <<< "$RUNCVM_TMPFS"
 
   for disk in $1
   do

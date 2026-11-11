@@ -25,6 +25,13 @@
 - Keyed specs (whose keys include Docker's aliases 'source', 'target' and
   'destination') with a repeated or unknown key, a field without '=', no dst
   or overlapping destinations are rejected likewise.
+- Across disks, and tmpfs mounts, which are mounted after every disk: a disk
+  whose destination lies above an earlier disk's (including through the
+  image's symbolic link /var/run), two disks with one destination, or a disk
+  at or below a tmpfs mount's destination: the Container/VM exits with
+  status 1, reporting the disk's spec, before creating that disk. A disk
+  listed before one below it, a tmpfs mount below a disk, and destinations
+  sharing only a prefix (/home and /homes): the Container/VM runs.
 """
 
 import os
@@ -95,6 +102,41 @@ INVALID = [
 ]
 
 
+# Across disks and tmpfs mounts: (name, RUNCVM_DISKS, further docker run options, the spec
+# reported, expected message, or None where the Container/VM runs)
+ACROSS = [
+    ("outer-disk-last", "/disks/b,/home/b,ext4,16M;/disks/a,/home,ext4,16M", [],
+     "/disks/a,/home,ext4,16M",
+     "dst '/home' lies above an earlier disk's dst '/home/b', which this disk would hide: "
+     "list this disk before that one in RUNCVM_DISKS"),
+    ("outer-disk-last-symlink", "/disks/b,/run/b,ext4,16M;/disks/a,/var/run,ext4,16M,layout=root", [],
+     "/disks/a,/var/run,ext4,16M,layout=root",
+     "dst '/var/run' lies above an earlier disk's dst '/run/b', which this disk would hide: "
+     "list this disk before that one in RUNCVM_DISKS"),
+    ("same-dst-two-disks", "/disks/a,/home,ext4,16M;/disks/b,/home,ext4,16M", [],
+     "/disks/b,/home,ext4,16M", "dst '/home' is also the dst of an earlier disk"),
+    ("tmpfs-above-disk", "/disks/b,/home/b,ext4,16M", ["--mount", "type=tmpfs,dst=/home"],
+     "/disks/b,/home/b,ext4,16M",
+     "dst '/home/b' lies at or below the tmpfs mount at '/home', which would hide this disk"),
+    ("tmpfs-at-disk", "/disks/b,/home,ext4,16M", ["--tmpfs", "/home"],
+     "/disks/b,/home,ext4,16M",
+     "dst '/home' lies at or below the tmpfs mount at '/home', which would hide this disk"),
+    ("outer-disk-first", "/disks/a,/home,ext4,16M;/disks/b,/home/b,ext4,16M", [], None, None),
+    ("tmpfs-below-disk", "/disks/a,/home,ext4,16M", ["--mount", "type=tmpfs,dst=/home/cache"], None, None),
+    ("prefix-only", "/disks/a,/home,ext4,16M;/disks/b,/homes,ext4,16M", ["--mount", "type=tmpfs,dst=/homes2"],
+     None, None),
+]
+
+
+def run_across(case):
+    name, disks, opts = case[:3]
+    volume = t.unique("across-" + name)
+    t.volume_create(volume)
+    return t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
+                    *t.vm_opts(), "--mount", "type=volume,src=%s,dst=/disks" % volume, *opts,
+                    "--env", "RUNCVM_DISKS=" + disks, "alpine", "true", timeout=TIMEOUT)
+
+
 def run_invalid(case):
     name, disks, _ = case
     return t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
@@ -115,6 +157,15 @@ def run_changed(case):
                                 timeout=TIMEOUT))
     return results
 
+
+for (name, disks, opts, spec, message), r in zip(ACROSS, t.parallel(run_across, ACROSS)):
+    if message is None:
+        if not t.check("%s: exit status" % name, 0, r.returncode):
+            t.log("output:\n%s" % r.stdout)
+        continue
+    t.check("%s: exit status" % name, 1, r.returncode)
+    if not t.check("%s: error message" % name, True, ("disk spec '%s' invalid: %s" % (spec, message)) in r.stdout):
+        t.log("output:\n%s" % r.stdout)
 
 for (name, disks, message), r in zip(INVALID, t.parallel(run_invalid, INVALID)):
     t.check("%s: exit status" % name, 1, r.returncode)
