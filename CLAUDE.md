@@ -187,36 +187,26 @@ the branch.
 
 ## Merging to `main`
 
-Every pull request lands by squash merge, as one commit whose subject ends in the pull
-request's number (e.g. `(#60)`), as GitHub's own squash subjects do, so that `git log
---oneline` links each change to its review. The commit message is written for `main` (not
-GitHub's default concatenation of the branch's commit subjects):
+`main` takes only clean commits. Every pull request lands by squash merge, with a commit
+message written for `main` (not GitHub's default concatenation of the branch's commit
+subjects), its subject ending in the pull request's number (e.g. `(#60)`). Before merging,
+preserve the branch's history with a tag,
+`git tag raw/<branch> origin/<branch> && git push origin raw/<branch>`, and end the squash
+message with a trailer citing it:
+```
+Raw-History: raw/<branch> (<original-tip-short-hash>)
+```
+A single-commit branch needs no tag or trailer.
 
-- **A single-commit branch** lands with that commit's own message, the number added to its
-  subject: `gh pr merge <n> --squash --subject "<subject> (#<n>)" --body "<body>"`, taking
-  the subject and body from `git log -1 --format=%s` and `%b` of the branch's commit. It needs
-  no tag or trailer.
-- **A multi-commit branch** lands with the message in its description's "Squash commit
-  message" section (below). Before merging, preserve the branch's history with a tag,
-  `git tag raw/<branch> origin/<branch> && git push origin raw/<branch>`, which the message's
-  trailer cites:
-  ```
-  Raw-History: raw/<branch> (<original-tip-short-hash>)
-  ```
-
-A branch that lands on `main` without a pull request, with the maintainer's agreement, may be
-rebased onto `main` and pushed only if it is already clean: every commit is a self-contained,
-logically coherent change that builds; every message meets the rules above; there are no merge,
-fixup or work-in-progress commits; and every commit has the right author.
-
-Once the changes in a pull request whose branch has more than one commit are complete (its tests
-may still be running), its description ends with a "Squash commit message" section, for use when
-it is squash-merged. The section holds the subject and body in a fenced block, which keeps the
-body's 72-column wrapping. They follow the rules in "Commit messages", with the subject ending
-in the pull request's number (e.g. `(#60)`), and the body ending with the `Raw-History:` trailer
-for the branch's tip and any `Co-Authored-By:` trailers. The message describes the pull
-request's final diff against its base, not the branch's commits one by one, and is updated
-whenever the branch changes.
+Once the changes in a pull request whose branch has more than one commit are complete (its
+tests may still be running), its description ends with a "Squash commit message" section, for
+use when it is squash-merged. The section
+holds the subject and body in a fenced block, which keeps the body's 72-column wrapping. They
+follow the rules in "Commit messages", with the subject ending in the pull request's number
+(e.g. `(#60)`) as GitHub's own squash subjects do, and the body ending with the
+`Raw-History:` trailer for the branch's tip and any `Co-Authored-By:` trailers. The message
+describes the pull request's final diff against its base, not the branch's commits one by
+one, and is updated whenever the branch changes.
 
 ### Stacked pull requests
 
@@ -239,6 +229,4 @@ git log origin/main --format='%H %s' | while read hash subject; do
 done
 ```
 
-A single-commit branch carries no trailer; check whether its content is already on `main`. A
-branch rebased onto `main` and pushed without a pull request has landed if its tip is on `main`
-(`git merge-base --is-ancestor <tip> origin/main`).
+A single-commit branch carries no trailer; check whether its content is already on `main`.
