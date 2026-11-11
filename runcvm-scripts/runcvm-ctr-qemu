@@ -947,7 +947,11 @@ ARGS=(
 # processing (OPOST) on the container's terminal, while the VM's console translates each LF to
 # CR LF itself, as a terminal does: stop the container's terminal from translating it again, so
 # lines end CR LF, not CR CR LF.
-if [ -t 0 ] && [[ "$CONSOLE_DEV" = hvc0 || "$CONSOLE_DEV" = ttyS0 ]]; then
+#
+# This applies where the VM's console is QEMU's stdio, which every console device but tty0 is, in
+# any display mode and on any architecture (e.g. hvc0, or a serial port's ttyS0): so tty0 alone,
+# the console of display mode 'vnc', which is the VM's display, is left out.
+if [ -t 0 ] && [ "$CONSOLE_DEV" != tty0 ]; then
   busybox stty -onlcr 2>/dev/null || true
 fi
 
