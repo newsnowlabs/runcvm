@@ -95,16 +95,20 @@ class Session:
             return self.proc.wait(max(0, deadline - time.time()))
         except subprocess.TimeoutExpired:
             self.proc.kill()
+            self.proc.wait(5)
             return None
         finally:
-            while self.read(0.2):
+            # Read the rest of the output, for a limited time, as another process may hold the
+            # terminal open.
+            drain = time.time() + 2
+            while time.time() < drain and self.read(drain - time.time()):
                 pass
             os.close(self.master)
 
 
-def window_size(session):
+def window_size(session, timeout=STEP_TIMEOUT):
     mark = session.send(b"echo size=$(stty size 2>/dev/null)\r")
-    m = session.expect(rb"size=([0-9 ]*)\r", STEP_TIMEOUT, mark)
+    m = session.expect(rb"size=([0-9 ]*)\r", timeout, mark)
     return m.group(1).decode() if m else None
 
 
@@ -133,7 +137,7 @@ def run(case):
         set_size(s.master, NEW_SIZE)
         deadline = time.time() + STEP_TIMEOUT
         while True:
-            result["new size"] = window_size(s)
+            result["new size"] = window_size(s, max(1, deadline - time.time()))
             if result["new size"] == "%d %d" % NEW_SIZE or time.time() >= deadline:
                 break
             time.sleep(1)
