@@ -29,8 +29,9 @@
 # [skip ci] prevent the run, so they would need the same treatment then.
 #
 # The arm64 job builds RunCVM for arm64 on GitHub's ubuntu-24.04-arm runner, and runs it there:
-# under KVM, the same tests as the x86-64 jobs; without KVM, a smoke test under software
-# emulation (TCG), as the core tier would take hours. Its failure does not fail the run.
+# under KVM, the same tests as the x86-64 jobs, in one job; without KVM, a smoke test under
+# software emulation (TCG), where each Container/VM takes tens of seconds to start, too slow for a
+# whole tier. Its failure does not fail the run.
 #
 # The build caches its layers in GitHub's Actions cache (buildx's gha cache, mode=max, so every
 # stage's layers), shared by all branches' runs, and read by pull requests from the base
@@ -243,7 +244,8 @@ jobs:
       group: ci-arm64-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 180
+    # GitHub's limit for a job on a hosted runner: under KVM, one job runs every test selected.
+    timeout-minutes: 360
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -267,6 +269,7 @@ jobs:
             sudo udevadm control --reload-rules
             sudo udevadm trigger --name-match=kvm
             ls -l /dev/kvm
+            [ -r /dev/kvm ] && [ -w /dev/kvm ]
             echo "kvm=true" >>"$GITHUB_OUTPUT"
           else
             echo "=== no /dev/kvm: Container/VMs run under software emulation (TCG)"
@@ -315,7 +318,7 @@ jobs:
             docker run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=tcg --env=RUNCVM_KERNEL=$kernel alpine \
               sh -c 'uname -mr; echo vcpus: $(nproc)' || status=1
           done
-          tests/run --accel tcg 13-qemu-accel 14-exit-codes 44-run-args --results "$RUNNER_TEMP/results" || status=1
+          RUNCVM_TEST_JOBS=2 tests/run --accel tcg 13-qemu-accel 14-exit-codes 44-run-args --results "$RUNNER_TEMP/results" || status=1
           exit $status
 
       - name: Upload test results
