@@ -351,7 +351,9 @@ if [ "$COMMAND" = "create" ]; then
 
   # A Kubernetes pod's sandbox container (CRI's "pause" container, which only holds the pod's
   # namespaces) runs under runc as given; the pod's other containers run as Container/VMs.
-  if [ "$(jq -r '.annotations["io.kubernetes.cri.container-type"] // empty' "$CFG")" = "sandbox" ]; then
+  # A container whose environment sets RUNCVM_RUNC=1 (e.g. a pod's sidecar) also runs under runc.
+  if [ "$(jq -r '.annotations["io.kubernetes.cri.container-type"] // empty' "$CFG")" = "sandbox" ] || \
+     [ "$(get_config_env RUNCVM_RUNC)" = "1" ]; then
     exec "$RUNC" "${COMMAND_LINE[@]}"
   fi
 
@@ -789,6 +791,12 @@ elif [ "$COMMAND" = "exec" ]; then
       *) break; ;;
     esac
   done
+
+  # A process in a container that runs under runc (see 'create' above) runs as given. The process
+  # has the container's environment.
+  if [ "$(get_process_env "$PROCESS" 'RUNCVM_RUNC' '0')" = "1" ]; then
+    exec "$RUNC" "${COMMAND_LINE[@]}"
+  fi
 
   # Allow user to enable debug logging
   if [ "$(get_process_env "$PROCESS" 'RUNCVM_RUNTIME_DEBUG' '0')" = "1" ]; then
