@@ -685,7 +685,7 @@ When RunCVM creates a Container/VM, fstab entries will be drafted, identifying e
 
 #### Disk I/O
 
-QEMU accesses each disk's backing file with direct I/O (`cache=none`), bypassing the host's page cache, and asynchronously through Linux io_uring (`aio=io_uring`). Where io_uring is unavailable, because the host kernel has it turned off (`sysctl kernel.io_uring_disabled`) or a seccomp profile applied to the container denies its system calls (as Docker's default profile does), RunCVM uses Linux AIO (`aio=native`) instead or, failing that, a pool of I/O threads (`aio=threads`), and logs a warning to the container's output (`docker logs`).
+QEMU accesses each disk's backing file with direct I/O (`cache=none`), bypassing the host's page cache, and asynchronously through Linux io_uring (`aio=io_uring`). Where io_uring is unavailable, because the host kernel has it turned off (`sysctl kernel.io_uring_disabled`) or a seccomp profile applied to the container denies its system calls (as Docker's default profile does), RunCVM uses Linux AIO (`aio=native`) instead or, failing that, a pool of I/O threads (`aio=threads`), and logs a warning to the container's output (`docker logs`). With no seccomp filter on the container, RunCVM chooses from the kernel setting alone: `io_uring`, unless `kernel.io_uring_disabled` is 2. Where a seccomp filter is in place (its rules cannot be read from inside the container) or `kernel.io_uring_disabled` is 1, it tries each remaining mode in turn as the Container/VM starts, opening the first disk briefly in QEMU.
 
 #### Preallocated disks
 
