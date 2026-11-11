@@ -449,12 +449,10 @@ do_disk() {
     fi
   done
 
-  # Disks are mounted in RUNCVM_DISKS order, and tmpfs mounts after them all, so a disk whose
-  # destination lies above an earlier disk's would be mounted over that disk, hiding it; two disks
-  # with one destination would hide one another; and a tmpfs mount at or above a disk's destination
-  # would hide the disk. Reject each, before this disk is created. Each destination is compared as
-  # its path in the image's filesystem, with symbolic links resolved (or as given, where that
-  # fails), as recorded in DISK_DESTS and TMPFS_DESTS.
+  # A disk and another disk, or a tmpfs mount, with one destination would hide one another, so
+  # reject it, before this disk is created. Each destination is compared as its path in the image's
+  # filesystem, with symbolic links resolved (or as given, where that fails), as recorded in
+  # DISK_DESTS and TMPFS_DESTS.
   for dst in "${dests[@]}"
   do
     path=$(disk_normalise_path "$dst") && path=$(disk_resolve_path "$path") || path="$dst"
@@ -462,14 +460,12 @@ do_disk() {
     do
       if [ "${DISK_DESTS[$i]}" = "$path" ]; then
         error "Error: disk spec '$spec' invalid: dst '$dst' is also the dst of an earlier disk"
-      elif [[ "${DISK_DESTS[$i]}" = "$path"/* ]]; then
-        error "Error: disk spec '$spec' invalid: dst '$dst' lies above an earlier disk's dst '${DISK_DESTS[$i]}', which this disk would hide: list this disk before that one in RUNCVM_DISKS"
       fi
     done
     for i in "${!TMPFS_DESTS[@]}"
     do
-      if [[ "${TMPFS_DESTS[$i]}" = "$path" || "$path" = "${TMPFS_DESTS[$i]%/}"/* ]]; then
-        error "Error: disk spec '$spec' invalid: dst '$dst' lies at or below the tmpfs mount at '${TMPFS_DESTS[$i]}', which would hide this disk"
+      if [ "${TMPFS_DESTS[$i]}" = "$path" ]; then
+        error "Error: disk spec '$spec' invalid: dst '$dst' is also the destination of a tmpfs mount"
       fi
     done
   done
@@ -529,14 +525,16 @@ do_disk() {
     done
   fi
 
+  # Add the disk's mounts to the fstab entries that write_fstab writes: its own mount at
+  # /.runcvm/disks/<n> for layout 'subdirs', and a mount at each destination.
   if [ "$layout" = "subdirs" ]; then
-    echo "UUID=$UUID /.runcvm/disks/$id $fs defaults,noatime 0 0" >>/.runcvm/fstab
+    FSTAB_DISKS+=("UUID=$UUID /.runcvm/disks/$id $fs defaults,noatime 0 0")
     for i in "${!dests[@]}"
     do
-      echo "/.runcvm/disks/$id/${subdirs[$i]} ${dests[$i]} none bind 0 0" >>/.runcvm/fstab
+      fstab_add_mount "/.runcvm/disks/$id/${subdirs[$i]} ${dests[$i]} none bind 0 0" "${dests[$i]}"
     done
   else
-    echo "UUID=$UUID ${dests[0]} $fs defaults,noatime 0 0" >>/.runcvm/fstab
+    fstab_add_mount "UUID=$UUID ${dests[0]} $fs defaults,noatime 0 0" "${dests[0]}"
   fi
 
   # Record this disk's backing file, and each of its destinations, for do_root_disk: a whole-root
@@ -643,25 +641,74 @@ disk_add_device() {
 }
 
 # Argument e.g. /disk1,/home,ext4,5G;/disk2,/var,ext4,1G
+# Adds fstab entry $1, a mount at destination $2, to the entries write_fstab writes in order of
+# depth: the number of components of the destination's path in the image's filesystem, with
+# symbolic links resolved (or as given, where that fails).
+fstab_add_mount() {
+  local path components
+
+  path=$(disk_normalise_path "$2") && path=$(disk_resolve_path "$path") || path="$2"
+  components="${path//[^\/]/}"
+  FSTAB_MOUNTS+=("$1")
+  FSTAB_DEPTHS+=("${#components}")
+}
+
+# Records each tmpfs mount, which runcvm-runtime passes in RUNCVM_TMPFS as fstab entries, one per
+# line: its entry, for write_fstab, and its destination in TMPFS_DESTS, as a path in the image's
+# filesystem with symbolic links resolved (or as given, where that fails), for do_disk's check.
+tmpfs_mounts() {
+  local line dst path
+
+  while IFS= read -r line
+  do
+    IFS=$' \t' read -r _ dst _ <<< "$line"
+    [ -n "$dst" ] || continue
+    path=$(disk_normalise_path "$dst") && path=$(disk_resolve_path "$path") || path="$dst"
+    TMPFS_DESTS+=("$path")
+    fstab_add_mount "$line" "$dst"
+  done <<< "$RUNCVM_TMPFS"
+}
+
+# Writes /.runcvm/fstab, for runcvm-vm-init to mount in order: first each disk with layout
+# 'subdirs' at /.runcvm/disks/<n>, the source of its destinations' bind mounts; then every mount at
+# a destination (the disks', and the tmpfs mounts), in order of depth, and otherwise in the order
+# added. So a mount is made only once every mount at a path above it has been, as Docker mounts a
+# deeper mount over a shallower one, whatever the order of the disks in RUNCVM_DISKS. Nothing is
+# written where there are no mounts.
+write_fstab() {
+  local depth i max=0
+
+  [ "${#FSTAB_DISKS[@]}" -gt 0 ] || [ "${#FSTAB_MOUNTS[@]}" -gt 0 ] || return 0
+
+  for i in "${!FSTAB_DEPTHS[@]}"
+  do
+    [ "${FSTAB_DEPTHS[$i]}" -le "$max" ] || max="${FSTAB_DEPTHS[$i]}"
+  done
+
+  {
+    for i in "${!FSTAB_DISKS[@]}"
+    do
+      echo "${FSTAB_DISKS[$i]}"
+    done
+    for ((depth = 0; depth <= max; depth++))
+    do
+      for i in "${!FSTAB_MOUNTS[@]}"
+      do
+        if [ "${FSTAB_DEPTHS[$i]}" -eq "$depth" ]; then
+          echo "${FSTAB_MOUNTS[$i]}"
+        fi
+      done
+    done
+  } >>/.runcvm/fstab
+}
+
 do_disks() {
   local IFS=';'
   local disk
   local id=0
-  local tmpfs_dst path
   ROOT_DISK_SPEC=""
   DISK_EXCLUDES=()
   DISK_DESTS=()
-
-  # The destination of each tmpfs mount, which runcvm-runtime passes in RUNCVM_TMPFS as fstab
-  # entries, one per line, for do_disk's check, as a path in the image's filesystem with symbolic
-  # links resolved.
-  TMPFS_DESTS=()
-  while IFS=$' \t' read -r _ tmpfs_dst _
-  do
-    [ -n "$tmpfs_dst" ] || continue
-    path=$(disk_normalise_path "$tmpfs_dst") && path=$(disk_resolve_path "$path") || path="$tmpfs_dst"
-    TMPFS_DESTS+=("$path")
-  done <<< "$RUNCVM_TMPFS"
 
   for disk in $1
   do
@@ -720,6 +767,11 @@ do_networks() {
 }
 
 DISKS=()
+FSTAB_DISKS=()
+FSTAB_MOUNTS=()
+FSTAB_DEPTHS=()
+TMPFS_DESTS=()
+tmpfs_mounts
 if [ -n "$RUNCVM_DISKS" ]; then
   do_disks "$RUNCVM_DISKS"
 fi
@@ -734,9 +786,7 @@ fi
 IFACES=()
 do_networks
 
-if [ -n "$RUNCVM_TMPFS" ]; then
-  echo "$RUNCVM_TMPFS" >>/.runcvm/fstab
-fi
+write_fstab
 
 if [[ -z "$RUNCVM_CPUS" || "$RUNCVM_CPUS" -le 0 ]]; then
   RUNCVM_CPUS=$(busybox nproc)

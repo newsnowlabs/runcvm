@@ -25,13 +25,14 @@
 - Keyed specs (whose keys include Docker's aliases 'source', 'target' and
   'destination') with a repeated or unknown key, a field without '=', no dst
   or overlapping destinations are rejected likewise.
-- Across disks, and tmpfs mounts, which are mounted after every disk: a disk
-  whose destination lies above an earlier disk's (including through the
-  image's symbolic link /var/run), two disks with one destination, or a disk
-  at or below a tmpfs mount's destination: the Container/VM exits with
-  status 1, reporting the disk's spec, before creating that disk. A disk
-  listed before one below it, a tmpfs mount below a disk, and destinations
-  sharing only a prefix (/home and /homes): the Container/VM runs.
+- Across disks and tmpfs mounts: two disks with one destination, or a disk
+  and a tmpfs mount with one destination: the Container/VM exits with
+  status 1, reporting the disk's spec, before creating that disk.
+- Nested disks and tmpfs mounts, in either order in RUNCVM_DISKS (including
+  through the image's symbolic link /var/run), a tmpfs mount above or below
+  a disk, and destinations sharing only a prefix (/home and /homes): the
+  Container/VM runs, and each path is on the intended disk or tmpfs, as a
+  deeper mount is mounted over a shallower one.
 """
 
 import os
@@ -103,29 +104,36 @@ INVALID = [
 
 
 # Across disks and tmpfs mounts: (name, RUNCVM_DISKS, further docker run options, the spec
-# reported, expected message, or None where the Container/VM runs)
+# reported, expected message)
 ACROSS = [
-    ("outer-disk-last", "/disks/b,/home/b,ext4,16M;/disks/a,/home,ext4,16M", [],
-     "/disks/a,/home,ext4,16M",
-     "dst '/home' lies above an earlier disk's dst '/home/b', which this disk would hide: "
-     "list this disk before that one in RUNCVM_DISKS"),
-    ("outer-disk-last-symlink", "/disks/b,/run/b,ext4,16M;/disks/a,/var/run,ext4,16M,layout=root", [],
-     "/disks/a,/var/run,ext4,16M,layout=root",
-     "dst '/var/run' lies above an earlier disk's dst '/run/b', which this disk would hide: "
-     "list this disk before that one in RUNCVM_DISKS"),
     ("same-dst-two-disks", "/disks/a,/home,ext4,16M;/disks/b,/home,ext4,16M", [],
      "/disks/b,/home,ext4,16M", "dst '/home' is also the dst of an earlier disk"),
-    ("tmpfs-above-disk", "/disks/b,/home/b,ext4,16M", ["--mount", "type=tmpfs,dst=/home"],
-     "/disks/b,/home/b,ext4,16M",
-     "dst '/home/b' lies at or below the tmpfs mount at '/home', which would hide this disk"),
-    ("tmpfs-at-disk", "/disks/b,/home,ext4,16M", ["--tmpfs", "/home"],
-     "/disks/b,/home,ext4,16M",
-     "dst '/home' lies at or below the tmpfs mount at '/home', which would hide this disk"),
-    ("outer-disk-first", "/disks/a,/home,ext4,16M;/disks/b,/home/b,ext4,16M", [], None, None),
-    ("tmpfs-below-disk", "/disks/a,/home,ext4,16M", ["--mount", "type=tmpfs,dst=/home/cache"], None, None),
-    ("prefix-only", "/disks/a,/home,ext4,16M;/disks/b,/homes,ext4,16M", ["--mount", "type=tmpfs,dst=/homes2"],
-     None, None),
+    ("same-dst-disk-tmpfs", "/disks/b,/home,ext4,16M", ["--tmpfs", "/home"],
+     "/disks/b,/home,ext4,16M", "dst '/home' is also the destination of a tmpfs mount"),
 ]
+
+# Nested disks and tmpfs mounts: (name, RUNCVM_DISKS, further docker run options, {path: the disk
+# expected there, by its position in RUNCVM_DISKS, or "tmpfs"}). Every disk has layout 'subdirs',
+# so it is mounted at /.runcvm/disks/<n>, whose device a path on it shares.
+LAYERED = [
+    ("outer-disk-first", "/disks/a,/home,ext4,16M;/disks/b,/home/b,ext4,16M", [],
+     {"/home": 0, "/home/b": 1}),
+    ("outer-disk-last", "/disks/b,/home/b,ext4,16M;/disks/a,/home,ext4,16M", [],
+     {"/home": 1, "/home/b": 0}),
+    ("outer-disk-last-symlink", "/disks/b,/run/b,ext4,16M;/disks/a,/var/run,ext4,16M", [],
+     {"/run": 1, "/run/b": 0}),
+    ("three-deep", "/disks/c,/srv/a/b,ext4,16M;/disks/a,/srv,ext4,16M;/disks/b,/srv/a,ext4,16M", [],
+     {"/srv": 1, "/srv/a": 2, "/srv/a/b": 0}),
+    ("tmpfs-above-disk", "/disks/b,/home/b,ext4,16M", ["--mount", "type=tmpfs,dst=/home"],
+     {"/home": "tmpfs", "/home/b": 0}),
+    ("tmpfs-below-disk", "/disks/a,/home,ext4,16M", ["--mount", "type=tmpfs,dst=/home/cache"],
+     {"/home": 0, "/home/cache": "tmpfs"}),
+    ("prefix-only", "/disks/a,/home,ext4,16M;/disks/b,/homes,ext4,16M", ["--mount", "type=tmpfs,dst=/homes2"],
+     {"/home": 0, "/homes": 1, "/homes2": "tmpfs"}),
+]
+
+# Prints, for each path given, its device number and filesystem type.
+PROBE = 'for p in "$@"; do echo "$p $(stat -c %d "$p") $(stat -f -c %T "$p")"; done'
 
 
 def run_across(case):
@@ -135,6 +143,17 @@ def run_across(case):
     return t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
                     *t.vm_opts(), "--mount", "type=volume,src=%s,dst=/disks" % volume, *opts,
                     "--env", "RUNCVM_DISKS=" + disks, "alpine", "true", timeout=TIMEOUT)
+
+
+def run_layered(case):
+    name, disks, opts, expected = case
+    volume = t.unique("layered-" + name)
+    t.volume_create(volume)
+    paths = list(expected) + ["/.runcvm/disks/%d" % n for n in range(disks.count(";") + 1)]
+    return t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
+                    *t.vm_opts(), "--mount", "type=volume,src=%s,dst=/disks" % volume, *opts,
+                    "--env", "RUNCVM_DISKS=" + disks, "alpine", "sh", "-c", PROBE, "sh", *paths,
+                    timeout=TIMEOUT)
 
 
 def run_invalid(case):
@@ -159,13 +178,26 @@ def run_changed(case):
 
 
 for (name, disks, opts, spec, message), r in zip(ACROSS, t.parallel(run_across, ACROSS)):
-    if message is None:
-        if not t.check("%s: exit status" % name, 0, r.returncode):
-            t.log("output:\n%s" % r.stdout)
-        continue
     t.check("%s: exit status" % name, 1, r.returncode)
     if not t.check("%s: error message" % name, True, ("disk spec '%s' invalid: %s" % (spec, message)) in r.stdout):
         t.log("output:\n%s" % r.stdout)
+
+for (name, disks, opts, expected), r in zip(LAYERED, t.parallel(run_layered, LAYERED)):
+    if not t.check("%s: exit status" % name, 0, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+        continue
+    probed = {}
+    for line in r.stdout.replace("\r", "").splitlines():
+        fields = line.split()
+        if len(fields) == 3:
+            probed[fields[0]] = (fields[1], fields[2])
+    for path, where in expected.items():
+        if where == "tmpfs":
+            t.check("%s: %s is the tmpfs mount" % (name, path), "tmpfs", probed.get(path, (None, None))[1])
+        else:
+            disk = probed.get("/.runcvm/disks/%d" % where, (None, None))[0]
+            t.check("%s: %s is on disk %d" % (name, path, where), True,
+                    disk is not None and probed.get(path, (None, None))[0] == disk)
 
 for (name, disks, message), r in zip(INVALID, t.parallel(run_invalid, INVALID)):
     t.check("%s: exit status" % name, 1, r.returncode)
