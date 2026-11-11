@@ -186,6 +186,8 @@ Like Kata, RunCVM aims to be a secure container runtime with lightweight virtual
 
 However, while Kata aims to launch standard container images inside a restricted-privileges namespace inside a VM running a single fixed and heavily customised kernel and Linux distribution optimised for this purpose, RunCVM intentionally aims to launch container _or VM_ images as the _VM's root filesystem_ using stock or bespoke Linux kernels, the upshot being RunCVM's can run VM workloads that Kata's security and kernel model would explicitly prevent.
 
+For example, RunCVM can launch [OpenWrt](#openwrt), and is 're-entrant', in the sense it can run inside itself (see [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm)).
+
 ## Project aims
 
 - Run any standard container workload in a VM using `docker run` with no need to customise images or the command line (except adding `--runtime=runcvm`)
