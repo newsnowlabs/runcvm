@@ -132,7 +132,7 @@ restore_network() {
   done
 
   nft list tables | while read -r _ family table; do
-    [ "$table" = "runcvm" ] && nft delete table "$family" runcvm
+    if [ "$table" = "runcvm" ]; then nft delete table "$family" runcvm; fi
   done
 }
 
