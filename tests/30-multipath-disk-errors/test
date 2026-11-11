@@ -31,8 +31,8 @@
 - Nested disks and tmpfs mounts, in either order in RUNCVM_DISKS (including
   through the image's symbolic link /var/run), a tmpfs mount above or below
   a disk, and destinations sharing only a prefix (/home and /homes): the
-  Container/VM runs, and each path is on the intended disk or tmpfs, as a
-  deeper mount is mounted over a shallower one.
+  Container/VM runs, with and without --init, and each path is on the
+  intended disk or tmpfs, as a deeper mount is mounted over a shallower one.
 """
 
 import os
@@ -146,12 +146,14 @@ def run_across(case):
 
 
 def run_layered(case):
-    name, disks, opts, expected = case
+    (name, disks, opts, expected), init = case
+    name += "-init" if init else "-noinit"
     volume = t.unique("layered-" + name)
     t.volume_create(volume)
     paths = list(expected) + ["/.runcvm/disks/%d" % n for n in range(disks.count(";") + 1)]
     return t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
-                    *t.vm_opts(), "--mount", "type=volume,src=%s,dst=/disks" % volume, *opts,
+                    *t.vm_opts(), *(["--init"] if init else []),
+                    "--mount", "type=volume,src=%s,dst=/disks" % volume, *opts,
                     "--env", "RUNCVM_DISKS=" + disks, "alpine", "sh", "-c", PROBE, "sh", *paths,
                     timeout=TIMEOUT)
 
@@ -182,7 +184,10 @@ for (name, disks, opts, spec, message), r in zip(ACROSS, t.parallel(run_across, 
     if not t.check("%s: error message" % name, True, ("disk spec '%s' invalid: %s" % (spec, message)) in r.stdout):
         t.log("output:\n%s" % r.stdout)
 
-for (name, disks, opts, expected), r in zip(LAYERED, t.parallel(run_layered, LAYERED)):
+LAYERED_RUNS = [(case, init) for case in LAYERED for init in (False, True)]
+t.param("init", "no, yes")
+for ((name, disks, opts, expected), init), r in zip(LAYERED_RUNS, t.parallel(run_layered, LAYERED_RUNS)):
+    name += ", --init" if init else ", no --init"
     if not t.check("%s: exit status" % name, 0, r.returncode):
         t.log("output:\n%s" % r.stdout)
         continue

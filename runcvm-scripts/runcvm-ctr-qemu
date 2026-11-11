@@ -640,7 +640,6 @@ disk_add_device() {
   )
 }
 
-# Argument e.g. /disk1,/home,ext4,5G;/disk2,/var,ext4,1G
 # Adds fstab entry $1, a mount at destination $2, to the entries write_fstab writes in order of
 # depth: the number of components of the destination's path in the image's filesystem, with
 # symbolic links resolved (or as given, where that fails).
@@ -661,7 +660,9 @@ tmpfs_mounts() {
 
   while IFS= read -r line
   do
-    IFS=$' \t' read -r _ dst _ <<< "$line"
+    # The destination is the second of the entry's space-separated fields.
+    dst="${line#* }"
+    dst="${dst%% *}"
     [ -n "$dst" ] || continue
     path=$(disk_normalise_path "$dst") && path=$(disk_resolve_path "$path") || path="$dst"
     TMPFS_DESTS+=("$path")
@@ -702,6 +703,7 @@ write_fstab() {
   } >>/.runcvm/fstab
 }
 
+# Argument e.g. /disk1,/home,ext4,5G;/disk2,/var,ext4,1G
 do_disks() {
   local IFS=';'
   local disk
