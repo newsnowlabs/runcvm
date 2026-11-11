@@ -1,0 +1,226 @@
+# RunCVM's CI: builds RunCVM once on a GitHub-hosted runner, then runs the integration tests (by
+# default the core tier) in real Container/VMs under KVM, split across several runners, each of
+# which installs the same build. GitHub's ubuntu-24.04 runners provide nested KVM; each test job
+# opens /dev/kvm to the runner user. The test framework's selftest runs in a separate job.
+#
+# What runs, and when:
+# - Pull requests and pushes to main run CI, except that changes to Markdown files alone
+#   (README.md, docs/**, ...) run nothing: neither the build nor the tests read them. On a pull
+#   request, this applies to the pull request's whole diff.
+# - A commit message containing "[skip ci]" (or "[ci skip]", "[no ci]") skips the run for a push
+#   whose latest commit it is: GitHub's own rule, for pull requests and pushes to main alike.
+# - Draft pull requests run nothing; marking one ready for review runs CI.
+# - Labels on a pull request:
+#   - ci:skip      runs nothing while present; removing it runs CI.
+#   - ci:extended  runs the extended tier (tests/run --tier extended) in place of the core tier.
+#   - ci:all       runs every tier (tests/run --tier all); it takes precedence over ci:extended.
+#   Adding ci:extended or ci:all runs the integration tests; other labels run nothing.
+# - Nightly, on main: every tier, with a build that uses no cached layers and pulls its base
+#   images afresh, so that changes upstream (Alpine, Docker, the kernels' packages) that break
+#   the build or the tests show up without a commit here. GitHub disables a public repository's
+#   scheduled workflows after 60 days without activity in it, and emails before doing so; the
+#   Actions tab re-enables them. GitHub sends a scheduled run's failure notices to whoever last
+#   changed the schedule.
+# - By hand (workflow_dispatch): the tests input gives tests/run's arguments, and fresh_build
+#   builds as the nightly run does.
+# Drafts and labels act through the jobs' if: conditions, not through event filters: if CI
+# becomes a required status check, a skipped job counts as passing, whereas a run that an event
+# filter prevents leaves the check pending and blocks merging. The Markdown paths filter and
+# [skip ci] prevent the run, so they would need the same treatment then.
+#
+# The build caches its layers in GitHub's Actions cache (buildx's gha cache, mode=max, so every
+# stage's layers), shared by all branches' runs, and read by pull requests from the base
+# branch's entries. A nightly or fresh build writes the cache without reading it.
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    paths-ignore: ['**.md']
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+    inputs:
+      tests:
+        description: tests/run arguments (e.g. "--tier all", or tests by name)
+        default: --tier core
+      fresh_build:
+        description: build without cached layers, pulling base images afresh (as nightly)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  # By hand: the tests input. Nightly: every tier. Pull requests: ci:all, then ci:extended, then
+  # the core tier.
+  TESTS: >-
+    ${{ inputs.tests
+      || (github.event_name == 'schedule' && '--tier all')
+      || (contains(github.event.pull_request.labels.*.name, 'ci:all') && '--tier all')
+      || (contains(github.event.pull_request.labels.*.name, 'ci:extended') && '--tier extended')
+      || '--tier core' }}
+  FRESH_BUILD: ${{ github.event_name == 'schedule' || inputs.fresh_build == true }}
+
+# Concurrency is per job, not per workflow: a run whose jobs are all skipped (e.g. one started by
+# an unrelated label) must not cancel a pull request's run in progress, and a skipped job never
+# joins its concurrency group.
+jobs:
+  selftest:
+    # Pull requests: not drafts, nor with ci:skip; and not for label changes, except removing
+    # ci:skip, since labels select the integration tests' tier, which selftest does not use.
+    if: >-
+      github.event_name != 'pull_request' || (
+        !github.event.pull_request.draft &&
+        !contains(github.event.pull_request.labels.*.name, 'ci:skip') &&
+        github.event.action != 'labeled' &&
+        (github.event.action != 'unlabeled' || github.event.label.name == 'ci:skip')
+      )
+    concurrency:
+      group: ci-selftest-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test framework selftest
+        run: tests/selftest/run-selftest --docker
+
+  build:
+    # Pull requests: not drafts, nor with ci:skip; for label changes, only adding a ci: label
+    # other than ci:skip, or removing ci:skip. The test jobs need this one, so they run or are
+    # skipped with it.
+    if: >-
+      github.event_name != 'pull_request' || (
+        !github.event.pull_request.draft &&
+        !contains(github.event.pull_request.labels.*.name, 'ci:skip') &&
+        (github.event.action != 'labeled' ||
+          (startsWith(github.event.label.name, 'ci:') && github.event.label.name != 'ci:skip')) &&
+        (github.event.action != 'unlabeled' || github.event.label.name == 'ci:skip')
+      )
+    concurrency:
+      group: ci-build-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # A docker-container builder: the docker driver, which docker build uses by default, cannot
+      # export a cache.
+      - uses: docker/setup-buildx-action@v3
+        id: buildx
+
+      # Gives the docker CLI's buildx the Actions runtime variables that the gha cache needs.
+      - uses: crazy-max/ghaction-github-runtime@v3
+
+      - name: Build RunCVM
+        env:
+          # build.sh runs docker build, which uses this builder.
+          BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
+        run: |
+          # gitlab.alpinelinux.org refuses requests from GitHub-hosted runners (HTTP 418), so the
+          # Alpine build stages use aports' GitHub mirror and Alpine's distfiles mirror.
+          cache=(--cache-to "type=gha,scope=runcvm,mode=max,ignore-error=true")
+          if [ "$FRESH_BUILD" = true ]; then
+            cache+=(--no-cache --pull)
+          else
+            cache+=(--cache-from "type=gha,scope=runcvm")
+          fi
+          time ./build/build.sh --tag ci -- \
+            --build-arg APORTS_URL=https://github.com/alpinelinux/aports.git \
+            --build-arg ALPINE_DISTFILES_MIRROR=https://distfiles.alpinelinux.org/distfiles \
+            "${cache[@]}" \
+            --output "type=docker,dest=$RUNNER_TEMP/runcvm-image.tar"
+          ls -l "$RUNNER_TEMP/runcvm-image.tar"
+
+      # The image's layers are already compressed.
+      - name: Upload the image
+        uses: actions/upload-artifact@v4
+        with:
+          name: runcvm-image
+          path: ${{ runner.temp }}/runcvm-image.tar
+          compression-level: 0
+          retention-days: 1
+
+  test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    concurrency:
+      group: ci-test-${{ github.ref }}-${{ matrix.shard }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    name: test (${{ matrix.shard }}/3)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the latest Docker release
+        run: |
+          # The runner image's Docker can lag Docker's releases; RunCVM's tests need 29.4 or later.
+          sudo apt-get remove -y moby-engine moby-cli moby-buildx moby-compose moby-containerd moby-runc || true
+          curl -fsSL https://get.docker.com -o "$RUNNER_TEMP/get-docker.sh"
+          sudo sh "$RUNNER_TEMP/get-docker.sh"
+          sudo systemctl restart docker
+
+      - name: Runner facts
+        run: |
+          uname -a; nproc; free -m; df -h / | tail -1
+          echo "=== CPU virtualisation flags: $(grep -cE '\b(vmx|svm)\b' /proc/cpuinfo || true)"
+          lsmod | grep -E '^(kvm|br_netfilter)' || true
+          docker version --format 'Docker: client {{.Client.Version}}, server {{.Server.Version}}'
+
+      - name: Open /dev/kvm to the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+          [ -r /dev/kvm ] && [ -w /dev/kvm ]
+
+      # After installing Docker, so that the image goes into the Docker that runs the tests.
+      - name: Download the image
+        uses: actions/download-artifact@v4
+        with:
+          name: runcvm-image
+          path: ${{ runner.temp }}
+
+      - name: Install RunCVM
+        run: |
+          docker load -i "$RUNNER_TEMP/runcvm-image.tar"
+          rm "$RUNNER_TEMP/runcvm-image.tar"
+          sudo REPO=newsnowlabs/runcvm:ci ./runcvm-scripts/runcvm-install-runtime.sh </dev/null
+          docker info --format '{{.Runtimes.runcvm.Path}}'
+
+      - name: Run a Container/VM under KVM
+        run: |
+          # With RUNCVM_QEMU_ACCEL=kvm, RunCVM refuses to start the VM without /dev/kvm rather
+          # than falling back to software emulation.
+          docker run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=kvm alpine \
+            sh -c 'dmesg | grep -iE "hypervisor detected" | head -1; echo vcpus: $(nproc)'
+
+      - name: Integration tests (${{ env.TESTS }}, shard ${{ matrix.shard }}/3)
+        run: |
+          # Of the tests TESTS selects, this shard runs every third, starting with its own
+          # number, so the three shards together run each once. Two tests at a time suits a
+          # hosted runner's 4 CPUs and 16 GB of memory. TESTS holds several arguments, so it is
+          # split into words.
+          # shellcheck disable=SC2086
+          tests/run $TESTS --shard ${{ matrix.shard }}/3 --list
+          # shellcheck disable=SC2086
+          RUNCVM_TEST_JOBS=2 tests/run $TESTS --shard ${{ matrix.shard }}/3 --results "$RUNNER_TEMP/results"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.shard }}
+          path: ${{ runner.temp }}/results
+          if-no-files-found: ignore
