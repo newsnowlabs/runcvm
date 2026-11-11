@@ -201,6 +201,18 @@ the branch.
   ```
   A single-commit branch needs no tag or trailer.
 
+Every commit that lands on `main` has a subject ending in its pull request's number (e.g.
+`(#60)`), so that `git log --oneline` links each change to its review. GitHub adds the number
+to a squash merge's subject, but a rebase merge keeps each commit's message as it is, without
+one. So:
+
+- **A single-commit branch** lands by squash merge, with the commit's own message and the
+  number added to its subject, which lands the same change as a rebase merge would:
+  `gh pr merge <n> --squash --subject "<subject> (#<n>)" --body "<body>"`, taking the subject
+  and body from `git log -1 --format=%s` and `%b` of the branch's commit.
+- **A multi-commit branch to be rebase-merged** first has each commit's subject reworded on
+  the branch to end with the number, and the branch force-pushed, before the rebase merge.
+
 Once the changes in a pull request whose branch has more than one commit are complete (its
 tests may still be running), its description ends with a "Squash commit message" section, for
 use if it is squash-merged; a clean branch may still be rebase-merged instead. The section
