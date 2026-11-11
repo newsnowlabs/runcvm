@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Interactive sessions: 'docker run -it' and 'docker exec -it' from a terminal.
+
+The test drives 'docker' from a pseudo-terminal of its own, as a person at a
+terminal would, with and without --init, and with runc as well, as a
+reference. In each session, with the Alpine shell:
+
+- the shell's prompt appears, and a typed command is echoed and runs;
+- the window size of the terminal is the session's, also after it changes;
+- Ctrl-C interrupts a running command (exit status 130), leaving the shell;
+- Ctrl-D at the prompt ends the session, with the shell's exit status.
+
+The expected values describe current behaviour. A change to it must update
+them deliberately. Known limitations of a RunCVM Container/VM's console
+('docker run -it'), where 'docker exec -it' matches runc:
+
+- the VM's console has no window size ('stty size' fails), before or after
+  the terminal's changes;
+- each line of output ends with CR CR LF, not CR LF: the VM's console and
+  the container's terminal each translate LF to CR LF.
+"""
+
+import fcntl
+import os
+import re
+import select
+import struct
+import subprocess
+import sys
+import termios
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+STEP_TIMEOUT = 60 if t.ACCEL == "tcg" else 15
+PROMPT = b"/ # "
+SIZE = (37, 101)
+NEW_SIZE = (41, 120)
+
+
+def set_size(fd, size):
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
+
+
+def take_terminal():
+    # Runs in the child, after setsid: the pseudo-terminal becomes its controlling terminal,
+    # so that a change to the window size sends 'docker' SIGWINCH, as at a person's terminal.
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+
+class Session:
+    """A command run on a pseudo-terminal of its own, with the output read so far."""
+
+    def __init__(self, args):
+        self.master, slave = os.openpty()
+        set_size(self.master, SIZE)
+        self.proc = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+                                     preexec_fn=take_terminal)
+        os.close(slave)
+        self.output = b""
+
+    def read(self, timeout):
+        """Read what arrives within timeout seconds; False at end of output."""
+        if not select.select([self.master], [], [], max(0, timeout))[0]:
+            return True
+        try:
+            data = os.read(self.master, 4096)
+        except OSError:
+            return False
+        self.output += data
+        return bool(data)
+
+    def expect(self, pattern, timeout, start=0):
+        """Wait for output since 'start' to match a regular expression (bytes); return the match."""
+        deadline = time.time() + timeout
+        while True:
+            m = re.search(pattern, self.output[start:])
+            if m or time.time() >= deadline or not self.read(deadline - time.time()):
+                return m
+
+    def send(self, data):
+        mark = len(self.output)
+        os.write(self.master, data)
+        return mark
+
+    def wait(self, timeout):
+        """Wait for the command to exit, reading its output; return its exit status, or None."""
+        deadline = time.time() + timeout
+        while self.proc.poll() is None and time.time() < deadline:
+            if not self.read(min(1, deadline - time.time())):
+                break
+        try:
+            return self.proc.wait(max(0, deadline - time.time()))
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait(5)
+            return None
+        finally:
+            # Read the rest of the output, for a limited time, as another process may hold the
+            # terminal open.
+            drain = time.time() + 2
+            while time.time() < drain and self.read(drain - time.time()):
+                pass
+            os.close(self.master)
+
+
+def window_size(session, timeout=STEP_TIMEOUT):
+    mark = session.send(b"echo size=$(stty size 2>/dev/null)\r")
+    m = session.expect(rb"size=([0-9 ]*)\r", timeout, mark)
+    return m.group(1).decode() if m else None
+
+
+def run(case):
+    runtime, mode, init = case
+    name = t.unique("%s-%s-%s" % (runtime, mode, "init" if init else "noinit"))
+    t.cleanup_container(name)
+    opts = ["--runtime=" + runtime, *(t.vm_opts() if runtime == t.RUNTIME else []), *(["--init"] if init else [])]
+    if mode == "exec":
+        r = t.docker("run", "-d", "--name", name, *t.labels(), *opts, "alpine", "sleep", "3600")
+        if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
+            return {"started": False, "output": r.stdout}
+        args = ["docker", "exec", "-it", name, "sh"]
+    else:
+        args = ["docker", "run", "-it", "--name", name, *t.labels(), *opts, "alpine", "sh"]
+
+    s = Session(args)
+    result = {"started": bool(s.expect(re.escape(PROMPT), BOOT_TIMEOUT))}
+    if result["started"]:
+        mark = s.send(b"echo hel''lo\r")
+        result["echo"] = bool(s.expect(rb"echo hel''lo", STEP_TIMEOUT, mark))
+        result["ran"] = bool(s.expect(rb"\nhello\r", STEP_TIMEOUT, mark))
+        line = re.search(rb"\nhello(\r*\n)", s.output[mark:])
+        result["line end"] = line.group(1).decode() if line else None
+        result["size"] = window_size(s)
+        set_size(s.master, NEW_SIZE)
+        deadline = time.time() + STEP_TIMEOUT
+        while True:
+            result["new size"] = window_size(s, max(1, deadline - time.time()))
+            if result["new size"] == "%d %d" % NEW_SIZE or time.time() >= deadline:
+                break
+            time.sleep(1)
+        mark = s.send(b"echo sleeping; sleep 60\r")
+        if s.expect(rb"\nsleeping\r", STEP_TIMEOUT, mark):
+            time.sleep(1)
+            s.send(b"\x03")
+            mark = s.send(b"echo status=$?\r")
+            m = s.expect(rb"status=([0-9]+)\r", STEP_TIMEOUT, mark)
+            result["interrupted"] = m.group(1).decode() if m else None
+            if m:
+                mark += m.end()
+        # Ctrl-D at the next prompt.
+        s.expect(re.escape(PROMPT), STEP_TIMEOUT, mark)
+        s.send(b"\x04")
+    result["exit status"] = s.wait(STEP_TIMEOUT if result["started"] else 5)
+    result["output"] = s.output.decode("utf-8", "backslashreplace")
+    return result
+
+
+runtimes = [t.RUNTIME] if t.RUNTIME == "runc" else [t.RUNTIME, "runc"]
+CASES = [(runtime, mode, init) for runtime in runtimes for mode in ("run", "exec") for init in (False, True)]
+t.param("init", "no, yes")
+
+for (runtime, mode, init), result in zip(CASES, t.parallel(run, CASES)):
+    desc = "%s, docker %s -it, %s" % (runtime, mode, "--init" if init else "no --init")
+    # The known limitations of a Container/VM's console (see above).
+    console = runtime != "runc" and mode == "run"
+    if not t.check("%s: prompt" % desc, True, result["started"]):
+        t.log("output:\n%s" % result["output"])
+        continue
+    t.check("%s: typed command echoed" % desc, True, result.get("echo"))
+    t.check("%s: typed command ran" % desc, True, result.get("ran"))
+    t.check("%s: line end" % desc, "\r\r\n" if console else "\r\n", result.get("line end"))
+    t.check("%s: window size" % desc, "" if console else "%d %d" % SIZE, result.get("size"))
+    t.check("%s: window size after a change" % desc, "" if console else "%d %d" % NEW_SIZE, result.get("new size"))
+    t.check("%s: Ctrl-C interrupts a command (exit status)" % desc, "130", result.get("interrupted"))
+    if not t.check("%s: Ctrl-D ends the session (exit status)" % desc, 0, result["exit status"]):
+        t.log("output: %r" % result["output"][-300:])
+
+t.finish()
