@@ -77,8 +77,8 @@
   unit (home.mount). An invalid RUNCVM_FSTAB is rejected.
 
 Specs that are invalid in themselves, or together, and the planner's
-held mounts, exclusions and manifests, are checked without a VM, for many
-more cases, by tests/54-disk-planner.
+held mounts, exclusions and manifests, are checked without a VM by
+tests/54-disk-planner.
 """
 
 import os

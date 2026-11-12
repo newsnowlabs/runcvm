@@ -23,8 +23,8 @@ the manifests); and that the checks and planning left /disks unchanged.
   mounted at two paths (existing or not), or as hard links, is rejected;
   two existing disks with one filesystem UUID are rejected; distinct files
   are not.
-- Sizes: a malformed size ('garbage', '1.5G', '10T'), also on a later disk,
-  is rejected; a valid one is accepted.
+- Sizes: a size that truncate rejects ('garbage', '1.5G', '10T'), also on a
+  later disk, is rejected; a valid one is accepted.
 - mke2fs's limits: 257 exclusions below an ext4 disk's destination, and 65
   destinations, are rejected; 256 and 64 are accepted, as are 257
   exclusions for xfs.
@@ -267,6 +267,9 @@ invalid("src-dotdot-naming-existing-disk", "/disks/a,/data,ext4;/disks/missing/.
 valid("src-double-slash", "/disks//a,/srv/a,ext4,16M", has=["disk 0 new=1 layout=subdirs"])
 valid("src-dangling-link", "/disks/link.img,/data,ext4,16M",
       setup="volume v /disks /data && ln -s state.img /disks/link.img",
+      has=["view 0 /data/state.img", "excl /data /data/state.img file"])
+valid("src-link-dot", "/disks/dot.img,/data,ext4,16M",
+      setup="volume v /disks /data && ln -s ./state.img /disks/dot.img",
       has=["view 0 /data/state.img", "excl /data /data/state.img file"])
 valid("src-link-up-existing-dir", "/disks/sub/up.img,/data,ext4,16M",
       setup="volume v /disks /data && mkdir -p /disks/x /disks/sub && ln -s ../x/s.img /disks/sub/up.img",
