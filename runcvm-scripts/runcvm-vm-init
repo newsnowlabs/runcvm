@@ -82,7 +82,7 @@ if [ -f /.runcvm/rootdisk ]; then
 
   # Bind each path over the same path on the disk, recursively, so that each carries the mounts
   # below it, creating a mountpoint of the same kind if the disk lacks one: the disk holds an empty
-  # directory at each mountpoint that is a directory, and nothing at a mounted file.
+  # directory at each mountpoint that is a directory, and an empty file at a mounted file.
   ROOTDISK_CARRIED=()
   while IFS= read -r path
   do

@@ -1148,6 +1148,18 @@ ARGS=(
   -append "$RUNCVM_KERNEL_ROOT $INIT rw ${APPEND[*]} $RUNCVM_KERNEL_APPEND"
 )
 
+# With a terminal ('docker run -t') as standard input, QEMU's stdio console keeps output
+# processing (OPOST) on the container's terminal, while the VM's console translates each LF to
+# CR LF itself, as a terminal does: stop the container's terminal from translating it again, so
+# lines end CR LF, not CR CR LF.
+#
+# This applies where the VM's console is QEMU's stdio, which every console device but tty0 is, in
+# any display mode and on any architecture (e.g. hvc0, or a serial port's ttyS0): so tty0 alone,
+# the console of display mode 'vnc', which is the VM's display, is left out.
+if [ -t 0 ] && [ "$CONSOLE_DEV" != tty0 ]; then
+  busybox stty -onlcr 2>/dev/null || true
+fi
+
 # virtiofsd is started in the background by runcvm-ctr-entrypoint, and QEMU fails at once if the
 # virtiofsd socket does not yet exist: wait up to 30s for it.
 for ((i = 0; i < 300; i++)); do
