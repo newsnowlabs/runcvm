@@ -452,8 +452,9 @@ do_disk() {
 
   # In do_disks' planning pass (DISK_PLAN=1), every disk's spec is checked, and its destinations
   # recorded in PLAN_DESTS (as paths in the image's filesystem, see disk_image_path) and PLAN_IDS,
-  # before any disk is created. A disk and another disk, a tmpfs mount, a volume or a bind mount
-  # with one destination would hide one another, so that is rejected.
+  # before any disk is created. A disk and another disk, or a tmpfs mount, with one destination
+  # would hide one another, so that is rejected. (A disk at a volume's or bind mount's destination
+  # is populated from it, when new, and mounted over it.)
   if [ "$DISK_PLAN" = "1" ]; then
     for dst in "${dests[@]}"
     do
@@ -468,12 +469,6 @@ do_disk() {
       do
         if [ "${TMPFS_DESTS[$i]}" = "$path" ]; then
           error "Error: disk spec '$spec' invalid: dst '$dst' is also the destination of a tmpfs mount"
-        fi
-      done
-      for i in "${!CONTAINER_MOUNTS[@]}"
-      do
-        if [ "${CONTAINER_MOUNTS[$i]}" = "$path" ]; then
-          error "Error: disk spec '$spec' invalid: dst '$dst' is also the destination of a volume or bind mount"
         fi
       done
       PLAN_DESTS+=("$path")

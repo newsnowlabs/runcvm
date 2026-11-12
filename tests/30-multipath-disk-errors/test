@@ -25,20 +25,20 @@
 - Keyed specs (whose keys include Docker's aliases 'source', 'target' and
   'destination') with a repeated or unknown key, a field without '=', no dst
   or overlapping destinations are rejected likewise.
-- Across disks and other mounts: two disks with one destination, or a disk
-  and a tmpfs mount, a volume or a bind mount with one destination: the
-  Container/VM exits with status 1, reporting the disk's spec, before
-  creating that disk.
+- Across disks and tmpfs mounts: two disks with one destination, or a disk
+  and a tmpfs mount with one destination: the Container/VM exits with
+  status 1, reporting the disk's spec, before creating that disk.
 - Nested disks, tmpfs mounts, volumes and bind mounts: nested disks in
   either order in RUNCVM_DISKS (including through the image's symbolic link
   /var/run), a tmpfs mount, a volume or a bind mount above a disk, a tmpfs
   mount below a disk, a tmpfs mount, a volume or a bind mount between two
   disks, a tmpfs mount below a volume below a disk, a volume
   below a disk below a volume or a tmpfs mount, a volume below a tmpfs
-  mount, and destinations sharing only a prefix (/home and /homes): the
-  Container/VM runs, with and without --init, and each path is on the
-  intended disk, tmpfs mount, volume or bind mount, as a deeper mount is
-  mounted over a shallower one.
+  mount, a disk at a volume's or a bind mount's destination, and
+  destinations sharing only a prefix (/home and /homes): the Container/VM
+  runs, with and without --init, and each path is on the intended disk,
+  tmpfs mount, volume or bind mount, as a deeper mount is mounted over a
+  shallower one, and a disk over a volume or bind mount at its destination.
 - A new disk leaves out another disk's destination below its own, holding an
   empty directory there with the directory's mode, whichever is listed first,
   for an ext4 and an xfs outer disk (populated by mke2fs and in the VM): with
@@ -121,10 +121,6 @@ ACROSS = [
      "/disks/b,/home,ext4,16M", "dst '/home' is also the dst of an earlier disk"),
     ("same-dst-disk-tmpfs", "/disks/b,/home,ext4,16M", ["--tmpfs", "/home"],
      "/disks/b,/home,ext4,16M", "dst '/home' is also the destination of a tmpfs mount"),
-    ("same-dst-disk-volume", "/disks/b,/data,ext4,16M", ["--mount", "type=volume,src={vol},dst=/data"],
-     "/disks/b,/data,ext4,16M", "dst '/data' is also the destination of a volume or bind mount"),
-    ("same-dst-disk-bind", "/disks/b,/srv/s,ext4,16M", ["--mount", "type=bind,src=/opt/runcvm/scripts,dst=/srv/s,readonly"],
-     "/disks/b,/srv/s,ext4,16M", "dst '/srv/s' is also the destination of a volume or bind mount"),
 ]
 
 # Nested disks, tmpfs mounts, volumes and bind mounts: (name, RUNCVM_DISKS, further docker run
@@ -170,6 +166,10 @@ LAYERED = [
     ("tmpfs-disk-volume", "/disks/a,/t/d,ext4,16M",
      ["--mount", "type=tmpfs,dst=/t", "--mount", "type=volume,src={vol},dst=/t/d/v"],
      {"/t": "tmpfs", "/t/d": 0, "/t/d/v": "volume"}),
+    ("disk-at-volume", "/disks/a,/data,ext4,16M", ["--mount", "type=volume,src={vol},dst=/data"],
+     {"/data": 0}),
+    ("disk-at-bind", "/disks/a,/srv/s,ext4,16M", ["--mount", "type=bind,src=/opt/runcvm/scripts,dst=/srv/s,readonly"],
+     {"/srv/s": 0}),
     ("tmpfs-volume", "/disks/a,/srv,ext4,16M",
      ["--mount", "type=tmpfs,dst=/t", "--mount", "type=volume,src={vol},dst=/t/v"],
      {"/srv": 0, "/t": "tmpfs", "/t/v": "volume"}),
