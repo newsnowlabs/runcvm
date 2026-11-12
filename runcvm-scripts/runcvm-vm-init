@@ -254,6 +254,9 @@ if [ -f /.runcvm/fstab ]; then
   # each non-recursively (each mount below it is listed too) into a private tmpfs, from where it
   # is mounted again at its path, in its place among the mounts in /.runcvm/fstab. Binding a Docker
   # volume also mounts it in the VM, which otherwise sees it only once accessed.
+  #
+  # HELD maps each held mount's path to where it is held, /.runcvm/submounts/<n>, where <n> is the
+  # number of entries already in HELD.
   declare -A HELD=()
   if [ -s /.runcvm/held-mounts ]; then
     mkdir -p /.runcvm/submounts
@@ -313,6 +316,7 @@ if [ -f /.runcvm/fstab ]; then
           vm_init_error "dst '$dst' cannot be populated: copying its contents to its new disk failed"
       fi
 
+      # Unmask in the reverse order of masking.
       for ((i = ${#masks[@]} - 1; i >= 0; i--))
       do
         busybox umount "${masks[$i]}" || \
@@ -343,6 +347,7 @@ if [ -f /.runcvm/fstab ]; then
   do
     if [[ "$line" = "#runcvm-held "* ]]; then
       path="${line#"#runcvm-held "}"
+      # A path that was missing when the mounts were held was not held, so is not mounted again.
       held="${HELD[$path]:-}"
       [ -n "$held" ] || continue
 
@@ -358,12 +363,17 @@ if [ -f /.runcvm/fstab ]; then
       continue
     fi
 
+    # An fstab entry's first four fields; skip blank lines and other comments.
     read -r src dst type options _ <<<"$line"
     [[ -z "$dst" || "$src" = \#* ]] && continue
 
+    # Add X-mount.mkdir to the entry's options, after a comma if it has any. Once mounted, go on to
+    # the next entry; otherwise, report it below.
     BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null \
       mount -i --options-source=disable -t "$type" -o "${options:+$options,}X-mount.mkdir" "$src" "$dst" && continue
 
+    # For a bind mount from /.runcvm/disks/<n>/<directory>: ${src%/*} is the disk's mountpoint,
+    # and ${src##*/} the directory.
     if [[ "$src" = /.runcvm/disks/* ]] && findmnt -rn --mountpoint "${src%/*}" >/dev/null && ! [ -d "$src" ]; then
       vm_init_error "dst '$dst' cannot be mounted: its disk has no directory '${src##*/}', so was created without this destination; destinations cannot be added to an existing disk"
     fi

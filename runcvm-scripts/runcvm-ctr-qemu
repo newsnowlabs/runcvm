@@ -145,14 +145,15 @@ disk_vm_mounts() {
 # RUNCVM_TMPFS instead.) /.runcvm, and the mounts below it, are left out.
 container_mounts() {
   local mnt rest
-  local IFS=$' \t\n'
+  local IFS=$' \t\n'  # Split on whitespace, whatever IFS the caller has set.
 
+  # Each line of mountinfo describes a mount; its fifth field is the mountpoint.
   while read -r _ _ _ _ mnt rest
   do
     # Decode mountinfo's octal escapes (e.g. '\040' for a space).
     mnt=$(printf '%b' "$mnt")
     [[ "$mnt" = "$RUNCVM_VM_MOUNTPOINT"/* ]] || continue
-    mnt="${mnt#"$RUNCVM_VM_MOUNTPOINT"}"
+    mnt="${mnt#"$RUNCVM_VM_MOUNTPOINT"}"  # Strip the prefix, leaving the path in the VM.
 
     [[ "$mnt" = /.runcvm || "$mnt" = /.runcvm/* ]] || echo "$mnt"
   done </proc/self/mountinfo
@@ -496,13 +497,20 @@ do_disk() {
     # over them (see write_fstab). Each is listed in inner[] as its path on this disk; inner_dir[]
     # holds the directory on this disk of this disk's destination that holds it (as in
     # /.runcvm/disks-populate below), and inner_path[] its path in the image's filesystem.
+    #
+    # For example, for this disk at /usr/share and another at /usr/share/apk: with layout 'subdirs',
+    # inner[] holds '/usr-share/apk' and inner_dir[] 'usr-share'; with layout 'root', inner[] holds
+    # '/apk' and inner_dir[] '.'; either way inner_path[] holds '/usr/share/apk'.
     inner=() inner_dir=() inner_path=()
     for i in "${!dests[@]}"
     do
       path=$(disk_image_path "${dests[$i]}")
       for j in "${!PLAN_DESTS[@]}"
       do
+        # Only another disk's destination strictly below this destination.
         [[ "${PLAN_IDS[$j]}" != "$id" && "${PLAN_DESTS[$j]}" = "${path%/}"/* ]] || continue
+
+        # ${PLAN_DESTS[$j]#"${path%/}"} is that destination relative to this one, e.g. '/apk'.
         if [ "$layout" = "subdirs" ]; then
           inner+=("/${subdirs[$i]}${PLAN_DESTS[$j]#"${path%/}"}")
           inner_dir+=("${subdirs[$i]}")
@@ -522,6 +530,7 @@ do_disk() {
       populate+=(-E one_file_system)
       for i in "${!inner[@]}"
       do
+        # -x takes a wildcard pattern, so escape the path to match only itself.
         populate+=(-x "$(disk_glob_escape "${inner[$i]}")")
       done
       if [ "$layout" = "subdirs" ]; then
@@ -691,15 +700,18 @@ fstab_add_mount() {
   local path components
 
   path=$(disk_image_path "$2")
+  # Delete every character but '/', so the length that remains is the depth: one '/' per
+  # component.
   components="${path//[^\/]/}"
   FSTAB_MOUNTS+=("$1")
   FSTAB_DEPTHS+=("${#components}")
 }
 
 # Records each tmpfs mount, which runcvm-runtime passes in RUNCVM_TMPFS as fstab entries, one per
-# line: its entry in TMPFS_ENTRIES, for write_fstab, after the disks', and its destination in
-# TMPFS_DESTS, as a path in the image's filesystem with symbolic links resolved (or as given, where
-# that fails), for do_disk's check and write_fstab.
+# line. Its entry and its destination as given are added to TMPFS_ENTRIES as consecutive elements,
+# for write_fstab to write after the disks' entries. Its destination, as a path in the image's
+# filesystem with symbolic links resolved (or as given, where that fails), is added to
+# TMPFS_DESTS, for do_disk's check and write_fstab.
 tmpfs_mounts() {
   local line dst path
 
@@ -729,11 +741,13 @@ tmpfs_mounts() {
 write_fstab() {
   local depth i max=0 mnt dst
 
+  # TMPFS_ENTRIES holds pairs: each tmpfs mount's entry, then its destination.
   for ((i = 0; i < ${#TMPFS_ENTRIES[@]}; i += 2))
   do
     fstab_add_mount "${TMPFS_ENTRIES[$i]}" "${TMPFS_ENTRIES[$i+1]}"
   done
 
+  # Each volume or bind mount strictly below any disk's or tmpfs mount's destination.
   for mnt in "${CONTAINER_MOUNTS[@]}"
   do
     for dst in "${DISK_DESTS[@]}" "${TMPFS_DESTS[@]}"
@@ -748,6 +762,8 @@ write_fstab() {
 
   [ "${#FSTAB_DISKS[@]}" -gt 0 ] || [ "${#FSTAB_MOUNTS[@]}" -gt 0 ] || return 0
 
+  # Sort the mounts by depth, keeping the order in which they were added at each depth: find the
+  # greatest depth, then, for each depth from 0 up to it, write the mounts of that depth.
   for i in "${!FSTAB_DEPTHS[@]}"
   do
     [ "${FSTAB_DEPTHS[$i]}" -le "$max" ] || max="${FSTAB_DEPTHS[$i]}"
@@ -791,6 +807,8 @@ do_disks() {
     id=$((id+1))
   done
 
+  # Reset what the planning pass set: do_disk records a whole-root disk in ROOT_DISK_SPEC, and
+  # rejects a second one where it is already set.
   DISK_PLAN=0
   ROOT_DISK_SPEC=""
   id=0
@@ -849,6 +867,7 @@ FSTAB_DEPTHS=()
 TMPFS_DESTS=()
 TMPFS_ENTRIES=()
 DISK_DESTS=()
+# The container's volumes and bind mounts, each once, read before any disk is created.
 mapfile -t CONTAINER_MOUNTS < <(container_mounts | busybox sort -u)
 tmpfs_mounts
 if [ -n "$RUNCVM_DISKS" ]; then
