@@ -250,7 +250,7 @@ if [ -f /.runcvm/rootdisk ]; then
     if [ -d "$path" ]; then
       mkdir -p "/.runcvm/newroot$path"
     else
-      mkdir -p "/.runcvm/newroot$(busybox dirname "$path")"
+      mkdir -p "/.runcvm/newroot${path%/*}"
       [ -e "/.runcvm/newroot$path" ] || touch "/.runcvm/newroot$path"
     fi
 
@@ -425,12 +425,14 @@ if [ -f /.runcvm/fstab ]; then
   # Mounts held mount $1 again at its path $2, creating a mountpoint of the same kind if the mount
   # above it lacks one.
   mount_held() {
-    local held="/.runcvm/submounts/$1" path="$2"
+    local held="/.runcvm/submounts/$1" path="$2" parent
 
     if [ -d "$held" ]; then
       mkdir -p "$path"
     else
-      mkdir -p "$(busybox dirname "$path")"
+      # The parent directory, by ${path%/*}, not $(dirname), which would drop newlines ending it.
+      parent="${path%/*}"
+      mkdir -p "${parent:-/}"
       [ -e "$path" ] || touch "$path"
     fi
 

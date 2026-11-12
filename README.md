@@ -817,7 +817,7 @@ Each `<diskN>` is a comma-separated list of fields, in either of two forms:
 
 where:
 
-- `<src>` is the path _within the container_ where the virtual disk backing file should be located. This may be in the container's overlayfs or within a volume (mounted using `--mount=type=volume`).
+- `<src>` is the absolute path _within the container_ where the virtual disk backing file should be located, without `.` or `..` components. This may be in the container's overlayfs or within a volume (mounted using `--mount=type=volume`). A symbolic link there is followed, as creating the file would follow it.
 - `<dst>` is both (a) the path within the VM where the disk's files should appear; and (b) the location of the directory with which contents the disk should be prepopulated. Several destinations may share one disk: separated by `:` in the positional form, or each given by its own `dst=` in the keyed form, where a destination may also contain `:`.
 - `<filesystem>` is the filesystem with which the backing disk should be formatted when first created: by default, `ext4`, `xfs` or `btrfs` (see [Disk filesystems](#disk-filesystems) below).
 - `<size>` is the size of the backing file (in `truncate` format), and must be specified if `<src>` does not exist.

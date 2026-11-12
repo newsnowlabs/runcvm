@@ -38,20 +38,28 @@
   and an xfs disk, below an xfs disk with a whole-root disk (populated before
   the root switch, so after the volumes were accessed), and carried onto a
   whole-root disk, are each mounted at their paths, and a disk at their
-  parent holds an empty directory at each.
+  parent holds an empty directory at each; the image's /srv/tr, named as the
+  volume at '/srv/tr\n' is without its newline, is copied. A bind-mounted
+  file whose parent's name ends in a newline is mounted, held below a tmpfs
+  mount and carried onto a whole-root disk.
 - Disk backing files below a destination, for ext4 and xfs: one volume at
   both /disks and /data, with a disk /disks/state.img at /data: the disk
-  holds no state.img; likewise another disk's backing file in that volume;
+  holds no state.img; likewise another disk's backing file in that volume,
+  and a backing file named through a dangling symbolic link to state.img;
   a backing file under /vm (the image's view in the container) below its
   own destination is left out; and a volume's unrelated file with a
   backing file's name, at the container path of that backing file, is kept.
-- Invalid plans create nothing: a later disk without a size; a 'root'-layout
-  destination with whitespace or '..'; two disks with one backing file, by
-  one path spelt two ways, through one volume mounted at two paths (neither file existing
-  yet, at /disks and /disks/alias), through a dangling symbolic link, or as hard links; two existing
-  disks with one UUID; a new ext4 disk with 257 mounts to leave out below its
-  destination, or with 65 destinations. Each is rejected, with exit status
-  1, naming the spec, and the disks' volume holds nothing new.
+- Invalid plans create nothing, and change no existing disk: a later disk
+  without a size, or with a malformed one; a backing file path that is
+  relative, or has a '.' or '..' component (including '..' after a directory
+  not yet created, naming an existing disk); a 'root'-layout destination
+  with whitespace or '..'; two disks with one backing file, by one path
+  spelt two ways, through one volume mounted at two paths (neither file
+  existing yet, at /disks and /disks/alias), through a dangling symbolic
+  link, or as hard links; two existing disks with one UUID; a new ext4 disk
+  with 257 mounts to leave out below its destination, or with 65
+  destinations. Each is rejected, with exit status 1, naming the spec, and
+  the disks' volume holds no new or changed file.
 - An existing disk with changed mounts: created with a volume below it, then
   used without it (an empty directory remains on the disk), then with a
   tmpfs mount there.
@@ -368,10 +376,18 @@ ODD = ["a b", "t\tb", "c\\d", "e\\040f", "n\nl", "tr\n"]
 ODD_TMPFS = "tm p\n"
 # For each path given after the disk's destination: 'ok' if it is a mountpoint, and the disk holds a
 # directory there (where a disk's destination is given, else '-').
+# Also whether the image's /srv/tr/f, in a directory whose name is that of the volume at '/srv/tr\n'
+# without its newline, was copied, as an exclusion of that volume must not match it.
 ENCODING_PROBE = ('d="$1"; shift; [ "$d" = - ] || { mkdir -p /tmp/under && mount --bind "$d" /tmp/under; }; '
                   'for p in "$@"; do m=bad; mountpoint -q "$p" && m=ok; '
                   'if [ "$d" != - ]; then [ -d "/tmp/under/${p#$d/}" ] || m="$m-noplaceholder"; fi; echo "$m"; done; '
-                  'echo "tmpfs=$(stat -f -c %T /srv/"$(printf "tm p")"* 2>/dev/null)"')
+                  'echo "tmpfs=$(stat -f -c %T /srv/"$(printf "tm p")"* 2>/dev/null)"; '
+                  '[ -f /srv/tr/f ] && echo unrelated=kept || echo unrelated=lost')
+srv_tr_image = t.unique("srv-tr").lower()
+subprocess.run(["docker", "build", "-q", *t.labels(), "-t", srv_tr_image, "-"], check=True,
+               input="FROM alpine\nRUN mkdir -p /srv/tr && echo f >/srv/tr/f\n", universal_newlines=True,
+               stdout=subprocess.DEVNULL)
+t.cleanup_image(srv_tr_image)
 # (name, RUNCVM_DISKS, the parent of the odd paths, the disk destination whose placeholders to check)
 ENCODING = [
     ("ext4", "/disks/a,/srv,ext4,64M", "/srv", "/srv"),
@@ -388,7 +404,7 @@ def run_encoding(case):
     for p in paths:
         opts += ["-v", p]
     opts += ["--tmpfs", "%s/%s" % (parent, ODD_TMPFS)]
-    return vm("encoding-" + name, disks, opts, ENCODING_PROBE, under, *paths)
+    return vm("encoding-" + name, disks, opts, ENCODING_PROBE, under, *paths, image=srv_tr_image)
 
 
 for (name, disks, parent, under), r in zip(ENCODING, t.parallel(run_encoding, ENCODING)):
@@ -401,24 +417,50 @@ for (name, disks, parent, under), r in zip(ENCODING, t.parallel(run_encoding, EN
         t.check("%s: volume at %r mounted%s" % (name, p, ", with a placeholder on the disk" if under != "-" else ""),
                 "ok", line)
     t.check("%s: tmpfs mount at %r" % (name, ODD_TMPFS), "tmpfs", values(r).get("tmpfs"))
+    t.check("%s: the image's /srv/tr, unlike the volume at '/srv/tr\\n', is copied" % name, "kept",
+            values(r).get("unrelated"))
+
+# A bind-mounted file whose parent directory's name ends in a newline: held below a tmpfs mount, and
+# carried onto a whole-root disk. (name, RUNCVM_DISKS, further options, the file's path)
+NEWLINE_PARENT = [
+    ("held", "/disks/a,/srv,ext4,64M", ["--tmpfs", "/t"], "/t/dir\n/file"),
+    ("carried", "/disks/r,/,ext4,256M", [], "/srv/dir\n/file"),
+]
+
+for (name, disks, opts, path), r in zip(NEWLINE_PARENT, t.parallel(
+        lambda c: vm("newline-parent-" + c[0], c[1], c[2] + ["-v", "/opt/runcvm/LICENSE:%s:ro" % c[3]],
+                     '[ -s "$1" ] && echo file=yes', c[3]), NEWLINE_PARENT)):
+    name = "bind-mounted file at %r, %s" % (path, name)
+    if not t.check("%s: exit status" % name, 0, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+        continue
+    t.check("%s: mounted" % name, "yes", values(r).get("file"))
 
 # --- Backing files ------------------------------------------------------------------------------
 
+def runc(volume, script):
+    t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v", "%s:/disks" % volume,
+             "alpine", "sh", "-c", script, check=True)
+
+
 # What the disk holds at its destination "$1": its entries, and state.img's contents, if any.
 BACKING_PROBE = UNDER + 'echo "entries=$(ls -A /tmp/under | tr "\\n" " ")"; echo "state=$(cat /tmp/under/state.img 2>/dev/null)"'
-BACKING = [(case, fs) for case in ("own", "other", "prefixed", "unrelated") for fs in ("ext4", "xfs")]
+BACKING = [(case, fs) for case in ("own", "other", "dangling", "prefixed", "unrelated") for fs in ("ext4", "xfs")]
 
 
 def run_backing(case):
     kind, fs = case
     name = "backing-%s-%s" % case
     size = SIZE[fs]
-    if kind in ("own", "other"):
+    if kind in ("own", "other", "dangling"):
         shared = t.unique(name + "-shared")
         t.volume_create(shared)
         disks = "/disks/state.img,/data,%s,%s" % (fs, size)
         if kind == "other":
             disks = "/disks/a.img,/data,%s,%s;/disks/state.img,/other,ext4,16M" % (fs, size)
+        if kind == "dangling":
+            runc(shared, "ln -s state.img /disks/link.img")
+            disks = "/disks/link.img,/data,%s,%s" % (fs, size)
         return vm(name, disks, ["--mount", "type=volume,src=%s,dst=/data" % shared], BACKING_PROBE, "/data",
                   disks_volume=shared)
     if kind == "prefixed":
@@ -431,6 +473,7 @@ def run_backing(case):
 for (kind, fs), r in zip(BACKING, t.parallel(run_backing, BACKING)):
     name = {"own": "one volume at /disks and /data, disk /disks/state.img at /data",
             "other": "one volume at /disks and /data, another disk's backing file in it",
+            "dangling": "one volume at /disks and /data, disk /disks/link.img, a dangling link to state.img",
             "prefixed": "backing file /vm/srv/state.img, disk at /srv",
             "unrelated": "volume at /data holding state.img, backing file /data/state.img"}[kind] + ", " + fs
     if not t.check("%s: exit status" % name, 0, r.returncode):
@@ -441,20 +484,15 @@ for (kind, fs), r in zip(BACKING, t.parallel(run_backing, BACKING)):
     if kind == "unrelated":
         t.check("%s: the volume's state.img is kept" % name, "seed", v.get("state"))
     else:
-        t.check("%s: no backing file on the disk" % name, [],
+        t.check("%s: no backing file on the disk" % name, ["link.img"] if kind == "dangling" else [],
                 [e for e in entries if e.endswith(".img")])
 
 # --- Invalid plans ------------------------------------------------------------------------------
 
-# Lists /disks, as a runc container sees it.
+# Lists /disks, as a runc container sees it, with each file's checksum.
 def disks_listing(volume):
     return t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v", "%s:/disks" % volume,
-                    "alpine", "sh", "-c", "cd /disks && find . | sort").stdout
-
-
-def runc(volume, script):
-    t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v", "%s:/disks" % volume,
-             "alpine", "sh", "-c", script, check=True)
+                    "alpine", "sh", "-c", "cd /disks && find . | sort && find . -type f -exec md5sum {} + | sort").stdout
 
 
 TMPFS_257 = []
@@ -485,6 +523,15 @@ INVALID = [
      "src '/disks/c' has the same filesystem UUID as the src of an earlier disk, '/disks/a'"),
     ("257-exclusions", None, None, TMPFS_257, "/disks/a,/srv,ext4,16M", None,
      "a new disk with fs 'ext4' can leave out at most 256 paths mounted below its destinations, and this one has 257"),
+    ("src-dotdot-alias", "/disks/a,/srv/a,ext4,16M,layout=root", None, [],
+     "/disks/a,/data,ext4;/disks/missing/../a,/other,ext4,16M", "/disks/missing/../a,/other,ext4,16M",
+     "src '/disks/missing/../a' must be an absolute path to a file, without '.' or '..' components or a newline"),
+    ("src-relative", None, None, [], "state.img,/srv/a,ext4,16M", None,
+     "src 'state.img' must be an absolute path to a file, without '.' or '..' components or a newline"),
+    ("src-dot", None, None, [], "/disks/./a,/srv/a,ext4,16M", None,
+     "src '/disks/./a' must be an absolute path to a file, without '.' or '..' components or a newline"),
+    ("later-disk-bad-size", None, None, [], "/disks/a,/srv/a,ext4,16M;/disks/b,/srv/b,ext4,garbage",
+     "/disks/b,/srv/b,ext4,garbage", "size 'garbage' invalid"),
     ("65-dsts", None, None, [], "/disks/a,%s,ext4,16M" % ":".join("/srv/d%d" % n for n in range(65)), None,
      "a new disk with fs 'ext4' and layout 'subdirs' can have at most 64 dst"),
 ]

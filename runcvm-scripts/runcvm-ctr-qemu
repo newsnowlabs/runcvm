@@ -121,8 +121,9 @@ disk_subdir() {
   echo "$name"
 }
 
-# Prints path $1 with each character special to mke2fs's '-x PATTERN' wildcards ('\', '*', '?'
-# and '[') escaped, so that the pattern matches only that path.
+# Sets REPLY to path $1 with each character special to mke2fs's '-x PATTERN' wildcards ('\', '*',
+# '?' and '[') escaped, so that the pattern matches only that path. (Set, not printed: $(...) would
+# drop any newlines the path ends in.)
 disk_glob_escape() {
   local path="$1"
 
@@ -131,7 +132,7 @@ disk_glob_escape() {
   path="${path//\?/\\?}"
   path="${path//\[/\\[}"
 
-  printf '%s' "$path"
+  REPLY="$path"
 }
 
 # Succeeds if path $1 is strictly below path $2, where $2 may be '/'.
@@ -271,23 +272,60 @@ disk_backing_views() {
   done
 }
 
-# Sets REPLY to a key identifying the file that disk backing file path $1 names, or will name once
-# created, whatever path reaches it: for an existing file, its device and inode; otherwise the
-# device and inode of the nearest directory above it that exists, with the rest of the path. Each
-# symbolic link the path ends in is followed first, as creating the file would follow it. Two paths
-# with one key name one file (e.g. /disks/a and /disks2/a, with one volume mounted at both).
-disk_src_key() {
-  local path="$1" target links=0 rest=""
+# Sets REPLY to the file that disk backing file path $1 names, or will name once created: the path,
+# with repeated '/' collapsed, and each symbolic link it ends in followed, as creating the file would
+# follow it. Fails, setting REPLY to the reason, unless the path is absolute, without '.' or '..'
+# components, a trailing '/' or a newline, so that each backing file has one spelling, which the
+# checks between disks can compare; '..' after a directory not yet created (e.g. /disks/missing/../a)
+# would name an existing file once that directory is created. A link's target is resolved where the
+# directory holding it exists, and is held to the same rules where it doesn't. Fails likewise after
+# 40 links.
+disk_src_file() {
+  local path="$1" target dir links=0
+
+  while [[ "$path" = *//* ]]; do path="${path//\/\//\/}"; done
+  if [[ "$path" != /* || "$path" = */ || "/$path/" = */./* || "/$path/" = */../* || "$path" = *$'\n'* ]]; then
+    REPLY="must be an absolute path to a file, without '.' or '..' components or a newline"
+    return 1
+  fi
 
   while [ -L "$path" ]
   do
     links=$((links+1))
-    [ "$links" -le 40 ] || break
+    if [ "$links" -gt 40 ]; then
+      REPLY="has too many levels of symbolic links"
+      return 1
+    fi
+
+    # readlink's output ends with one newline, which $(...) removes, together with any newlines
+    # that end the target itself; the '/' appended first keeps those.
     target=$(busybox readlink "$path"; echo /)
     target="${target%$'\n/'}"
-    [[ "$target" = /* ]] || target="$(busybox dirname "$path")/$target"
+    [[ "$target" = /* ]] || target="${path%/*}/$target"
+    while [[ "$target" = *//* ]]; do target="${target//\/\//\/}"; done
+
+    dir="${target%/*}"
+    if [[ "${target##*/}" != "" && "${target##*/}" != "." && "${target##*/}" != ".." && -d "${dir:-/}" ]]; then
+      dir=$(busybox realpath "${dir:-/}")
+      target="${dir%/}/${target##*/}"
+    fi
+    if [[ "$target" = */ || "/$target/" = */./* || "/$target/" = */../* || "$target" = *$'\n'* ]]; then
+      REPLY="is a symbolic link to '$target', which must be an absolute path to a file, without '.' or '..' components or a newline, where the directory holding it does not exist"
+      return 1
+    fi
     path="$target"
   done
+
+  REPLY="$path"
+}
+
+# Sets REPLY to a key identifying the file that disk backing file $1 (as disk_src_file gives it)
+# names, or will name once created, whatever path reaches it: for an existing file, its device and
+# inode; otherwise the device and inode of the nearest directory above it that exists, with the rest
+# of the path. Two paths with one key name one file (e.g. /disks/a and /disks/alias/a, with one
+# volume mounted at both).
+disk_src_key() {
+  local path="$1" rest=""
 
   if [ -e "$path" ]; then
     REPLY="file $(busybox stat -L -c '%d:%i' "$path")"
@@ -302,18 +340,21 @@ disk_src_key() {
   REPLY="dir $(busybox stat -L -c '%d:%i' "${path:-/}")$rest"
 }
 
-# Creates disk backing file $2, of size $3, for disk spec $1. disk_parse has checked the size.
+# Creates disk $1's backing file, at the path disk_src_file gave it, with its directory if needed.
+# disk_parse has checked the size. A file that has appeared there since disk_parse found none is not
+# touched: it may be another disk's.
 disk_create_file() {
-  local spec="$1" src="$2" size="$3" dir
+  local id="$1" file="${DISK_SRC_FILE[$1]}" dir
 
-  # Create directory for disk backing file, if needed.
-  dir="$(busybox dirname "$src")"
-  if ! [ -d "$dir" ]; then
-    mkdir -p "$dir"
+  if [ -e "$file" ]; then
+    error "Error: disk spec '${DISK_SPEC[$id]}' invalid: src '${DISK_SRC[$id]}' exists, though it did not when the disks were checked"
   fi
 
-  # Create disk backing file.
-  busybox truncate -s "$size" "$src" >&2 || error "Error: disk spec '$spec' invalid: truncate on '$src' with size '$size' failed"
+  dir="${file%/*}"
+  [ -d "${dir:-/}" ] || mkdir -p "$dir"
+
+  busybox truncate -s "${DISK_SIZE[$id]}" "$file" >&2 || \
+    error "Error: disk spec '${DISK_SPEC[$id]}' invalid: truncate on '${DISK_SRC[$id]}' with size '${DISK_SIZE[$id]}' failed"
 }
 
 # Allocates every block of disk backing file $2, for disk spec $1, keeping its contents, so that the
@@ -330,9 +371,9 @@ disk_prealloc() {
 # with a common index), each filled by one phase only:
 #
 # - Disks, by disk id (position in RUNCVM_DISKS), filled by disk_parse: DISK_SPEC, DISK_SRC,
-#   DISK_SRC_PATH (the backing file's canonical path in this container), DISK_SRC_KEY (what identifies
-#   the file, existing or not, for checks between disks, see disk_src_key),
-#   DISK_FS, DISK_SIZE, DISK_PREALLOC,
+#   DISK_SRC_FILE (the file the backing file path names, see disk_src_file), DISK_SRC_PATH (that
+#   file's canonical path in this container), DISK_SRC_KEY (what identifies the file, existing or
+#   not, for checks between disks, see disk_src_key), DISK_FS, DISK_SIZE, DISK_PREALLOC,
 #   DISK_LAYOUT ('subdirs', 'root', or 'whole' for a whole-root disk), DISK_NEW (1 if the backing
 #   file doesn't exist) and DISK_UUID (an existing disk's, from disk_parse; a new disk's, from
 #   disks_create).
@@ -399,7 +440,7 @@ disk_prealloc() {
 disk_parse() {
   local spec="$1"
   local id="$2"
-  local src="" dsts dst fs="" size="" layout layout_opt="" prealloc="off" field key value i j path dir
+  local src="" file dsts dst fs="" size="" layout layout_opt="" prealloc="off" field key value i j path dir
   local whole_root=0
   local -a fields=() dests=() subdirs=() resolved=() fss=()
   local -A seen=()
@@ -483,6 +524,10 @@ disk_parse() {
     error "Error: disk spec '$spec' invalid: src, dst and fs must all be specified"
   fi
 
+  # Every check of the backing file is made of the file the path names (see disk_src_file).
+  disk_src_file "$src" || error "Error: disk spec '$spec' invalid: src '$src' $REPLY"
+  file="$REPLY"
+
   if [[ -n "$layout_opt" && "$layout_opt" != "subdirs" && "$layout_opt" != "root" ]]; then
     error "Error: disk spec '$spec' invalid: layout must be 'subdirs' or 'root'"
   fi
@@ -496,20 +541,20 @@ disk_parse() {
     error "Error: disk spec '$spec' invalid: fs '$fs' unsupported; fs must be one of: $(IFS=' '; echo "${fss[*]}")"
   fi
 
-  if [[ -e "$src" && ! -f "$src" ]]; then
+  if [[ -e "$file" && ! -f "$file" ]]; then
     error "Error: disk spec '$spec' invalid: src '$src' must be a plain file if it exists"
   fi
 
   # An existing disk keeps the filesystem it was created with, and the layout, as recorded by its
   # label. Its UUID, by which the VM mounts it, is read now, probing the backing file directly,
   # without the image's blkid configuration or cache.
-  if [[ -f "$src" ]]; then
-    value=$(blkid -p -s TYPE -o value "$src") || true
+  if [[ -f "$file" ]]; then
+    value=$(blkid -p -s TYPE -o value "$file") || true
     if [[ -n "$value" && "$value" != "$fs" ]]; then
       error "Error: disk spec '$spec' invalid: src '$src' exists, with fs '$value', not '$fs'"
     fi
 
-    value=$(blkid -p -s LABEL -o value "$src") || true
+    value=$(blkid -p -s LABEL -o value "$file") || true
     # grep reads all of disk_fs_list's output (no -q), as the pipefail note at the top requires.
     if [[ -n "$value" ]] && disk_fs_list 5 | grep -xF -- "$value" >/dev/null; then
       layout="subdirs"
@@ -525,7 +570,7 @@ disk_parse() {
       error "Error: disk spec '$spec' invalid: src '$src' exists, with layout 'root', which holds exactly one dst"
     fi
 
-    DISK_UUID[$id]=$(blkid -p -s UUID -o value "$src") || true
+    DISK_UUID[$id]=$(blkid -p -s UUID -o value "$file") || true
     if [ -z "${DISK_UUID[$id]}" ]; then
       error "Error: disk spec '$spec' invalid: no filesystem UUID found in src '$src'"
     fi
@@ -540,6 +585,12 @@ disk_parse() {
     if [[ -z "$size" ]]; then
       error "Error: disk spec '$spec' invalid: size must be specified if src '$src' does not exist"
     fi
+
+    # The size is checked by the truncate that will create the backing file, on a scratch file in
+    # /.runcvm, a tmpfs, where it takes no space.
+    busybox truncate -s "$size" /.runcvm/disk-size-check 2>/dev/null || \
+      error "Error: disk spec '$spec' invalid: size '$size' invalid"
+    busybox rm -f /.runcvm/disk-size-check
 
     which "${DISK_FS_MKFS[0]}" >/dev/null || \
       error "Error: disk spec '$spec' invalid: fs '$fs' needs '${DISK_FS_MKFS[0]}', which RunCVM lacks"
@@ -568,7 +619,7 @@ disk_parse() {
       error "Error: disk spec '$spec' invalid: a disk with dst '/' must have layout 'root'"
     fi
 
-    if [[ -f "$src" && "$layout" = "subdirs" ]]; then
+    if [[ -f "$file" && "$layout" = "subdirs" ]]; then
       error "Error: disk spec '$spec' invalid: src '$src' exists, with layout 'subdirs', not 'root' as dst '/' requires"
     fi
 
@@ -648,24 +699,23 @@ disk_parse() {
 
   # The backing file's canonical path: an existing file's, or, for a new one, its directory's, where
   # that exists, with its name.
-  if [ -e "$src" ]; then
-    path=$(busybox realpath "$src")
+  if [ -e "$file" ]; then
+    path=$(busybox realpath "$file")
   else
-    dir=$(busybox dirname "$src")
-    if [ -d "$dir" ]; then
-      path=$(busybox realpath "$dir")
-      path="${path%/}/$(busybox basename "$src")"
-    elif disk_normalise_path "$src"; then
-      path="$REPLY"
+    dir="${file%/*}"
+    if [ -d "${dir:-/}" ]; then
+      path=$(busybox realpath "${dir:-/}")
+      path="${path%/}/${file##*/}"
     else
-      path="$src"
+      path="$file"
     fi
   fi
 
   DISK_SPEC[$id]="$spec"
   DISK_SRC[$id]="$src"
+  DISK_SRC_FILE[$id]="$file"
   DISK_SRC_PATH[$id]="$path"
-  disk_src_key "$src"
+  disk_src_key "$file"
   DISK_SRC_KEY[$id]="$REPLY"
   disk_backing_views "$id" "$path"
   DISK_FS[$id]="$fs"
@@ -929,7 +979,7 @@ disks_create() {
     disk_fs "${DISK_FS[$id]}"
 
     if [ "${DISK_NEW[$id]}" = "1" ]; then
-      disk_create_file "${DISK_SPEC[$id]}" "${DISK_SRC[$id]}" "${DISK_SIZE[$id]}"
+      disk_create_file "$id"
 
       populate=()
       if [ "${DISK_LAYOUT[$id]}" = "subdirs" ]; then
@@ -945,7 +995,8 @@ disks_create() {
         do
           [ "${DEST_DISK[${EXCL_DEST[$i]}]}" = "$id" ] || continue
           # -x takes a wildcard pattern, so escape the path to match only itself.
-          populate+=(-x "$(disk_glob_escape "${EXCL_ON_DISK[$i]}")")
+          disk_glob_escape "${EXCL_ON_DISK[$i]}"
+          populate+=(-x "$REPLY")
         done
         for d in "${!DEST_DISK[@]}"
         do
@@ -1013,12 +1064,13 @@ do_root_disk() {
   src="${DISK_SRC[$id]}"
 
   if [ "${DISK_NEW[$id]}" = "1" ]; then
-    disk_create_file "$spec" "$src" "${DISK_SIZE[$id]}"
+    disk_create_file "$id"
 
     for i in "${!EXCL_DEST[@]}"
     do
       [ "${DEST_DISK[${EXCL_DEST[$i]}]}" = "$id" ] || continue
-      excludes+=(-x "$(disk_glob_escape "${EXCL_ON_DISK[$i]}")")
+      disk_glob_escape "${EXCL_ON_DISK[$i]}"
+      excludes+=(-x "$REPLY")
     done
 
     MKE2FS_CONFIG="$RUNCVM_GUEST/etc/mke2fs.conf" BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null \
