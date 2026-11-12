@@ -50,9 +50,10 @@ done
 $BUSYBOX sync
 
 # Unmount the entries of /.runcvm/fstab in the reverse of the order they are mounted, so that a
-# mount below a path is unmounted before the mount at that path. A filesystem that can't be unmounted is remounted read-only: a disk
-# with layout 'subdirs' is mounted at /.runcvm/disks/<n>, its own entry, where remounting it
-# read-only applies to the whole filesystem, whatever is still mounted from it.
+# mount below a path is unmounted before the mount at that path. A filesystem that can't be
+# unmounted is remounted read-only: a disk with layout 'subdirs' is mounted at /.runcvm/disks/<n>,
+# its own entry, where remounting it read-only applies to the whole filesystem, whatever is still
+# mounted from it.
 if [ -f /.runcvm/fstab ]; then
   mapfile -t dsts < <($BUSYBOX awk '$1 !~ /^#/ && NF >= 2 { print $2 }' /.runcvm/fstab)
   for ((i = ${#dsts[@]} - 1; i >= 0; i--))

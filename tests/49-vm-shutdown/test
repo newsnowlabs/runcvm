@@ -11,8 +11,8 @@
   ends the Container/VM when the timeout runs out (exit status 137), as
   for any container.
 - --init, with an entrypoint that exits by itself, leaving a process that
-  ignores SIGTERM: the Container/VM ends at once, with the entrypoint's
-  exit status.
+  ignores SIGTERM: the Container/VM ends without waiting for that process,
+  with the entrypoint's exit status.
 - In each case with a disk, a file written to the ext4 disk, and not
   synced, is intact afterwards, read by a new Container/VM, whose kernel
   needs no journal recovery to mount the disk.
@@ -55,7 +55,8 @@ CHECK = ("[ \"$(md5sum /data/f 2>/dev/null | cut -d' ' -f1)\" = \"$(cat /data/f.
 
 # Each case: image, --init, RUNCVM_SHUTDOWN, entrypoint, how it ends ('stop' with its timeout,
 # 'kill' with its signal, 'exit' by itself, or None: just check the method), with a disk?, and the
-# expected exit status, method, and least and most seconds taken.
+# expected exit status, method, least and most seconds taken, and the file, if any, written after
+# SIGTERM.
 CASES = [
     dict(name="systemd-stop", image=SYSTEMD_IMAGE, end=("stop", STOP_TIMEOUT), disk="write",
          status=0, mode="systemd", most=STOP_TIMEOUT),
