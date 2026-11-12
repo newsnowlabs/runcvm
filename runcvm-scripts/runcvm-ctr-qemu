@@ -500,8 +500,8 @@ do_disk() {
     fi
 
     # Other disks' destinations below this disk's are left empty on it, as those disks are mounted
-    # over them (see write_fstab): each is listed in inner[], as its directory on this disk, with
-    # inner_dir[] the directory on this disk of the destination holding it (see
+    # over them (see write_fstab). Each is listed in inner[] as its path on this disk; inner_dir[]
+    # holds the directory on this disk of this disk's destination that holds it (as in
     # /.runcvm/disks-populate below), and inner_path[] its path in the image's filesystem.
     inner=() inner_dir=() inner_path=()
     for i in "${!dests[@]}"
@@ -523,8 +523,8 @@ do_disk() {
 
     # mke2fs populates the disk with any pre-existing files from each dst, staying on the
     # filesystem holding the dst: a directory on which another filesystem is mounted is left
-    # empty, and a file on another filesystem (such as a bind-mounted file) is left out. Each of
-    # inner[], excluded by its path on the new disk, is left empty likewise.
+    # empty, and a file on another filesystem (such as a bind-mounted file) is left out. Each
+    # directory in inner[] is excluded by its path on the new disk, so is left empty likewise.
     if [ "${DISK_FS_MKFS[0]}" = "mke2fs" ]; then
       populate+=(-E one_file_system)
       for i in "${!inner[@]}"
@@ -560,10 +560,10 @@ do_disk() {
   # runcvm-vm-init, which reads one line per destination: <id> <UUID> <fs> <directory> <dst>, where
   # <directory> is the destination's directory on the disk, or '.' for its root.
   #
-  # It masks each of inner[] with an empty tmpfs while copying, so leaving it empty, as read from
-  # /.runcvm/disks-populate-masks: one line per masked directory: <id> <directory> <path>, where
-  # <directory> is as in /.runcvm/disks-populate, and <path> is the directory's path in the image's
-  # filesystem.
+  # While copying, runcvm-vm-init masks each directory in inner[] with an empty tmpfs, so that it
+  # is left empty, as listed in /.runcvm/disks-populate-masks, one line per directory:
+  # <id> <directory> <path>, where <directory> is as in /.runcvm/disks-populate, and <path> is the
+  # masked directory's path in the image's filesystem.
   if [[ "$created" = "1" && "${DISK_FS_MKFS[0]}" != "mke2fs" ]]; then
     for i in "${!dests[@]}"
     do

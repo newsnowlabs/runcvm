@@ -139,7 +139,7 @@ LAYERED = [
 
 # A disk at /usr/share and one at /usr/share/apk: (name, RUNCVM_DISKS, the outer disk's position in
 # RUNCVM_DISKS). Each has layout 'subdirs', so the outer disk's directory for /usr/share/apk is
-# /.runcvm/disks/<n>/usr-share/apk. (xfs needs at least 300M.)
+# /.runcvm/disks/<n>/usr-share/apk. (An xfs filesystem needs at least 300M.)
 POPULATED = [
     ("ext4-outer-first", "/disks/a,/usr/share,ext4,64M;/disks/b,/usr/share/apk,ext4,16M", 0),
     ("ext4-outer-last", "/disks/b,/usr/share/apk,ext4,16M;/disks/a,/usr/share,ext4,64M", 1),
@@ -147,8 +147,8 @@ POPULATED = [
     ("xfs-outer-last", "/disks/b,/usr/share/apk,ext4,16M;/disks/a,/usr/share,xfs,320M", 1),
 ]
 
-# Prints the entries of the outer disk's directory for /usr/share/apk, then its mode, then whether
-# /usr/share/apk/keys holds any file.
+# Prints the entries of the outer disk's directory for /usr/share/apk, then its mode, then the
+# number of entries in /usr/share/apk/keys.
 POPULATED_PROBE = ('d=/.runcvm/disks/$1/usr-share/apk; echo "entries=$(ls -A "$d" | tr "\\n" " ")"; '
                    'echo "mode=$(stat -c %a "$d")"; '
                    'echo "keys=$(ls /usr/share/apk/keys | wc -l)"')
