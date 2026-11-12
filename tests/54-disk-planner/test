@@ -1,0 +1,507 @@
+#!/usr/bin/env python3
+"""RUNCVM_DISKS: parsing, checks and planning, without a VM.
+
+Each case runs runcvm-ctr-qemu's parse, check and plan phases (sourced, so
+that it only defines its functions), and its manifest writer, in a runc
+container of its own whose root, bound non-recursively at /vm, stands for
+the image, as in a RunCVM container; volumes are bind mounts from a tmpfs,
+at /vm/<path> or, for /disks, in the container only; existing disks are
+ext4 filesystems made by RunCVM's own mke2fs. Nothing is formatted or
+booted. Each case checks the outcome: the error naming the spec, or what
+the plan holds (held mounts, mount order, exclusions, backing-file views,
+the manifests); and that the checks and planning left /disks unchanged.
+
+- Invalid disk specs (syntax, destinations, layouts, options, filesystems,
+  prealloc, keyed forms) and invalid combinations (shared destinations,
+  with disks or tmpfs mounts) are rejected with their messages.
+- Backing file paths: relative, with '.' or '..' components, ending in '/',
+  or through a symbolic link to such a path in a directory that does not
+  exist, are rejected; '//' is collapsed; a dangling symbolic link is
+  followed to where the file will be created, also through a link with
+  '../' or './' in a directory that exists.
+- Backing-file identity: one file by two spellings, through one volume
+  mounted at two paths (existing or not), or as hard links, is rejected;
+  two existing disks with one filesystem UUID are rejected; distinct files
+  are not.
+- Sizes: a malformed size ('garbage', '1.5G', '10T'), also on a later disk,
+  is rejected; a valid one is accepted.
+- mke2fs's limits: 257 exclusions below an ext4 disk's destination, and 65
+  destinations, are rejected; 256 and 64 are accepted, as are 257
+  exclusions for xfs.
+- Backing-file views: a backing file is seen by the VM through every mount
+  of its filesystem below /vm (one volume at /disks and /data), at its own
+  path below /vm, or not at all (a volume's unrelated file of the same
+  name; /disks alone); each view below a new disk's destination is
+  excluded from it, its own included.
+- Exclusions and held mounts: container mounts, other disks' and tmpfs
+  mounts' destinations below a new disk's destination are excluded,
+  outermost only, including nested volumes on one device; a volume at a
+  disk's destination is not excluded, nor held, even below another disk or
+  a tmpfs mount; an existing disk has no exclusions.
+- Manifests: paths with a space, tab, '\\', a literal '\\040', and embedded
+  and trailing newlines are written escaped, and decode to the paths;
+  RUNCVM_FSTAB=all writes held mounts as bind mounts from
+  /.runcvm/submounts/<id>.
+- The planner on random plans: held mounts are exactly the container mounts
+  strictly below a disk or tmpfs mount, other than those at a disk's
+  destination; mounts are ordered by depth, stably; exclusions are the
+  outermost of the container mounts, disk and tmpfs destinations and
+  backing-file views strictly below each new disk's destination (and
+  /.runcvm for a whole-root disk); and paths survive encoding exactly.
+"""
+
+import os
+import random
+import shlex
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+SCRIPTS = os.path.realpath(os.path.join(REPO, "runcvm-scripts"))
+GUEST = "/opt/runcvm"
+
+# Runs in each case's container, with RunCVM's package at /.runcvm/guest, this repository's scripts
+# at /t, and the case at /h/case: sets up the case, runs the planning phases in a subshell (an
+# error ends it), and prints the plan and its manifests, then whether /disks is unchanged.
+HARNESS = r'''
+RUNCVM_GUEST=/.runcvm/guest
+. /t/runcvm-ctr-defaults
+. /t/runcvm-ctr-qemu
+RUNCVM_VM_MOUNTPOINT=/vm
+mkdir -p /vm && mount --bind / /vm
+
+# volume <name> <path>...: a volume, mounted at each path (below /vm, or in the container for /disks).
+volume() {
+  local name="$1" p
+  shift
+  mkdir -p "/vols/$name"
+  for p in "$@"
+  do
+    if [[ "$p" = /disks || "$p" = /disks/* ]]; then
+      mkdir -p "$p" && mount --bind "/vols/$name" "$p"
+    else
+      mkdir -p "/vm$p" && mount --bind "/vols/$name" "/vm$p"
+    fi
+  done
+}
+
+# bindfile <path>: a file bind-mounted from the host at <path> in the image.
+bindfile() {
+  mkdir -p "/vm${1%/*}" && touch "/vm$1" && mount --bind /.runcvm/guest/LICENSE "/vm$1"
+}
+
+# existing_disk <path> [subdirs]: an existing ext4 disk, with layout 'subdirs' if asked.
+existing_disk() {
+  mkdir -p "${1%/*}" && busybox truncate -s 16M "$1" &&
+    MKE2FS_CONFIG=$RUNCVM_GUEST/etc/mke2fs.conf mke2fs -q -F -t ext4 ${2:+-L runcvm-subdirs} "$1"
+}
+
+. /h/case
+before=$(find /disks | sort; find /disks -type f -exec md5sum {} + | sort)
+(
+  container_mounts
+  if [ -n "$RUNCVM_DISKS" ]; then
+    IFS=';' read -r -a specs <<< "$RUNCVM_DISKS"
+    for i in "${!specs[@]}"; do disk_parse "${specs[$i]}" "$i"; done
+  fi
+  tmpfs_parse
+  plan_check
+  plan_mounts
+  for i in "${!DISK_SPEC[@]}"; do echo "disk $i new=${DISK_NEW[$i]} layout=${DISK_LAYOUT[$i]}"; done
+  for i in "${!BACKING_PATH[@]}"; do echo "view ${BACKING_DISK[$i]} $(path_encode "${BACKING_PATH[$i]}")"; done
+  for i in "${!HELD_CMOUNT[@]}"; do echo "held $(path_encode "${CMOUNT_PATH[${HELD_CMOUNT[$i]}]}")"; done
+  for i in "${MOUNT_ORDER[@]}"; do echo "order ${MOUNT_KIND[$i]} $(path_encode "${MOUNT_PATH[$i]}")"; done
+  for i in "${!EXCL_DEST[@]}"; do
+    echo "excl ${DEST_GIVEN[${EXCL_DEST[$i]}]} $(path_encode "${EXCL_ON_DISK[$i]}") ${EXCL_TYPE[$i]}"
+  done
+  write_manifests
+  [ ! -f /.runcvm/fstab ] || busybox sed 's/^/fstab /' /.runcvm/fstab
+  [ ! -f /.runcvm/held-mounts ] || busybox sed 's/^/held-mounts /' /.runcvm/held-mounts
+  echo planned
+) 2>&1
+after=$(find /disks | sort; find /disks -type f -exec md5sum {} + | sort)
+[ "$before" = "$after" ] && echo "disks unchanged" || echo "disks changed"
+'''
+
+
+def case_script(setup, disks, tmpfs=(), env=()):
+    lines = [setup or ":", "RUNCVM_DISKS=%s" % shlex.quote(disks), "RUNCVM_TMPFS=%s" % shlex.quote("\n".join(tmpfs))]
+    lines += ["%s=%s" % (k, shlex.quote(v)) for k, v in env]
+    return "\n".join(lines) + "\n"
+
+
+def run_case(case):
+    """Run a case ({name, setup, disks, tmpfs, env}) in a runc container; return its output lines."""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "harness"), "w") as f:
+            f.write(HARNESS)
+        with open(os.path.join(d, "case"), "w") as f:
+            f.write(case_script(case.get("setup"), case.get("disks", ""), case.get("tmpfs", ()), case.get("env", ())))
+        container = t.unique("planner-" + case["name"])
+        try:
+            r = t.docker("run", "--rm", "--name", container, *t.labels(), "--runtime=runc",
+                         "--network=none", "--cap-add=SYS_ADMIN", "--security-opt=apparmor=unconfined",
+                         "--tmpfs", "/.runcvm", "--tmpfs", "/disks", "--tmpfs", "/vols",
+                         "-v", "%s:/.runcvm/guest:ro" % GUEST, "-v", "%s:/t:ro" % SCRIPTS, "-v", "%s:/h:ro" % d,
+                         "alpine", "/.runcvm/guest/bin/bash", "/h/harness", timeout=60)
+        except subprocess.TimeoutExpired:
+            t.docker("rm", "-f", container)
+            return ["timed out after 60s"]
+    return r.stdout.splitlines()
+
+
+if not os.path.exists(os.path.join(GUEST, "bin", "bash")):
+    t.skip("RunCVM is not installed at %s" % GUEST)
+
+# Disk specs that are invalid alone: (name, RUNCVM_DISKS, expected message).
+INVALID = [
+    ("ancestor", "/disks/d,/var/lib:/var/lib/docker,ext4,16M",
+     "dst '/var/lib' and dst '/var/lib/docker' overlap"),
+    ("descendant", "/disks/d,/srv/a/b:/home:/srv/a,ext4,16M",
+     "dst '/srv/a/b' and dst '/srv/a' overlap"),
+    ("same", "/disks/d,/home:/home/,ext4,16M",
+     "dst '/home' and dst '/home' overlap"),
+    ("same-unnormalised", "/disks/d,/srv//a:/srv/a/,ext4,16M",
+     "dst '/srv/a' and dst '/srv/a' overlap"),
+    ("empty", "/disks/d,/home::/srv,ext4,16M",
+     "dst must not be empty"),
+    ("trailing-colon", "/disks/d,/home:,ext4,16M",
+     "dst must not be empty"),
+    ("relative", "/disks/d,home:/srv,ext4,16M",
+     "dst 'home' must be an absolute path other than '/', without '.' or '..' components"),
+    ("dotdot", "/disks/d,/srv/../home:/srv,ext4,16M",
+     "dst '/srv/../home' must be an absolute path other than '/', without '.' or '..' components"),
+    ("whitespace", "/disks/d,/srv/a b:/home,ext4,16M",
+     "dst '/srv/a b' must not contain whitespace or '\\'"),
+    ("root-several", "/disks/d,/srv/a:/srv/b,ext4,16M,layout=root",
+     "layout 'root' holds exactly one dst"),
+    ("bad-layout", "/disks/d,/srv/a,ext4,16M,layout=flat",
+     "layout must be 'subdirs' or 'root'"),
+    ("repeated-layout", "/disks/d,/srv/a,ext4,16M,layout=root,layout=root",
+     "layout specified more than once"),
+    ("unknown-option", "/disks/d,/srv/a,ext4,16M,colour=blue",
+     "unknown option 'colour'"),
+    ("extra-field", "/disks/d,/srv/a,ext4,16M,32M",
+     "unexpected field '32M'"),
+    ("keyed-repeated", "src=/disks/d,dst=/srv/a,fs=ext4,fs=xfs,size=16M",
+     "fs specified more than once"),
+    ("keyed-unkeyed-field", "src=/disks/d,dst=/srv/a,/srv/b,fs=ext4,size=16M",
+     "field '/srv/b' must be of the form <key>=<value>"),
+    ("keyed-unknown", "src=/disks/d,dst=/srv/a,fs=ext4,size=16M,colour=blue",
+     "unknown option 'colour'"),
+    ("keyed-no-dst", "src=/disks/d,fs=ext4,size=16M",
+     "src, dst and fs must all be specified"),
+    ("keyed-overlap", "src=/disks/d,dst=/srv/a,dst=/srv/a/b,fs=ext4,size=16M",
+     "dst '/srv/a' and dst '/srv/a/b' overlap"),
+    ("symlink-same", "/disks/d,/var/run:/run,ext4,16M",
+     "dst '/var/run' and dst '/run' overlap, as '/run' and '/run'"),
+    ("symlink-ancestor", "/disks/d,/run:/var/lock,ext4,16M",
+     "dst '/run' and dst '/var/lock' overlap, as '/run' and '/run/lock'"),
+    ("lost+found", "/disks/d,/lost+found:/home,ext4,16M",
+     "dst '/lost+found' requires layout 'root'"),
+    ("keyed-alias-repeated", "fs=ext4,source=/disks/d,target=/srv/a,src=/disks/e,size=16M",
+     "src specified more than once"),
+    ("unsupported-fs", "/disks/d,/srv/a,zfs,16M", "fs 'zfs' unsupported; fs must be one of: ext4 xfs btrfs"),
+    ("bad-prealloc", "/disks/d,/srv/a,ext4,16M,prealloc=yes",
+     "prealloc must be 'on' or 'off'"),
+    ("repeated-prealloc", "/disks/d,/srv/a,ext4,16M,prealloc=on,prealloc=off",
+     "prealloc specified more than once"),
+    ("keyed-bad-prealloc", "src=/disks/d,dst=/srv/a,fs=ext4,size=16M,prealloc=1",
+     "prealloc must be 'on' or 'off'"),
+    ("keyed-repeated-prealloc", "prealloc=on,src=/disks/d,dst=/srv/a,fs=ext4,size=16M,prealloc=on",
+     "prealloc specified more than once"),
+]
+
+# Disks invalid together, or with tmpfs mounts: (name, RUNCVM_DISKS, RUNCVM_TMPFS lines, the spec
+# reported, expected message).
+ACROSS = [
+    ("same-dst-two-disks", "/disks/a,/home,ext4,16M;/disks/b,/home,ext4,16M", [],
+     "/disks/b,/home,ext4,16M", "dst '/home' is also the dst of an earlier disk"),
+    ("same-dst-disk-tmpfs", "/disks/b,/home,ext4,16M", ["tmpfs /home tmpfs defaults 0 0"],
+     "/disks/b,/home,ext4,16M", "dst '/home' is also the destination of a tmpfs mount"),
+]
+
+
+def enc(path):
+    return path.replace("\\", "\\134").replace(" ", "\\040").replace("\t", "\\011").replace("\n", "\\012")
+
+
+SRC_RULE = "must be an absolute path to a file, without '.' or '..' components or a newline"
+ODD = ["/srv/a b", "/srv/t\tb", "/srv/c\\d", "/srv/e\\040f", "/srv/n\nl", "/srv/tr\n"]
+
+# Each case: name; setup (shell, run in the case's container before planning); RUNCVM_DISKS;
+# RUNCVM_TMPFS lines; other environment; and either 'error', a message the plan must fail with, with
+# 'spec' the spec it names (by default RUNCVM_DISKS), or 'has' and 'lacks', output lines it must and
+# must not print.
+CASES = []
+
+
+def invalid(name, disks, message, spec=None, setup=None, tmpfs=()):
+    CASES.append(dict(name=name, disks=disks, setup=setup, tmpfs=list(tmpfs),
+                      error="Error: disk spec '%s' invalid: %s" % (spec or disks, message)))
+
+
+def valid(name, disks, has=(), lacks=(), setup=None, tmpfs=(), env=()):
+    CASES.append(dict(name=name, disks=disks, setup=setup, tmpfs=list(tmpfs), env=list(env), has=list(has),
+                      lacks=list(lacks)))
+
+
+# Disk specs alone.
+for name, disks, message in INVALID:
+    invalid(name, disks, message)
+for name, disks, tmpfs, spec, message in ACROSS:
+    invalid(name, disks, message, spec=spec, tmpfs=tmpfs)
+
+# Backing file paths.
+invalid("src-relative", "state.img,/srv/a,ext4,16M", "src 'state.img' " + SRC_RULE)
+invalid("src-dot", "/disks/./a,/srv/a,ext4,16M", "src '/disks/./a' " + SRC_RULE)
+invalid("src-dotdot", "/disks/x/../a,/srv/a,ext4,16M", "src '/disks/x/../a' " + SRC_RULE)
+invalid("src-trailing-slash", "/disks/a/,/srv/a,ext4,16M", "src '/disks/a/' " + SRC_RULE)
+invalid("src-dotdot-naming-existing-disk", "/disks/a,/data,ext4;/disks/missing/../a,/other,ext4,16M",
+        "src '/disks/missing/../a' " + SRC_RULE, spec="/disks/missing/../a,/other,ext4,16M",
+        setup="existing_disk /disks/a")
+valid("src-double-slash", "/disks//a,/srv/a,ext4,16M", has=["disk 0 new=1 layout=subdirs"])
+valid("src-dangling-link", "/disks/link.img,/data,ext4,16M",
+      setup="volume v /disks /data && ln -s state.img /disks/link.img",
+      has=["view 0 /data/state.img", "excl /data /data/state.img file"])
+valid("src-link-up-existing-dir", "/disks/sub/up.img,/data,ext4,16M",
+      setup="volume v /disks /data && mkdir -p /disks/x /disks/sub && ln -s ../x/s.img /disks/sub/up.img",
+      has=["disk 0 new=1 layout=subdirs", "view 0 /data/x/s.img", "excl /data /data/x/s.img file"])
+invalid("src-link-up-missing-dir", "/disks/bad.img,/srv/a,ext4,16M",
+        "src '/disks/bad.img' is a symbolic link to '/disks/../nope/s.img', which " + SRC_RULE +
+        ", where the directory holding it does not exist",
+        setup="ln -s ../nope/s.img /disks/bad.img")
+invalid("src-link-loop", "/disks/l1,/srv/a,ext4,16M", "src '/disks/l1' has too many levels of symbolic links",
+        setup="ln -s l2 /disks/l1 && ln -s l1 /disks/l2")
+
+# Backing-file identity.
+invalid("same-file-two-spellings", "/disks/a,/srv/a,ext4,16M;/disks//a,/srv/b,ext4,16M",
+        "src '/disks//a' is the same file as the src of an earlier disk, '/disks/a'", spec="/disks//a,/srv/b,ext4,16M")
+invalid("same-file-aliased-volume-new", "/disks/p/a,/srv/a,ext4,16M;/disks/q/a,/srv/b,ext4,16M",
+        "src '/disks/q/a' is the same file as the src of an earlier disk, '/disks/p/a'",
+        spec="/disks/q/a,/srv/b,ext4,16M", setup="volume v /disks/p /disks/q")
+invalid("same-file-aliased-volume-existing", "/disks/p/a,/srv/a,ext4;/disks/q/a,/srv/b,ext4",
+        "src '/disks/q/a' is the same file as the src of an earlier disk, '/disks/p/a'",
+        spec="/disks/q/a,/srv/b,ext4", setup="volume v /disks/p /disks/q && existing_disk /disks/p/a")
+invalid("same-file-hard-link", "/disks/a,/srv/a,ext4;/disks/h,/srv/h,ext4",
+        "src '/disks/h' is the same file as the src of an earlier disk, '/disks/a'", spec="/disks/h,/srv/h,ext4",
+        setup="existing_disk /disks/a && ln /disks/a /disks/h")
+invalid("same-uuid", "/disks/a,/srv/a,ext4;/disks/c,/srv/c,ext4",
+        "src '/disks/c' has the same filesystem UUID as the src of an earlier disk, '/disks/a'",
+        spec="/disks/c,/srv/c,ext4", setup="existing_disk /disks/a && cp /disks/a /disks/c")
+valid("distinct-files", "/disks/a,/srv/a,ext4,16M;/disks/b,/srv/b,ext4,16M",
+      has=["disk 0 new=1 layout=subdirs", "disk 1 new=1 layout=subdirs"])
+
+# Sizes.
+for size in ("garbage", "1.5G", "10T"):
+    invalid("size-" + size, "/disks/a,/srv/a,ext4,16M;/disks/b,/srv/b,ext4,%s" % size,
+            "size '%s' invalid" % size, spec="/disks/b,/srv/b,ext4,%s" % size)
+valid("size-40G", "/disks/a,/srv/a,ext4,40G", has=["disk 0 new=1 layout=subdirs"])
+
+# mke2fs's limits.
+TMPFS_257 = ["tmpfs /srv/t%d tmpfs defaults 0 0" % n for n in range(257)]
+invalid("257-exclusions", "/disks/a,/srv,ext4,16M",
+        "a new disk with fs 'ext4' can leave out at most 256 paths mounted below its destinations, and this one has 257",
+        tmpfs=TMPFS_257)
+valid("256-exclusions", "/disks/a,/srv,ext4,16M", tmpfs=TMPFS_257[:256], has=["excl /srv /srv/t255 dir"])
+valid("257-exclusions-xfs", "/disks/a,/srv,xfs,320M", tmpfs=TMPFS_257, has=["excl /srv /srv/t256 dir"])
+invalid("65-dsts", "/disks/a,%s,ext4,16M" % ":".join("/srv/d%d" % n for n in range(65)),
+        "a new disk with fs 'ext4' and layout 'subdirs' can have at most 64 dst")
+valid("64-dsts", "/disks/a,%s,ext4,16M" % ":".join("/srv/d%d" % n for n in range(64)),
+      has=["disk 0 new=1 layout=subdirs"])
+
+# Backing-file views.
+valid("view-own-through-alias", "/disks/state.img,/data,ext4,16M", setup="volume v /disks /data",
+      has=["view 0 /data/state.img", "excl /data /data/state.img file"])
+valid("view-own-existing-not-excluded", "/disks/state.img,/data,ext4", setup="volume v /disks /data && existing_disk /disks/state.img",
+      has=["view 0 /data/state.img", "disk 0 new=0 layout=root"], lacks=["excl /data /data/state.img file"])
+valid("view-other-disks", "/disks/a.img,/data,ext4,16M;/disks/b.img,/other,ext4,16M", setup="volume v /disks /data",
+      has=["excl /data /data/a.img file", "excl /data /data/b.img file"])
+valid("view-prefixed", "/vm/srv/state.img,/srv,ext4,16M", has=["view 0 /srv/state.img", "excl /srv /srv/state.img file"])
+valid("view-none-unrelated-file", "/data/state.img,/data,ext4,16M",
+      setup="volume s /data && echo seed >/vols/s/state.img", lacks=["view 0 /data/state.img"])
+valid("view-none-disks-only", "/disks/state.img,/srv,ext4,16M", lacks=["view 0 /disks/state.img"])
+
+# Exclusions and held mounts.
+NESTED_SETUP = "volume a /srv/vol && volume b /srv/vol/in && bindfile /srv/f"
+for layout, base in (("subdirs", "/srv"), ("root", "")):
+    valid("exclusions-" + layout, "/disks/a,/srv,ext4,16M,layout=%s;/disks/b,/srv/inner,ext4,16M" % layout,
+          setup=NESTED_SETUP, tmpfs=["tmpfs /srv/t tmpfs defaults 0 0"],
+          has=["excl /srv %s/vol dir" % base, "excl /srv %s/f file" % base, "excl /srv %s/inner dir" % base,
+               "excl /srv %s/t dir" % base, "held /srv/vol", "held /srv/vol/in", "held /srv/f",
+               "order disk /srv", "order held /srv/vol/in"],
+          lacks=["excl /srv %s/vol/in dir" % base])
+valid("disk-at-volume-below-disk", "/disks/a,/data,ext4,16M;/disks/b,/data/db,ext4,16M", setup="volume v /data/db",
+      has=["excl /data /data/db dir"], lacks=["held /data/db"])
+valid("disk-at-volume-below-tmpfs", "/disks/a,/t/d,ext4,16M", setup="volume v /t/d",
+      tmpfs=["tmpfs /t tmpfs defaults 0 0"], has=["order tmpfs /t", "order disk /t/d"], lacks=["held /t/d"])
+valid("disk-at-volume-seeds", "/disks/a,/data,ext4,16M", setup="volume v /data && volume w /data/b",
+      has=["excl /data /data/b dir", "held /data/b"], lacks=["held /data", "excl /data /data dir"])
+valid("existing-disk-no-exclusions", "/disks/a,/srv,ext4", setup="existing_disk /disks/a subdirs && volume v /srv/v",
+      has=["held /srv/v", "disk 0 new=0 layout=subdirs"], lacks=["excl /srv /srv/v dir"])
+valid("whole-root", "/disks/r,/,ext4,64M;/disks/a,/home,ext4,16M", setup="volume v /srv/v",
+      has=["excl / /srv/v dir", "excl / /home dir", "excl / /.runcvm dir", "disk 0 new=1 layout=whole"],
+      lacks=["order disk /"])
+
+# Manifests.
+valid("odd-paths", "/disks/a,/srv,ext4,16M",
+      setup=" && ".join("volume v%d %s" % (n, shlex.quote(p)) for n, p in enumerate(ODD)),
+      tmpfs=["tmpfs %s tmpfs defaults 0 0" % enc("/srv/tm p\n")],
+      has=["fstab #runcvm-held %d %s" % (n, enc(p)) for n, p in enumerate(ODD)] +
+          ["held-mounts %d %s" % (n, enc(p)) for n, p in enumerate(ODD)] +
+          ["fstab tmpfs %s tmpfs defaults 0 0" % enc("/srv/tm p\n")] +
+          ["excl /srv %s dir" % enc(p) for p in ODD])
+valid("fstab-all", "/disks/a,/data,ext4,16M", setup="volume v /data/v", env=[("RUNCVM_FSTAB", "all")],
+      has=["fstab /.runcvm/submounts/0 /data/v none bind 0 0", "held-mounts 0 /data/v"],
+      lacks=["fstab #runcvm-held 0 /data/v"])
+valid("fstab-disks", "/disks/a,/data,ext4,16M", setup="volume v /data/v",
+      has=["fstab #runcvm-held 0 /data/v", "held-mounts 0 /data/v"])
+
+names = [c["name"] for c in CASES]
+assert len(names) == len(set(names)), "case names must be unique"
+
+for case, lines in zip(CASES, t.parallel(run_case, CASES, jobs=8)):
+    name = case["name"]
+    ok = t.check("%s: finished" % name, False, "timed out after 60s" in lines)
+    ok &= t.check("%s: disks unchanged" % name, True, "disks unchanged" in lines)
+    if "error" in case:
+        ok &= t.check("%s: rejected" % name, False, "planned" in lines)
+        ok &= t.check("%s: error message" % name, True, any(case["error"] in line for line in lines))
+    else:
+        ok &= t.check("%s: planned" % name, True, "planned" in lines)
+        for line in case["has"]:
+            ok &= t.check("%s: %r" % (name, line), True, line in lines)
+        for line in case["lacks"]:
+            ok &= t.check("%s: not %r" % (name, line), False, line in lines)
+    if not ok:
+        t.log("%s: output:\n%s" % (name, "\n".join(lines)))
+
+# --- The planner, on random plans ---------------------------------------------------------------
+
+PLANNER = r'''
+. "$1"
+busybox() { "$@"; }
+disk_fs() { DISK_FS_MKFS=(mke2fs); }
+RUNCVM_VM_MOUNTPOINT=/nonexistent
+mapfile -d '' -t input <"$2"
+i=0
+next() { REPLY="${input[$i]}"; i=$((i+1)); }
+next; n="$REPLY"; for ((k = 0; k < n; k++)); do next; CMOUNT_PATH[k]="$REPLY"; next; CMOUNT_TYPE[k]="$REPLY"; done
+next; n="$REPLY"; for ((k = 0; k < n; k++)); do
+  next; DISK_SPEC[k]="d$k"; DISK_NEW[k]="$REPLY"; next; DISK_LAYOUT[k]="$REPLY"; DISK_FS[k]=ext4
+done
+next; n="$REPLY"; for ((k = 0; k < n; k++)); do
+  next; DEST_DISK[k]="$REPLY"; next; DEST_PATH[k]="$REPLY"; DEST_GIVEN[k]="$REPLY"; next; DEST_DIR[k]="$REPLY"
+  [ "${DISK_LAYOUT[${DEST_DISK[k]}]}" = whole ] || mount_add "${DEST_PATH[k]}" disk dir "$k"
+done
+next; n="$REPLY"; for ((k = 0; k < n; k++)); do next; mount_add "$REPLY" tmpfs dir "$k"; done
+next; n="$REPLY"; for ((k = 0; k < n; k++)); do next; BACKING_DISK[k]="$REPLY"; next; BACKING_PATH[k]="$REPLY"; done
+plan_mounts
+for k in "${!HELD_CMOUNT[@]}"; do printf 'held %s %s\n' "$k" "$(path_encode "${CMOUNT_PATH[${HELD_CMOUNT[k]}]}")"; done
+for k in "${MOUNT_ORDER[@]}"; do printf 'order %s %s\n' "${MOUNT_KIND[k]}" "$(path_encode "${MOUNT_PATH[k]}")"; done
+for k in "${!EXCL_DEST[@]}"; do printf 'excl %s %s %s\n' "${EXCL_DEST[k]}" "$(path_encode "${EXCL_PATH[k]}")" "$(path_encode "${EXCL_ON_DISK[k]}")"; done
+for k in "${!CMOUNT_PATH[@]}"; do path_decode_check="$(path_encode "${CMOUNT_PATH[k]}")"; printf -v back '%b' "$path_decode_check"; [ "$back" = "${CMOUNT_PATH[k]}" ] || echo "roundtrip-fail $k"; done
+'''
+NAMES = ["a", "b", "a b", "c\\d", "t\tx", "n\nl", "e\\040f", "tr\n"]
+
+
+def below(path, top):
+    return path.startswith(top.rstrip("/") + "/")
+
+
+def encode(path):
+    return path.replace("\\", "\\134").replace(" ", "\\040").replace("\t", "\\011").replace("\n", "\\012")
+
+
+def random_path(rng, depth):
+    return "/" + "/".join(rng.choice(NAMES) for _ in range(depth))
+
+
+def planner_case(seed):
+    rng = random.Random(seed)
+    cmounts = []
+    for _ in range(rng.randint(0, 8)):
+        p = random_path(rng, rng.randint(1, 4))
+        if p not in [c[0] for c in cmounts]:
+            cmounts.append((p, rng.choice(["dir", "file"])))
+    disks, dests = [], []
+    used = set()
+    for d in range(rng.randint(1, 4)):
+        if d == 0 and rng.random() < 0.2:
+            disks.append((rng.choice(["0", "1"]), "whole"))
+            dests.append((d, "/", "."))
+            continue
+        layout = rng.choice(["subdirs", "root"])
+        disks.append((rng.choice(["0", "1"]), layout))
+        for _ in range(rng.randint(1, 2) if layout == "subdirs" else 1):
+            p = rng.choice([c[0] for c in cmounts] + [random_path(rng, rng.randint(1, 3))])
+            if p in used or any(below(p, q) or below(q, p) for (dd, q, _) in dests if dd == d):
+                continue
+            used.add(p)
+            dests.append((d, p, "s%d" % len(dests) if layout == "subdirs" else "."))
+    tmpfs = [p for p in {random_path(rng, rng.randint(1, 3)) for _ in range(rng.randint(0, 2))} if p not in used]
+    backing = [(rng.randrange(len(disks)), random_path(rng, rng.randint(1, 4))) for _ in range(rng.randint(0, 2))]
+    return cmounts, disks, dests, tmpfs, backing
+
+
+def planner_expected(cmounts, disks, dests, tmpfs, backing):
+    rows = [(p, "disk") for (d, p, _) in dests if disks[d][1] != "whole"] + [(p, "tmpfs") for p in tmpfs]
+    held = []
+    for p, _ in cmounts:
+        if any(kind == "disk" and q == p for q, kind in rows):
+            continue
+        if any(below(p, q) for q, _ in rows):
+            held.append(p)
+    rows += [(p, "held") for p in held]
+    order = sorted(range(len(rows)), key=lambda k: (rows[k][0].count("/"), k))
+    excl = []
+    for n, (d, p, sub) in enumerate(dests):
+        if disks[d][0] != "1":
+            continue
+        cand = [c for c, _ in cmounts if below(c, p)] + [q for q, kind in rows if kind != "held" and below(q, p)]
+        cand += [b for _, b in backing if below(b, p)]
+        if disks[d][1] == "whole":
+            cand.append("/.runcvm")
+        seen = []
+        for k, c in enumerate(cand):
+            if any(below(c, o) for o in cand) or c in cand[:k]:
+                continue
+            rel = c if p == "/" else c[len(p):]
+            seen.append((n, c, "/" + sub + rel if disks[d][1] == "subdirs" else rel))
+        excl += seen
+    return (["held %d %s" % (k, encode(p)) for k, p in enumerate(held)] +
+            ["order %s %s" % (rows[k][1], encode(rows[k][0])) for k in order] +
+            ["excl %d %s %s" % (n, encode(c), encode(o)) for n, c, o in excl])
+
+
+def run_planner(seed):
+    cmounts, disks, dests, tmpfs, backing = planner_case(seed)
+    fields = [str(len(cmounts))] + [x for c in cmounts for x in c]
+    fields += [str(len(disks))] + [x for dk in disks for x in dk]
+    fields += [str(len(dests))] + [x for (d, p, sub) in dests for x in (str(d), p, sub)]
+    fields += [str(len(tmpfs))] + tmpfs
+    fields += [str(len(backing))] + [x for (d, b) in backing for x in (str(d), b)]
+    path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "planner-%s-%d" % (t.RUN_ID, seed))
+    with open(path, "w") as f:
+        f.write("".join(x + "\0" for x in fields))
+    r = subprocess.run(["bash", "-c", PLANNER, "planner", os.path.join(REPO, "runcvm-scripts", "runcvm-ctr-qemu"), path],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+    os.unlink(path)
+    return r.returncode, r.stdout.splitlines(), planner_expected(cmounts, disks, dests, tmpfs, backing)
+
+
+PLANNER_SEEDS = list(range(200))
+failures = []
+for seed, (rc, got, expected) in zip(PLANNER_SEEDS, t.parallel(run_planner, PLANNER_SEEDS, jobs=8)):
+    if rc != 0 or got != expected:
+        failures.append(seed)
+        if len(failures) <= 3:
+            t.log("planner seed %d: exit %d\ngot:\n%s\nexpected:\n%s" % (seed, rc, "\n".join(got), "\n".join(expected)))
+t.check("planner: %d random plans give the held mounts, mount order and exclusions expected" % len(PLANNER_SEEDS),
+        [], failures)
+
+t.finish()

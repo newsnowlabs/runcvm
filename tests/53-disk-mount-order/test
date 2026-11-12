@@ -75,16 +75,13 @@
   a held volume's own mount unit (also one at a path with a space) mounts it
   again, writes reaching the volume, and so does restarting its ancestor's
   unit (home.mount). An invalid RUNCVM_FSTAB is rejected.
-- The planner (runcvm-ctr-qemu, sourced), on random plans: held mounts are
-  exactly the container mounts strictly below a disk or tmpfs mount, other
-  than those at a disk's destination; mounts are ordered by depth, stably;
-  exclusions are the outermost of the container mounts, disk and tmpfs
-  destinations and backing-file views strictly below each new disk's
-  destination (and /.runcvm for a whole-root disk); and paths survive encoding exactly.
+
+Specs that are invalid in themselves, or together, and the planner's
+held mounts, exclusions and manifests, are checked without a VM, for many
+more cases, by tests/54-disk-planner.
 """
 
 import os
-import random
 import subprocess
 import sys
 
@@ -93,7 +90,6 @@ import framework as t  # noqa: E402
 
 TIMEOUT = 600 if t.ACCEL == "tcg" else 180
 BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
-REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 SIZE = {"ext4": "64M", "xfs": "320M", "btrfs": "128M"}  # mkfs.xfs needs 300M; mkfs.btrfs 109M.
 SYSTEMD_IMAGE = "almalinux/9-init"
 
@@ -720,129 +716,5 @@ for (mode, has_fstab), result in zip(SYSTEMD, t.parallel(run_systemd, SYSTEMD)):
     t.check("%s: restarting the ancestor's mount unit mounts it again" % name, "kept", v.get("ancestor"))
     if not t.check("%s: no failed units after the restarts" % name, "0", v.get("failed_after")):
         t.log("failed units:\n%s" % result["failed"])
-
-# --- The planner, on random plans ---------------------------------------------------------------
-
-PLANNER = r'''
-. "$1"
-busybox() { "$@"; }
-disk_fs() { DISK_FS_MKFS=(mke2fs); }
-RUNCVM_VM_MOUNTPOINT=/nonexistent
-mapfile -d '' -t input <"$2"
-i=0
-next() { REPLY="${input[$i]}"; i=$((i+1)); }
-next; n="$REPLY"; for ((k = 0; k < n; k++)); do next; CMOUNT_PATH[k]="$REPLY"; next; CMOUNT_TYPE[k]="$REPLY"; done
-next; n="$REPLY"; for ((k = 0; k < n; k++)); do
-  next; DISK_SPEC[k]="d$k"; DISK_NEW[k]="$REPLY"; next; DISK_LAYOUT[k]="$REPLY"; DISK_FS[k]=ext4
-done
-next; n="$REPLY"; for ((k = 0; k < n; k++)); do
-  next; DEST_DISK[k]="$REPLY"; next; DEST_PATH[k]="$REPLY"; DEST_GIVEN[k]="$REPLY"; next; DEST_DIR[k]="$REPLY"
-  [ "${DISK_LAYOUT[${DEST_DISK[k]}]}" = whole ] || mount_add "${DEST_PATH[k]}" disk dir "$k"
-done
-next; n="$REPLY"; for ((k = 0; k < n; k++)); do next; mount_add "$REPLY" tmpfs dir "$k"; done
-next; n="$REPLY"; for ((k = 0; k < n; k++)); do next; BACKING_DISK[k]="$REPLY"; next; BACKING_PATH[k]="$REPLY"; done
-plan_mounts
-for k in "${!HELD_CMOUNT[@]}"; do printf 'held %s %s\n' "$k" "$(path_encode "${CMOUNT_PATH[${HELD_CMOUNT[k]}]}")"; done
-for k in "${MOUNT_ORDER[@]}"; do printf 'order %s %s\n' "${MOUNT_KIND[k]}" "$(path_encode "${MOUNT_PATH[k]}")"; done
-for k in "${!EXCL_DEST[@]}"; do printf 'excl %s %s %s\n' "${EXCL_DEST[k]}" "$(path_encode "${EXCL_PATH[k]}")" "$(path_encode "${EXCL_ON_DISK[k]}")"; done
-for k in "${!CMOUNT_PATH[@]}"; do path_decode_check="$(path_encode "${CMOUNT_PATH[k]}")"; printf -v back '%b' "$path_decode_check"; [ "$back" = "${CMOUNT_PATH[k]}" ] || echo "roundtrip-fail $k"; done
-'''
-NAMES = ["a", "b", "a b", "c\\d", "t\tx", "n\nl", "e\\040f", "tr\n"]
-
-
-def below(path, top):
-    return path.startswith(top.rstrip("/") + "/")
-
-
-def encode(path):
-    return path.replace("\\", "\\134").replace(" ", "\\040").replace("\t", "\\011").replace("\n", "\\012")
-
-
-def random_path(rng, depth):
-    return "/" + "/".join(rng.choice(NAMES) for _ in range(depth))
-
-
-def planner_case(seed):
-    rng = random.Random(seed)
-    cmounts = []
-    for _ in range(rng.randint(0, 8)):
-        p = random_path(rng, rng.randint(1, 4))
-        if p not in [c[0] for c in cmounts]:
-            cmounts.append((p, rng.choice(["dir", "file"])))
-    disks, dests = [], []
-    used = set()
-    for d in range(rng.randint(1, 4)):
-        if d == 0 and rng.random() < 0.2:
-            disks.append((rng.choice(["0", "1"]), "whole"))
-            dests.append((d, "/", "."))
-            continue
-        layout = rng.choice(["subdirs", "root"])
-        disks.append((rng.choice(["0", "1"]), layout))
-        for _ in range(rng.randint(1, 2) if layout == "subdirs" else 1):
-            p = rng.choice([c[0] for c in cmounts] + [random_path(rng, rng.randint(1, 3))])
-            if p in used or any(below(p, q) or below(q, p) for (dd, q, _) in dests if dd == d):
-                continue
-            used.add(p)
-            dests.append((d, p, "s%d" % len(dests) if layout == "subdirs" else "."))
-    tmpfs = [p for p in {random_path(rng, rng.randint(1, 3)) for _ in range(rng.randint(0, 2))} if p not in used]
-    backing = [(rng.randrange(len(disks)), random_path(rng, rng.randint(1, 4))) for _ in range(rng.randint(0, 2))]
-    return cmounts, disks, dests, tmpfs, backing
-
-
-def planner_expected(cmounts, disks, dests, tmpfs, backing):
-    rows = [(p, "disk") for (d, p, _) in dests if disks[d][1] != "whole"] + [(p, "tmpfs") for p in tmpfs]
-    held = []
-    for p, _ in cmounts:
-        if any(kind == "disk" and q == p for q, kind in rows):
-            continue
-        if any(below(p, q) for q, _ in rows):
-            held.append(p)
-    rows += [(p, "held") for p in held]
-    order = sorted(range(len(rows)), key=lambda k: (rows[k][0].count("/"), k))
-    excl = []
-    for n, (d, p, sub) in enumerate(dests):
-        if disks[d][0] != "1":
-            continue
-        cand = [c for c, _ in cmounts if below(c, p)] + [q for q, kind in rows if kind != "held" and below(q, p)]
-        cand += [b for _, b in backing if below(b, p)]
-        if disks[d][1] == "whole":
-            cand.append("/.runcvm")
-        seen = []
-        for k, c in enumerate(cand):
-            if any(below(c, o) for o in cand) or c in cand[:k]:
-                continue
-            rel = c if p == "/" else c[len(p):]
-            seen.append((n, c, "/" + sub + rel if disks[d][1] == "subdirs" else rel))
-        excl += seen
-    return (["held %d %s" % (k, encode(p)) for k, p in enumerate(held)] +
-            ["order %s %s" % (rows[k][1], encode(rows[k][0])) for k in order] +
-            ["excl %d %s %s" % (n, encode(c), encode(o)) for n, c, o in excl])
-
-
-def run_planner(seed):
-    cmounts, disks, dests, tmpfs, backing = planner_case(seed)
-    fields = [str(len(cmounts))] + [x for c in cmounts for x in c]
-    fields += [str(len(disks))] + [x for dk in disks for x in dk]
-    fields += [str(len(dests))] + [x for (d, p, sub) in dests for x in (str(d), p, sub)]
-    fields += [str(len(tmpfs))] + tmpfs
-    fields += [str(len(backing))] + [x for (d, b) in backing for x in (str(d), b)]
-    path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "planner-%s-%d" % (t.RUN_ID, seed))
-    with open(path, "w") as f:
-        f.write("".join(x + "\0" for x in fields))
-    r = subprocess.run(["bash", "-c", PLANNER, "planner", os.path.join(REPO, "runcvm-scripts", "runcvm-ctr-qemu"), path],
-                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
-    os.unlink(path)
-    return r.returncode, r.stdout.splitlines(), planner_expected(cmounts, disks, dests, tmpfs, backing)
-
-
-PLANNER_SEEDS = list(range(200))
-failures = []
-for seed, (rc, got, expected) in zip(PLANNER_SEEDS, t.parallel(run_planner, PLANNER_SEEDS, jobs=8)):
-    if rc != 0 or got != expected:
-        failures.append(seed)
-        if len(failures) <= 3:
-            t.log("planner seed %d: exit %d\ngot:\n%s\nexpected:\n%s" % (seed, rc, "\n".join(got), "\n".join(expected)))
-t.check("planner: %d random plans give the held mounts, mount order and exclusions expected" % len(PLANNER_SEEDS),
-        [], failures)
 
 t.finish()
