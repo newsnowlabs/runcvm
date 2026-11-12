@@ -135,6 +135,20 @@ void quit(int exit_status) {
 }
 
 /*
+ * Whether signal signum asks the container to stop: SIGTERM, SIGINT, SIGPWR, and the signals
+ * systemd takes as requests to halt and to power off, which images for systemd declare as their
+ * stop signal (e.g. STOPSIGNAL SIGRTMIN+3). Docker numbers SIGRTMIN+n from 34, as glibc does;
+ * this program, built against musl, has its own SIGRTMIN, so these two are given by number.
+ */
+#define DOCKER_SIGRTMIN_3 37
+#define DOCKER_SIGRTMIN_4 38
+
+int is_stop_signal(int signum) {
+    return signum == SIGTERM || signum == SIGINT || signum == SIGPWR ||
+           signum == DOCKER_SIGRTMIN_3 || signum == DOCKER_SIGRTMIN_4;
+}
+
+/*
  * The dumb-init signal handler.
  *
  * The main job of this signal handler is to forward signals along to our child
@@ -154,20 +168,6 @@ void quit(int exit_status) {
  * https://www.gnu.org/software/libc/manual/html_node/Job-Control-Signals.html
  *
 */
-/*
- * Whether signal signum asks the container to stop: SIGTERM, SIGINT, SIGPWR, and the signals
- * systemd takes as requests to halt and to power off, which images for systemd declare as their
- * stop signal (e.g. STOPSIGNAL SIGRTMIN+3). Docker numbers SIGRTMIN+n from 34, as glibc does;
- * this program, built against musl, has its own SIGRTMIN, so these two are given by number.
- */
-#define DOCKER_SIGRTMIN_3 37
-#define DOCKER_SIGRTMIN_4 38
-
-int is_stop_signal(int signum) {
-    return signum == SIGTERM || signum == SIGINT || signum == SIGPWR ||
-           signum == DOCKER_SIGRTMIN_3 || signum == DOCKER_SIGRTMIN_4;
-}
-
 void handle_signal(int signum) {
     DEBUG("Received signal %d.\n", signum);
 

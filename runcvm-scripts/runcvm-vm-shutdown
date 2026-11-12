@@ -38,8 +38,8 @@ kill -KILL -1 2>/dev/null
 
 $BUSYBOX sync
 
-# Unmount the entries of /.runcvm/fstab in the reverse of the order mounted, each mount below a
-# path before the mount at it. A filesystem that can't be unmounted is remounted read-only: a disk
+# Unmount the entries of /.runcvm/fstab in the reverse of the order they are mounted, so that a
+# mount below a path is unmounted before the mount at that path. A filesystem that can't be unmounted is remounted read-only: a disk
 # with layout 'subdirs' is mounted at /.runcvm/disks/<n>, its own entry, where remounting it
 # read-only applies to the whole filesystem, whatever is still mounted from it.
 if [ -f /.runcvm/fstab ]; then

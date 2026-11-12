@@ -1134,7 +1134,7 @@ If `RUNCVM_SHUTDOWN` is left undefined, set to an empty string or set to `auto`,
 - `systemd`, if the specified entrypoint (or, if a symlink, its target) matches the regex `/systemd$`, as for `RUNCVM_CGROUPFS`;
 - else `all`.
 
-`systemd`, `busybox` and `signal:<signal>` act through the channel `docker exec` uses; until it is available, while the VM is still booting, RunCVM does `all` instead.
+`systemd`, `busybox` and `signal:<signal>` act through the channel `docker exec` uses; where that fails, e.g. while the VM is still booting, RunCVM does `all` instead.
 
 To stop a Container/VM without a clean shutdown, e.g. one whose disks are thrown away, use `docker stop -t 0`, `docker kill` or `docker rm -f`.
 
