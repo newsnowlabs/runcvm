@@ -6,14 +6,35 @@
 #
 # - When the container is being stopped (runcvm-ctr-shutdown has created /.runcvm/stopping), every
 #   process is sent SIGTERM, and is waited for however long it takes: Docker's stop timeout alone
-#   limits the wait, as for any container. File systems are synced every second meanwhile, so that
-#   should Docker end the VM, writes made up to then are kept.
+#   limits the wait, as for any container. The disks are synced every second meanwhile, so that
+#   should Docker end the VM, writes made to them up to then are kept.
 # - When the entrypoint has exited by itself, every process left is killed at once (SIGKILL).
 
 # Load RunCVM's own environment, saved by runcvm-ctr-entrypoint
 . /.runcvm/config
 
 BUSYBOX=$RUNCVM_GUEST/bin/busybox
+
+# The disks' own mounts: each entry of /.runcvm/fstab mounting a disk by its UUID, and the root
+# filesystem if it is a whole-root disk.
+disks=()
+if [ -f /.runcvm/fstab ]; then
+  mapfile -t disks < <($BUSYBOX awk '$1 ~ /^UUID=/ { print $2 }' /.runcvm/fstab)
+fi
+[ -f /.runcvm/rootdisk ] && disks+=(/)
+
+# Syncs the disks alone, each with syncfs (sync -f), never with a plain sync: that would also sync
+# the VM's virtiofs filesystems, and virtiofsd would answer by syncing the whole of each host
+# filesystem shared with the VM. The disks need it, as their writes stay in the VM's memory until
+# synced; writes to virtiofs go straight to the host.
+sync_disks() {
+  local disk
+
+  for disk in "${disks[@]}"
+  do
+    $BUSYBOX sync -f "$disk" 2>/dev/null
+  done
+}
 
 # Prints the PIDs of the processes still running, other than init, this script, the subshell
 # running this function ($BASHPID, as in "$(processes)") and kernel threads (whose command line is
@@ -39,15 +60,15 @@ else
   kill -KILL -1 2>/dev/null
 fi
 
-# Wait for the processes to end, syncing every second (every fifth check).
+# Wait for the processes to end, syncing the disks every second (every fifth check).
 for ((i = 1; ; i++))
 do
   [ -z "$(processes)" ] && break
-  (( i % 5 )) || $BUSYBOX sync
+  (( i % 5 )) || sync_disks
   $BUSYBOX sleep 0.2
 done
 
-$BUSYBOX sync
+sync_disks
 
 # Unmount the entries of /.runcvm/fstab in the reverse of the order they are mounted, so that a
 # mount below a path is unmounted before the mount at that path. A filesystem that can't be
@@ -67,7 +88,5 @@ fi
 if [ -f /.runcvm/rootdisk ]; then
   $BUSYBOX mount -o remount,ro / 2>/dev/null
 fi
-
-$BUSYBOX sync
 
 exit 0
