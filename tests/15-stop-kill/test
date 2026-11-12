@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """'docker stop' and 'docker kill' of a running RunCVM Container/VM.
 
-On 'docker stop', RunCVM asks the VM to power off (ACPI), then runs
-'poweroff' in it, then sends SIGTERM to the VM's PID 1:
+On 'docker stop', RunCVM asks the VM to power off as RUNCVM_SHUTDOWN's
+default chooses: with --init, busybox 'poweroff'; without, as these
+entrypoints are not an init, ACPI, 'poweroff' and SIGTERM to the VM's
+PID 1 at once (see tests/49-vm-shutdown for the other methods):
 
 - With --init, busybox init powers the VM off cleanly: exit status 0,
   well within the stop timeout.

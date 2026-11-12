@@ -834,10 +834,10 @@ When RunCVM creates a Container/VM, fstab entries will be drafted, identifying e
 
 > **Warning: launch with `--init` if a disk's contents must survive the VM ending.** Data written to a disk stays in the VM's memory until the VM's kernel writes it out, so whether it reaches the backing file depends on how the VM ends:
 >
-> - With `--init`, the VM's init syncs its file systems before powering off, both when the entrypoint exits and on `docker stop`.
-> - Without `--init`, `docker stop` runs `poweroff` in the VM, which also syncs file systems first. But when the entrypoint exits by itself, the VM ends at once: the entrypoint is the VM's PID 1, and nothing runs after it. Data not yet written out is lost, and the file system needs journal recovery when next mounted.
-> - `docker kill` ends the VM at once in either mode.
-> - Launch an image whose entrypoint is its own init, such as systemd, without `--init`, which would displace it as the VM's PID 1. Such an init normally runs until `docker stop`, which syncs file systems as above.
+> - With `--init`, the VM's init stops every process, unmounts the disks (remounting read-only any it cannot unmount) and syncs before powering off, both when the entrypoint exits and on `docker stop`, so each disk's file system is left clean.
+> - Launch an image whose entrypoint is its own init, such as systemd, without `--init`, which would displace it as the VM's PID 1. On `docker stop`, RunCVM asks that init to power off (see [`RUNCVM_SHUTDOWN`](#runcvm_shutdown)), and it stops its services and unmounts its file systems first.
+> - Without `--init`, with an entrypoint that is not an init, `docker stop` sends the entrypoint, the VM's PID 1, SIGTERM and SIGUSR2, and presses the VM's ACPI power button. When the entrypoint exits, on those signals or by itself, the VM ends at once: nothing runs after the VM's PID 1. Data not yet written out is lost, and the file system needs journal recovery when next mounted.
+> - `docker kill` (SIGKILL), `docker stop -t 0` and `docker rm -f` end the VM at once in every mode.
 >
 > To keep a disk's data without `--init`, the workload must flush the disk before its entrypoint exits, with `sync -f <dst>` for one `<dst>` of each disk, which flushes only that disk's file system and needs no special privileges. A workload running as root may instead unmount the disk once nothing still uses it, which also leaves the disk's file system clean, needing no journal recovery. That means unmounting the disk's own mount: `umount <dst>` does so only where the disk is mounted directly at `<dst>`. Where `<dst>` is a bind mount from the disk, `umount <dst>` removes only the bind mount and leaves the disk mounted, unflushed. A plain `sync` also works, but flushes every file system in the VM, including its root file system, whether that is shared with the container or is a whole-root disk.
 >
@@ -1116,6 +1116,28 @@ If cgroup2 is already mounted on `/sys/fs/cgroup` when the VM starts, as the sys
 
 Please also note that in the case your distribution is running Systemd you may instead set `--env=RUNCVM_KERNEL_APPEND='systemd.unified_cgroup_hierarchy=<boolean>'` (where `<boolean>` is `0` or `1`) to request Systemd to create either hybrid or cgroup2-only cgroup filesystem(s) itself.
 
+### RUNCVM_SHUTDOWN
+
+**`RUNCVM_SHUTDOWN=<auto|systemd|busybox|acpi|all|signal:<signal>>`**
+
+Chooses how RunCVM asks the VM to power off when the container is stopped: by `docker stop`, or by any of SIGTERM, SIGINT, SIGPWR, SIGRTMIN+3 and SIGRTMIN+4 (e.g. from `docker kill -s`). RunCVM does not pass these signals to QEMU: the container stops once the VM has powered off, or when `docker stop`'s timeout (`-t`, by default 10 seconds) runs out and Docker kills it. Acceptable values are:
+
+- `systemd` - send the VM's PID 1 SIGRTMIN+4, systemd's request to power off; systemd stops its services and unmounts its file systems first
+- `busybox` - run RunCVM's busybox `poweroff`, which asks busybox init, such as RunCVM's own with `--init`, to power off
+- `acpi` - press the VM's ACPI power button, which a VM running `acpid` or `systemd-logind` acts on
+- `signal:<signal>` - send the VM's PID 1 `<signal>`, by name (e.g. `PWR` or `SIGINT`) or by number, for an init that RunCVM does not recognise; numbers follow Docker's, in which SIGRTMIN is 34
+- `all` - press the ACPI power button, run busybox `poweroff`, and send the VM's PID 1 SIGTERM, all at once
+
+If `RUNCVM_SHUTDOWN` is left undefined, set to an empty string or set to `auto`, RunCVM chooses:
+
+- `busybox`, with `--init`, or if the specified entrypoint ends in `/init` and is (or, if a symlink, its target is) busybox;
+- `systemd`, if the specified entrypoint (or, if a symlink, its target) matches the regex `/systemd$`, as for `RUNCVM_CGROUPFS`;
+- else `all`.
+
+`systemd`, `busybox` and `signal:<signal>` act through the channel `docker exec` uses; until it is available, while the VM is still booting, RunCVM does `all` instead.
+
+To stop a Container/VM without a clean shutdown, e.g. one whose disks are thrown away, use `docker stop -t 0`, `docker kill` or `docker rm -f`.
+
 ## Upgrading
 
 To upgrade, follow this procedure:
@@ -1197,7 +1219,7 @@ The `runcvm-ctr-entrypoint`:
 
 The `runcvm-init` process:
 - Is RunCVM's custom init process, that takes over as PID1 within the container, supervising `runcvm-ctr-qemu` to launch the VM.
-- Waits for a TERM signal. On receiving one, it spawns `runcvm-ctr-shutdown`, which cycles through a number of methods to try to shut down the VM cleanly.
+- Waits for a stop signal: SIGTERM, SIGINT, SIGPWR, or SIGRTMIN+3 or SIGRTMIN+4, which images for systemd declare as their stop signal. On receiving one, it spawns `runcvm-ctr-shutdown`, which asks the VM to power off as [`RUNCVM_SHUTDOWN`](#runcvm_shutdown) chooses. It never passes these signals to QEMU, which they would end at once.
 - Waits for its child (QEMU) to exit. When it does, execs `runcvm-ctr-exit` to retrieve any saved exit code (written by the application to `/.runcvm/exitcode`) and exit with this code.
 
 The `runcvm-ctr-qemu` script:
@@ -1210,7 +1232,7 @@ The `runcvm-vm-init` process:
 - Switches the root filesystem to a whole-root disk, if `RUNCVM_DISKS` defines one, with `pivot_root`, binding onto it the mounts that must stay live, before anything else uses the root
 - Retrieves the container configuration - network (IPv4, and IPv6 if present), environment, disk and tmpfs mounts - saved by `runcvm-ctr-entrypoint` to `/.runcvm`, and reproduces it within the VM
 - Launches the container's pre-existing entrypoint, in one of two ways.
-   1. If `RUNCVM_INIT` is `1` (i.e. the container was originally intended to be launched with Docker's own init process) then it configures and execs busybox `init`, which becomes the VM's PID1, to supervise `dropbear`, run `runcvm-vm-start` and `poweroff` the VM if signalled to do so.
+   1. If `RUNCVM_INIT` is `1` (i.e. the container was originally intended to be launched with Docker's own init process) then it configures and execs busybox `init`, which becomes the VM's PID1, to supervise `dropbear`, run `runcvm-vm-start` and `poweroff` the VM if signalled to do so, first stopping every process and unmounting the disks (`runcvm-vm-shutdown`).
    2. Else, it backgrounds `dropbear`, then execs (via `runcvm-init`, purely to create a controlling tty) `runcvm-vm-start`, which runs as the VM's PID1.
 - In both cases, `dropbear` accepts only RunCVM's own key (used by `docker exec`), with password logins and port forwarding disabled. It ignores the image's `/etc/passwd`, `/etc/shadow`, `/etc/shells` and `authorized_keys`, and runs `runcvm-vm-exec` with RunCVM's own `bash`, so `docker exec` works whatever shell, if any, the image gives root. `dropbear` listens on port 22222 on every address of the VM, but RunCVM's nft rules in the container's network namespace drop TCP to that port in every frame bridged to the VM, on any of its networks, so other containers and hosts cannot reach it; `docker exec` connects from the container's own network namespace, which those rules do not filter. The VM's own firewall is left to the workload.
 

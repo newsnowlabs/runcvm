@@ -1,21 +1,46 @@
 #!/.runcvm/guest/bin/bash
 
-# runcvm-init forks and execs this script when it receives a SIGTERM
+# runcvm-init forks and execs this script when it receives a stop signal (see is_stop_signal in
+# runcvm-init): it asks the guest to power off, after which QEMU exits and the container stops.
+# A guest that doesn't power off is left to Docker's stop timeout.
 
 # Load RunCVM's own environment, saved by runcvm-ctr-entrypoint
 . /.runcvm/config
 
-poweroff() {
-  # Try ACPI poweroff
-  $RUNCVM_GUEST/scripts/runcvm-ctr-qemu-poweroff
-  
-  # Try running busybox poweroff
-  $RUNCVM_GUEST/scripts/runcvm-ctr-exec 0:0 / 0 0 0 $RUNCVM_GUEST/bin/poweroff &>/dev/null
-
-  # Try killing the VM's PID 1
-  $RUNCVM_GUEST/scripts/runcvm-ctr-exec 0:0 / 0 0 0 $RUNCVM_GUEST/bin/busybox kill 1 &>/dev/null
+vm_exec() {
+  $RUNCVM_GUEST/scripts/runcvm-ctr-exec 0:0 / 0 0 0 "$@" &>/dev/null
 }
 
-poweroff
+# Every method at once: ACPI, which a guest running acpid or systemd-logind acts on; busybox
+# poweroff, which signals busybox init (SIGUSR2); and SIGTERM to the VM's PID 1.
+poweroff_all() {
+  $RUNCVM_GUEST/scripts/runcvm-ctr-qemu-poweroff
+  vm_exec $RUNCVM_GUEST/bin/poweroff
+  vm_exec $RUNCVM_GUEST/bin/busybox kill 1
+}
+
+# The method runcvm-vm-init recorded at boot, as RUNCVM_SHUTDOWN requests, or 'all' before then.
+mode=all
+[ -f /.runcvm/shutdown ] && read -r mode </.runcvm/shutdown
+
+case "$mode" in
+  systemd)
+    # SIGRTMIN+4, numbered 38 as systemd (built against glibc) numbers it: systemd's request to
+    # power off. RunCVM's busybox, built against musl, numbers SIGRTMIN differently.
+    vm_exec $RUNCVM_GUEST/bin/busybox kill -38 1 || poweroff_all
+    ;;
+  busybox)
+    vm_exec $RUNCVM_GUEST/bin/poweroff || poweroff_all
+    ;;
+  acpi)
+    $RUNCVM_GUEST/scripts/runcvm-ctr-qemu-poweroff
+    ;;
+  signal:*)
+    vm_exec $RUNCVM_GUEST/bin/busybox kill -s "${mode#signal:}" 1 || poweroff_all
+    ;;
+  *)
+    poweroff_all
+    ;;
+esac
 
 exit 0

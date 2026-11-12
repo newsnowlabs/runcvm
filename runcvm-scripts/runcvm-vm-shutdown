@@ -1,0 +1,61 @@
+#!/.runcvm/guest/bin/bash
+
+# RunCVM's init (--init) runs this as its first shutdown action, before it powers the VM off: it
+# stops every process, so that their writes are done, and then unmounts the filesystems in
+# /.runcvm/fstab, the disks among them, so that each is left clean.
+
+# Load RunCVM's own environment, saved by runcvm-ctr-entrypoint
+. /.runcvm/config
+
+BUSYBOX=$RUNCVM_GUEST/bin/busybox
+
+# Prints the PIDs of the processes still running, other than init, this script, the subshell
+# running this function ($BASHPID, as in "$(processes)") and kernel threads (whose command line is
+# empty).
+processes() {
+  local p pid cmdline
+
+  for p in /proc/[0-9]*
+  do
+    pid="${p#/proc/}"
+    [[ "$pid" = 1 || "$pid" = "$$" || "$pid" = "$BASHPID" ]] && continue
+    cmdline=""
+    read -r -d '' cmdline <"$p/cmdline" 2>/dev/null
+    [ -n "$cmdline" ] && echo "$pid"
+  done
+}
+
+# Ask every process to stop, and give them up to 5 seconds before killing those that remain.
+# kill -1 signals every process but init and the caller, so it must be bash's own kill: busybox's,
+# as a separate process, would signal this script too.
+kill -TERM -1 2>/dev/null
+for ((i = 0; i < 50; i++))
+do
+  [ -z "$(processes)" ] && break
+  $BUSYBOX sleep 0.1
+done
+kill -KILL -1 2>/dev/null
+
+$BUSYBOX sync
+
+# Unmount the entries of /.runcvm/fstab in the reverse of the order mounted, each mount below a
+# path before the mount at it. A filesystem that can't be unmounted is remounted read-only: a disk
+# with layout 'subdirs' is mounted at /.runcvm/disks/<n>, its own entry, where remounting it
+# read-only applies to the whole filesystem, whatever is still mounted from it.
+if [ -f /.runcvm/fstab ]; then
+  mapfile -t dsts < <($BUSYBOX awk '$1 !~ /^#/ && NF >= 2 { print $2 }' /.runcvm/fstab)
+  for ((i = ${#dsts[@]} - 1; i >= 0; i--))
+  do
+    $BUSYBOX umount "${dsts[$i]}" 2>/dev/null || \
+      $BUSYBOX mount -o remount,ro "${dsts[$i]}" 2>/dev/null
+  done
+fi
+
+# A whole-root disk is the VM's root filesystem, which can only be remounted read-only.
+if [ -f /.runcvm/rootdisk ]; then
+  $BUSYBOX mount -o remount,ro / 2>/dev/null
+fi
+
+$BUSYBOX sync
+
+exit 0

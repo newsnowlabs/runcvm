@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Stopping a Container/VM powers its VM off cleanly, as RUNCVM_SHUTDOWN chooses.
+
+- With systemd as the entrypoint (almalinux/9-init, whose stop signal is
+  SIGRTMIN+3), 'docker stop' powers the VM off well within the stop
+  timeout, with exit status 0; 'docker kill -s TERM' does likewise.
+- With --init, 'docker stop' and 'docker kill -s INT' do likewise.
+- In both, a file written to an ext4 disk just before 'docker stop', and
+  not synced, is intact when the Container/VM starts again, and the disk
+  needs no journal recovery: systemd, and RunCVM's init, unmount it first.
+- The method recorded in /.runcvm/shutdown by default: 'systemd' for
+  systemd, 'busybox' with --init or with busybox init as the entrypoint
+  (alpine's /sbin/init), 'all' otherwise.
+- RUNCVM_SHUTDOWN=signal:USR1 sends the VM's PID 1 SIGUSR1, which an
+  entrypoint trapping it reports as its exit status.
+- An invalid RUNCVM_SHUTDOWN stops the Container/VM being created.
+"""
+
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+STOP_TIMEOUT = 30
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+SYSTEMD_IMAGE = "almalinux/9-init"
+
+SLEEP = ["sleep", "600"]
+USR1_TRAP = ["sh", "-c", "trap 'echo 7 >/.runcvm/exitcode; exit 0' USR1; while true; do sleep 1; done"]
+
+# (name, image, --init?, RUNCVM_SHUTDOWN or None, entrypoint or None, action, expected exit status,
+#  expected /.runcvm/shutdown, write and check a disk?)
+CASES = [
+    ("systemd-stop", SYSTEMD_IMAGE, False, None, None, ["stop"], 0, "systemd", True),
+    ("systemd-term", SYSTEMD_IMAGE, False, None, None, ["kill", "-s", "TERM"], 0, "systemd", False),
+    ("init-stop", "alpine", True, None, SLEEP, ["stop"], 0, "busybox", True),
+    ("init-int", "alpine", True, None, SLEEP, ["kill", "-s", "INT"], 0, "busybox", False),
+    ("busybox-init-stop", "alpine", False, None, ["/sbin/init"], ["stop"], 0, "busybox", False),
+    ("signal-usr1", "alpine", False, "signal:USR1", USR1_TRAP, ["stop"], 7, "signal:USR1", False),
+    ("plain-mode", "alpine", False, None, SLEEP, None, None, "all", False),
+]
+
+# Writes 8 MiB of random data to the disk, without syncing, and prints its checksum.
+WRITE = "dd if=/dev/urandom of=/data/f bs=1M count=8 2>/dev/null && md5sum /data/f | cut -d' ' -f1"
+# Prints the file's checksum, then whether the kernel recovered the disk's journal when mounting it.
+CHECK = "md5sum /data/f | cut -d' ' -f1; dmesg | grep -c 'recovery complete' || true"
+
+
+def booted(container, image):
+    if not t.wait_for_exec(container, BOOT_TIMEOUT):
+        return False
+    if image == SYSTEMD_IMAGE:
+        return t.wait_for("systemd running in %s" % container, BOOT_TIMEOUT,
+                          ["docker", "exec", container, "sh", "-c",
+                           "systemctl is-system-running | grep -E 'running|degraded'"])
+    return True
+
+
+def run(case):
+    name, image, init, mode, entrypoint, action, _, _, disk = case
+    container = t.unique(name)
+    t.cleanup_container(container)
+    opts = ["--init"] if init else []
+    if mode:
+        opts += ["--env", "RUNCVM_SHUTDOWN=" + mode]
+    if disk:
+        volume = t.unique(name + "-disks")
+        t.volume_create(volume)
+        opts += ["--mount", "type=volume,src=%s,dst=/disks" % volume,
+                 "--env", "RUNCVM_DISKS=/disks/data,/data,ext4,64M"]
+    result = {"name": name}
+    r = t.docker("run", "-d", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 *opts, image, *(entrypoint or []))
+    if r.returncode != 0 or not booted(container, image):
+        result["error"] = r.stdout + t.docker("logs", container).stdout
+        return result
+    result["mode"] = t.docker("exec", container, "cat", "/.runcvm/shutdown").stdout.strip()
+    if action is None:
+        t.docker("rm", "-f", container)
+        return result
+    if disk:
+        result["written"] = t.docker("exec", container, "sh", "-c", WRITE).stdout.strip()
+    start = time.time()
+    if action[0] == "stop":
+        t.docker("stop", "-t", str(STOP_TIMEOUT), container)
+    else:
+        t.docker(*action, container)
+    t.docker("wait", container, timeout=STOP_TIMEOUT * 2)
+    result["elapsed"] = time.time() - start
+    status = t.docker("inspect", "-f", "{{.State.ExitCode}}", container).stdout.strip()
+    result["status"] = int(status) if status.isdigit() else status
+    if disk:
+        t.docker("start", container)
+        if booted(container, image):
+            lines = t.docker("exec", container, "sh", "-c", CHECK).stdout.split()
+            result["read"], result["recoveries"] = (lines + ["", ""])[:2]
+        t.docker("rm", "-f", container)
+    return result
+
+
+for case, result in zip(CASES, t.parallel(run, CASES)):
+    name, _, _, _, _, action, expected, expected_mode, disk = case
+    if "error" in result:
+        t.check("%s: Container/VM started" % name, True, False)
+        t.log("output:\n%s" % result["error"])
+        continue
+    t.check("%s: /.runcvm/shutdown" % name, expected_mode, result["mode"])
+    if action is None:
+        continue
+    t.log("%s: docker %s took %.0fs" % (name, " ".join(action), result["elapsed"]))
+    t.check("%s: exit status" % name, expected, result["status"])
+    t.check("%s: finished before the %ds stop timeout" % (name, STOP_TIMEOUT), True,
+            result["elapsed"] < STOP_TIMEOUT)
+    if disk:
+        t.check("%s: unsynced file intact after restart" % name, True,
+                bool(result["written"]) and result.get("read") == result["written"])
+        t.check("%s: disk needed no journal recovery" % name, "0", result.get("recoveries"))
+
+r = t.docker("run", "--rm", *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+             "--env", "RUNCVM_SHUTDOWN=bogus", "alpine", "true")
+t.check("invalid RUNCVM_SHUTDOWN: rejected", True, r.returncode != 0)
+if not t.check("invalid RUNCVM_SHUTDOWN: error message", True, "RUNCVM_SHUTDOWN 'bogus' invalid" in r.stdout):
+    t.log("output:\n%s" % r.stdout)
+
+t.finish()
