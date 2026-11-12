@@ -32,8 +32,8 @@
 - Nested disks, tmpfs mounts, volumes and bind mounts: nested disks in
   either order in RUNCVM_DISKS (including through the image's symbolic link
   /var/run), a tmpfs mount, a volume or a bind mount above a disk, a tmpfs
-  mount below a disk, each of a tmpfs mount, a volume and a bind mount
-  between two disks, a tmpfs mount below a volume below a disk, a volume
+  mount below a disk, a tmpfs mount, a volume or a bind mount between two
+  disks, a tmpfs mount below a volume below a disk, a volume
   below a disk below a volume or a tmpfs mount, a volume below a tmpfs
   mount, and destinations sharing only a prefix (/home and /homes): the
   Container/VM runs, with and without --init, and each path is on the
@@ -290,7 +290,8 @@ for ((name, disks, opts, expected), init), r in zip(LAYERED_RUNS, t.parallel(run
         if where == "tmpfs":
             t.check("%s: %s is the tmpfs mount" % (name, path), "tmpfs", fstype)
         elif where in ("volume", "bind"):
-            t.check("%s: %s is the %s, not on a disk" % (name, path, where), True,
+            kind = "volume" if where == "volume" else "bind mount"
+            t.check("%s: %s is the %s, not on a disk" % (name, path, kind), True,
                     marker == where and fstype != "tmpfs" and dev not in disk_devices)
         else:
             disk = probed.get("/.runcvm/disks/%d" % where, (None, None, None))[0]

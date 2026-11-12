@@ -140,9 +140,9 @@ disk_vm_mounts() {
 }
 
 # Prints, one per line, each mountpoint below $RUNCVM_VM_MOUNTPOINT, at any depth, as its path in
-# the VM: Docker's volumes and bind mounts, including files such as /etc/hosts. (runcvm-runtime
-# passes tmpfs mounts to the VM in RUNCVM_TMPFS instead.) /.runcvm, and the mounts below it, are
-# left out.
+# the VM: Docker's volumes and bind mounts, including files such as /etc/hosts. (There are no
+# tmpfs mounts: runcvm-runtime removes them from the container, passing them to the VM in
+# RUNCVM_TMPFS instead.) /.runcvm, and the mounts below it, are left out.
 container_mounts() {
   local mnt rest
   local IFS=$' \t\n'
@@ -586,9 +586,9 @@ do_disk() {
   fi
 
   # Record this disk's backing file, and each of its destinations, for do_root_disk: a whole-root
-  # disk leaves them out, as this disk holds the destinations' contents; and the destinations for
-  # write_fstab. Each is recorded as its path in the image's filesystem, with symbolic links
-  # resolved.
+  # disk leaves them out, as this disk holds the destinations' contents. The destinations are also
+  # recorded for write_fstab. Each is recorded as its path in the image's filesystem, with symbolic
+  # links resolved.
   DISK_EXCLUDES+=("$(busybox realpath "$src")")
   for dst in "${dests[@]}"
   do

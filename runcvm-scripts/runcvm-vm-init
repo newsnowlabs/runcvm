@@ -251,9 +251,9 @@ if [ -f /.runcvm/fstab ]; then
   # Hold on to each mount that a disk or tmpfs mount will hide once mounted at its destination, as
   # listed in /.runcvm/held-mounts (see write_fstab in runcvm-ctr-qemu): Docker's volumes and bind
   # mounts, including files such as /etc/hosts, below a disk's or tmpfs mount's destination. Bind
-  # each, alone (each mount below it is listed too), into a private tmpfs, from where it is mounted
-  # again at its path, in its place among the mounts in /.runcvm/fstab. Binding a Docker volume also
-  # mounts it in the VM, which otherwise sees it only once accessed.
+  # each non-recursively (each mount below it is listed too) into a private tmpfs, from where it
+  # is mounted again at its path, in its place among the mounts in /.runcvm/fstab. Binding a Docker
+  # volume also mounts it in the VM, which otherwise sees it only once accessed.
   declare -A HELD=()
   if [ -s /.runcvm/held-mounts ]; then
     mkdir -p /.runcvm/submounts
@@ -374,7 +374,7 @@ if [ -f /.runcvm/fstab ]; then
     vm_init_error "mounting the filesystems in /.runcvm/fstab failed, leaving unmounted: ${unmounted[*]}"
   fi
 
-  # Detach the tmpfs that held the held mounts.
+  # Detach the tmpfs that held the mounts.
   if [ -d /.runcvm/submounts ]; then
     busybox umount -l /.runcvm/submounts
     rmdir /.runcvm/submounts
