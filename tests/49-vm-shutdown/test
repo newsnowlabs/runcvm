@@ -25,6 +25,7 @@
 """
 
 import os
+import subprocess
 import sys
 import time
 
@@ -125,7 +126,12 @@ def run(c):
             t.docker("stop", "-t", str(c["end"][1]), container)
         else:
             t.docker("kill", "-s", c["end"][1], container)
-    t.docker("wait", container, timeout=STOP_TIMEOUT * 4)
+    try:
+        t.docker("wait", container, timeout=STOP_TIMEOUT * 4)
+    except subprocess.TimeoutExpired:
+        t.docker("rm", "-f", container)
+        result["status"] = "did not end"
+        return result
     result["elapsed"] = time.time() - start
     status = t.docker("inspect", "-f", "{{.State.ExitCode}}", container).stdout.strip()
     result["status"] = int(status) if status.isdigit() else status
@@ -147,8 +153,10 @@ for c, result in zip(CASES, t.parallel(run, CASES)):
         t.check("%s: /.runcvm/shutdown" % name, c["mode"], result["mode"])
     if c["end"] is None:
         continue
-    t.log("%s: took %.0fs" % (name, result["elapsed"]))
     t.check("%s: exit status" % name, c["status"], result["status"])
+    if "elapsed" not in result:
+        continue
+    t.log("%s: took %.0fs" % (name, result["elapsed"]))
     t.check("%s: took %ds to %ds" % (name, c.get("least", 0), c["most"]), True,
             c.get("least", 0) <= result["elapsed"] < c["most"])
     if c.get("disk"):
