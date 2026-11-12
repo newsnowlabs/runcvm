@@ -55,6 +55,144 @@ fi
 # available to the kernel for the VM's lifetime, including after a switch to a whole-root disk.
 echo "$RUNCVM_GUEST/scripts/runcvm-vm-modprobe" >/proc/sys/kernel/modprobe
 
+# Reports error $1 on the console device, which the container's output is connected to, and powers
+# the VM off with exit status 1.
+vm_init_error() {
+  local console
+
+  read -r console </.runcvm/console
+  echo "RunCVM: Error: $1" >"/dev/$console"
+  echo 1 >/.runcvm/exitcode
+  poweroff -f
+  exit 1
+}
+
+# Sets variable $1 to field $2 decoded: RunCVM writes each path in /.runcvm/fstab and the other
+# files it passes to the VM with fstab's octal escapes for '\', space, tab and newline (see
+# path_encode in runcvm-ctr-qemu), as the kernel writes mountpoints in mountinfo. Each '\' in such a
+# field begins an escape, so it decodes exactly; assigning directly keeps any trailing newline.
+path_decode() {
+  printf -v "$1" '%b' "$2"
+}
+
+# Load the kernel modules of each disk's filesystem, as listed in disk-filesystems, before any disk
+# is mounted.
+if [ -f /.runcvm/fstab ]; then
+  declare -A DISK_FSS=()
+  while read -r src _ type _
+  do
+    [[ "$src" != UUID=* ]] || DISK_FSS[$type]=1
+  done </.runcvm/fstab
+
+  for fs in "${!DISK_FSS[@]}"
+  do
+    disk_fs "$fs" || vm_init_error "fs '$fs' is not supported"
+    for module in "${DISK_FS_MODULES[@]}"
+    do
+      busybox modprobe "$module" || vm_init_error "fs '$fs' needs kernel module '$module', which the VM's kernel ($(busybox uname -r)) lacks"
+    done
+  done
+fi
+
+# Populates each new disk that its mkfs command left empty, as listed in /.runcvm/disks-populate
+# (see disks_create in runcvm-ctr-qemu), from the image's filesystem at root $1: copies each
+# destination's contents to its directory on the disk, with RunCVM's own cp, which preserves
+# ownership, permissions, timestamps, links and extended attributes, and stays on the filesystem
+# holding the destination.
+#
+# Each path listed for the destination in /.runcvm/disks-populate-masks is masked while copying, so
+# that the disk holds none of its contents: a directory with an empty tmpfs, with the original's
+# mode, owner and group, leaving an empty directory on the disk; and a file with an empty file
+# bind-mounted from a scratch tmpfs, whose copy is then removed, leaving nothing. The masks are
+# removed in the reverse order, every file mask before the scratch tmpfs is detached.
+populate_disks() {
+  local root="${1%/}" id uuid fs dir dst mnt mid mdir mpath i mode uid gid file
+  local scratch=/.runcvm/populate-scratch
+  local -a masks=() file_masks=()
+  local -A mounted=()
+
+  [ -f /.runcvm/disks-populate ] || return 0
+
+  while read -r id uuid fs dir dst
+  do
+    path_decode dst "$dst"
+    dst="$root$dst"
+
+    mnt="/.runcvm/disks/$id"
+    if [ -z "${mounted[$id]}" ]; then
+      mkdir -p "$mnt"
+      BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null mount -i --options-source=disable -t "$fs" -o noatime "UUID=$uuid" "$mnt" || \
+        vm_init_error "dst '$dst' cannot be populated: mounting its new disk failed"
+      mounted[$id]=1
+    fi
+
+    masks=() file_masks=()
+    if [ -f /.runcvm/disks-populate-masks ]; then
+      while read -r mid mdir _ mpath
+      do
+        [[ "$mid" = "$id" && "$mdir" = "$dir" ]] || continue
+        path_decode mpath "$mpath"
+        mpath="$root$mpath"
+        # A tmpfs mount's destination may not exist in the image: there is nothing there to copy.
+        [ -e "$mpath" ] || continue
+
+        read -r mode uid gid < <(busybox stat -c '%a %u %g' "$mpath")
+        if [ -d "$mpath" ]; then
+          mount -i --options-source=disable -t tmpfs -o "mode=$mode,uid=$uid,gid=$gid" tmpfs "$mpath" || \
+            vm_init_error "dst '$dst' cannot be populated: masking '$mpath' failed"
+        else
+          if ! findmnt -rn --mountpoint "$scratch" >/dev/null; then
+            mkdir -p "$scratch"
+            mount -i --options-source=disable -t tmpfs -o mode=0700 tmpfs "$scratch"
+          fi
+          file="$scratch/${#masks[@]}"
+          : >"$file"
+          busybox chown "$uid:$gid" "$file"
+          busybox chmod "$mode" "$file"
+          mount -i --options-source=disable --bind "$file" "$mpath" || \
+            vm_init_error "dst '$dst' cannot be populated: masking '$mpath' failed"
+          file_masks+=("$mpath")
+        fi
+        masks+=("$mpath")
+      done </.runcvm/disks-populate-masks
+    fi
+
+    mkdir -p "$mnt/$dir"
+    if [ -d "$dst" ]; then
+      $RUNCVM_GUEST/usr/bin/coreutils --coreutils-prog=cp -a -x "$dst/." "$mnt/$dir/" || \
+        vm_init_error "dst '$dst' cannot be populated: copying its contents to its new disk failed"
+    fi
+
+    for ((i = ${#masks[@]} - 1; i >= 0; i--))
+    do
+      busybox umount "${masks[$i]}" || \
+        vm_init_error "dst '$dst' cannot be populated: unmasking '${masks[$i]}' failed"
+    done
+
+    # Leave out each masked file, as mke2fs does: the empty copy of its mask is removed. (The VM's
+    # mount step creates an empty file where a mount needs one.)
+    for mpath in "${file_masks[@]}"
+    do
+      busybox rm -f "$mnt/$dir/${mpath#"$dst"/}"
+    done
+  done </.runcvm/disks-populate
+
+  if findmnt -rn --mountpoint "$scratch" >/dev/null; then
+    busybox umount "$scratch"
+    rmdir "$scratch"
+  fi
+
+  # Unmount the disks again, for the fstab to mount them as for any other boot.
+  for id in "${!mounted[@]}"
+  do
+    busybox umount "/.runcvm/disks/$id" || vm_init_error "unmounting new disk '/.runcvm/disks/$id' after populating it failed"
+  done
+}
+
+# Populate the new disks from the image's filesystem, before any switch to a whole-root disk, which
+# holds none of the other disks' destinations.
+populate_disks /
+
 # Switch the root filesystem to the whole-root disk, if RUNCVM_DISKS defines one (see do_root_disk
 # in runcvm-ctr-qemu). This must happen before anything else uses the root: everything after it,
 # and the workload, sees the disk as /.
@@ -63,13 +201,31 @@ if [ -f /.runcvm/rootdisk ]; then
 
   # The paths to carry onto the disk: each mount directly below the root, such as /proc, /sys and
   # /dev; and each path the container recorded as a mountpoint, as Docker's volumes appear in the
-  # VM as mounts only once accessed, and its bind-mounted files, such as /etc/hosts, never do.
-  ROOTDISK_MOUNTS=$(
-    {
-      awk 'NR==FNR { if ($5 == "/") root=$1; next } $2 == root && $5 != "/.runcvm" { print $5 }' /proc/self/mountinfo /proc/self/mountinfo
-      cat /.runcvm/rootdisk-mounts
-    } | busybox sort -u
-  )
+  # VM as mounts only once accessed, and its bind-mounted files, such as /etc/hosts, never do. Both
+  # are kept encoded, as mountinfo and /.runcvm/rootdisk-mounts give them, until the set is complete,
+  # so that each path is in it once.
+  declare -A ROOTDISK_ENCODED=()
+  while read -r id parent _ _ mnt _
+  do
+    [ "$mnt" != "/" ] || ROOTDISK_ROOT="$id"
+  done </proc/self/mountinfo
+  while read -r id parent _ _ mnt _
+  do
+    if [[ "$parent" = "$ROOTDISK_ROOT" && "$mnt" != "/" && "$mnt" != "/.runcvm" ]]; then
+      ROOTDISK_ENCODED[$mnt]=1
+    fi
+  done </proc/self/mountinfo
+  while IFS= read -r mnt
+  do
+    [ -z "$mnt" ] || ROOTDISK_ENCODED[$mnt]=1
+  done </.runcvm/rootdisk-mounts
+
+  ROOTDISK_MOUNTS=()
+  for mnt in "${!ROOTDISK_ENCODED[@]}"
+  do
+    path_decode path "$mnt"
+    ROOTDISK_MOUNTS+=("$path")
+  done
 
   busybox modprobe ext4
   mkdir -p /.runcvm/newroot /.runcvm/vmroot
@@ -81,18 +237,15 @@ if [ -f /.runcvm/rootdisk ]; then
   mount -i --options-source=disable --bind /.runcvm/guest /.runcvm/newroot/.runcvm/guest
 
   # Bind each path over the same path on the disk, recursively, so that each carries the mounts
-  # below it, creating a mountpoint of the same kind if the disk lacks one: the disk holds an empty
-  # directory at each mountpoint that is a directory, and an empty file at a mounted file.
-  ROOTDISK_CARRIED=()
-  while IFS= read -r path
+  # below it (so a path below another in the set is carried by that one), creating a mountpoint of
+  # the same kind if the disk lacks one: the disk holds an empty directory at each mountpoint that
+  # is a directory, and an empty file at a mounted file.
+  for path in "${ROOTDISK_MOUNTS[@]}"
   do
-    [ -n "$path" ] || continue
-
-    for carried in "${ROOTDISK_CARRIED[@]}"
+    for other in "${ROOTDISK_MOUNTS[@]}"
     do
-      [[ "$path" = "$carried"/* ]] && continue 2
+      [[ "$path" = "${other%/}"/* ]] && continue 2
     done
-    ROOTDISK_CARRIED+=("$path")
 
     if [ -d "$path" ]; then
       mkdir -p "/.runcvm/newroot$path"
@@ -102,7 +255,7 @@ if [ -f /.runcvm/rootdisk ]; then
     fi
 
     mount -i --options-source=disable --rbind "$path" "/.runcvm/newroot$path"
-  done <<<"$ROOTDISK_MOUNTS"
+  done
 
   # Switch to the disk. Everything this script uses must already be on the disk: RunCVM's tools,
   # which find their libraries through /proc/self/exe, need /proc. Nothing needs the image's
@@ -212,18 +365,6 @@ done </.runcvm/network/routes6
 # Setup hostname
 hostname -F /etc/hostname
 
-# Reports error $1 on the console device, which the container's output is connected to, and powers
-# the VM off with exit status 1.
-vm_init_error() {
-  local console
-
-  read -r console </.runcvm/console
-  echo "RunCVM: Error: $1" >"/dev/$console"
-  echo 1 >/.runcvm/exitcode
-  poweroff -f
-  exit 1
-}
-
 # Load the kernel modules that RUNCVM_KERNEL_MODULES names (checked by runcvm-runtime as a
 # comma-separated list of module names), before the workload starts: for modules that nothing
 # requests from the kernel on demand, such as kvm_intel or kvm_amd for VMs nested in this one.
@@ -236,38 +377,29 @@ if [ -n "$RUNCVM_KERNEL_MODULES" ]; then
   done
 fi
 
-# Mount filesystems defined in /etc/fstab OR as defined in RUNCVM_DISKS
+# Mount the filesystems in /.runcvm/fstab, as RUNCVM_DISKS and the tmpfs mounts define them (see
+# write_manifests in runcvm-ctr-qemu).
 if [ -f /.runcvm/fstab ]; then
-  # Load the kernel modules of each disk's filesystem, as listed in disk-filesystems.
-  for fs in $(awk '$1 ~ /^UUID=/ { print $3 }' /.runcvm/fstab | busybox sort -u)
-  do
-    disk_fs "$fs" || vm_init_error "fs '$fs' is not supported"
-    for module in "${DISK_FS_MODULES[@]}"
-    do
-      busybox modprobe "$module" || vm_init_error "fs '$fs' needs kernel module '$module', which the VM's kernel ($(busybox uname -r)) lacks"
-    done
-  done
-
   # Hold on to each mount that a disk or tmpfs mount will hide once mounted at its destination, as
-  # listed in /.runcvm/held-mounts (see write_fstab in runcvm-ctr-qemu): Docker's volumes and bind
-  # mounts, including files such as /etc/hosts, below a disk's or tmpfs mount's destination. Bind
-  # each non-recursively (each mount below it is listed too) into a private tmpfs, from where it
-  # is mounted again at its path, in its place among the mounts in /.runcvm/fstab. Binding a Docker
-  # volume also mounts it in the VM, which otherwise sees it only once accessed.
-  #
-  # HELD maps each held mount's path to where it is held, /.runcvm/submounts/<n>, where <n> is the
-  # number of entries already in HELD.
-  declare -A HELD=()
+  # listed in /.runcvm/held-mounts, one line each, <id> <path>: Docker's volumes and bind mounts,
+  # including files such as /etc/hosts, below a disk's or tmpfs mount's destination. Bind each
+  # non-recursively (each mount below it is listed too) into a private tmpfs, at
+  # /.runcvm/submounts/<id>, from where it is mounted again at its path, in its place among the
+  # mounts in /.runcvm/fstab. Binding a Docker volume also mounts it in the VM, which otherwise sees
+  # it only once accessed. Each is a container mount, so a held mount missing in the VM is an error.
+  held_paths=()
   if [ -s /.runcvm/held-mounts ]; then
     mkdir -p /.runcvm/submounts
     mount -i --options-source=disable -t tmpfs -o mode=0700 tmpfs /.runcvm/submounts
     mount -i --make-rprivate /.runcvm/submounts
 
-    while IFS= read -r path
+    while read -r id path
     do
-      [[ -n "$path" && -e "$path" ]] || continue
+      [ -n "$id" ] || continue
+      path_decode path "$path"
+      [ -e "$path" ] || vm_init_error "'$path' cannot be mounted over the mount above it: it is missing in the VM"
 
-      held="/.runcvm/submounts/${#HELD[@]}"
+      held="/.runcvm/submounts/$id"
       if [ -d "$path" ]; then
         mkdir "$held"
       else
@@ -276,67 +408,42 @@ if [ -f /.runcvm/fstab ]; then
 
       mount -i --options-source=disable --bind "$path" "$held" || \
         vm_init_error "'$path' cannot be mounted over the mount above it: binding it before mounting the disks failed"
-      HELD["$path"]="$held"
+      held_paths+=("$path")
     done </.runcvm/held-mounts
-  fi
 
-  # Populate each new disk that its mkfs command left empty: copy each destination's contents, as
-  # the image holds them, to its directory on the disk, with RunCVM's own cp, which preserves
-  # ownership, permissions, timestamps, links and extended attributes. cp stays on the filesystem
-  # holding the destination, leaving each directory on which another filesystem is mounted, such
-  # as the held mounts above, empty. Each directory listed for the destination in
-  # /.runcvm/disks-populate-masks is another disk's destination, which that disk will be mounted
-  # over: while copying, it is masked with an empty tmpfs that has the directory's mode, owner
-  # and group, so that it is left empty likewise.
-  if [ -f /.runcvm/disks-populate ]; then
-    while read -r id uuid fs dir dst
+    # Detach each held mount from its path, deepest first: the disk or tmpfs mount above it would
+    # only hide it, and the mount table would then show two mounts at its path once it is mounted
+    # again, which misleads mount -a (busybox's skips the path as mounted) and systemd (whose
+    # umount of the path fails). A path that is not a mountpoint in the VM (such as Docker's
+    # bind-mounted files) has nothing to detach.
+    for ((i = ${#held_paths[@]} - 1; i >= 0; i--))
     do
-      mnt="/.runcvm/disks/$id"
-      if ! findmnt -rn --mountpoint "$mnt" >/dev/null; then
-        mkdir -p "$mnt"
-        BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null mount -i --options-source=disable -t "$fs" -o noatime "UUID=$uuid" "$mnt" || \
-          vm_init_error "dst '$dst' cannot be populated: mounting its new disk failed"
-      fi
-
-      masks=()
-      if [ -f /.runcvm/disks-populate-masks ]; then
-        while read -r mid mdir mpath
-        do
-          [[ "$mid" = "$id" && "$mdir" = "$dir" && -d "$mpath" ]] || continue
-          read -r mmode muid mgid < <(busybox stat -c '%a %u %g' "$mpath")
-          mount -i --options-source=disable -t tmpfs -o "mode=$mmode,uid=$muid,gid=$mgid" tmpfs "$mpath" || \
-            vm_init_error "dst '$dst' cannot be populated: masking '$mpath', another disk's dst, failed"
-          masks+=("$mpath")
-        done </.runcvm/disks-populate-masks
-      fi
-
-      mkdir -p "$mnt/$dir"
-      if [ -d "$dst" ]; then
-        $RUNCVM_GUEST/usr/bin/coreutils --coreutils-prog=cp -a -x "$dst/." "$mnt/$dir/" || \
-          vm_init_error "dst '$dst' cannot be populated: copying its contents to its new disk failed"
-      fi
-
-      # Unmask in the reverse order of masking.
-      for ((i = ${#masks[@]} - 1; i >= 0; i--))
-      do
-        busybox umount "${masks[$i]}" || \
-          vm_init_error "dst '$dst' cannot be populated: unmasking '${masks[$i]}' failed"
-      done
-    done </.runcvm/disks-populate
-
-    # Unmount the disks again, for the fstab to mount them as for any other boot.
-    for mnt in $(awk '{ print $1 }' /.runcvm/disks-populate | busybox sort -u)
-    do
-      busybox umount "/.runcvm/disks/$mnt" || vm_init_error "unmounting new disk '/.runcvm/disks/$mnt' after populating it failed"
+      busybox umount -l "${held_paths[$i]}" 2>/dev/null || true
     done
   fi
 
+  # Mounts held mount $1 again at its path $2, creating a mountpoint of the same kind if the mount
+  # above it lacks one.
+  mount_held() {
+    local held="/.runcvm/submounts/$1" path="$2"
+
+    if [ -d "$held" ]; then
+      mkdir -p "$path"
+    else
+      mkdir -p "$(busybox dirname "$path")"
+      [ -e "$path" ] || touch "$path"
+    fi
+
+    mount -i --options-source=disable --bind "$held" "$path" || \
+      vm_init_error "'$path' cannot be mounted over the mount above it: binding it again failed"
+  }
+
   # Mount each entry in /.runcvm/fstab in turn, in the order written there, creating its mountpoint
-  # if it lacks one; and, at each '#runcvm-held <path>', the mount held from <path> again at its
-  # path, creating a mountpoint of the same kind if the mount above it lacks one. Resolve UUID= with
-  # RunCVM's own libblkid configuration, which scans devices and keeps no cache, not with the
-  # image's /etc/blkid.conf and /run/blkid cache. -i keeps mount from running any
-  # /sbin/mount.<type> helper from the image.
+  # if it lacks one; and each held mount again at its path, at its '#runcvm-held <id> <path>' comment
+  # (RUNCVM_FSTAB=disks) or its bind mount from /.runcvm/submounts/<id> (RUNCVM_FSTAB=all). Each
+  # field is decoded, as mount is given it directly. Resolve UUID= with RunCVM's own libblkid
+  # configuration, which scans devices and keeps no cache, not with the image's /etc/blkid.conf and
+  # /run/blkid cache. -i keeps mount from running any /sbin/mount.<type> helper from the image.
   #
   # Each entry left unmounted is named. A bind mount from a disk with layout 'subdirs' fails if the
   # disk, once mounted at /.runcvm/disks/<n>, has no directory for its destination: a destination
@@ -346,26 +453,23 @@ if [ -f /.runcvm/fstab ]; then
   while IFS= read -r line
   do
     if [[ "$line" = "#runcvm-held "* ]]; then
-      path="${line#"#runcvm-held "}"
-      # A path that was missing when the mounts were held was not held, so is not mounted again.
-      held="${HELD[$path]:-}"
-      [ -n "$held" ] || continue
-
-      if [ -d "$held" ]; then
-        mkdir -p "$path"
-      else
-        mkdir -p "$(busybox dirname "$path")"
-        [ -e "$path" ] || touch "$path"
-      fi
-
-      mount -i --options-source=disable --bind "$held" "$path" || \
-        vm_init_error "'$path' cannot be mounted over the mount above it: binding it again failed"
+      read -r _ id path <<<"$line"
+      path_decode path "$path"
+      mount_held "$id" "$path"
       continue
     fi
 
     # An fstab entry's first four fields; skip blank lines and other comments.
     read -r src dst type options _ <<<"$line"
     [[ -z "$dst" || "$src" = \#* ]] && continue
+    path_decode src "$src"
+    path_decode dst "$dst"
+    path_decode options "$options"
+
+    if [[ "$src" = /.runcvm/submounts/* ]]; then
+      mount_held "${src##*/}" "$dst"
+      continue
+    fi
 
     # Add X-mount.mkdir to the entry's options, after a comma if it has any. Once mounted, go on to
     # the next entry; otherwise, report it below.
@@ -384,17 +488,22 @@ if [ -f /.runcvm/fstab ]; then
     vm_init_error "mounting the filesystems in /.runcvm/fstab failed, leaving unmounted: ${unmounted[*]}"
   fi
 
-  # Detach the tmpfs that held the mounts.
-  if [ -d /.runcvm/submounts ]; then
+  # With RUNCVM_FSTAB=all, keep the tmpfs that holds the mounts, from which /.runcvm/fstab's bind
+  # mounts mount them again; otherwise detach it.
+  if [[ -d /.runcvm/submounts && "${RUNCVM_FSTAB:-disks}" != "all" ]]; then
     busybox umount -l /.runcvm/submounts
     rmdir /.runcvm/submounts
   fi
 
   # Mount our fstab over the image's /etc/fstab, where the image has one. An image without one
-  # (e.g. busybox, or a static binary's) has nothing that reads it, and has no file to mount over:
-  # this script runs with 'bash -e' as the VM's PID 1, so a failed mount would halt the VM.
+  # (e.g. busybox, or a static binary's) is left without one, unless RUNCVM_FSTAB=all, for which an
+  # empty /etc/fstab is created to mount it over, so that systemd and 'mount -a' find the held
+  # mounts' entries.
+  if [[ ! -e /etc/fstab && "${RUNCVM_FSTAB:-disks}" = "all" ]]; then
+    { mkdir -p /etc && touch /etc/fstab; } || vm_init_error "RUNCVM_FSTAB=all: /etc/fstab cannot be created"
+  fi
   if [ -e /etc/fstab ]; then
-    mount -i --bind /.runcvm/fstab /etc/fstab
+    mount -i --options-source=disable --bind /.runcvm/fstab /etc/fstab || vm_init_error "/.runcvm/fstab cannot be mounted over /etc/fstab"
   fi
 fi
 

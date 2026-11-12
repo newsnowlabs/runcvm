@@ -28,22 +28,6 @@
 - Across disks and tmpfs mounts: two disks with one destination, or a disk
   and a tmpfs mount with one destination: the Container/VM exits with
   status 1, reporting the disk's spec, before creating that disk.
-- Nested disks, tmpfs mounts, volumes and bind mounts: nested disks in
-  either order in RUNCVM_DISKS (including through the image's symbolic link
-  /var/run), a tmpfs mount, a volume or a bind mount above a disk, a tmpfs
-  mount below a disk, a tmpfs mount, a volume or a bind mount between two
-  disks, a tmpfs mount below a volume below a disk, a volume
-  below a disk below a volume or a tmpfs mount, a volume below a tmpfs
-  mount, a disk at a volume's or a bind mount's destination, and
-  destinations sharing only a prefix (/home and /homes): the Container/VM
-  runs, with and without --init, and each path is on the intended disk,
-  tmpfs mount, volume or bind mount, as a deeper mount is mounted over a
-  shallower one, and a disk over a volume or bind mount at its destination.
-- A new disk leaves out another disk's destination below its own, holding an
-  empty directory there with the directory's mode, whichever is listed first,
-  for an ext4 and an xfs outer disk (populated by mke2fs and in the VM): with
-  disks at /usr/share and /usr/share/apk, the outer disk's apk directory is
-  empty, and /usr/share/apk, on the inner disk, holds the image's keys.
 """
 
 import os
@@ -123,80 +107,6 @@ ACROSS = [
      "/disks/b,/home,ext4,16M", "dst '/home' is also the destination of a tmpfs mount"),
 ]
 
-# Nested disks, tmpfs mounts, volumes and bind mounts: (name, RUNCVM_DISKS, further docker run
-# options, {path: the disk expected there, by its position in RUNCVM_DISKS, or "tmpfs", "volume" or
-# "bind"}). Every disk has layout 'subdirs', so it is mounted at /.runcvm/disks/<n>, whose device a
-# path on it shares. Each {vol} and {vol2} in the options is a new volume holding a file .vol; the
-# bind mounts are of the host's /opt/runcvm, which holds LICENSE and a directory scripts, so that a
-# disk below the bind mount is at an existing directory, and nothing is created on the host.
-LAYERED = [
-    ("outer-disk-first", "/disks/a,/home,ext4,16M;/disks/b,/home/b,ext4,16M", [],
-     {"/home": 0, "/home/b": 1}),
-    ("outer-disk-last", "/disks/b,/home/b,ext4,16M;/disks/a,/home,ext4,16M", [],
-     {"/home": 1, "/home/b": 0}),
-    ("outer-disk-last-symlink", "/disks/b,/run/b,ext4,16M;/disks/a,/var/run,ext4,16M", [],
-     {"/run": 1, "/run/b": 0}),
-    ("three-deep", "/disks/c,/srv/a/b,ext4,16M;/disks/a,/srv,ext4,16M;/disks/b,/srv/a,ext4,16M", [],
-     {"/srv": 1, "/srv/a": 2, "/srv/a/b": 0}),
-    ("tmpfs-above-disk", "/disks/b,/home/b,ext4,16M", ["--mount", "type=tmpfs,dst=/home"],
-     {"/home": "tmpfs", "/home/b": 0}),
-    ("tmpfs-below-disk", "/disks/a,/home,ext4,16M", ["--mount", "type=tmpfs,dst=/home/cache"],
-     {"/home": 0, "/home/cache": "tmpfs"}),
-    ("prefix-only", "/disks/a,/home,ext4,16M;/disks/b,/homes,ext4,16M", ["--mount", "type=tmpfs,dst=/homes2"],
-     {"/home": 0, "/homes": 1, "/homes2": "tmpfs"}),
-    ("volume-above-disk", "/disks/a,/data/db,ext4,16M", ["--mount", "type=volume,src={vol},dst=/data"],
-     {"/data": "volume", "/data/db": 0}),
-    ("bind-above-disk", "/disks/a,/srv/rcvm/scripts,ext4,16M",
-     ["--mount", "type=bind,src=/opt/runcvm,dst=/srv/rcvm,readonly"],
-     {"/srv/rcvm": "bind", "/srv/rcvm/scripts": 0}),
-    ("disk-tmpfs-disk", "/disks/b,/home/x/y,ext4,16M;/disks/a,/home,ext4,16M", ["--mount", "type=tmpfs,dst=/home/x"],
-     {"/home": 1, "/home/x": "tmpfs", "/home/x/y": 0}),
-    ("disk-volume-disk", "/disks/a,/home,ext4,16M;/disks/b,/home/shared/db,ext4,16M",
-     ["--mount", "type=volume,src={vol},dst=/home/shared"],
-     {"/home": 0, "/home/shared": "volume", "/home/shared/db": 1}),
-    ("disk-bind-disk", "/disks/a,/srv,ext4,16M;/disks/b,/srv/rcvm/scripts,ext4,16M",
-     ["--mount", "type=bind,src=/opt/runcvm,dst=/srv/rcvm,readonly"],
-     {"/srv": 0, "/srv/rcvm": "bind", "/srv/rcvm/scripts": 1}),
-    ("disk-volume-tmpfs", "/disks/a,/home,ext4,16M",
-     ["--mount", "type=volume,src={vol},dst=/home/shared", "--mount", "type=tmpfs,dst=/home/shared/tmp"],
-     {"/home": 0, "/home/shared": "volume", "/home/shared/tmp": "tmpfs"}),
-    ("volume-disk-volume", "/disks/a,/data/db,ext4,16M",
-     ["--mount", "type=volume,src={vol},dst=/data", "--mount", "type=volume,src={vol2},dst=/data/db/v"],
-     {"/data": "volume", "/data/db": 0, "/data/db/v": "volume"}),
-    ("tmpfs-disk-volume", "/disks/a,/t/d,ext4,16M",
-     ["--mount", "type=tmpfs,dst=/t", "--mount", "type=volume,src={vol},dst=/t/d/v"],
-     {"/t": "tmpfs", "/t/d": 0, "/t/d/v": "volume"}),
-    ("disk-at-volume", "/disks/a,/data,ext4,16M", ["--mount", "type=volume,src={vol},dst=/data"],
-     {"/data": 0}),
-    ("disk-at-bind", "/disks/a,/srv/s,ext4,16M", ["--mount", "type=bind,src=/opt/runcvm/scripts,dst=/srv/s,readonly"],
-     {"/srv/s": 0}),
-    ("tmpfs-volume", "/disks/a,/srv,ext4,16M",
-     ["--mount", "type=tmpfs,dst=/t", "--mount", "type=volume,src={vol},dst=/t/v"],
-     {"/srv": 0, "/t": "tmpfs", "/t/v": "volume"}),
-]
-
-# A disk at /usr/share and one at /usr/share/apk: (name, RUNCVM_DISKS, the outer disk's position in
-# RUNCVM_DISKS). Each has layout 'subdirs', so the outer disk's directory for /usr/share/apk is
-# /.runcvm/disks/<n>/usr-share/apk. (An xfs filesystem needs at least 300M.)
-POPULATED = [
-    ("ext4-outer-first", "/disks/a,/usr/share,ext4,64M;/disks/b,/usr/share/apk,ext4,16M", 0),
-    ("ext4-outer-last", "/disks/b,/usr/share/apk,ext4,16M;/disks/a,/usr/share,ext4,64M", 1),
-    ("xfs-outer-first", "/disks/a,/usr/share,xfs,320M;/disks/b,/usr/share/apk,ext4,16M", 0),
-    ("xfs-outer-last", "/disks/b,/usr/share/apk,ext4,16M;/disks/a,/usr/share,xfs,320M", 1),
-]
-
-# Prints the entries of the outer disk's directory for /usr/share/apk, then its mode, then the
-# number of entries in /usr/share/apk/keys.
-POPULATED_PROBE = ('d=/.runcvm/disks/$1/usr-share/apk; echo "entries=$(ls -A "$d" | tr "\\n" " ")"; '
-                   'echo "mode=$(stat -c %a "$d")"; '
-                   'echo "keys=$(ls /usr/share/apk/keys | wc -l)"')
-
-# Prints, for each path given, its device number, its filesystem type, and 'volume' if it holds .vol
-# (a test volume's file), 'bind' if it holds LICENSE (the host's /opt/runcvm), or '-'.
-PROBE = ('for p in "$@"; do m=-; [ -e "$p/.vol" ] && m=volume; [ -e "$p/LICENSE" ] && m=bind; '
-         'echo "$p $(stat -c %d "$p") $(stat -f -c %T "$p") $m"; done')
-
-
 def mount_opts(opts, name):
     """Return docker run options 'opts' with each {vol} and {vol2} replaced by a new volume's name,
     each volume holding a file .vol."""
@@ -221,29 +131,6 @@ def run_across(case):
                     *t.vm_opts(), "--mount", "type=volume,src=%s,dst=/disks" % volume,
                     *mount_opts(opts, "across-" + name),
                     "--env", "RUNCVM_DISKS=" + disks, "alpine", "true", timeout=TIMEOUT)
-
-
-def run_layered(case):
-    (name, disks, opts, expected), init = case
-    name += "-init" if init else "-noinit"
-    volume = t.unique("layered-" + name)
-    t.volume_create(volume)
-    paths = list(expected) + ["/.runcvm/disks/%d" % n for n in range(disks.count(";") + 1)]
-    return t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
-                    *t.vm_opts(), *(["--init"] if init else []),
-                    "--mount", "type=volume,src=%s,dst=/disks" % volume, *mount_opts(opts, "layered-" + name),
-                    "--env", "RUNCVM_DISKS=" + disks, "alpine", "sh", "-c", PROBE, "sh", *paths,
-                    timeout=TIMEOUT)
-
-
-def run_populated(case):
-    name, disks, outer = case
-    volume = t.unique("populated-" + name)
-    t.volume_create(volume)
-    return t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
-                    *t.vm_opts(), "--mount", "type=volume,src=%s,dst=/disks" % volume,
-                    "--env", "RUNCVM_DISKS=" + disks, "alpine", "sh", "-c", POPULATED_PROBE, "sh", str(outer),
-                    timeout=TIMEOUT)
 
 
 def run_invalid(case):
@@ -271,41 +158,6 @@ for (name, disks, opts, spec, message), r in zip(ACROSS, t.parallel(run_across, 
     t.check("%s: exit status" % name, 1, r.returncode)
     if not t.check("%s: error message" % name, True, ("disk spec '%s' invalid: %s" % (spec, message)) in r.stdout):
         t.log("output:\n%s" % r.stdout)
-
-LAYERED_RUNS = [(case, init) for case in LAYERED for init in (False, True)]
-t.param("init", "no, yes")
-for ((name, disks, opts, expected), init), r in zip(LAYERED_RUNS, t.parallel(run_layered, LAYERED_RUNS)):
-    name += ", --init" if init else ", no --init"
-    if not t.check("%s: exit status" % name, 0, r.returncode):
-        t.log("output:\n%s" % r.stdout)
-        continue
-    probed = {}
-    for line in r.stdout.replace("\r", "").splitlines():
-        fields = line.split()
-        if len(fields) == 4:
-            probed[fields[0]] = (fields[1], fields[2], fields[3])
-    disk_devices = [probed[p][0] for p in probed if p.startswith("/.runcvm/disks/")]
-    for path, where in expected.items():
-        dev, fstype, marker = probed.get(path, (None, None, None))
-        if where == "tmpfs":
-            t.check("%s: %s is the tmpfs mount" % (name, path), "tmpfs", fstype)
-        elif where in ("volume", "bind"):
-            kind = "volume" if where == "volume" else "bind mount"
-            t.check("%s: %s is the %s, not on a disk" % (name, path, kind), True,
-                    marker == where and fstype != "tmpfs" and dev not in disk_devices)
-        else:
-            disk = probed.get("/.runcvm/disks/%d" % where, (None, None, None))[0]
-            t.check("%s: %s is on disk %d" % (name, path, where), True, disk is not None and dev == disk)
-
-for (name, disks, outer), r in zip(POPULATED, t.parallel(run_populated, POPULATED)):
-    if not t.check("%s: exit status" % name, 0, r.returncode):
-        t.log("output:\n%s" % r.stdout)
-        continue
-    values = dict(line.split("=", 1) for line in r.stdout.replace("\r", "").splitlines() if "=" in line)
-    t.check("%s: outer disk's directory for /usr/share/apk is empty" % name, "", values.get("entries", "?").strip())
-    t.check("%s: and has the image's directory's mode" % name, "755", values.get("mode"))
-    t.check("%s: /usr/share/apk/keys, on the inner disk, holds the image's keys" % name, True,
-            values.get("keys", "0").strip() not in ("", "0"))
 
 for (name, disks, message), r in zip(INVALID, t.parallel(run_invalid, INVALID)):
     t.check("%s: exit status" % name, 1, r.returncode)

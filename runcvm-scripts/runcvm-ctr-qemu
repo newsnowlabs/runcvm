@@ -6,13 +6,18 @@
 # input: not grep -q, -m or -l, head, sed's q, awk's exit or a single read, which can exit first
 # and leave the command writing to them killed by SIGPIPE, failing the pipeline at random. Use e.g.
 # 'grep ... >/dev/null', or capture the output first. tests/43-pipefail-readers checks this.
-set -o errexit -o pipefail
+#
+# Sourced rather than run (as tests/53-disk-mount-order does, to check the disk planner), this script
+# only defines its functions.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  set -o errexit -o pipefail
 
-# Load RunCVM's own environment, saved by runcvm-ctr-entrypoint
-. /.runcvm/config
+  # Load RunCVM's own environment, saved by runcvm-ctr-entrypoint
+  . /.runcvm/config
 
-# Load defaults
-. $RUNCVM_GUEST/scripts/runcvm-ctr-defaults && unset PATH
+  # Load defaults
+  . $RUNCVM_GUEST/scripts/runcvm-ctr-defaults && unset PATH
+fi
 
 QEMU_IFUP="$RUNCVM_GUEST/scripts/runcvm-ctr-qemu-ifup"
 QEMU_IFDOWN="$RUNCVM_GUEST/scripts/runcvm-ctr-qemu-ifdown"
@@ -27,7 +32,23 @@ error() {
   exit 1
 }
 
-# Prints path $1 in normal form: with repeated '/' collapsed and any trailing '/' removed.
+# Prints path $1 with fstab's octal escapes for '\', space, tab and newline ('\134', '\040', '\011'
+# and '\012'), as every path is written to the files that runcvm-vm-init reads: /.runcvm/fstab,
+# /.runcvm/held-mounts, /.runcvm/disks-populate, /.runcvm/disks-populate-masks and
+# /.runcvm/rootdisk-mounts. A field so written never contains a separator, and each '\' in it
+# begins an escape, so it decodes exactly, with bash's printf '%b'.
+path_encode() {
+  local path="$1"
+
+  path="${path//\\/\\134}"
+  path="${path// /\\040}"
+  path="${path//$'\t'/\\011}"
+  path="${path//$'\n'/\\012}"
+
+  printf '%s' "$path"
+}
+
+# Sets REPLY to path $1 in normal form: with repeated '/' collapsed and any trailing '/' removed.
 # Fails if $1 is not absolute, is '/', or has a '.' or '..' component.
 disk_normalise_path() {
   local path="$1"
@@ -39,10 +60,10 @@ disk_normalise_path() {
 
   [[ -n "$path" && "/$path/" != */./* && "/$path/" != */../* ]] || return 1
 
-  echo "$path"
+  REPLY="$path"
 }
 
-# Prints normalised path $1 with each symbolic link in the image's filesystem (below
+# Sets REPLY to normalised path $1 with each symbolic link in the image's filesystem (below
 # $RUNCVM_VM_MOUNTPOINT) resolved, as mounting at $1 in the VM would resolve it. Components that do
 # not exist are kept as given. Fails after 40 links, as the kernel does.
 disk_resolve_path() {
@@ -61,7 +82,10 @@ disk_resolve_path() {
     if [ -L "$RUNCVM_VM_MOUNTPOINT$resolved/$comp" ]; then
       links=$((links+1))
       [ "$links" -le 40 ] || return 1
-      target=$(busybox readlink "$RUNCVM_VM_MOUNTPOINT$resolved/$comp") || return 1
+      # readlink's output ends with one newline, which $(...) removes, together with any newlines
+      # that end the target itself; the '/' appended first keeps those.
+      target=$(busybox readlink "$RUNCVM_VM_MOUNTPOINT$resolved/$comp"; echo /) || return 1
+      target="${target%$'\n/'}"
       [[ "$target" = /* ]] && resolved=""
       rest="${target#/}${rest:+/$rest}"
     else
@@ -69,16 +93,13 @@ disk_resolve_path() {
     fi
   done
 
-  echo "${resolved:-/}"
+  REPLY="${resolved:-/}"
 }
 
-# Prints destination $1 as its path in the image's filesystem: normalised, with symbolic links
-# resolved (see disk_resolve_path), or as given where either fails.
+# Sets REPLY to destination $1 as its path in the image's filesystem: normalised, with symbolic
+# links resolved (see disk_resolve_path), or as given where either fails.
 disk_image_path() {
-  local path
-
-  path=$(disk_normalise_path "$1") && path=$(disk_resolve_path "$path") || path="$1"
-  echo "$path"
+  disk_normalise_path "$1" && disk_resolve_path "$REPLY" || REPLY="$1"
 }
 
 # Prints the name of the top-level directory of a disk with layout 'subdirs' that holds destination
@@ -110,16 +131,33 @@ disk_glob_escape() {
   path="${path//\?/\\?}"
   path="${path//\[/\\[}"
 
-  echo "$path"
+  printf '%s' "$path"
 }
 
-# Prints, one per line, each mountpoint directly below $RUNCVM_VM_MOUNTPOINT, other than /.runcvm,
-# as its path in the VM: Docker's volumes, bind mounts and files such as /etc/hosts, and the
-# kernel modules.
-disk_vm_mounts() {
-  local id parent mnt vm_id="" rest
-  local IFS=$' \t\n'
+# Succeeds if path $1 is strictly below path $2, where $2 may be '/'.
+path_below() {
+  [[ "$1" = "${2%/}"/* ]]
+}
 
+# Records every mount in this container in MI_POINT, MI_DEV and MI_ROOT (see the tables below), and
+# each mountpoint below $RUNCVM_VM_MOUNTPOINT, at any depth, once, as its path in the VM:
+# Docker's volumes and bind mounts, including files such as /etc/hosts, and the kernel modules.
+# (There are no tmpfs mounts: runcvm-runtime removes them from the container, passing them to the
+# VM in RUNCVM_TMPFS instead.) /.runcvm, and the mounts below it, are left out. Mountinfo gives each
+# path as the kernel resolved it, so it is already a path in the image's filesystem.
+#
+# CMOUNT_PATH holds each path, CMOUNT_TYPE 'dir' or 'file', and CMOUNT_TOP 1 for a mount directly
+# below $RUNCVM_VM_MOUNTPOINT in the mount tree (as a whole-root disk carries it, see
+# do_root_disk) and 0 otherwise. Nothing changes these arrays afterwards.
+container_mounts() {
+  local id parent mnt vm_id="" rest i
+  local -A seen=()
+  local IFS=$' \t\n'  # Split on whitespace, whatever IFS the caller has set.
+
+  CMOUNT_PATH=() CMOUNT_TYPE=() CMOUNT_TOP=() MI_POINT=() MI_DEV=() MI_ROOT=()
+
+  # Each line of mountinfo describes a mount: its ID, its parent's ID, and, in the fifth field, its
+  # mountpoint, with octal escapes (e.g. '\040' for a space).
   while read -r id parent _ _ mnt rest
   do
     if [ "$mnt" = "$RUNCVM_VM_MOUNTPOINT" ]; then
@@ -127,45 +165,146 @@ disk_vm_mounts() {
     fi
   done </proc/self/mountinfo
 
-  while read -r id parent _ _ mnt rest
+  while read -r id parent dev root mnt rest
   do
-    [ "$parent" = "$vm_id" ] || continue
+    printf -v mnt '%b' "$mnt"
+    i="${#MI_POINT[@]}"
+    MI_POINT[$i]="$mnt"
+    MI_DEV[$i]="$dev"
+    printf -v MI_ROOT[$i] '%b' "$root"
 
-    # Decode mountinfo's octal escapes (e.g. '\040' for a space).
-    mnt=$(printf '%b' "$mnt")
-    mnt="${mnt#"$RUNCVM_VM_MOUNTPOINT"}"
-
-    [ "$mnt" = "/.runcvm" ] || echo "$mnt"
-  done </proc/self/mountinfo
-}
-
-# Prints, one per line, each mountpoint below $RUNCVM_VM_MOUNTPOINT, at any depth, as its path in
-# the VM: Docker's volumes and bind mounts, including files such as /etc/hosts. (There are no
-# tmpfs mounts: runcvm-runtime removes them from the container, passing them to the VM in
-# RUNCVM_TMPFS instead.) /.runcvm, and the mounts below it, are left out.
-container_mounts() {
-  local mnt rest
-  local IFS=$' \t\n'  # Split on whitespace, whatever IFS the caller has set.
-
-  # Each line of mountinfo describes a mount; its fifth field is the mountpoint.
-  while read -r _ _ _ _ mnt rest
-  do
-    # Decode mountinfo's octal escapes (e.g. '\040' for a space).
-    mnt=$(printf '%b' "$mnt")
     [[ "$mnt" = "$RUNCVM_VM_MOUNTPOINT"/* ]] || continue
     mnt="${mnt#"$RUNCVM_VM_MOUNTPOINT"}"  # Strip the prefix, leaving the path in the VM.
+    [[ "$mnt" = /.runcvm || "$mnt" = /.runcvm/* ]] && continue
 
-    [[ "$mnt" = /.runcvm || "$mnt" = /.runcvm/* ]] || echo "$mnt"
+    if [ -n "${seen[$mnt]+x}" ]; then
+      i="${seen[$mnt]}"
+    else
+      i="${#CMOUNT_PATH[@]}"
+      seen[$mnt]="$i"
+      CMOUNT_PATH[$i]="$mnt"
+      CMOUNT_TOP[$i]=0
+      if [ -d "$RUNCVM_VM_MOUNTPOINT$mnt" ]; then CMOUNT_TYPE[$i]=dir; else CMOUNT_TYPE[$i]=file; fi
+    fi
+    [ "$parent" != "$vm_id" ] || CMOUNT_TOP[$i]=1
   done </proc/self/mountinfo
 }
 
-# Creates disk backing file $2, of size $3, for disk spec $1, if it does not already exist.
+# Succeeds if paths $1 and $2 reach one file: the same device and inode.
+same_file() {
+  [[ -e "$1" && -e "$2" ]] || return 1
+  [ "$(busybox stat -L -c '%d:%i' "$1")" = "$(busybox stat -L -c '%d:%i' "$2")" ]
+}
+
+# Adds a backing-file view row for each path in the image's view (below $RUNCVM_VM_MOUNTPOINT) at
+# which the VM sees disk $1's backing file, whose canonical path in this container is $2. The two
+# views differ: Docker's mounts, other than those at or below /disks, are mounted only below
+# $RUNCVM_VM_MOUNTPOINT, so a container path such as /data/x.img is the image's own directory,
+# while the VM's /data may be a volume; and one filesystem may be mounted at several paths (e.g.
+# one volume at both /disks and /data). So spellings are only candidates:
+# - the container path, without any $RUNCVM_VM_MOUNTPOINT prefix;
+# - for each mount below $RUNCVM_VM_MOUNTPOINT of the same device as the container mount holding the
+#   backing file, whose root (its directory within that filesystem) holds the backing file, the
+#   backing file's path through that mount.
+# Each candidate is confirmed where both views reach one file: for an existing backing file, the
+# file itself; for a new one, the nearest directory above it that exists in this container, each
+# directory missing there being missing in the image's view too.
+disk_backing_views() {
+  local id="$1" path="$2" i m=-1 len=-1 rel cand cdir vdir v
+  local -a cands=()
+  local -A seen=()
+
+  if [[ "$path" = "$RUNCVM_VM_MOUNTPOINT"/* ]]; then
+    cands+=("${path#"$RUNCVM_VM_MOUNTPOINT"}")
+  else
+    cands+=("$path")
+  fi
+
+  # The container mount holding the path: the one with the longest mountpoint at or above it, and
+  # of those, the last mounted.
+  for i in "${!MI_POINT[@]}"
+  do
+    if [[ "${MI_POINT[$i]}" = "/" || "$path" = "${MI_POINT[$i]}" ]] || path_below "$path" "${MI_POINT[$i]}"; then
+      [ "${#MI_POINT[$i]}" -lt "$len" ] || { m="$i"; len="${#MI_POINT[$i]}"; }
+    fi
+  done
+
+  if [ "$m" -ge 0 ]; then
+    # The path within the mount's filesystem.
+    if [ "${MI_POINT[$m]}" = "/" ]; then rel="$path"; else rel="${path#"${MI_POINT[$m]}"}"; fi
+    rel="${MI_ROOT[$m]%/}$rel"
+
+    for i in "${!MI_POINT[@]}"
+    do
+      [ "${MI_DEV[$i]}" = "${MI_DEV[$m]}" ] || continue
+      [[ "${MI_POINT[$i]}" = "$RUNCVM_VM_MOUNTPOINT" ]] || path_below "${MI_POINT[$i]}" "$RUNCVM_VM_MOUNTPOINT" || continue
+      [[ "${MI_ROOT[$i]}" = "/" ]] || path_below "$rel" "${MI_ROOT[$i]}" || continue
+      if [ "${MI_ROOT[$i]}" = "/" ]; then cand="$rel"; else cand="${rel#"${MI_ROOT[$i]}"}"; fi
+      cands+=("${MI_POINT[$i]#"$RUNCVM_VM_MOUNTPOINT"}$cand")
+    done
+  fi
+
+  for cand in "${cands[@]}"
+  do
+    [ -z "${seen[$cand]+x}" ] || continue
+    seen[$cand]=1
+
+    if [ -e "$path" ]; then
+      same_file "$path" "$RUNCVM_VM_MOUNTPOINT$cand" || continue
+    else
+      # Walk up both paths together, which share every component of the backing file's name, to
+      # the nearest directory that exists in this container: each directory missing here, which
+      # creating the backing file creates, must be missing in the image's view too, or that view
+      # has something else there (such as a volume).
+      cdir="${path%/*}" vdir="${cand%/*}"
+      while ! [ -d "${cdir:-/}" ]
+      do
+        [[ ! -e "$RUNCVM_VM_MOUNTPOINT$vdir" && -n "$vdir" && -n "$cdir" ]] || continue 2
+        cdir="${cdir%/*}" vdir="${vdir%/*}"
+      done
+      same_file "${cdir:-/}" "$RUNCVM_VM_MOUNTPOINT${vdir:-/}" || continue
+    fi
+
+    v="${#BACKING_DISK[@]}"
+    BACKING_DISK[$v]="$id"
+    BACKING_PATH[$v]="$cand"
+  done
+}
+
+# Sets REPLY to a key identifying the file that disk backing file path $1 names, or will name once
+# created, whatever path reaches it: for an existing file, its device and inode; otherwise the
+# device and inode of the nearest directory above it that exists, with the rest of the path. Each
+# symbolic link the path ends in is followed first, as creating the file would follow it. Two paths
+# with one key name one file (e.g. /disks/a and /disks2/a, with one volume mounted at both).
+disk_src_key() {
+  local path="$1" target links=0 rest=""
+
+  while [ -L "$path" ]
+  do
+    links=$((links+1))
+    [ "$links" -le 40 ] || break
+    target=$(busybox readlink "$path"; echo /)
+    target="${target%$'\n/'}"
+    [[ "$target" = /* ]] || target="$(busybox dirname "$path")/$target"
+    path="$target"
+  done
+
+  if [ -e "$path" ]; then
+    REPLY="file $(busybox stat -L -c '%d:%i' "$path")"
+    return 0
+  fi
+
+  while ! [ -d "${path:-/}" ]
+  do
+    rest="/${path##*/}$rest"
+    path="${path%/*}"
+  done
+  REPLY="dir $(busybox stat -L -c '%d:%i' "${path:-/}")$rest"
+}
+
+# Creates disk backing file $2, of size $3, for disk spec $1. disk_parse has checked the size.
 disk_create_file() {
   local spec="$1" src="$2" size="$3" dir
-
-  if [[ -z "$size" ]]; then
-    error "Error: disk spec '$spec' invalid: size must be specified if src '$src' does not exist"
-  fi
 
   # Create directory for disk backing file, if needed.
   dir="$(busybox dirname "$src")"
@@ -186,6 +325,40 @@ disk_prealloc() {
   size=$(busybox stat -c %s "$src") && busybox fallocate -l "$size" "$src" >&2 || \
     error "Error: disk spec '$spec': fallocate on '$src' failed (the filesystem holding it may lack the space, or not support fallocate)"
 }
+
+# RUNCVM_DISKS is planned, checked and created in phases, sharing these tables (parallel arrays
+# with a common index), each filled by one phase only:
+#
+# - Disks, by disk id (position in RUNCVM_DISKS), filled by disk_parse: DISK_SPEC, DISK_SRC,
+#   DISK_SRC_PATH (the backing file's canonical path in this container), DISK_SRC_KEY (what identifies
+#   the file, existing or not, for checks between disks, see disk_src_key),
+#   DISK_FS, DISK_SIZE, DISK_PREALLOC,
+#   DISK_LAYOUT ('subdirs', 'root', or 'whole' for a whole-root disk), DISK_NEW (1 if the backing
+#   file doesn't exist) and DISK_UUID (an existing disk's, from disk_parse; a new disk's, from
+#   disks_create).
+# - Destinations, one row per destination, filled by disk_parse: DEST_DISK (disk id), DEST_GIVEN
+#   (normalised, for mounting and messages), DEST_PATH (its path in the image's filesystem, with
+#   symbolic links resolved: what population reads from, and what the plan compares) and DEST_DIR
+#   (its directory on the disk: its subdirectory for layout 'subdirs', '.' otherwise). A
+#   whole-root disk's row has destination '/', and is used for population only.
+# - Mounts, one row per mount the VM makes at a path, filled by disk_parse, tmpfs_parse and
+#   plan_mounts: MOUNT_PATH (in the image's filesystem), MOUNT_KIND ('disk', 'tmpfs' or 'held':
+#   a container mount hidden by a disk or tmpfs mount above it, mounted again over it), MOUNT_TYPE
+#   ('dir' or 'file'), MOUNT_REF (the destination row, the tmpfs entry, or the held mount's ID).
+#   MOUNT_ORDER lists the rows in order of depth.
+# - Backing-file views, one row per path in the image's view at which the VM sees a disk's backing
+#   file, filled by disk_parse (see disk_backing_views): BACKING_DISK, BACKING_PATH.
+# - Container mounts, from container_mounts: CMOUNT_PATH, CMOUNT_TYPE, CMOUNT_TOP; and every
+#   mount in this container, MI_POINT (mountpoint), MI_DEV (device) and MI_ROOT (its directory
+#   within the device's filesystem).
+# - Held mounts, by held mount ID, filled by plan_mounts: HELD_CMOUNT (the container mount row).
+# - Exclusions, one row per path a new disk is not populated with, filled by plan_mounts:
+#   EXCL_DEST (the destination row), EXCL_PATH (in the image's filesystem), EXCL_ON_DISK (its path
+#   on the disk, as mke2fs's -x matches it) and EXCL_TYPE ('dir' or 'file').
+#
+# Nothing is created until every check has passed: disk_parse, tmpfs_parse, plan_check and
+# plan_mounts write nothing; disks_create creates the destinations and disks; write_manifests
+# writes /.runcvm/fstab and the other files runcvm-vm-init reads.
 
 # Argument, in positional form: <src>,<dst>[:<dst2>:...],<fs>[,<size>][,layout=subdirs|root][,prealloc=on|off]
 # e.g. /volume/disk1,/var/lib/docker:/var/lib/containerd:/home,ext4,5G
@@ -208,9 +381,9 @@ disk_prealloc() {
 # A disk with layout 'root' has exactly one destination, holds its contents at its root, and is
 # mounted at that destination.
 #
-# A new disk is populated only from the image's filesystem at each destination, not from the other
-# filesystems mounted below it, such as Docker's volumes and bind mounts: those stay live, mounted
-# again over the disk in the VM (see do_disks, and runcvm-vm-init).
+# A new disk is populated only from the image's filesystem at each destination, not from anything
+# mounted below it: Docker's volumes and bind mounts, other disks and tmpfs mounts (see
+# plan_mounts).
 #
 # With prealloc=on, every block of the disk's backing file is allocated (see disk_prealloc), whether
 # the file is new or existing, and QEMU attaches the disk ignoring the VM's discard requests and
@@ -220,12 +393,15 @@ disk_prealloc() {
 # A disk with destination '/' (a whole-root disk) holds the VM's whole root filesystem: see
 # do_root_disk. It must be the disk's only destination, have fs 'ext4' and layout 'root', and be the
 # only such disk.
-do_disk() {
+#
+# disk_parse checks spec $1, of disk id $2, and records the disk and its destinations in the
+# tables, creating nothing.
+disk_parse() {
   local spec="$1"
   local id="$2"
-  local src="" dsts dst fs="" size="" layout layout_opt="" prealloc="off" field key value UUID LABEL TYPE i j path
-  local whole_root=0 created=0
-  local -a fields=() dests=() subdirs=() resolved=() populate=() fss=() inner=() inner_dir=() inner_path=()
+  local src="" dsts dst fs="" size="" layout layout_opt="" prealloc="off" field key value i j path dir
+  local whole_root=0
+  local -a fields=() dests=() subdirs=() resolved=() fss=()
   local -A seen=()
 
   IFS=',' read -r -a fields <<< "$spec"
@@ -325,16 +501,17 @@ do_disk() {
   fi
 
   # An existing disk keeps the filesystem it was created with, and the layout, as recorded by its
-  # label.
+  # label. Its UUID, by which the VM mounts it, is read now, probing the backing file directly,
+  # without the image's blkid configuration or cache.
   if [[ -f "$src" ]]; then
-    TYPE=$(blkid -p -s TYPE -o value "$src") || true
-    if [[ -n "$TYPE" && "$TYPE" != "$fs" ]]; then
-      error "Error: disk spec '$spec' invalid: src '$src' exists, with fs '$TYPE', not '$fs'"
+    value=$(blkid -p -s TYPE -o value "$src") || true
+    if [[ -n "$value" && "$value" != "$fs" ]]; then
+      error "Error: disk spec '$spec' invalid: src '$src' exists, with fs '$value', not '$fs'"
     fi
 
-    LABEL=$(blkid -p -s LABEL -o value "$src") || true
+    value=$(blkid -p -s LABEL -o value "$src") || true
     # grep reads all of disk_fs_list's output (no -q), as the pipefail note at the top requires.
-    if [[ -n "$LABEL" ]] && disk_fs_list 5 | grep -xF -- "$LABEL" >/dev/null; then
+    if [[ -n "$value" ]] && disk_fs_list 5 | grep -xF -- "$value" >/dev/null; then
       layout="subdirs"
     else
       layout="root"
@@ -347,12 +524,28 @@ do_disk() {
     if [[ "$layout" = "root" && "${#dests[@]}" -gt 1 ]]; then
       error "Error: disk spec '$spec' invalid: src '$src' exists, with layout 'root', which holds exactly one dst"
     fi
+
+    DISK_UUID[$id]=$(blkid -p -s UUID -o value "$src") || true
+    if [ -z "${DISK_UUID[$id]}" ]; then
+      error "Error: disk spec '$spec' invalid: no filesystem UUID found in src '$src'"
+    fi
+    DISK_NEW[$id]=0
   else
     layout="${layout_opt:-subdirs}"
 
     if [[ "$layout" = "root" && "${#dests[@]}" -gt 1 ]]; then
       error "Error: disk spec '$spec' invalid: layout 'root' holds exactly one dst"
     fi
+
+    if [[ -z "$size" ]]; then
+      error "Error: disk spec '$spec' invalid: size must be specified if src '$src' does not exist"
+    fi
+
+    which "${DISK_FS_MKFS[0]}" >/dev/null || \
+      error "Error: disk spec '$spec' invalid: fs '$fs' needs '${DISK_FS_MKFS[0]}', which RunCVM lacks"
+
+    DISK_UUID[$id]=""
+    DISK_NEW[$id]=1
   fi
 
   for dst in "${dests[@]}"
@@ -379,21 +572,17 @@ do_disk() {
       error "Error: disk spec '$spec' invalid: src '$src' exists, with layout 'subdirs', not 'root' as dst '/' requires"
     fi
 
-    if [ -n "$ROOT_DISK_SPEC" ]; then
+    if [ -n "$ROOT_DISK_ID" ]; then
       error "Error: disk spec '$spec' invalid: only one disk may have dst '/'"
     fi
 
-    # Populating a new whole-root disk excludes every other disk, so it waits until do_disks has
-    # handled them all.
-    ROOT_DISK_SPEC="$spec"
-    ROOT_DISK_SRC="$src"
-    ROOT_DISK_SIZE="$size"
     ROOT_DISK_ID="$id"
-    ROOT_DISK_PREALLOC="$prealloc"
-    return 0
-  fi
-
-  if [ "$layout" = "subdirs" ]; then
+    layout="whole"
+    dests=("/")
+    resolved=("/")
+  else
+    # Every destination is an absolute path, other than '/', without '.' or '..' components,
+    # whitespace or '\', and is compared with others as its path in the image's filesystem.
     for i in "${!dests[@]}"
     do
       dst="${dests[$i]}"
@@ -402,10 +591,30 @@ do_disk() {
         error "Error: disk spec '$spec' invalid: dst '$dst' must not contain whitespace or '\\'"
       fi
 
-      dests[$i]=$(disk_normalise_path "$dst") || \
+      disk_normalise_path "$dst" || \
         error "Error: disk spec '$spec' invalid: dst '$dst' must be an absolute path other than '/', without '.' or '..' components"
+      dests[$i]="$REPLY"
 
-      subdirs[$i]=$(disk_subdir "${dests[$i]}")
+      disk_resolve_path "${dests[$i]}" || \
+        error "Error: disk spec '$spec' invalid: dst '$dst' has too many levels of symbolic links"
+      resolved[$i]="$REPLY"
+
+      if [[ -e "$RUNCVM_VM_MOUNTPOINT${resolved[$i]}" && ! -d "$RUNCVM_VM_MOUNTPOINT${resolved[$i]}" ]]; then
+        error "Error: disk spec '$spec' invalid: dst '$dst' must be a directory if it exists"
+      fi
+
+      if [[ "$src" = "$dst" ]]; then
+        error "Error: disk spec '$spec' invalid: src '$src' cannot be same as dst"
+      fi
+    done
+  fi
+
+  if [ "$layout" = "subdirs" ]; then
+    for i in "${!dests[@]}"
+    do
+      dst="${dests[$i]}"
+
+      subdirs[$i]=$(disk_subdir "$dst")
       if [ "${#subdirs[$i]}" -gt 255 ]; then
         error "Error: disk spec '$spec' invalid: dst '$dst' is too long"
       fi
@@ -416,9 +625,6 @@ do_disk() {
       if [ "${subdirs[$i]}" = "lost+found" ]; then
         error "Error: disk spec '$spec' invalid: dst '$dst' requires layout 'root'"
       fi
-
-      resolved[$i]=$(disk_resolve_path "${dests[$i]}") || \
-        error "Error: disk spec '$spec' invalid: dst '$dst' has too many levels of symbolic links"
     done
 
     # Each destination's directory is bind-mounted over the destination, so no destination may be
@@ -429,7 +635,7 @@ do_disk() {
       for j in "${!dests[@]}"
       do
         [ "$i" -lt "$j" ] || continue
-        if [[ "${resolved[$i]}" = "${resolved[$j]}" || "${resolved[$j]}" = "${resolved[$i]%/}"/* || "${resolved[$i]}" = "${resolved[$j]%/}"/* ]]; then
+        if [[ "${resolved[$i]}" = "${resolved[$j]}" ]] || path_below "${resolved[$j]}" "${resolved[$i]}" || path_below "${resolved[$i]}" "${resolved[$j]}"; then
           if [[ "${resolved[$i]}" = "${dests[$i]}" && "${resolved[$j]}" = "${dests[$j]}" ]]; then
             error "Error: disk spec '$spec' invalid: dst '${dests[$i]}' and dst '${dests[$j]}' overlap"
           else
@@ -440,210 +646,456 @@ do_disk() {
     done
   fi
 
-  for dst in "${dests[@]}"
-  do
-    if [[ "$src" = "$dst" ]]; then
-      error "Error: disk spec '$spec' invalid: src '$src' cannot be same as dst"
+  # The backing file's canonical path: an existing file's, or, for a new one, its directory's, where
+  # that exists, with its name.
+  if [ -e "$src" ]; then
+    path=$(busybox realpath "$src")
+  else
+    dir=$(busybox dirname "$src")
+    if [ -d "$dir" ]; then
+      path=$(busybox realpath "$dir")
+      path="${path%/}/$(busybox basename "$src")"
+    elif disk_normalise_path "$src"; then
+      path="$REPLY"
+    else
+      path="$src"
     fi
-
-    if [[ -e "$dst" && ! -d "$dst" ]]; then
-      error "Error: disk spec '$spec' invalid: dst '$dst' must be a directory if it exists"
-    fi
-  done
-
-  # In do_disks' planning pass (DISK_PLAN=1), every disk's spec is checked, and its destinations
-  # recorded in PLAN_DESTS (as paths in the image's filesystem, see disk_image_path) and PLAN_IDS,
-  # before any disk is created. A disk and another disk, or a tmpfs mount, with one destination
-  # would hide one another, so that is rejected. (A disk at a volume's or bind mount's destination
-  # is populated from it, when new, and mounted over it.)
-  if [ "$DISK_PLAN" = "1" ]; then
-    for dst in "${dests[@]}"
-    do
-      path=$(disk_image_path "$dst")
-      for i in "${!PLAN_DESTS[@]}"
-      do
-        if [ "${PLAN_DESTS[$i]}" = "$path" ]; then
-          error "Error: disk spec '$spec' invalid: dst '$dst' is also the dst of an earlier disk"
-        fi
-      done
-      for i in "${!TMPFS_DESTS[@]}"
-      do
-        if [ "${TMPFS_DESTS[$i]}" = "$path" ]; then
-          error "Error: disk spec '$spec' invalid: dst '$dst' is also the destination of a tmpfs mount"
-        fi
-      done
-      PLAN_DESTS+=("$path")
-      PLAN_IDS+=("$id")
-    done
-    return 0
   fi
 
-  # Create each destination directory, if it doesn't already exist: it is the source from which
-  # a new disk is populated, and the mountpoint within the VM.
-  for dst in "${dests[@]}"
+  DISK_SPEC[$id]="$spec"
+  DISK_SRC[$id]="$src"
+  DISK_SRC_PATH[$id]="$path"
+  disk_src_key "$src"
+  DISK_SRC_KEY[$id]="$REPLY"
+  disk_backing_views "$id" "$path"
+  DISK_FS[$id]="$fs"
+  DISK_SIZE[$id]="$size"
+  DISK_PREALLOC[$id]="$prealloc"
+  DISK_LAYOUT[$id]="$layout"
+
+  for i in "${!dests[@]}"
   do
-    [ -d "$RUNCVM_VM_MOUNTPOINT/$dst" ] || mkdir -p "$RUNCVM_VM_MOUNTPOINT/$dst" >&2
+    j="${#DEST_DISK[@]}"
+    DEST_DISK[$j]="$id"
+    DEST_GIVEN[$j]="${dests[$i]}"
+    DEST_PATH[$j]="${resolved[$i]}"
+    DEST_DIR[$j]="${subdirs[$i]:-.}"
+
+    [ "$layout" = "whole" ] || mount_add "${resolved[$i]}" disk dir "$j"
   done
+}
 
-  if [[ ! -f "$src" ]]; then
-    disk_create_file "$spec" "$src" "$size"
-    created=1
+# Adds a mount row: a mount at path $1 (in the image's filesystem) of kind $2, type $3, referring to
+# $4 (see the tables above).
+mount_add() {
+  local i="${#MOUNT_PATH[@]}"
 
-    if [ "$layout" = "subdirs" ]; then
-      populate=("$DISK_FS_LABEL_OPT" "$DISK_FS_SUBDIRS_LABEL")
-    fi
+  MOUNT_PATH[$i]="$1"
+  MOUNT_KIND[$i]="$2"
+  MOUNT_TYPE[$i]="$3"
+  MOUNT_REF[$i]="$4"
+}
 
-    # Other disks' destinations below this disk's are left empty on it, as those disks are mounted
-    # over them (see write_fstab). Each is listed in inner[] as its path on this disk; inner_dir[]
-    # holds the directory on this disk of this disk's destination that holds it (as in
-    # /.runcvm/disks-populate below), and inner_path[] its path in the image's filesystem.
-    #
-    # For example, for this disk at /usr/share and another at /usr/share/apk: with layout 'subdirs',
-    # inner[] holds '/usr-share/apk' and inner_dir[] 'usr-share'; with layout 'root', inner[] holds
-    # '/apk' and inner_dir[] '.'; either way inner_path[] holds '/usr/share/apk'.
-    inner=() inner_dir=() inner_path=()
-    for i in "${!dests[@]}"
+# Records each tmpfs mount, which runcvm-runtime passes in RUNCVM_TMPFS as fstab entries, one per
+# line, with fstab's octal escapes in each field: TMPFS_ENTRY holds each entry, and a 'tmpfs' mount
+# row refers to it, at its destination's path in the image's filesystem (or as given, where that
+# cannot be resolved).
+tmpfs_parse() {
+  local line dst i
+
+  while IFS= read -r line
+  do
+    # The destination is the second of the entry's space-separated fields.
+    dst="${line#* }"
+    dst="${dst%% *}"
+    [ -n "$dst" ] || continue
+    printf -v dst '%b' "$dst"
+
+    i="${#TMPFS_ENTRY[@]}"
+    TMPFS_ENTRY[$i]="$line"
+    disk_image_path "$dst"
+    mount_add "$REPLY" tmpfs dir "$i"
+  done <<< "$RUNCVM_TMPFS"
+}
+
+# Checks the disks against each other and against the tmpfs mounts:
+# - no two disks with one destination, nor a disk with a tmpfs mount's destination, as each would
+#   hide the other (a disk at a volume's or bind mount's destination is mounted over it, and a new
+#   disk is populated from it);
+# - no two disks with one backing file, whether named by one path or another that leads, or will
+#   lead once created, to the same file, or as hard links to one file (see disk_src_key);
+# - no two existing disks with one filesystem UUID, by which the VM finds each disk.
+# Each error names the later disk's spec.
+plan_check() {
+  local i j di dj
+
+  for j in "${!DEST_DISK[@]}"
+  do
+    [ "${DISK_LAYOUT[${DEST_DISK[$j]}]}" != "whole" ] || continue
+
+    for i in "${!DEST_DISK[@]}"
     do
-      path=$(disk_image_path "${dests[$i]}")
-      for j in "${!PLAN_DESTS[@]}"
-      do
-        # Only another disk's destination strictly below this destination.
-        [[ "${PLAN_IDS[$j]}" != "$id" && "${PLAN_DESTS[$j]}" = "${path%/}"/* ]] || continue
-
-        # ${PLAN_DESTS[$j]#"${path%/}"} is that destination relative to this one, e.g. '/apk'.
-        if [ "$layout" = "subdirs" ]; then
-          inner+=("/${subdirs[$i]}${PLAN_DESTS[$j]#"${path%/}"}")
-          inner_dir+=("${subdirs[$i]}")
-        else
-          inner+=("${PLAN_DESTS[$j]#"${path%/}"}")
-          inner_dir+=(".")
-        fi
-        inner_path+=("${PLAN_DESTS[$j]}")
-      done
+      [ "$i" -lt "$j" ] || break
+      if [[ "${DEST_DISK[$i]}" != "${DEST_DISK[$j]}" && "${DEST_PATH[$i]}" = "${DEST_PATH[$j]}" ]]; then
+        error "Error: disk spec '${DISK_SPEC[${DEST_DISK[$j]}]}' invalid: dst '${DEST_GIVEN[$j]}' is also the dst of an earlier disk"
+      fi
     done
 
-    # mke2fs populates the disk with any pre-existing files from each dst, staying on the
-    # filesystem holding the dst: a directory on which another filesystem is mounted is left
-    # empty, and a file on another filesystem (such as a bind-mounted file) is left out. Each
-    # directory in inner[] is excluded by its path on the new disk, so is left empty likewise.
-    if [ "${DISK_FS_MKFS[0]}" = "mke2fs" ]; then
-      populate+=(-E one_file_system)
-      for i in "${!inner[@]}"
+    for i in "${!MOUNT_KIND[@]}"
+    do
+      if [[ "${MOUNT_KIND[$i]}" = "tmpfs" && "${MOUNT_PATH[$i]}" = "${DEST_PATH[$j]}" ]]; then
+        error "Error: disk spec '${DISK_SPEC[${DEST_DISK[$j]}]}' invalid: dst '${DEST_GIVEN[$j]}' is also the destination of a tmpfs mount"
+      fi
+    done
+  done
+
+  for dj in "${!DISK_SPEC[@]}"
+  do
+    for di in "${!DISK_SPEC[@]}"
+    do
+      [ "$di" -lt "$dj" ] || break
+
+      if [ "${DISK_SRC_KEY[$di]}" = "${DISK_SRC_KEY[$dj]}" ]; then
+        error "Error: disk spec '${DISK_SPEC[$dj]}' invalid: src '${DISK_SRC[$dj]}' is the same file as the src of an earlier disk, '${DISK_SRC[$di]}'"
+      fi
+
+      if [[ "${DISK_NEW[$di]}" = "0" && "${DISK_NEW[$dj]}" = "0" && "${DISK_UUID[$di]}" = "${DISK_UUID[$dj]}" ]]; then
+        error "Error: disk spec '${DISK_SPEC[$dj]}' invalid: src '${DISK_SRC[$dj]}' has the same filesystem UUID as the src of an earlier disk, '${DISK_SRC[$di]}', so the VM cannot tell them apart (a copied disk keeps its UUID)"
+      fi
+    done
+  done
+}
+
+# Plans the VM's mounts, and what each new disk is populated with:
+#
+# - Held mounts: each container mount strictly below a disk's or tmpfs mount's destination would be
+#   hidden by that mount, so is held during boot, and mounted again over it, as Docker mounts a
+#   deeper mount over a shallower one. A container mount at a disk's destination is not: the disk is
+#   mounted over it. Each held mount gets the next ID, its slot in /.runcvm/submounts (see
+#   runcvm-vm-init), and a 'held' mount row.
+#
+# - MOUNT_ORDER: the mount rows in order of depth (the number of components of each path), and
+#   otherwise in the order added (disks, tmpfs mounts, held mounts), so a mount is made only once
+#   every mount at a path above it has been, whatever the order of the disks in RUNCVM_DISKS.
+#
+# - Exclusions: a new disk holds nothing that is mounted below its destinations in the VM. For each
+#   new disk's destination (a whole-root disk's '/' included), every container mount, every disk's
+#   and tmpfs mount's destination, and every disk backing file that the VM sees (its own included),
+#   strictly below it is excluded, outermost only (a path below another excluded path needs no
+#   exclusion of its own); a whole-root disk also excludes /.runcvm. A container mount at the destination itself is not
+#   excluded: a new disk at a volume's destination is populated from the volume.
+#
+# - mke2fs's limits, checked for each new disk it populates: at most 256 exclusions (-x) and 64
+#   subdirectories (-P).
+plan_mounts() {
+  local c i j d id held=0 path depth max=0 rel n p
+  local -a cand=() cand_type=() subdirs=()
+  local -A excl_count=() subdir_count=()
+
+  for c in "${!CMOUNT_PATH[@]}"
+  do
+    path="${CMOUNT_PATH[$c]}"
+    j=""
+    for i in "${!MOUNT_KIND[@]}"
+    do
+      [ "${MOUNT_KIND[$i]}" != "held" ] || continue
+      if [[ "${MOUNT_KIND[$i]}" = "disk" && "${MOUNT_PATH[$i]}" = "$path" ]]; then
+        j=""
+        break
+      fi
+      path_below "$path" "${MOUNT_PATH[$i]}" && j=1
+    done
+    [ -n "$j" ] || continue
+
+    HELD_CMOUNT[$held]="$c"
+    mount_add "$path" held "${CMOUNT_TYPE[$c]}" "$held"
+    held=$((held+1))
+  done
+
+  # Depth: the number of '/' in the path, one per component.
+  MOUNT_ORDER=()
+  for i in "${!MOUNT_PATH[@]}"
+  do
+    path="${MOUNT_PATH[$i]//[^\/]/}"
+    MOUNT_DEPTH[$i]="${#path}"
+    [ "${MOUNT_DEPTH[$i]}" -le "$max" ] || max="${MOUNT_DEPTH[$i]}"
+  done
+  for ((depth = 0; depth <= max; depth++))
+  do
+    for i in "${!MOUNT_PATH[@]}"
+    do
+      [ "${MOUNT_DEPTH[$i]}" -ne "$depth" ] || MOUNT_ORDER+=("$i")
+    done
+  done
+
+  for d in "${!DEST_DISK[@]}"
+  do
+    id="${DEST_DISK[$d]}"
+    [ "${DISK_NEW[$id]}" = "1" ] || continue
+    p="${DEST_PATH[$d]}"
+
+    cand=() cand_type=()
+    for c in "${!CMOUNT_PATH[@]}"
+    do
+      path_below "${CMOUNT_PATH[$c]}" "$p" || continue
+      cand+=("${CMOUNT_PATH[$c]}")
+      cand_type+=("${CMOUNT_TYPE[$c]}")
+    done
+    for i in "${!MOUNT_KIND[@]}"
+    do
+      [ "${MOUNT_KIND[$i]}" != "held" ] || continue
+      path_below "${MOUNT_PATH[$i]}" "$p" || continue
+      cand+=("${MOUNT_PATH[$i]}")
+      cand_type+=(dir)
+    done
+    for i in "${!BACKING_PATH[@]}"
+    do
+      path_below "${BACKING_PATH[$i]}" "$p" || continue
+      cand+=("${BACKING_PATH[$i]}")
+      cand_type+=(file)
+    done
+    if [ "${DISK_LAYOUT[$id]}" = "whole" ]; then
+      cand+=(/.runcvm)
+      cand_type+=(dir)
+    fi
+
+    # Keep each candidate once, and only where no other candidate is above it.
+    for i in "${!cand[@]}"
+    do
+      for j in "${!cand[@]}"
       do
-        # -x takes a wildcard pattern, so escape the path to match only itself.
-        populate+=(-x "$(disk_glob_escape "${inner[$i]}")")
+        if path_below "${cand[$i]}" "${cand[$j]}" || [[ "$j" -lt "$i" && "${cand[$j]}" = "${cand[$i]}" ]]; then
+          continue 2
+        fi
       done
-      if [ "$layout" = "subdirs" ]; then
-        for i in "${!dests[@]}"
-        do
-          populate+=(-P "${subdirs[$i]}=$RUNCVM_VM_MOUNTPOINT${dests[$i]}")
-        done
+
+      if [ "$p" = "/" ]; then rel="${cand[$i]}"; else rel="${cand[$i]#"$p"}"; fi
+      n="${#EXCL_DEST[@]}"
+      EXCL_DEST[$n]="$d"
+      EXCL_PATH[$n]="${cand[$i]}"
+      EXCL_TYPE[$n]="${cand_type[$i]}"
+      if [ "${DISK_LAYOUT[$id]}" = "subdirs" ]; then
+        EXCL_ON_DISK[$n]="/${DEST_DIR[$d]}$rel"
       else
-        populate+=(-d "$RUNCVM_VM_MOUNTPOINT/${dests[0]}")
+        EXCL_ON_DISK[$n]="$rel"
+      fi
+      excl_count[$id]=$(( ${excl_count[$id]:-0} + 1 ))
+    done
+
+    [ "${DISK_LAYOUT[$id]}" != "subdirs" ] || subdir_count[$id]=$(( ${subdir_count[$id]:-0} + 1 ))
+  done
+
+  for id in "${!DISK_SPEC[@]}"
+  do
+    [ "${DISK_NEW[$id]}" = "1" ] || continue
+    disk_fs "${DISK_FS[$id]}"
+    [ "${DISK_FS_MKFS[0]}" = "mke2fs" ] || continue
+
+    if [ "${excl_count[$id]:-0}" -gt 256 ]; then
+      error "Error: disk spec '${DISK_SPEC[$id]}' invalid: a new disk with fs '${DISK_FS[$id]}' can leave out at most 256 paths mounted below its destinations, and this one has ${excl_count[$id]}"
+    fi
+    if [ "${subdir_count[$id]:-0}" -gt 64 ]; then
+      error "Error: disk spec '${DISK_SPEC[$id]}' invalid: a new disk with fs '${DISK_FS[$id]}' and layout 'subdirs' can have at most 64 dst"
+    fi
+  done
+}
+
+# Creates the destinations and disks as planned: first every missing destination directory, at its
+# path in the image's filesystem (mode 0755, owned by root, as are any missing directories above
+# it), the source from which a new disk is populated and the mountpoint in the VM; then each disk,
+# in spec order, with a whole-root disk last (see do_root_disk). A new disk is formatted, populated
+# by mke2fs, or else listed for runcvm-vm-init to populate; then its backing file is preallocated,
+# if asked, and it is added to the QEMU command line.
+#
+# A new disk that its mkfs command leaves empty is listed in /.runcvm/disks-populate, one line per
+# destination: <id> <UUID> <fs> <directory> <path>, where <directory> is the destination's
+# directory on the disk ('.' for its root) and <path> its path in the image's filesystem. Its
+# exclusions are listed in /.runcvm/disks-populate-masks, one line each:
+# <id> <directory> <dir|file> <path>, where <directory> is as in /.runcvm/disks-populate, and
+# <path> is the excluded path in the image's filesystem. Paths are encoded with path_encode.
+disks_create() {
+  local d id i path
+  local -a populate=()
+
+  for d in "${!DEST_DISK[@]}"
+  do
+    path="$RUNCVM_VM_MOUNTPOINT${DEST_PATH[$d]}"
+    [ -d "$path" ] || (umask 022 && mkdir -p "$path") >&2
+  done
+
+  for id in "${!DISK_SPEC[@]}"
+  do
+    [ "${DISK_LAYOUT[$id]}" != "whole" ] || continue
+    disk_fs "${DISK_FS[$id]}"
+
+    if [ "${DISK_NEW[$id]}" = "1" ]; then
+      disk_create_file "${DISK_SPEC[$id]}" "${DISK_SRC[$id]}" "${DISK_SIZE[$id]}"
+
+      populate=()
+      if [ "${DISK_LAYOUT[$id]}" = "subdirs" ]; then
+        populate=("$DISK_FS_LABEL_OPT" "$DISK_FS_SUBDIRS_LABEL")
+      fi
+
+      # mke2fs populates the disk with the image's files at each destination, staying on the
+      # filesystem holding the destination, and leaving out each excluded path by its path on the
+      # disk: an excluded directory is created empty, and an excluded file is left out.
+      if [ "${DISK_FS_MKFS[0]}" = "mke2fs" ]; then
+        populate+=(-E one_file_system)
+        for i in "${!EXCL_DEST[@]}"
+        do
+          [ "${DEST_DISK[${EXCL_DEST[$i]}]}" = "$id" ] || continue
+          # -x takes a wildcard pattern, so escape the path to match only itself.
+          populate+=(-x "$(disk_glob_escape "${EXCL_ON_DISK[$i]}")")
+        done
+        for d in "${!DEST_DISK[@]}"
+        do
+          [ "${DEST_DISK[$d]}" = "$id" ] || continue
+          if [ "${DISK_LAYOUT[$id]}" = "subdirs" ]; then
+            populate+=(-P "${DEST_DIR[$d]}=$RUNCVM_VM_MOUNTPOINT${DEST_PATH[$d]}")
+          else
+            populate+=(-d "$RUNCVM_VM_MOUNTPOINT${DEST_PATH[$d]}")
+          fi
+        done
+      fi
+
+      # Run the mkfs command from RunCVM's own tools, with RunCVM's own mke2fs and libblkid
+      # configuration, not the image's /etc/mke2fs.conf and /etc/blkid.conf.
+      path=$(which "${DISK_FS_MKFS[0]}")
+      MKE2FS_CONFIG="$RUNCVM_GUEST/etc/mke2fs.conf" BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null \
+        "$path" "${DISK_FS_MKFS[@]:1}" "${populate[@]}" "${DISK_SRC[$id]}" >&2 || \
+        error "Error: disk spec '${DISK_SPEC[$id]}' invalid: ${DISK_FS_MKFS[0]} on '${DISK_SRC[$id]}' with fs '${DISK_FS[$id]}' failed"
+
+      DISK_UUID[$id]=$(blkid -p -s UUID -o value "${DISK_SRC[$id]}") || true
+      if [ -z "${DISK_UUID[$id]}" ]; then
+        error "Error: disk spec '${DISK_SPEC[$id]}' invalid: no filesystem UUID found in src '${DISK_SRC[$id]}'"
+      fi
+
+      if [ "${DISK_FS_MKFS[0]}" != "mke2fs" ]; then
+        for d in "${!DEST_DISK[@]}"
+        do
+          [ "${DEST_DISK[$d]}" = "$id" ] || continue
+          echo "$id ${DISK_UUID[$id]} ${DISK_FS[$id]} ${DEST_DIR[$d]} $(path_encode "${DEST_PATH[$d]}")" >>/.runcvm/disks-populate
+          for i in "${!EXCL_DEST[@]}"
+          do
+            [ "${EXCL_DEST[$i]}" = "$d" ] || continue
+            echo "$id ${DEST_DIR[$d]} ${EXCL_TYPE[$i]} $(path_encode "${EXCL_PATH[$i]}")" >>/.runcvm/disks-populate-masks
+          done
+        done
       fi
     fi
 
-    # Run the mkfs command from RunCVM's own tools, with RunCVM's own mke2fs and libblkid
-    # configuration, not the image's /etc/mke2fs.conf and /etc/blkid.conf.
-    path=$(which "${DISK_FS_MKFS[0]}") || error "Error: disk spec '$spec' invalid: fs '$fs' needs '${DISK_FS_MKFS[0]}', which RunCVM lacks"
-    MKE2FS_CONFIG="$RUNCVM_GUEST/etc/mke2fs.conf" BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null \
-      "$path" "${DISK_FS_MKFS[@]:1}" "${populate[@]}" "$src" >&2 || \
-      error "Error: disk spec '$spec' invalid: ${DISK_FS_MKFS[0]} on '$src' with fs '$fs' failed"
-  fi
+    [ "${DISK_PREALLOC[$id]}" = "off" ] || disk_prealloc "${DISK_SPEC[$id]}" "${DISK_SRC[$id]}"
 
-  # Obtain the filesystem's UUID by probing the backing file directly, without the image's blkid
-  # configuration or cache, and add the disk to fstab.
-  UUID=$(blkid -p -s UUID -o value "$src") || true
-  if [ -z "$UUID" ]; then
-    error "Error: disk spec '$spec' invalid: no filesystem UUID found in src '$src'"
-  fi
-
-  # A new disk that its mkfs command left empty is populated from its destinations by
-  # runcvm-vm-init, which reads one line per destination: <id> <UUID> <fs> <directory> <dst>, where
-  # <directory> is the destination's directory on the disk, or '.' for its root.
-  #
-  # While copying, runcvm-vm-init masks each directory in inner[] with an empty tmpfs, so that it
-  # is left empty, as listed in /.runcvm/disks-populate-masks, one line per directory:
-  # <id> <directory> <path>, where <directory> is as in /.runcvm/disks-populate, and <path> is the
-  # masked directory's path in the image's filesystem.
-  if [[ "$created" = "1" && "${DISK_FS_MKFS[0]}" != "mke2fs" ]]; then
-    for i in "${!dests[@]}"
-    do
-      echo "$id $UUID $fs ${subdirs[$i]:-.} ${dests[$i]}" >>/.runcvm/disks-populate
-    done
-    for i in "${!inner[@]}"
-    do
-      echo "$id ${inner_dir[$i]} ${inner_path[$i]}" >>/.runcvm/disks-populate-masks
-    done
-  fi
-
-  # Add the disk's mounts to the fstab entries that write_fstab writes: its own mount at
-  # /.runcvm/disks/<n> for layout 'subdirs', and a mount at each destination.
-  if [ "$layout" = "subdirs" ]; then
-    FSTAB_DISKS+=("UUID=$UUID /.runcvm/disks/$id $fs defaults,noatime 0 0")
-    for i in "${!dests[@]}"
-    do
-      fstab_add_mount "/.runcvm/disks/$id/${subdirs[$i]} ${dests[$i]} none bind 0 0" "${dests[$i]}"
-    done
-  else
-    fstab_add_mount "UUID=$UUID ${dests[0]} $fs defaults,noatime 0 0" "${dests[0]}"
-  fi
-
-  # Record this disk's backing file, and each of its destinations, for do_root_disk: a whole-root
-  # disk leaves them out, as this disk holds the destinations' contents. The destinations are also
-  # recorded for write_fstab. Each is recorded as its path in the image's filesystem, with symbolic
-  # links resolved.
-  DISK_EXCLUDES+=("$(busybox realpath "$src")")
-  for dst in "${dests[@]}"
-  do
-    path=$(disk_image_path "$dst")
-    DISK_EXCLUDES+=("$path")
-    DISK_DESTS+=("$path")
+    disk_add_device "${DISK_SRC[$id]}" "$id" "${DISK_PREALLOC[$id]}"
   done
 
-  [ "$prealloc" = "off" ] || disk_prealloc "$spec" "$src"
-
-  disk_add_device "$src" "$id" "$prealloc"
+  [ -z "$ROOT_DISK_ID" ] || do_root_disk
 }
 
 # Creates and populates a new whole-root disk, and records it for runcvm-vm-init, which switches the
 # VM's root filesystem to it with pivot_root, before anything else uses the root.
 #
 # The disk is populated from the image's filesystem below $RUNCVM_VM_MOUNTPOINT, without crossing
-# into other filesystems, so it leaves out everything that must stay live: /.runcvm, Docker's
-# volumes, bind mounts and files such as /etc/hosts, and the kernel modules, leaving an empty
-# directory at each mountpoint that is a directory. It also leaves out each disk's backing file,
-# and the contents of every other disk's destinations. A disk is populated only when it is created:
-# it does not see later changes to the image or the container's filesystem.
+# into other filesystems, and leaving out its exclusions (see plan_mounts): everything that must
+# stay live (/.runcvm, Docker's volumes, bind mounts and files such as /etc/hosts, and the kernel
+# modules), each disk's backing file, and every other disk's and tmpfs mount's destination. It
+# holds an empty directory at each excluded directory. A disk is populated only when it is
+# created: it does not see later changes to the image or the container's filesystem.
 #
-# /.runcvm/rootdisk holds the disk's filesystem UUID; /.runcvm/rootdisk-mounts lists the paths
-# runcvm-vm-init carries from the image's filesystem onto the disk.
+# /.runcvm/rootdisk holds the disk's filesystem UUID; /.runcvm/rootdisk-mounts lists, encoded with
+# path_encode, the container mounts runcvm-vm-init carries from the image's filesystem onto the
+# disk: those directly below $RUNCVM_VM_MOUNTPOINT in the mount tree.
 do_root_disk() {
-  local spec="$ROOT_DISK_SPEC" src="$ROOT_DISK_SRC" path UUID
+  local id="$ROOT_DISK_ID" spec src i
   local -a excludes=()
 
-  if [[ ! -f "$src" ]]; then
-    disk_create_file "$spec" "$src" "$ROOT_DISK_SIZE"
+  spec="${DISK_SPEC[$id]}"
+  src="${DISK_SRC[$id]}"
 
-    for path in "${DISK_EXCLUDES[@]}" "$(busybox realpath "$src")"
+  if [ "${DISK_NEW[$id]}" = "1" ]; then
+    disk_create_file "$spec" "$src" "${DISK_SIZE[$id]}"
+
+    for i in "${!EXCL_DEST[@]}"
     do
-      excludes+=(-x "$(disk_glob_escape "$path")")
+      [ "${DEST_DISK[${EXCL_DEST[$i]}]}" = "$id" ] || continue
+      excludes+=(-x "$(disk_glob_escape "${EXCL_ON_DISK[$i]}")")
     done
 
-    MKE2FS_CONFIG="$RUNCVM_GUEST/etc/mke2fs.conf" mke2fs -q -F -t ext4 -d "$RUNCVM_VM_MOUNTPOINT" -E one_file_system "${excludes[@]}" "$src" >&2 || error "Error: disk spec '$spec' invalid: mke2fs on '$src' with fs 'ext4' failed"
+    MKE2FS_CONFIG="$RUNCVM_GUEST/etc/mke2fs.conf" BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null \
+      mke2fs -q -F -t ext4 -d "$RUNCVM_VM_MOUNTPOINT" -E one_file_system "${excludes[@]}" "$src" >&2 || \
+      error "Error: disk spec '$spec' invalid: mke2fs on '$src' with fs 'ext4' failed"
+
+    DISK_UUID[$id]=$(blkid -p -s UUID -o value "$src") || true
+    if [ -z "${DISK_UUID[$id]}" ]; then
+      error "Error: disk spec '$spec' invalid: no filesystem UUID found in src '$src'"
+    fi
   fi
 
-  UUID=$(blkid -p -s UUID -o value "$src") || true
-  if [ -z "$UUID" ]; then
-    error "Error: disk spec '$spec' invalid: no filesystem UUID found in src '$src'"
-  fi
+  echo "${DISK_UUID[$id]}" >/.runcvm/rootdisk
+  for i in "${!CMOUNT_PATH[@]}"
+  do
+    [ "${CMOUNT_TOP[$i]}" = "0" ] || echo "$(path_encode "${CMOUNT_PATH[$i]}")"
+  done >/.runcvm/rootdisk-mounts
 
-  echo "$UUID" >/.runcvm/rootdisk
-  disk_vm_mounts >/.runcvm/rootdisk-mounts
+  [ "${DISK_PREALLOC[$id]}" = "off" ] || disk_prealloc "$spec" "$src"
 
-  [ "$ROOT_DISK_PREALLOC" = "off" ] || disk_prealloc "$spec" "$src"
+  disk_add_device "$src" "$id" "${DISK_PREALLOC[$id]}"
+}
 
-  disk_add_device "$src" "$ROOT_DISK_ID" "$ROOT_DISK_PREALLOC"
+# Writes /.runcvm/fstab, for runcvm-vm-init to mount in order, as MOUNT_ORDER lists the mounts:
+# first each disk with layout 'subdirs' at /.runcvm/disks/<id>, the source of its destinations' bind
+# mounts; then each mount at its path, in order of depth. Nothing is written where there are no
+# mounts.
+#
+# Each held mount is listed in /.runcvm/held-mounts, one line each, <id> <path>, for runcvm-vm-init
+# to hold at /.runcvm/submounts/<id> before mounting anything; and in its place in /.runcvm/fstab,
+# where runcvm-vm-init mounts it again: with RUNCVM_FSTAB=disks (the default), as a comment
+# '#runcvm-held <id> <path>'; with RUNCVM_FSTAB=all, as a bind mount from /.runcvm/submounts/<id>,
+# which systemd and 'mount -a' can mount again. Paths are encoded with path_encode.
+write_manifests() {
+  local i d id ref path
+
+  for i in "${!HELD_CMOUNT[@]}"
+  do
+    echo "$i $(path_encode "${CMOUNT_PATH[${HELD_CMOUNT[$i]}]}")"
+  done >>/.runcvm/held-mounts
+
+  [ "${#MOUNT_PATH[@]}" -gt 0 ] || return 0
+
+  {
+    for id in "${!DISK_SPEC[@]}"
+    do
+      [ "${DISK_LAYOUT[$id]}" = "subdirs" ] || continue
+      echo "UUID=${DISK_UUID[$id]} /.runcvm/disks/$id ${DISK_FS[$id]} defaults,noatime 0 0"
+    done
+
+    for i in "${MOUNT_ORDER[@]}"
+    do
+      ref="${MOUNT_REF[$i]}"
+      case "${MOUNT_KIND[$i]}" in
+        disk)
+          id="${DEST_DISK[$ref]}"
+          path=$(path_encode "${DEST_GIVEN[$ref]}")
+          if [ "${DISK_LAYOUT[$id]}" = "subdirs" ]; then
+            echo "/.runcvm/disks/$id/${DEST_DIR[$ref]} $path none bind 0 0"
+          else
+            echo "UUID=${DISK_UUID[$id]} $path ${DISK_FS[$id]} defaults,noatime 0 0"
+          fi
+          ;;
+        tmpfs)
+          echo "${TMPFS_ENTRY[$ref]}"
+          ;;
+        held)
+          path=$(path_encode "${MOUNT_PATH[$i]}")
+          if [ "${RUNCVM_FSTAB:-disks}" = "all" ]; then
+            echo "/.runcvm/submounts/$ref $path none bind 0 0"
+          else
+            echo "#runcvm-held $ref $path"
+          fi
+          ;;
+      esac
+    done
+  } >>/.runcvm/fstab
 }
 
 # Adds disk backing file $1 to the QEMU command line, as disk number $2, with prealloc $3 ('on' or
@@ -693,136 +1145,6 @@ disk_add_device() {
   )
 }
 
-# Adds fstab entry $1, a mount at destination $2, to the entries write_fstab writes in order of
-# depth: the number of components of the destination's path in the image's filesystem, with
-# symbolic links resolved (or as given, where that fails).
-fstab_add_mount() {
-  local path components
-
-  path=$(disk_image_path "$2")
-  # Delete every character but '/', so the length that remains is the depth: one '/' per
-  # component.
-  components="${path//[^\/]/}"
-  FSTAB_MOUNTS+=("$1")
-  FSTAB_DEPTHS+=("${#components}")
-}
-
-# Records each tmpfs mount, which runcvm-runtime passes in RUNCVM_TMPFS as fstab entries, one per
-# line. Its entry and its destination as given are added to TMPFS_ENTRIES as consecutive elements,
-# for write_fstab to write after the disks' entries. Its destination, as a path in the image's
-# filesystem with symbolic links resolved (or as given, where that fails), is added to
-# TMPFS_DESTS, for do_disk's check and write_fstab.
-tmpfs_mounts() {
-  local line dst path
-
-  while IFS= read -r line
-  do
-    # The destination is the second of the entry's space-separated fields.
-    dst="${line#* }"
-    dst="${dst%% *}"
-    [ -n "$dst" ] || continue
-    path=$(disk_image_path "$dst")
-    TMPFS_DESTS+=("$path")
-    TMPFS_ENTRIES+=("$line" "$dst")
-  done <<< "$RUNCVM_TMPFS"
-}
-
-# Writes /.runcvm/fstab, for runcvm-vm-init to mount in order: first each disk with layout
-# 'subdirs' at /.runcvm/disks/<n>, the source of its destinations' bind mounts; then every mount at
-# a destination (the disks', then the tmpfs mounts, then the volumes and bind mounts below them),
-# in order of depth, and otherwise in that order. So a mount is made only once every mount at a
-# path above it has been, as Docker mounts a deeper mount over a shallower one, whatever the order
-# of the disks in RUNCVM_DISKS. Nothing is written where there are no mounts.
-#
-# A disk or tmpfs mount at its destination in the VM hides every volume and bind mount below that
-# destination, so each is listed in /.runcvm/held-mounts, for runcvm-vm-init to hold on to before
-# mounting anything, and as a comment '#runcvm-held <path>' in its place in /.runcvm/fstab, where
-# runcvm-vm-init mounts it again. (A whole-root disk carries the mounts below / itself.)
-write_fstab() {
-  local depth i max=0 mnt dst
-
-  # TMPFS_ENTRIES holds pairs: each tmpfs mount's entry, then its destination.
-  for ((i = 0; i < ${#TMPFS_ENTRIES[@]}; i += 2))
-  do
-    fstab_add_mount "${TMPFS_ENTRIES[$i]}" "${TMPFS_ENTRIES[$i+1]}"
-  done
-
-  # Each volume or bind mount strictly below any disk's or tmpfs mount's destination.
-  for mnt in "${CONTAINER_MOUNTS[@]}"
-  do
-    for dst in "${DISK_DESTS[@]}" "${TMPFS_DESTS[@]}"
-    do
-      if [[ "$mnt" = "${dst%/}"/* ]]; then
-        echo "$mnt" >>/.runcvm/held-mounts
-        fstab_add_mount "#runcvm-held $mnt" "$mnt"
-        break
-      fi
-    done
-  done
-
-  [ "${#FSTAB_DISKS[@]}" -gt 0 ] || [ "${#FSTAB_MOUNTS[@]}" -gt 0 ] || return 0
-
-  # Sort the mounts by depth, keeping the order in which they were added at each depth: find the
-  # greatest depth, then, for each depth from 0 up to it, write the mounts of that depth.
-  for i in "${!FSTAB_DEPTHS[@]}"
-  do
-    [ "${FSTAB_DEPTHS[$i]}" -le "$max" ] || max="${FSTAB_DEPTHS[$i]}"
-  done
-
-  {
-    for i in "${!FSTAB_DISKS[@]}"
-    do
-      echo "${FSTAB_DISKS[$i]}"
-    done
-    for ((depth = 0; depth <= max; depth++))
-    do
-      for i in "${!FSTAB_MOUNTS[@]}"
-      do
-        if [ "${FSTAB_DEPTHS[$i]}" -eq "$depth" ]; then
-          echo "${FSTAB_MOUNTS[$i]}"
-        fi
-      done
-    done
-  } >>/.runcvm/fstab
-}
-
-# Argument e.g. /disk1,/home,ext4,5G;/disk2,/var,ext4,1G
-do_disks() {
-  local IFS=';'
-  local disk
-  local id=0
-  ROOT_DISK_SPEC=""
-  DISK_EXCLUDES=()
-  DISK_DESTS=()
-
-  # A planning pass checks every disk's spec, and records every disk's destinations, before any
-  # disk is created: so that an invalid spec creates no disk, and so that a new disk can leave out
-  # the destinations of disks listed after it. Then each disk is created and added.
-  DISK_PLAN=1
-  PLAN_DESTS=()
-  PLAN_IDS=()
-  for disk in $1
-  do
-    do_disk "$disk" "$id"
-    id=$((id+1))
-  done
-
-  # Reset what the planning pass set: do_disk records a whole-root disk in ROOT_DISK_SPEC, and
-  # rejects a second one where it is already set.
-  DISK_PLAN=0
-  ROOT_DISK_SPEC=""
-  id=0
-  for disk in $1
-  do
-    do_disk "$disk" "$id"
-    id=$((id+1))
-  done
-
-  if [ -n "$ROOT_DISK_SPEC" ]; then
-    do_root_disk
-  fi
-}
-
 do_networks() {
   local id=0 ifpath if mac vhost
   local DOCKER_IF DOCKER_IF_MAC DOCKER_IF_MTU DOCKER_IF_IP DOCKER_IF_IP_NETPREFIX DOCKER_IF_IP_GW
@@ -860,19 +1182,24 @@ do_networks() {
   done
 }
 
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+
 DISKS=()
-FSTAB_DISKS=()
-FSTAB_MOUNTS=()
-FSTAB_DEPTHS=()
-TMPFS_DESTS=()
-TMPFS_ENTRIES=()
-DISK_DESTS=()
-# The container's volumes and bind mounts, each once, read before any disk is created.
-mapfile -t CONTAINER_MOUNTS < <(container_mounts | busybox sort -u)
-tmpfs_mounts
+ROOT_DISK_ID=""
+container_mounts
 if [ -n "$RUNCVM_DISKS" ]; then
-  do_disks "$RUNCVM_DISKS"
+  # e.g. /disk1,/home,ext4,5G;/disk2,/var,ext4,1G
+  IFS=';' read -r -a DISK_SPECS <<< "$RUNCVM_DISKS"
+  for i in "${!DISK_SPECS[@]}"
+  do
+    disk_parse "${DISK_SPECS[$i]}" "$i"
+  done
 fi
+tmpfs_parse
+plan_check
+plan_mounts
+disks_create
+write_manifests
 
 # vhost-net needs /dev/vhost-net, which the runtime passes into the container only if it
 # exists on the host: without it, QEMU would fail to start with vhost=on.
@@ -883,8 +1210,6 @@ fi
 
 IFACES=()
 do_networks
-
-write_fstab
 
 if [[ -z "$RUNCVM_CPUS" || "$RUNCVM_CPUS" -le 0 ]]; then
   RUNCVM_CPUS=$(busybox nproc)
