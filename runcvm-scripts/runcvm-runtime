@@ -656,7 +656,7 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
 
   # What /.runcvm/fstab lists of the container's volumes and bind mounts that a disk or tmpfs mount
   # hides, and that runcvm-vm-init mounts again over it (see write_manifests in runcvm-ctr-qemu):
-  # - disks (default): each only as a comment, with nothing of how it is held left in the VM
+  # - disks (default): each only as a comment, with the tmpfs that held it detached after boot
   # - all: each as a bind mount from where it is held, which systemd and 'mount -a' can mount again
   case "$(get_config_env 'RUNCVM_FSTAB' 'disks')" in
     disks|all) ;;

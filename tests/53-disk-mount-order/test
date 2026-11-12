@@ -37,8 +37,8 @@
   trailing newlines: volumes (and a tmpfs mount) at such paths below an ext4
   and an xfs disk, below an xfs disk with a whole-root disk (populated before
   the root switch, so after the volumes were accessed), and carried onto a
-  whole-root disk, are each mounted at their paths, and the disks hold an
-  empty directory at each.
+  whole-root disk, are each mounted at their paths, and a disk at their
+  parent holds an empty directory at each.
 - Disk backing files below a destination, for ext4 and xfs: one volume at
   both /disks and /data, with a disk /disks/state.img at /data: the disk
   holds no state.img; likewise another disk's backing file in that volume;
@@ -47,7 +47,7 @@
   backing file's name, at the container path of that backing file, is kept.
 - Invalid plans create nothing: a later disk without a size; a 'root'-layout
   destination with whitespace or '..'; two disks with one backing file, by
-  one path, through one volume mounted at two paths (neither file existing
+  one path spelt two ways, through one volume mounted at two paths (neither file existing
   yet, at /disks and /disks/alias), through a dangling symbolic link, or as hard links; two existing
   disks with one UUID; a new ext4 disk with 257 mounts to leave out below its
   destination, or with 65 destinations. Each is rejected, with exit status
@@ -72,7 +72,7 @@
   than those at a disk's destination; mounts are ordered by depth, stably;
   exclusions are the outermost of the container mounts, disk and tmpfs
   destinations and backing-file views strictly below each new disk's
-  destination; and paths survive encoding exactly.
+  destination (and /.runcvm for a whole-root disk); and paths survive encoding exactly.
 """
 
 import os
@@ -525,7 +525,8 @@ def run_changed():
     volume = t.unique(name + "-disks")
     t.volume_create(volume)
     disks = "/disks/a,/data,ext4,64M"
-    probe = 'echo "v=$(stat -f -c %T /data/v)"; echo "entries=$(ls -A /data/v | tr "\\n" " ")"'
+    probe = ('echo "v=$(stat -f -c %T /data/v)"; [ -d /data/v ] && echo dir=yes; '
+             'echo "entries=$(ls -A /data/v | tr "\\n" " ")"')
     return [vm(name + "-1", disks, mount_opts(["--mount", "type=volume,src={vol},dst=/data/v"], name), probe,
                disks_volume=volume),
             vm(name + "-2", disks, [], probe, disks_volume=volume),
@@ -539,6 +540,7 @@ for step, r, expected in zip(("with a volume below it", "without it", "with a tm
         t.log("output:\n%s" % r.stdout)
         continue
     v = values(r)
+    t.check("%s: /data/v is a directory" % name, "yes", v.get("dir"))
     t.check("%s: /data/v holds" % name, expected, v.get("entries", "?").strip())
     if step == "with a tmpfs mount there":
         t.check("%s: /data/v is the tmpfs mount" % name, "tmpfs", v.get("v"))
