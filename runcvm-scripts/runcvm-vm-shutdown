@@ -1,8 +1,14 @@
 #!/.runcvm/guest/bin/bash
 
 # RunCVM's init (--init) runs this as its first shutdown action, before it powers the VM off: it
-# stops every process, so that their writes are done, and then unmounts the filesystems in
+# ends every other process, as Docker's own init would, and then unmounts the filesystems in
 # /.runcvm/fstab, the disks among them, so that each is left clean.
+#
+# - When the container is being stopped (runcvm-ctr-shutdown has created /.runcvm/stopping), every
+#   process is sent SIGTERM, and is waited for however long it takes: Docker's stop timeout alone
+#   limits the wait, as for any container. File systems are synced every second meanwhile, so that
+#   should Docker end the VM, writes made up to then are kept.
+# - When the entrypoint has exited by itself, every process left is killed at once (SIGKILL).
 
 # Load RunCVM's own environment, saved by runcvm-ctr-entrypoint
 . /.runcvm/config
@@ -25,16 +31,21 @@ processes() {
   done
 }
 
-# Ask every process to stop, and give them up to 5 seconds before killing those that remain.
 # kill -1 signals every process but init and the caller, so it must be bash's own kill: busybox's,
 # as a separate process, would signal this script too.
-kill -TERM -1 2>/dev/null
-for ((i = 0; i < 50; i++))
+if [ -f /.runcvm/stopping ]; then
+  kill -TERM -1 2>/dev/null
+else
+  kill -KILL -1 2>/dev/null
+fi
+
+# Wait for the processes to end, syncing every second (every fifth check).
+for ((i = 1; ; i++))
 do
   [ -z "$(processes)" ] && break
-  $BUSYBOX sleep 0.1
+  (( i % 5 )) || $BUSYBOX sync
+  $BUSYBOX sleep 0.2
 done
-kill -KILL -1 2>/dev/null
 
 $BUSYBOX sync
 

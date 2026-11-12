@@ -19,6 +19,10 @@ poweroff_all() {
   vm_exec $RUNCVM_GUEST/bin/busybox kill 1
 }
 
+# Tell the VM the container is being stopped, rather than its entrypoint having exited (see
+# runcvm-vm-shutdown); /.runcvm is shared with the VM.
+$RUNCVM_GUEST/bin/busybox touch /.runcvm/stopping
+
 # The method runcvm-vm-init recorded at boot, as RUNCVM_SHUTDOWN requests, or 'all' before then.
 mode=all
 [ -f /.runcvm/shutdown ] && read -r mode </.runcvm/shutdown
