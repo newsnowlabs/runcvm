@@ -286,7 +286,10 @@ if [ -f /.runcvm/fstab ]; then
   # the image holds them, to its directory on the disk, with RunCVM's own cp, which preserves
   # ownership, permissions, timestamps, links and extended attributes. cp stays on the filesystem
   # holding the destination, leaving each directory on which another filesystem is mounted, such
-  # as the held mounts above, empty.
+  # as the held mounts above, empty. Each directory listed for the destination in
+  # /.runcvm/disks-populate-masks, another disk's destination, which that disk will be mounted
+  # over, is masked while copying with an empty tmpfs that has the directory's mode and owner, so
+  # is left empty likewise.
   if [ -f /.runcvm/disks-populate ]; then
     while read -r id uuid fs dir dst
     do
@@ -297,11 +300,29 @@ if [ -f /.runcvm/fstab ]; then
           vm_init_error "dst '$dst' cannot be populated: mounting its new disk failed"
       fi
 
+      masks=()
+      if [ -f /.runcvm/disks-populate-masks ]; then
+        while read -r mid mdir mpath
+        do
+          [[ "$mid" = "$id" && "$mdir" = "$dir" && -d "$mpath" ]] || continue
+          read -r mmode muid mgid < <(busybox stat -c '%a %u %g' "$mpath")
+          mount -i --options-source=disable -t tmpfs -o "mode=$mmode,uid=$muid,gid=$mgid" tmpfs "$mpath" || \
+            vm_init_error "dst '$dst' cannot be populated: masking '$mpath', another disk's dst, failed"
+          masks+=("$mpath")
+        done </.runcvm/disks-populate-masks
+      fi
+
       mkdir -p "$mnt/$dir"
       if [ -d "$dst" ]; then
         $RUNCVM_GUEST/usr/bin/coreutils --coreutils-prog=cp -a -x "$dst/." "$mnt/$dir/" || \
           vm_init_error "dst '$dst' cannot be populated: copying its contents to its new disk failed"
       fi
+
+      for ((i = ${#masks[@]} - 1; i >= 0; i--))
+      do
+        busybox umount "${masks[$i]}" || \
+          vm_init_error "dst '$dst' cannot be populated: unmasking '${masks[$i]}' failed"
+      done
     done </.runcvm/disks-populate
 
     # Unmount the disks again, for the fstab to mount them as for any other boot.

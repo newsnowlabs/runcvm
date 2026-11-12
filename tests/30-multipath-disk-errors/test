@@ -33,6 +33,11 @@
   a disk, and destinations sharing only a prefix (/home and /homes): the
   Container/VM runs, with and without --init, and each path is on the
   intended disk or tmpfs, as a deeper mount is mounted over a shallower one.
+- A new disk leaves out another disk's destination below its own, holding an
+  empty directory there with the directory's mode, whichever is listed first,
+  for an ext4 and an xfs outer disk (populated by mke2fs and in the VM): with
+  disks at /usr/share and /usr/share/apk, the outer disk's apk directory is
+  empty, and /usr/share/apk, on the inner disk, holds the image's keys.
 """
 
 import os
@@ -132,6 +137,22 @@ LAYERED = [
      {"/home": 0, "/homes": 1, "/homes2": "tmpfs"}),
 ]
 
+# A disk at /usr/share and one at /usr/share/apk: (name, RUNCVM_DISKS, the outer disk's position in
+# RUNCVM_DISKS). Each has layout 'subdirs', so the outer disk's directory for /usr/share/apk is
+# /.runcvm/disks/<n>/usr-share/apk. (xfs needs at least 300M.)
+POPULATED = [
+    ("ext4-outer-first", "/disks/a,/usr/share,ext4,64M;/disks/b,/usr/share/apk,ext4,16M", 0),
+    ("ext4-outer-last", "/disks/b,/usr/share/apk,ext4,16M;/disks/a,/usr/share,ext4,64M", 1),
+    ("xfs-outer-first", "/disks/a,/usr/share,xfs,320M;/disks/b,/usr/share/apk,ext4,16M", 0),
+    ("xfs-outer-last", "/disks/b,/usr/share/apk,ext4,16M;/disks/a,/usr/share,xfs,320M", 1),
+]
+
+# Prints the entries of the outer disk's directory for /usr/share/apk, then its mode, then whether
+# /usr/share/apk/keys holds any file.
+POPULATED_PROBE = ('d=/.runcvm/disks/$1/usr-share/apk; echo "entries=$(ls -A "$d" | tr "\\n" " ")"; '
+                   'echo "mode=$(stat -c %a "$d")"; '
+                   'echo "keys=$(ls /usr/share/apk/keys | wc -l)"')
+
 # Prints, for each path given, its device number and filesystem type.
 PROBE = 'for p in "$@"; do echo "$p $(stat -c %d "$p") $(stat -f -c %T "$p")"; done'
 
@@ -155,6 +176,16 @@ def run_layered(case):
                     *t.vm_opts(), *(["--init"] if init else []),
                     "--mount", "type=volume,src=%s,dst=/disks" % volume, *opts,
                     "--env", "RUNCVM_DISKS=" + disks, "alpine", "sh", "-c", PROBE, "sh", *paths,
+                    timeout=TIMEOUT)
+
+
+def run_populated(case):
+    name, disks, outer = case
+    volume = t.unique("populated-" + name)
+    t.volume_create(volume)
+    return t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
+                    *t.vm_opts(), "--mount", "type=volume,src=%s,dst=/disks" % volume,
+                    "--env", "RUNCVM_DISKS=" + disks, "alpine", "sh", "-c", POPULATED_PROBE, "sh", str(outer),
                     timeout=TIMEOUT)
 
 
@@ -203,6 +234,16 @@ for ((name, disks, opts, expected), init), r in zip(LAYERED_RUNS, t.parallel(run
             disk = probed.get("/.runcvm/disks/%d" % where, (None, None))[0]
             t.check("%s: %s is on disk %d" % (name, path, where), True,
                     disk is not None and probed.get(path, (None, None))[0] == disk)
+
+for (name, disks, outer), r in zip(POPULATED, t.parallel(run_populated, POPULATED)):
+    if not t.check("%s: exit status" % name, 0, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+        continue
+    values = dict(line.split("=", 1) for line in r.stdout.replace("\r", "").splitlines() if "=" in line)
+    t.check("%s: outer disk's directory for /usr/share/apk is empty" % name, "", values.get("entries", "?").strip())
+    t.check("%s: and has the image's directory's mode" % name, "755", values.get("mode"))
+    t.check("%s: /usr/share/apk/keys, on the inner disk, holds the image's keys" % name, True,
+            values.get("keys", "0").strip() not in ("", "0"))
 
 for (name, disks, message), r in zip(INVALID, t.parallel(run_invalid, INVALID)):
     t.check("%s: exit status" % name, 1, r.returncode)

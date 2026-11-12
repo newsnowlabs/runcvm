@@ -72,6 +72,15 @@ disk_resolve_path() {
   echo "${resolved:-/}"
 }
 
+# Prints destination $1 as its path in the image's filesystem: normalised, with symbolic links
+# resolved (see disk_resolve_path), or as given where either fails.
+disk_image_path() {
+  local path
+
+  path=$(disk_normalise_path "$1") && path=$(disk_resolve_path "$path") || path="$1"
+  echo "$path"
+}
+
 # Prints the name of the top-level directory of a disk with layout 'subdirs' that holds destination
 # $1, a normalised path: the path without its leading '/', with each '%', '-' and '=' encoded as
 # '%25', '%2D' and '%3D', and then each '/' replaced by '-'. For example, '/var/lib/docker' is held
@@ -223,7 +232,7 @@ do_disk() {
   local id="$2"
   local src="" dsts dst fs="" size="" layout layout_opt="" prealloc="off" field key value UUID LABEL TYPE i j path
   local whole_root=0 created=0
-  local -a fields=() dests=() subdirs=() resolved=() populate=() fss=()
+  local -a fields=() dests=() subdirs=() resolved=() populate=() fss=() inner=() inner_dir=() inner_path=()
   local -A seen=()
 
   IFS=',' read -r -a fields <<< "$spec"
@@ -449,26 +458,31 @@ do_disk() {
     fi
   done
 
-  # A disk and another disk, or a tmpfs mount, with one destination would hide one another, so
-  # reject it, before this disk is created. Each destination is compared as its path in the image's
-  # filesystem, with symbolic links resolved (or as given, where that fails), as recorded in
-  # DISK_DESTS and TMPFS_DESTS.
-  for dst in "${dests[@]}"
-  do
-    path=$(disk_normalise_path "$dst") && path=$(disk_resolve_path "$path") || path="$dst"
-    for i in "${!DISK_DESTS[@]}"
+  # In do_disks' planning pass (DISK_PLAN=1), every disk's spec is checked, and its destinations
+  # recorded in PLAN_DESTS (as paths in the image's filesystem, see disk_image_path) and PLAN_IDS,
+  # before any disk is created. A disk and another disk, or a tmpfs mount, with one destination
+  # would hide one another, so that is rejected.
+  if [ "$DISK_PLAN" = "1" ]; then
+    for dst in "${dests[@]}"
     do
-      if [ "${DISK_DESTS[$i]}" = "$path" ]; then
-        error "Error: disk spec '$spec' invalid: dst '$dst' is also the dst of an earlier disk"
-      fi
+      path=$(disk_image_path "$dst")
+      for i in "${!PLAN_DESTS[@]}"
+      do
+        if [ "${PLAN_DESTS[$i]}" = "$path" ]; then
+          error "Error: disk spec '$spec' invalid: dst '$dst' is also the dst of an earlier disk"
+        fi
+      done
+      for i in "${!TMPFS_DESTS[@]}"
+      do
+        if [ "${TMPFS_DESTS[$i]}" = "$path" ]; then
+          error "Error: disk spec '$spec' invalid: dst '$dst' is also the destination of a tmpfs mount"
+        fi
+      done
+      PLAN_DESTS+=("$path")
+      PLAN_IDS+=("$id")
     done
-    for i in "${!TMPFS_DESTS[@]}"
-    do
-      if [ "${TMPFS_DESTS[$i]}" = "$path" ]; then
-        error "Error: disk spec '$spec' invalid: dst '$dst' is also the destination of a tmpfs mount"
-      fi
-    done
-  done
+    return 0
+  fi
 
   # Create each destination directory, if it doesn't already exist: it is the source from which
   # a new disk is populated, and the mountpoint within the VM.
@@ -485,11 +499,38 @@ do_disk() {
       populate=("$DISK_FS_LABEL_OPT" "$DISK_FS_SUBDIRS_LABEL")
     fi
 
+    # Other disks' destinations below this disk's are left empty on it, as those disks are mounted
+    # over them (see write_fstab): each is listed in inner[], as its directory on this disk, with
+    # inner_dir[] the directory on this disk of the destination holding it (see
+    # /.runcvm/disks-populate below), and inner_path[] its path in the image's filesystem.
+    inner=() inner_dir=() inner_path=()
+    for i in "${!dests[@]}"
+    do
+      path=$(disk_image_path "${dests[$i]}")
+      for j in "${!PLAN_DESTS[@]}"
+      do
+        [[ "${PLAN_IDS[$j]}" != "$id" && "${PLAN_DESTS[$j]}" = "${path%/}"/* ]] || continue
+        if [ "$layout" = "subdirs" ]; then
+          inner+=("/${subdirs[$i]}${PLAN_DESTS[$j]#"${path%/}"}")
+          inner_dir+=("${subdirs[$i]}")
+        else
+          inner+=("${PLAN_DESTS[$j]#"${path%/}"}")
+          inner_dir+=(".")
+        fi
+        inner_path+=("${PLAN_DESTS[$j]}")
+      done
+    done
+
     # mke2fs populates the disk with any pre-existing files from each dst, staying on the
     # filesystem holding the dst: a directory on which another filesystem is mounted is left
-    # empty, and a file on another filesystem (such as a bind-mounted file) is left out.
+    # empty, and a file on another filesystem (such as a bind-mounted file) is left out. Each of
+    # inner[], excluded by its path on the new disk, is left empty likewise.
     if [ "${DISK_FS_MKFS[0]}" = "mke2fs" ]; then
       populate+=(-E one_file_system)
+      for i in "${!inner[@]}"
+      do
+        populate+=(-x "$(disk_glob_escape "${inner[$i]}")")
+      done
       if [ "$layout" = "subdirs" ]; then
         for i in "${!dests[@]}"
         do
@@ -518,10 +559,19 @@ do_disk() {
   # A new disk that its mkfs command left empty is populated from its destinations by
   # runcvm-vm-init, which reads one line per destination: <id> <UUID> <fs> <directory> <dst>, where
   # <directory> is the destination's directory on the disk, or '.' for its root.
+  #
+  # It masks each of inner[] with an empty tmpfs while copying, so leaving it empty, as read from
+  # /.runcvm/disks-populate-masks: one line per masked directory: <id> <directory> <path>, where
+  # <directory> is as in /.runcvm/disks-populate, and <path> is the directory's path in the image's
+  # filesystem.
   if [[ "$created" = "1" && "${DISK_FS_MKFS[0]}" != "mke2fs" ]]; then
     for i in "${!dests[@]}"
     do
       echo "$id $UUID $fs ${subdirs[$i]:-.} ${dests[$i]}" >>/.runcvm/disks-populate
+    done
+    for i in "${!inner[@]}"
+    do
+      echo "$id ${inner_dir[$i]} ${inner_path[$i]}" >>/.runcvm/disks-populate-masks
     done
   fi
 
@@ -543,7 +593,7 @@ do_disk() {
   DISK_EXCLUDES+=("$(busybox realpath "$src")")
   for dst in "${dests[@]}"
   do
-    path=$(disk_normalise_path "$dst") && path=$(disk_resolve_path "$path") || path="$dst"
+    path=$(disk_image_path "$dst")
     DISK_EXCLUDES+=("$path")
     DISK_DESTS+=("$path")
   done
@@ -646,7 +696,7 @@ disk_add_device() {
 fstab_add_mount() {
   local path components
 
-  path=$(disk_normalise_path "$2") && path=$(disk_resolve_path "$path") || path="$2"
+  path=$(disk_image_path "$2")
   components="${path//[^\/]/}"
   FSTAB_MOUNTS+=("$1")
   FSTAB_DEPTHS+=("${#components}")
@@ -665,7 +715,7 @@ tmpfs_mounts() {
     dst="${line#* }"
     dst="${dst%% *}"
     [ -n "$dst" ] || continue
-    path=$(disk_normalise_path "$dst") && path=$(disk_resolve_path "$path") || path="$dst"
+    path=$(disk_image_path "$dst")
     TMPFS_DESTS+=("$path")
     TMPFS_ENTRIES+=("$line" "$dst")
   done <<< "$RUNCVM_TMPFS"
@@ -718,6 +768,21 @@ do_disks() {
   DISK_EXCLUDES=()
   DISK_DESTS=()
 
+  # A planning pass checks every disk's spec, and records every disk's destinations, before any
+  # disk is created: so that an invalid spec creates no disk, and so that a new disk can leave out
+  # the destinations of disks listed after it. Then each disk is created and added.
+  DISK_PLAN=1
+  PLAN_DESTS=()
+  PLAN_IDS=()
+  for disk in $1
+  do
+    do_disk "$disk" "$id"
+    id=$((id+1))
+  done
+
+  DISK_PLAN=0
+  ROOT_DISK_SPEC=""
+  id=0
   for disk in $1
   do
     do_disk "$disk" "$id"
