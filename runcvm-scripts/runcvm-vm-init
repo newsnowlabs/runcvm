@@ -248,14 +248,14 @@ if [ -f /.runcvm/fstab ]; then
     done
   done
 
-  # Hold on to each mount that a disk will hide once mounted at its destination, as listed in
-  # /.runcvm/disks-submounts (see do_disks in runcvm-ctr-qemu): Docker's volumes, bind mounts and
-  # tmpfs mounts, and files such as /etc/hosts, below a disk's destination. Bind each, recursively,
-  # into a private tmpfs, from where it is mounted again over the disk once the disks are mounted.
-  # A mount below another held mount is carried with it. Binding a Docker volume also mounts it in
-  # the VM, which otherwise sees it only once accessed.
-  DISK_SUBMOUNTS=()
-  if [ -s /.runcvm/disks-submounts ]; then
+  # Hold on to each mount that a disk or tmpfs mount will hide once mounted at its destination, as
+  # listed in /.runcvm/held-mounts (see write_fstab in runcvm-ctr-qemu): Docker's volumes and bind
+  # mounts, including files such as /etc/hosts, below a disk's or tmpfs mount's destination. Bind
+  # each, alone (each mount below it is listed too), into a private tmpfs, from where it is mounted
+  # again at its path, in its place among the mounts in /.runcvm/fstab. Binding a Docker volume also
+  # mounts it in the VM, which otherwise sees it only once accessed.
+  declare -A HELD=()
+  if [ -s /.runcvm/held-mounts ]; then
     mkdir -p /.runcvm/submounts
     mount -i --options-source=disable -t tmpfs -o mode=0700 tmpfs /.runcvm/submounts
     mount -i --make-rprivate /.runcvm/submounts
@@ -264,22 +264,17 @@ if [ -f /.runcvm/fstab ]; then
     do
       [[ -n "$path" && -e "$path" ]] || continue
 
-      for held in "${DISK_SUBMOUNTS[@]}"
-      do
-        [[ "$path" = "$held"/* ]] && continue 2
-      done
-
-      held="/.runcvm/submounts/${#DISK_SUBMOUNTS[@]}"
+      held="/.runcvm/submounts/${#HELD[@]}"
       if [ -d "$path" ]; then
         mkdir "$held"
       else
         touch "$held"
       fi
 
-      mount -i --options-source=disable --rbind "$path" "$held" || \
-        vm_init_error "'$path' cannot be mounted over its disk: binding it before mounting the disks failed"
-      DISK_SUBMOUNTS+=("$path")
-    done </.runcvm/disks-submounts
+      mount -i --options-source=disable --bind "$path" "$held" || \
+        vm_init_error "'$path' cannot be mounted over the mount above it: binding it before mounting the disks failed"
+      HELD["$path"]="$held"
+    done </.runcvm/held-mounts
   fi
 
   # Populate each new disk that its mkfs command left empty: copy each destination's contents, as
@@ -332,49 +327,54 @@ if [ -f /.runcvm/fstab ]; then
     done
   fi
 
-  # Resolve UUID= with RunCVM's own libblkid configuration, which scans devices and keeps no
-  # cache, not with the image's /etc/blkid.conf and /run/blkid cache. -i keeps mount from running
-  # any /sbin/mount.<type> helper from the image.
-  if ! BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null mount -i -a --fstab /.runcvm/fstab -o X-mount.mkdir; then
-    # Name each entry left unmounted. A bind mount from a disk with layout 'subdirs' fails if the
-    # disk, once mounted at /.runcvm/disks/<n>, has no directory for its destination: a
-    # destination added to the disk's spec after the disk was created. That is reported only
-    # where the disk itself is mounted, as an unmounted disk holds no directories to look for.
-    unmounted=()
-    while read -r src dst _
-    do
-      [[ -z "$dst" || "$src" = \#* ]] && continue
-      findmnt -rn --mountpoint "$dst" >/dev/null && continue
+  # Mount each entry in /.runcvm/fstab in turn, in the order written there, creating its mountpoint
+  # if it lacks one; and, at each '#runcvm-held <path>', the mount held from <path> again at its
+  # path, creating a mountpoint of the same kind if the mount above it lacks one. Resolve UUID= with
+  # RunCVM's own libblkid configuration, which scans devices and keeps no cache, not with the
+  # image's /etc/blkid.conf and /run/blkid cache. -i keeps mount from running any
+  # /sbin/mount.<type> helper from the image.
+  #
+  # Each entry left unmounted is named. A bind mount from a disk with layout 'subdirs' fails if the
+  # disk, once mounted at /.runcvm/disks/<n>, has no directory for its destination: a destination
+  # added to the disk's spec after the disk was created. That is reported only where the disk
+  # itself is mounted, as an unmounted disk holds no directories to look for.
+  unmounted=()
+  while IFS= read -r line
+  do
+    if [[ "$line" = "#runcvm-held "* ]]; then
+      path="${line#"#runcvm-held "}"
+      held="${HELD[$path]:-}"
+      [ -n "$held" ] || continue
 
-      if [[ "$src" = /.runcvm/disks/* ]] && findmnt -rn --mountpoint "${src%/*}" >/dev/null && ! [ -d "$src" ]; then
-        vm_init_error "dst '$dst' cannot be mounted: its disk has no directory '${src##*/}', so was created without this destination; destinations cannot be added to an existing disk"
+      if [ -d "$held" ]; then
+        mkdir -p "$path"
+      else
+        mkdir -p "$(busybox dirname "$path")"
+        [ -e "$path" ] || touch "$path"
       fi
 
-      unmounted+=("$dst")
-    done </.runcvm/fstab
+      mount -i --options-source=disable --bind "$held" "$path" || \
+        vm_init_error "'$path' cannot be mounted over the mount above it: binding it again failed"
+      continue
+    fi
 
+    read -r src dst type options _ <<<"$line"
+    [[ -z "$dst" || "$src" = \#* ]] && continue
+
+    BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null \
+      mount -i --options-source=disable -t "$type" -o "${options:+$options,}X-mount.mkdir" "$src" "$dst" && continue
+
+    if [[ "$src" = /.runcvm/disks/* ]] && findmnt -rn --mountpoint "${src%/*}" >/dev/null && ! [ -d "$src" ]; then
+      vm_init_error "dst '$dst' cannot be mounted: its disk has no directory '${src##*/}', so was created without this destination; destinations cannot be added to an existing disk"
+    fi
+    unmounted+=("$dst")
+  done </.runcvm/fstab
+
+  if [ "${#unmounted[@]}" -gt 0 ]; then
     vm_init_error "mounting the filesystems in /.runcvm/fstab failed, leaving unmounted: ${unmounted[*]}"
   fi
 
-  # Mount each held mount again at its path, over the disk that hides it, as Docker mounts a
-  # deeper mount over a shallower one, creating a mountpoint of the same kind if the disk lacks one.
-  # Then detach the tmpfs that held them.
-  for i in "${!DISK_SUBMOUNTS[@]}"
-  do
-    path="${DISK_SUBMOUNTS[$i]}"
-    held="/.runcvm/submounts/$i"
-
-    if [ -d "$held" ]; then
-      mkdir -p "$path"
-    else
-      mkdir -p "$(busybox dirname "$path")"
-      [ -e "$path" ] || touch "$path"
-    fi
-
-    mount -i --options-source=disable --rbind "$held" "$path" || \
-      vm_init_error "'$path' cannot be mounted over its disk: binding it after mounting the disks failed"
-  done
-
+  # Detach the tmpfs that held the held mounts.
   if [ -d /.runcvm/submounts ]; then
     busybox umount -l /.runcvm/submounts
     rmdir /.runcvm/submounts

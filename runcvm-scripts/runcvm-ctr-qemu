@@ -139,12 +139,12 @@ disk_vm_mounts() {
   done </proc/self/mountinfo
 }
 
-# Prints, one per line, each mountpoint below $RUNCVM_VM_MOUNTPOINT, at any depth, that lies
-# strictly below one of the disk destinations $@ (normalised paths, with symbolic links resolved),
-# as its path in the VM: Docker's volumes, bind mounts, tmpfs mounts and files such as /etc/hosts.
-# /.runcvm, and the mounts below it, are left out.
-disk_submounts() {
-  local mnt dst rest
+# Prints, one per line, each mountpoint below $RUNCVM_VM_MOUNTPOINT, at any depth, as its path in
+# the VM: Docker's volumes and bind mounts, including files such as /etc/hosts. (runcvm-runtime
+# passes tmpfs mounts to the VM in RUNCVM_TMPFS instead.) /.runcvm, and the mounts below it, are
+# left out.
+container_mounts() {
+  local mnt rest
   local IFS=$' \t\n'
 
   while read -r _ _ _ _ mnt rest
@@ -154,15 +154,7 @@ disk_submounts() {
     [[ "$mnt" = "$RUNCVM_VM_MOUNTPOINT"/* ]] || continue
     mnt="${mnt#"$RUNCVM_VM_MOUNTPOINT"}"
 
-    [[ "$mnt" = /.runcvm || "$mnt" = /.runcvm/* ]] && continue
-
-    for dst in "$@"
-    do
-      if [[ "$mnt" = "$dst"/* ]]; then
-        echo "$mnt"
-        break
-      fi
-    done
+    [[ "$mnt" = /.runcvm || "$mnt" = /.runcvm/* ]] || echo "$mnt"
   done </proc/self/mountinfo
 }
 
@@ -460,8 +452,8 @@ do_disk() {
 
   # In do_disks' planning pass (DISK_PLAN=1), every disk's spec is checked, and its destinations
   # recorded in PLAN_DESTS (as paths in the image's filesystem, see disk_image_path) and PLAN_IDS,
-  # before any disk is created. A disk and another disk, or a tmpfs mount, with one destination
-  # would hide one another, so that is rejected.
+  # before any disk is created. A disk and another disk, a tmpfs mount, a volume or a bind mount
+  # with one destination would hide one another, so that is rejected.
   if [ "$DISK_PLAN" = "1" ]; then
     for dst in "${dests[@]}"
     do
@@ -476,6 +468,12 @@ do_disk() {
       do
         if [ "${TMPFS_DESTS[$i]}" = "$path" ]; then
           error "Error: disk spec '$spec' invalid: dst '$dst' is also the destination of a tmpfs mount"
+        fi
+      done
+      for i in "${!CONTAINER_MOUNTS[@]}"
+      do
+        if [ "${CONTAINER_MOUNTS[$i]}" = "$path" ]; then
+          error "Error: disk spec '$spec' invalid: dst '$dst' is also the destination of a volume or bind mount"
         fi
       done
       PLAN_DESTS+=("$path")
@@ -588,8 +586,9 @@ do_disk() {
   fi
 
   # Record this disk's backing file, and each of its destinations, for do_root_disk: a whole-root
-  # disk leaves them out, as this disk holds the destinations' contents. Each is recorded as its
-  # path in the image's filesystem, with symbolic links resolved.
+  # disk leaves them out, as this disk holds the destinations' contents; and the destinations for
+  # write_fstab. Each is recorded as its path in the image's filesystem, with symbolic links
+  # resolved.
   DISK_EXCLUDES+=("$(busybox realpath "$src")")
   for dst in "${dests[@]}"
   do
@@ -705,7 +704,7 @@ fstab_add_mount() {
 # Records each tmpfs mount, which runcvm-runtime passes in RUNCVM_TMPFS as fstab entries, one per
 # line: its entry in TMPFS_ENTRIES, for write_fstab, after the disks', and its destination in
 # TMPFS_DESTS, as a path in the image's filesystem with symbolic links resolved (or as given, where
-# that fails), for do_disk's check.
+# that fails), for do_disk's check and write_fstab.
 tmpfs_mounts() {
   local line dst path
 
@@ -723,16 +722,33 @@ tmpfs_mounts() {
 
 # Writes /.runcvm/fstab, for runcvm-vm-init to mount in order: first each disk with layout
 # 'subdirs' at /.runcvm/disks/<n>, the source of its destinations' bind mounts; then every mount at
-# a destination (the disks', then the tmpfs mounts), in order of depth, and otherwise in that
-# order. So a mount is made only once every mount at a path above it has been, as Docker mounts a
-# deeper mount over a shallower one, whatever the order of the disks in RUNCVM_DISKS. Nothing is
-# written where there are no mounts.
+# a destination (the disks', then the tmpfs mounts, then the volumes and bind mounts below them),
+# in order of depth, and otherwise in that order. So a mount is made only once every mount at a
+# path above it has been, as Docker mounts a deeper mount over a shallower one, whatever the order
+# of the disks in RUNCVM_DISKS. Nothing is written where there are no mounts.
+#
+# A disk or tmpfs mount at its destination in the VM hides every volume and bind mount below that
+# destination, so each is listed in /.runcvm/held-mounts, for runcvm-vm-init to hold on to before
+# mounting anything, and as a comment '#runcvm-held <path>' in its place in /.runcvm/fstab, where
+# runcvm-vm-init mounts it again. (A whole-root disk carries the mounts below / itself.)
 write_fstab() {
-  local depth i max=0
+  local depth i max=0 mnt dst
 
   for ((i = 0; i < ${#TMPFS_ENTRIES[@]}; i += 2))
   do
     fstab_add_mount "${TMPFS_ENTRIES[$i]}" "${TMPFS_ENTRIES[$i+1]}"
+  done
+
+  for mnt in "${CONTAINER_MOUNTS[@]}"
+  do
+    for dst in "${DISK_DESTS[@]}" "${TMPFS_DESTS[@]}"
+    do
+      if [[ "$mnt" = "${dst%/}"/* ]]; then
+        echo "$mnt" >>/.runcvm/held-mounts
+        fstab_add_mount "#runcvm-held $mnt" "$mnt"
+        break
+      fi
+    done
   done
 
   [ "${#FSTAB_DISKS[@]}" -gt 0 ] || [ "${#FSTAB_MOUNTS[@]}" -gt 0 ] || return 0
@@ -789,14 +805,6 @@ do_disks() {
     id=$((id+1))
   done
 
-  # A disk mounted at its destination in the VM hides every mount below that destination, so
-  # record those mounts in /.runcvm/disks-submounts, for runcvm-vm-init to mount again over the
-  # disks, as Docker mounts a deeper mount over a shallower one. (A whole-root disk carries the
-  # mounts below / itself.)
-  if [ "${#DISK_DESTS[@]}" -gt 0 ]; then
-    disk_submounts "${DISK_DESTS[@]}" | busybox sort -u >/.runcvm/disks-submounts
-  fi
-
   if [ -n "$ROOT_DISK_SPEC" ]; then
     do_root_disk
   fi
@@ -845,6 +853,8 @@ FSTAB_MOUNTS=()
 FSTAB_DEPTHS=()
 TMPFS_DESTS=()
 TMPFS_ENTRIES=()
+DISK_DESTS=()
+mapfile -t CONTAINER_MOUNTS < <(container_mounts | busybox sort -u)
 tmpfs_mounts
 if [ -n "$RUNCVM_DISKS" ]; then
   do_disks "$RUNCVM_DISKS"
