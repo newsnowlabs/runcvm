@@ -25,8 +25,8 @@ fi
 
 # Syncs the disks alone, each with syncfs (sync -f), never with a plain sync: that would also sync
 # the VM's virtiofs filesystems, and virtiofsd would answer by syncing the whole of each host
-# filesystem shared with the VM. The disks need this sync, as their writes stay in the VM's memory until
-# synced; writes to virtiofs go straight to the host.
+# filesystem shared with the VM. The disks need this sync, as their writes stay in the VM's memory
+# until synced; writes to virtiofs go straight to the host.
 sync_disks() {
   local disk
 
