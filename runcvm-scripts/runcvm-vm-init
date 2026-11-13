@@ -347,7 +347,7 @@ case "${RUNCVM_SHUTDOWN:-auto}" in
     shutdown_mode="$RUNCVM_SHUTDOWN"
     ;;
 esac
-echo "$shutdown_mode" >/.runcvm/shutdown
+echo "$shutdown_mode" >/.runcvm/state/shutdown
 
 # Make directory for dropbear host keys and public/private keypair
 mkdir -p /.runcvm/dropbear
@@ -386,7 +386,6 @@ null::respawn:$RUNCVM_GUEST/usr/sbin/dropbear -REF -j -k -p $SSHD_PORT -A $RUNCV
 null::ctrlaltdel:$RUNCVM_GUEST/bin/poweroff
 null::restart:$RUNCVM_GUEST/bin/poweroff
 null::shutdown:$RUNCVM_GUEST/scripts/runcvm-vm-shutdown
-null::shutdown:$RUNCVM_GUEST/bin/poweroff
 _EOE_
 
   # Allow runcvm-vm-start to run once (and only once)

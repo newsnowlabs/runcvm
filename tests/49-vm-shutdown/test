@@ -10,13 +10,15 @@
 - --init, with an entrypoint that ignores SIGTERM: 'docker stop -t 5'
   ends the Container/VM when the timeout runs out (exit status 137), as
   for any container.
+- --init, with RunCVM's init asked to halt (SIGUSR1) from inside the VM:
+  the VM powers off, as for poweroff, and the Container/VM ends.
 - --init, with an entrypoint that exits by itself, leaving a process that
   ignores SIGTERM: the Container/VM ends without waiting for that process,
   with the entrypoint's exit status.
 - In each case with a disk, a file written to the ext4 disk, and not
   synced, is intact afterwards, read by a new Container/VM, whose kernel
   needs no journal recovery to mount the disk.
-- The method recorded in /.runcvm/shutdown by default: 'systemd' for
+- The method recorded in /.runcvm/state/shutdown by default: 'systemd' for
   systemd, 'busybox' with --init or with busybox init as the entrypoint
   (alpine's /sbin/init), 'all' otherwise.
 - RUNCVM_SHUTDOWN=signal:USR1 sends the VM's PID 1 SIGUSR1, which an
@@ -55,9 +57,9 @@ CHECK = ("[ \"$(md5sum /data/f 2>/dev/null | cut -d' ' -f1)\" = \"$(cat /data/f.
          "dmesg | grep -c 'recovery complete' || true")
 
 # Each case: image, --init, RUNCVM_SHUTDOWN, entrypoint, how it ends ('stop' with its timeout,
-# 'kill' with its signal, 'exit' by itself, or None: just check the method), with a disk?, and the
-# expected exit status, method, least and most seconds taken, and the file, if any, written after
-# SIGTERM.
+# 'kill' with its signal, 'vm-signal' with the signal sent to the VM's PID 1 from inside the VM,
+# 'exit' by itself, or None: just check the method), with a disk?, and the expected exit status,
+# method, least and most seconds taken, and the file, if any, written after SIGTERM.
 CASES = [
     dict(name="systemd-stop", image=SYSTEMD_IMAGE, end=("stop", STOP_TIMEOUT), disk="write",
          status=0, mode="systemd", most=STOP_TIMEOUT),
@@ -71,6 +73,8 @@ CASES = [
          status=0, mode="busybox", least=8, most=20, late="late"),
     dict(name="init-ignore-term", init=True, entrypoint=IGNORE_TERM, end=("stop", 5),
          status=137, mode="busybox", least=5, most=15),
+    dict(name="init-halt", init=True, entrypoint=SLEEP, end=("vm-signal", "USR1"), disk="write",
+         status=0, mode="busybox", most=STOP_TIMEOUT),
     dict(name="init-exit", init=True, entrypoint=EXIT_LEAVING, end=("exit", None), disk="entrypoint",
          status=0, mode="busybox", most=STOP_TIMEOUT),
     dict(name="busybox-init-stop", entrypoint=["/sbin/init"], end=("stop", STOP_TIMEOUT),
@@ -115,7 +119,7 @@ def run(c):
         if r.returncode != 0 or not booted(container, image):
             result["error"] = r.stdout + t.docker("logs", container).stdout
             return result
-        result["mode"] = t.docker("exec", container, "cat", "/.runcvm/shutdown").stdout.strip()
+        result["mode"] = t.docker("exec", container, "cat", "/.runcvm/state/shutdown").stdout.strip()
         if c["end"] is None:
             t.docker("rm", "-f", container)
             return result
@@ -124,6 +128,8 @@ def run(c):
         start = time.time()
         if c["end"][0] == "stop":
             t.docker("stop", "-t", str(c["end"][1]), container)
+        elif c["end"][0] == "vm-signal":
+            t.docker("exec", container, "/.runcvm/guest/bin/busybox", "kill", "-s", c["end"][1], "1")
         else:
             t.docker("kill", "-s", c["end"][1], container)
     try:
@@ -150,7 +156,7 @@ for c, result in zip(CASES, t.parallel(run, CASES)):
         t.log("output:\n%s" % result["error"])
         continue
     if "mode" in result:
-        t.check("%s: /.runcvm/shutdown" % name, c["mode"], result["mode"])
+        t.check("%s: /.runcvm/state/shutdown" % name, c["mode"], result["mode"])
     if c["end"] is None:
         continue
     t.check("%s: exit status" % name, c["status"], result["status"])

@@ -1,10 +1,12 @@
 #!/.runcvm/guest/bin/bash
 
-# RunCVM's init (--init) runs this as its first shutdown action, before it powers the VM off: it
-# ends every other process, as Docker's own init would, and then unmounts the filesystems in
-# /.runcvm/fstab, the disks among them, so that each is left clean.
+# RunCVM's init (--init) runs this as its shutdown action, however it was asked to end the VM
+# (poweroff, halt or reboot): it ends every other process, as Docker's own init would, unmounts
+# the filesystems in /.runcvm/fstab, the disks among them, so that each is left clean, and then
+# powers the VM off itself. Busybox init would otherwise end the VM as it was asked to, and a
+# halted VM, unlike one powered off or rebooted, would leave the container running.
 #
-# - When the container is being stopped (runcvm-ctr-shutdown has created /.runcvm/stopping), every
+# - When the container is being stopped (runcvm-ctr-shutdown has created /.runcvm/state/stopping), every
 #   process is sent SIGTERM, and is waited for however long it takes: Docker's stop timeout alone
 #   limits the wait, as for any container. The disks are synced every second meanwhile, so that
 #   should Docker end the VM, writes made to them up to then are kept.
@@ -54,7 +56,7 @@ processes() {
 
 # kill -1 signals every process but init and the caller, so it must be bash's own kill: busybox's,
 # as a separate process, would signal this script too.
-if [ -f /.runcvm/stopping ]; then
+if [ -f /.runcvm/state/stopping ]; then
   kill -TERM -1 2>/dev/null
 else
   kill -KILL -1 2>/dev/null
@@ -89,4 +91,6 @@ if [ -f /.runcvm/rootdisk ]; then
   $BUSYBOX mount -o remount,ro / 2>/dev/null
 fi
 
-exit 0
+# Every process has ended and the disks are clean, so power off at once (-f), without signalling
+# init.
+$BUSYBOX poweroff -f
