@@ -17,11 +17,12 @@
   distributions), so that each case names the release it tests. With
   tests/run --pull, the images are pulled first, so that each tag is tested
   as published now; otherwise the host's copies are used.
-- An OpenWrt image, imported from OpenWrt's x86 rootfs (once per host, or
-  again with --pull), gets the OpenWrt kernel.
+- On x86-64 hosts, an OpenWrt image, imported from OpenWrt's x86 rootfs
+  (once per host, or again with --pull), gets the OpenWrt kernel.
 - An image with no os-release gets Debian's kernel silently. An image of any
-  other distribution (Arch Linux, Wolfi) gets Debian's kernel and shows the
-  fallback-kernel warning; no other image shows it.
+  other distribution (Arch Linux, on x86-64 hosts only, as its image has no
+  arm64 build; Wolfi) gets Debian's kernel and shows the fallback-kernel
+  warning; no other image shows it.
 - /etc/os-release is read within the image: an absolute symbolic link names
   a file in the image, not the host's.
 - An image's USER and WORKDIR apply in the VM.
@@ -35,6 +36,7 @@ them deliberately.
 
 import atexit
 import os
+import platform
 import subprocess
 import sys
 
@@ -54,6 +56,9 @@ def kernel_version(dist):
         return None
 
 
+# Arch Linux's image, and OpenWrt's x86 rootfs, have no arm64 build.
+X86_64 = platform.machine() == "x86_64"
+
 # (image, expected kernel dist): an image tagged with each release that RunCVM aims to support (see
 # README.md's Supported distributions), then rolling and other distributions' images.
 IMAGES = (("alpine:3.22", "alpine"), ("alpine:3.23", "alpine"), ("alpine:3.24", "alpine"),
@@ -69,7 +74,7 @@ IMAGES = (("alpine:3.22", "alpine"), ("alpine:3.23", "alpine"), ("alpine:3.24", 
           ("opensuse/tumbleweed", "opensuse"),
           ("kalilinux/kali-rolling", "debian"),
           ("busybox", "debian"),
-          ("archlinux", "debian"),
+          *([("archlinux", "debian")] if X86_64 else []),
           ("cgr.dev/chainguard/wolfi-base", "debian"))
 
 t.pull_images(["alpine"] + [i for i, _ in IMAGES])
@@ -80,7 +85,7 @@ OPENWRT_RELEASE = "25.12.6"
 OPENWRT_IMAGE = "runcvm-test/openwrt:" + OPENWRT_RELEASE
 OPENWRT_ROOTFS = ("https://downloads.openwrt.org/releases/{0}/targets/x86/generic/"
                   "openwrt-{0}-x86-generic-rootfs.tar.gz".format(OPENWRT_RELEASE))
-if t.PULL or t.docker("image", "inspect", OPENWRT_IMAGE).returncode != 0:
+if X86_64 and (t.PULL or t.docker("image", "inspect", OPENWRT_IMAGE).returncode != 0):
     r = t.docker("import", OPENWRT_ROOTFS, OPENWRT_IMAGE, timeout=600)
     if not t.check("imported OpenWrt %s" % OPENWRT_RELEASE, 0, r.returncode):
         t.log(r.stdout)
@@ -111,7 +116,8 @@ CASES += [("kernel-ol", ["--env=RUNCVM_KERNEL=ol"], ["alpine", "sh", "-c", PROBE
 # Each case is named after its image, tag included, so that releases of one distribution have distinct names.
 CASES += [("image-" + i.replace(":", "-").replace("/", "-"), [], [i, "sh", "-c", PROBE], k, None)
           for i, k in IMAGES]
-CASES += [("image-openwrt-" + OPENWRT_RELEASE, [], [OPENWRT_IMAGE, "sh", "-c", PROBE], "openwrt", None)]
+if X86_64:
+    CASES += [("image-openwrt-" + OPENWRT_RELEASE, [], [OPENWRT_IMAGE, "sh", "-c", PROBE], "openwrt", None)]
 CASES += [("image-os-release-link", [], [link_image, "sh", "-c", PROBE], "alpine", None)]
 
 # The cases whose image's distribution has no RunCVM kernel, so whose output shows the warning.
