@@ -6,10 +6,11 @@
 # powers the VM off itself. Busybox init would otherwise end the VM as it was asked to, and a
 # halted VM, unlike one powered off or rebooted, would leave the container running.
 #
-# - When the container is being stopped (runcvm-ctr-shutdown has created /.runcvm/state/stopping), every
-#   process is sent SIGTERM, and is waited for however long it takes: Docker's stop timeout alone
-#   limits the wait, as for any container. The disks are synced every second meanwhile, so that
-#   should Docker end the VM, writes made to them up to then are kept.
+# - When the container is being stopped (runcvm-ctr-shutdown has created
+#   /.runcvm/state/stopping), every process is sent SIGTERM, and is waited for however long it
+#   takes: Docker's stop timeout alone limits the wait, as for any container. The disks are synced
+#   every second meanwhile, so that should Docker end the VM, writes made to them up to then are
+#   kept.
 # - When the entrypoint has exited by itself, every process left is killed at once (SIGKILL).
 
 # Load RunCVM's own environment, saved by runcvm-ctr-entrypoint
