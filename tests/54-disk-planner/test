@@ -46,8 +46,8 @@ the manifests); and that the checks and planning left /disks unchanged.
   disk's destination is not excluded, nor held, even below another disk or
   a tmpfs mount; an existing disk has no exclusions.
 - Manifests: paths with a space, '\\', a literal '\\040', a backslash
-  followed by 'n', and UTF-8 characters are written escaped, and decode to
-  the paths;
+  followed by 'n', and UTF-8 characters are written with spaces and '\\'
+  escaped, and decode to the paths;
   RUNCVM_FSTAB=all writes held mounts as bind mounts from
   /.runcvm/submounts/<id>.
 - The planner on random plans: held mounts are exactly the container mounts

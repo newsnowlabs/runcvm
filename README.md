@@ -956,7 +956,7 @@ Sets what RunCVM's fstab lists of the volumes and bind mounts that a disk or tmp
 - `disks`: each such volume and bind mount appears only as a comment, `#runcvm-held <id> <path>`, in its place among the mounts, and the tmpfs that held it during boot is detached, leaving nothing of it in the VM. Unmounting the volume, or restarting a systemd mount unit above it (such as `home.mount` for a volume at `/home/user/shared` below a disk at `/home`), loses it until the Container/VM restarts. An image without an `/etc/fstab` is left without one.
 - `all`: each appears as a bind mount from where it is held, `/.runcvm/submounts/<id> <path> none bind 0 0`, and the tmpfs holding it stays mounted at `/.runcvm/submounts`, so that `mount -a` mounts it again, as systemd does when restarting the volume's own mount unit, or the unit of a mount above it (such as `home.mount`; systemd restarts the volume's unit in a job of its own, which `systemctl restart home.mount` does not wait for). An image without an `/etc/fstab` is given an empty one, for RunCVM's to be mounted over.
 
-Paths in RunCVM's fstab are written with fstab's octal escapes for space, tab, newline and `\` (`\040`, `\011`, `\012` and `\134`), which `mount`, systemd and RunCVM decode.
+Paths in RunCVM's fstab are written with fstab's octal escapes for space and `\` (`\040` and `\134`; and, as a safeguard, for tab and newline, which no mount path may contain), which `mount`, systemd and RunCVM decode.
 
 ### RUNCVM_DISPLAY_MODE
 
