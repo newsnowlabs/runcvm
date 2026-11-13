@@ -16,10 +16,15 @@ the manifests); and that the checks and planning left /disks unchanged.
   with disks or tmpfs mounts) are rejected with their messages.
 - Backing file paths: relative, with '.' or '..' components, ending in '/',
   or through a symbolic link to such a path in a directory that does not
-  exist, or to a path with a newline (including through a directory whose
-  name ends in one), are rejected; '//' is collapsed; a dangling symbolic link is
+  exist, are rejected; '//' is collapsed; a dangling symbolic link is
   followed to where the file will be created, also through a link with
   '../' or './' in a directory that exists.
+- Control characters (bytes 0x01-0x1F and 0x7F): in a backing file path or
+  a destination, given or reached through symbolic links (to the file, or
+  in a directory above it), in a container mount's or a tmpfs mount's
+  destination: each is rejected, with the path, and a spec holding it,
+  shown escaped. UTF-8 characters, including a non-breaking space, and a
+  backslash followed by 'n' are accepted.
 - Backing-file identity: one file by two spellings, through one volume
   mounted at two paths (existing or not), or as hard links, is rejected;
   two existing disks with one filesystem UUID are rejected; distinct files
@@ -40,8 +45,9 @@ the manifests); and that the checks and planning left /disks unchanged.
   outermost only, including nested volumes on one device; a volume at a
   disk's destination is not excluded, nor held, even below another disk or
   a tmpfs mount; an existing disk has no exclusions.
-- Manifests: paths with a space, tab, '\\', a literal '\\040', and embedded
-  and trailing newlines are written escaped, and decode to the paths;
+- Manifests: paths with a space, '\\', a literal '\\040', a backslash
+  followed by 'n', and UTF-8 characters are written escaped, and decode to
+  the paths;
   RUNCVM_FSTAB=all writes held mounts as bind mounts from
   /.runcvm/submounts/<id>.
 - The planner on random plans: held mounts are exactly the container mounts
@@ -106,10 +112,7 @@ existing_disk() {
 before=$(find /disks | sort; find /disks -type f -exec md5sum {} + | sort)
 (
   container_mounts
-  if [ -n "$RUNCVM_DISKS" ]; then
-    IFS=';' read -r -a specs <<< "$RUNCVM_DISKS"
-    for i in "${!specs[@]}"; do disk_parse "${specs[$i]}" "$i"; done
-  fi
+  disks_parse "$RUNCVM_DISKS"
   tmpfs_parse
   plan_check
   plan_mounts
@@ -231,8 +234,9 @@ def enc(path):
     return path.replace("\\", "\\134").replace(" ", "\\040").replace("\t", "\\011").replace("\n", "\\012")
 
 
-SRC_RULE = "must be an absolute path to a file, without '.' or '..' components or a newline"
-ODD = ["/srv/a b", "/srv/t\tb", "/srv/c\\d", "/srv/e\\040f", "/srv/n\nl", "/srv/tr\n"]
+SRC_RULE = "must be an absolute path to a file, without '.' or '..' components"
+ODD = ["/srv/a b", "/srv/c\\d", "/srv/e\\040f", "/srv/n\\nl", "/srv/caf\u00e9", "/srv/\u65e5\u672c"]
+CTL = "must not contain control characters (bytes 0x01-0x1F and 0x7F)"
 
 # Each case: name; setup (shell, run in the case's container before planning); RUNCVM_DISKS;
 # RUNCVM_TMPFS lines; other environment; and either 'error', a message the plan must fail with, with
@@ -280,11 +284,38 @@ invalid("src-link-up-missing-dir", "/disks/bad.img,/srv/a,ext4,16M",
         "file, without '.' or '..' components, where the directory holding it does not exist",
         setup="ln -s ../nope/s.img /disks/bad.img")
 invalid("src-link-newline-dir", "/disks/link.img,/srv/a,ext4",
-        "src '/disks/link.img' is a symbolic link to a path with a newline",
+        "src '/disks/link.img' is a symbolic link to $'/disks/store\\n/state.img', which " + CTL,
         setup="mkdir -p '/disks/store\n' && existing_disk '/disks/store\n/state.img' && "
               "ln -s 'store\n' /disks/alias && ln -s alias/state.img /disks/link.img")
 invalid("src-link-loop", "/disks/l1,/srv/a,ext4,16M", "src '/disks/l1' has too many levels of symbolic links",
         setup="ln -s l2 /disks/l1 && ln -s l1 /disks/l2")
+
+# Control characters, each shown escaped in the error: (name, RUNCVM_DISKS, setup, RUNCVM_TMPFS lines,
+# the whole error).
+for name, disks, setup, tmpfs, error in [
+    ("src-tab", "/disks/a\tb,/srv/a,ext4,16M", None, [],
+     "Error: disk spec $'/disks/a\\tb,/srv/a,ext4,16M' invalid: src $'/disks/a\\tb' " + CTL),
+    ("src-newline", "/disks/a\nb,/srv/a,ext4,16M", None, [],
+     "Error: disk spec $'/disks/a\\nb,/srv/a,ext4,16M' invalid: src $'/disks/a\\nb' " + CTL),
+    ("dst-newline-second-of-two", "/disks/a,/srv/a:/srv/b\nc,ext4,16M", None, [],
+     "Error: disk spec $'/disks/a,/srv/a:/srv/b\\nc,ext4,16M' invalid: dst $'/srv/b\\nc' " + CTL),
+    ("dst-0x01", "/disks/a,/srv/a\x01b,ext4,16M", None, [],
+     "Error: disk spec $'/disks/a,/srv/a\\001b,ext4,16M' invalid: dst $'/srv/a\\001b' " + CTL),
+    ("dst-0x7f", "/disks/a,/srv/a\x7fb,ext4,16M", None, [],
+     "Error: disk spec $'/disks/a,/srv/a\\177b,ext4,16M' invalid: dst $'/srv/a\\177b' " + CTL),
+    ("src-through-linked-parent", "/disks/alias/state.img,/srv/a,ext4",
+     "mkdir -p \"$(printf '/disks/st\\001')\" && existing_disk \"$(printf '/disks/st\\001/state.img')\" && "
+     "ln -s \"$(printf 'st\\001')\" /disks/alias", [],
+     "Error: disk spec '/disks/alias/state.img,/srv/a,ext4' invalid: src '/disks/alias/state.img' leads to "
+     "$'/disks/st\\001/state.img', which " + CTL),
+    ("container-mount-0x01", "/disks/a,/srv,ext4,16M", "volume v \"$(printf '/srv/a\\001b')\"", [],
+     "Error: mount destination $'/srv/a\\001b' " + CTL),
+    ("tmpfs-0x7f", "/disks/a,/srv,ext4,16M", None, ["tmpfs /srv/t\x7f tmpfs defaults 0 0"],
+     "Error: tmpfs mount destination $'/srv/t\\177' " + CTL),
+]:
+    CASES.append(dict(name=name, disks=disks, setup=setup, tmpfs=tmpfs, error=error))
+valid("utf8-and-printable-backslash-n-accepted", "/disks/a\\nb,/srv/caf\u00e9:/srv/no\u00a0break,ext4,16M",
+      has=["disk 0 new=1 layout=subdirs", "order disk /srv/caf\u00e9", "order disk /srv/no\u00a0break"])
 
 # Backing-file identity.
 invalid("same-file-two-spellings", "/disks/a,/srv/a,ext4,16M;/disks//a,/srv/b,ext4,16M",
@@ -362,10 +393,10 @@ valid("whole-root", "/disks/r,/,ext4,64M;/disks/a,/home,ext4,16M", setup="volume
 # Manifests.
 valid("odd-paths", "/disks/a,/srv,ext4,16M",
       setup=" && ".join("volume v%d %s" % (n, shlex.quote(p)) for n, p in enumerate(ODD)),
-      tmpfs=["tmpfs %s tmpfs defaults 0 0" % enc("/srv/tm p\n")],
+      tmpfs=["tmpfs %s tmpfs defaults 0 0" % enc("/srv/tm p")],
       has=["fstab #runcvm-held %d %s" % (n, enc(p)) for n, p in enumerate(ODD)] +
           ["held-mounts %d %s" % (n, enc(p)) for n, p in enumerate(ODD)] +
-          ["fstab tmpfs %s tmpfs defaults 0 0" % enc("/srv/tm p\n")] +
+          ["fstab tmpfs %s tmpfs defaults 0 0" % enc("/srv/tm p")] +
           ["excl /srv %s dir" % enc(p) for p in ODD])
 valid("fstab-all", "/disks/a,/data,ext4,16M", setup="volume v /data/v", env=[("RUNCVM_FSTAB", "all")],
       has=["fstab /.runcvm/submounts/0 /data/v none bind 0 0", "held-mounts 0 /data/v"],

@@ -48,6 +48,29 @@ path_encode() {
   printf '%s' "$path"
 }
 
+# Succeeds if $1 contains an ASCII control character: a byte 0x01-0x1F or 0x7F, such as a tab or a
+# newline, which no mount destination or disk backing file path may contain. Bytes are compared as
+# such (LC_ALL=C), whatever the container's locale, so every other byte, such as those of UTF-8
+# characters, passes.
+path_has_control() {
+  local LC_ALL=C
+  [[ "$1" = *[$'\001'-$'\037'$'\177']* ]]
+}
+
+# Succeeds if $1 contains ASCII whitespace or '\', compared as bytes whatever the container's locale,
+# as a disk's destination may not.
+path_has_space() {
+  local LC_ALL=C
+  [[ "$1" = *[[:space:]\\]* ]]
+}
+
+# Sets REPLY to $1 quoted for a message: in single quotes, or, if it contains a control character,
+# in bash's $'...' notation, with each such character escaped.
+path_shown() {
+  local LC_ALL=C
+  if path_has_control "$1"; then printf -v REPLY '%q' "$1"; else REPLY="'$1'"; fi
+}
+
 # Sets REPLY to path $1 in normal form: with repeated '/' collapsed and any trailing '/' removed.
 # Fails if $1 is not absolute, is '/', or has a '.' or '..' component.
 disk_normalise_path() {
@@ -175,6 +198,12 @@ container_mounts() {
     printf -v MI_ROOT[$i] '%b' "$root"
 
     [[ "$mnt" = "$RUNCVM_VM_MOUNTPOINT"/* ]] || continue
+    # runcvm-runtime rejects such a destination as given; this rejects one that leads to such a path
+    # through symbolic links in the image.
+    if path_has_control "$mnt"; then
+      path_shown "${mnt#"$RUNCVM_VM_MOUNTPOINT"}"
+      error "Error: mount destination $REPLY must not contain control characters (bytes 0x01-0x1F and 0x7F)"
+    fi
     mnt="${mnt#"$RUNCVM_VM_MOUNTPOINT"}"  # Strip the prefix, leaving the path in the VM.
     [[ "$mnt" = /.runcvm || "$mnt" = /.runcvm/* ]] && continue
 
@@ -282,8 +311,8 @@ disk_realpath() {
 # Sets REPLY to the file that disk backing file path $1 names, or will name once created: the path,
 # with repeated '/' collapsed, and each symbolic link it ends in followed, as creating the file would
 # follow it. Fails, setting REPLY to the reason, unless the path is absolute, without '.' or '..'
-# components, a trailing '/' or a newline, so that each backing file has one spelling, which the
-# checks between disks can compare; '..' after a directory not yet created (e.g. /disks/missing/../a)
+# components or a trailing '/', so that each backing file has one spelling, which the checks
+# between disks can compare; '..' after a directory not yet created (e.g. /disks/missing/../a)
 # would name an existing file once that directory is created. A link's target is resolved where the
 # directory holding it exists, and is held to the same rules where it doesn't. Fails likewise after
 # 40 links.
@@ -291,8 +320,8 @@ disk_src_file() {
   local path="$1" target dir links=0
 
   while [[ "$path" = *//* ]]; do path="${path//\/\//\/}"; done
-  if [[ "$path" != /* || "$path" = */ || "/$path/" = */./* || "/$path/" = */../* || "$path" = *$'\n'* ]]; then
-    REPLY="must be an absolute path to a file, without '.' or '..' components or a newline"
+  if [[ "$path" != /* || "$path" = */ || "/$path/" = */./* || "/$path/" = */../* ]]; then
+    REPLY="must be an absolute path to a file, without '.' or '..' components"
     return 1
   fi
 
@@ -316,8 +345,9 @@ disk_src_file() {
       disk_realpath "${dir:-/}"
       target="${REPLY%/}/${target##*/}"
     fi
-    if [[ "$target" = *$'\n'* ]]; then
-      REPLY="is a symbolic link to a path with a newline"
+    if path_has_control "$target"; then
+      path_shown "$target"
+      REPLY="is a symbolic link to $REPLY, which must not contain control characters (bytes 0x01-0x1F and 0x7F)"
       return 1
     fi
     if [[ "$target" = */ || "/$target/" = */./* || "/$target/" = */../* ]]; then
@@ -457,7 +487,8 @@ disk_parse() {
   local -a fields=() dests=() subdirs=() resolved=() fss=()
   local -A seen=()
 
-  IFS=',' read -r -a fields <<< "$spec"
+  # Split with mapfile, not read, which would stop at a newline: every field reaches the checks.
+  mapfile -d ',' -t fields < <(printf '%s' "$spec")
 
   if [[ "${fields[0]}" =~ ^(src|source|dst|target|destination|fs|size|layout|prealloc)= ]]; then
     # Keyed form: every field is <key>=<value>, split at the first '='; only dst may be repeated.
@@ -529,12 +560,26 @@ disk_parse() {
       error "Error: disk spec '$spec' invalid: dst must not be empty"
     fi
 
-    [ -z "$dsts" ] || IFS=':' read -r -a dests <<< "$dsts"
+    [ -z "$dsts" ] || mapfile -d ':' -t dests < <(printf '%s' "$dsts")
   fi
 
   if [[ -z "$src" || "${#dests[@]}" -eq 0 || -z "$fs" ]]; then
     error "Error: disk spec '$spec' invalid: src, dst and fs must all be specified"
   fi
+
+  # No backing file path or destination may contain a control character; such a spec is shown
+  # with each one escaped.
+  for value in "$src" "${dests[@]}"
+  do
+    path_has_control "$value" || continue
+    path_shown "$spec"
+    spec="$REPLY"
+    path_shown "$value"
+    if [ "$value" = "$src" ]; then
+      error "Error: disk spec $spec invalid: src $REPLY must not contain control characters (bytes 0x01-0x1F and 0x7F)"
+    fi
+    error "Error: disk spec $spec invalid: dst $REPLY must not contain control characters (bytes 0x01-0x1F and 0x7F)"
+  done
 
   # Every check of the backing file is made of the file the path names (see disk_src_file).
   disk_src_file "$src" || error "Error: disk spec '$spec' invalid: src '$src' $REPLY"
@@ -650,7 +695,7 @@ disk_parse() {
     do
       dst="${dests[$i]}"
 
-      if [[ "$dst" = *[[:space:]\\]* ]]; then
+      if path_has_space "$dst"; then
         error "Error: disk spec '$spec' invalid: dst '$dst' must not contain whitespace or '\\'"
       fi
 
@@ -661,6 +706,10 @@ disk_parse() {
       disk_resolve_path "${dests[$i]}" || \
         error "Error: disk spec '$spec' invalid: dst '$dst' has too many levels of symbolic links"
       resolved[$i]="$REPLY"
+      if path_has_control "${resolved[$i]}"; then
+        path_shown "${resolved[$i]}"
+        error "Error: disk spec '$spec' invalid: dst '$dst' leads, through symbolic links in the image, to $REPLY, which must not contain control characters (bytes 0x01-0x1F and 0x7F)"
+      fi
 
       if [[ -e "$RUNCVM_VM_MOUNTPOINT${resolved[$i]}" && ! -d "$RUNCVM_VM_MOUNTPOINT${resolved[$i]}" ]]; then
         error "Error: disk spec '$spec' invalid: dst '$dst' must be a directory if it exists"
@@ -724,6 +773,12 @@ disk_parse() {
     fi
   fi
 
+  # The canonical path shows any symbolic links in the directories above the file.
+  if path_has_control "$path"; then
+    path_shown "$path"
+    error "Error: disk spec '$spec' invalid: src '$src' leads to $REPLY, which must not contain control characters (bytes 0x01-0x1F and 0x7F)"
+  fi
+
   DISK_SPEC[$id]="$spec"
   DISK_SRC[$id]="$src"
   DISK_SRC_FILE[$id]="$file"
@@ -745,6 +800,19 @@ disk_parse() {
     DEST_DIR[$j]="${subdirs[$i]:-.}"
 
     [ "$layout" = "whole" ] || mount_add "${resolved[$i]}" disk dir "$j"
+  done
+}
+
+# Parses each disk spec in $1, RUNCVM_DISKS, e.g. /disk1,/home,ext4,5G;/disk2,/var,ext4,1G (see
+# disk_parse), split with mapfile, not read, which would stop at a newline.
+disks_parse() {
+  local i
+  local -a specs=()
+
+  [ -z "$1" ] || mapfile -d ';' -t specs < <(printf '%s' "$1")
+  for i in "${!specs[@]}"
+  do
+    disk_parse "${specs[$i]}" "$i"
   done
 }
 
@@ -773,6 +841,10 @@ tmpfs_parse() {
     dst="${dst%% *}"
     [ -n "$dst" ] || continue
     printf -v dst '%b' "$dst"
+    if path_has_control "$dst"; then
+      path_shown "$dst"
+      error "Error: tmpfs mount destination $REPLY must not contain control characters (bytes 0x01-0x1F and 0x7F)"
+    fi
 
     i="${#TMPFS_ENTRY[@]}"
     TMPFS_ENTRY[$i]="$line"
@@ -1253,14 +1325,7 @@ do_networks() {
 DISKS=()
 ROOT_DISK_ID=""
 container_mounts
-if [ -n "$RUNCVM_DISKS" ]; then
-  # e.g. /disk1,/home,ext4,5G;/disk2,/var,ext4,1G
-  IFS=';' read -r -a DISK_SPECS <<< "$RUNCVM_DISKS"
-  for i in "${!DISK_SPECS[@]}"
-  do
-    disk_parse "${DISK_SPECS[$i]}" "$i"
-  done
-fi
+disks_parse "$RUNCVM_DISKS"
 tmpfs_parse
 plan_check
 plan_mounts
