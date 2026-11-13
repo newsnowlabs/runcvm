@@ -615,7 +615,7 @@ Some points to bear in mind:
 
 - **Where to keep the backing file.** A backing file under `/disks` in a named Docker volume, as above, is kept outside the container's overlay filesystem, survives removal of the container, and can be reused by a later Container/VM. Without the `--mount`, the backing file is created in the container's own filesystem, and goes when the container is removed.
 - **Disk size.** A backing file is sparse by default, so it takes host space only as `dockerd` writes to it. Size the disk for every image, container and volume `dockerd` will hold. With the containerd image store, each image takes space twice: once compressed, and once unpacked. If the host's filesystem fills up, `dockerd`'s writes to a sparse disk fail with I/O errors, which can leave Docker's storage inconsistent. For a long-lived `dockerd`, consider adding `prealloc=on` (e.g. `RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,10G,prealloc=on`), which takes the disk's full size on the host from the start, and keeps it taken, even after images are removed (see [Preallocated disks](#preallocated-disks)).
-- **Keeping the data.** Launch with `--init`, or from an image whose entrypoint is its own init, such as systemd, so that the VM flushes the disk when it stops (see [Shutdown](#shutdown) under [`RUNCVM_DISKS`](#runcvm_disks)). A disk thrown away after each run needs no flushing.
+- **Keeping the data.** Launch with `--init`, or from an image whose entrypoint is its own init, such as systemd, so that the VM flushes the disk when it stops (see [Shutdown and disk data integrity](#shutdown-and-disk-data-integrity) under [`RUNCVM_DISKS`](#runcvm_disks)). A disk thrown away after each run needs no flushing.
 - **Existing disks.** A destination cannot be added to an existing disk. A disk created for `/var/lib/docker` alone (e.g. with `RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,5G`), by this or an earlier release, has layout `root` and holds only that one destination. To add `/var/lib/containerd`, give the new spec a new backing file, or remove the old one, losing its contents.
 - **Nested RunCVM.** When the inner `dockerd` itself runs RunCVM Container/VMs, as in [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm), consider adding `/opt/runcvm` to the disk's destinations too, so the inner Container/VMs are not served RunCVM over nested virtiofs. RunCVM's own test environment, in `tests/env/Dockerfile`, uses `RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G`.
 
@@ -832,7 +832,7 @@ RunCVM formats disks with its own bundled `mkfs` commands, and `ext4` disks with
 
 When RunCVM creates a Container/VM, fstab entries will be drafted, identifying each disk by its filesystem's UUID. After the VM boots, the fstab entries will be mounted, in order. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on. RunCVM finds each disk with its own bundled `blkid.conf`, which scans the VM's block devices and keeps no cache, ignoring any `/etc/blkid.conf` in the image.
 
-Data written to a disk stays in the VM's memory until the VM's kernel writes it out, so whether a disk's contents survive the VM ending depends on how the VM shuts down: see [Shutdown](#shutdown) below.
+Data written to a disk stays in the VM's memory until the VM's kernel writes it out, so whether a disk's contents survive the VM ending depends on how the VM shuts down: see [Shutdown and disk data integrity](#shutdown-and-disk-data-integrity) below.
 
 #### Preallocated disks
 
@@ -889,7 +889,7 @@ The VM still boots from the container's filesystem over virtiofs. Early in boot,
 
 The disk is populated only when it is created. While it exists, later changes to the image, or to the container's own filesystem, are not seen in the VM; and changes the VM makes outside volumes are made to the disk, not the container's filesystem, so `docker diff`, `docker cp`, `docker commit` and `docker export` do not see them. To start afresh from the image, remove the disk's backing file.
 
-Every write outside volumes goes to the disk, so [Shutdown](#shutdown) below applies to all of them. With `--init`, RunCVM's init syncs every disk, the whole-root disk included, and remounts the whole-root disk read-only before the VM powers off; an image whose entrypoint is its own init (such as systemd) unmounts its file systems, and remounts its root file system read-only, as it powers off. Without either, a workload whose data must survive should run `sync -f /` before it exits. This flushes the whole-root disk only.
+Every write outside volumes goes to the disk, so [Shutdown and disk data integrity](#shutdown-and-disk-data-integrity) below applies to all of them. With `--init`, RunCVM's init syncs every disk, the whole-root disk included, and remounts the whole-root disk read-only before the VM powers off; an image whose entrypoint is its own init (such as systemd) unmounts its file systems, and remounts its root file system read-only, as it powers off. Without either, a workload whose data must survive should run `sync -f /` before it exits. This flushes the whole-root disk only.
 
 Compared with disks whose destinations are other paths, such as `/var/lib/docker` or `/home` (here called multi-path disks):
 
@@ -902,7 +902,7 @@ Compared with disks whose destinations are other paths, such as `/var/lib/docker
 | `docker diff`, `docker cp`, `docker commit`, `docker export` | Unaffected, except for the listed paths | Do not see changes made in the VM outside volumes |
 | If the disk outlives the image | The listed paths are stale | The whole root is stale: image updates are not seen |
 
-#### Shutdown
+#### Shutdown and disk data integrity
 
 Data written to a disk stays in the VM's memory until the VM's kernel writes it out, so whether it reaches the backing file depends on how the VM ends:
 
@@ -1142,7 +1142,7 @@ If `RUNCVM_SHUTDOWN` is left undefined, set to an empty string or set to `auto`,
 
 `systemd`, `busybox` and `signal:<signal>` act through the channel `docker exec` uses; where that fails, e.g. while the VM is still booting, RunCVM does `all` instead.
 
-What happens to the VM's disks as it powers off, whether they are synced and unmounted, depends on the VM's init, provided `RUNCVM_SHUTDOWN` asks it in a way it acts on: see [Shutdown](#shutdown) under [`RUNCVM_DISKS`](#runcvm_disks).
+What happens to the VM's disks as it powers off, whether they are synced and unmounted, depends on the VM's init, provided `RUNCVM_SHUTDOWN` asks it in a way it acts on: see [Shutdown and disk data integrity](#shutdown-and-disk-data-integrity) under [`RUNCVM_DISKS`](#runcvm_disks).
 
 To stop a Container/VM without a clean shutdown, e.g. one whose disks are thrown away, use `docker stop -t 0`, `docker kill` or `docker rm -f`.
 
