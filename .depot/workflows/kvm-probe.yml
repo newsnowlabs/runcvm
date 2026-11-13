@@ -1,0 +1,46 @@
+# Reports what Depot CI's sandboxes offer RunCVM, on arm64 and x86_64: whether /dev/kvm exists
+# and can be opened, the CPUs, memory and kernel, Docker, cgroups, and the kernel modules RunCVM
+# uses. It builds and runs nothing of RunCVM's.
+name: KVM probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [depot-ubuntu-24.04-arm, depot-ubuntu-24.04]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - name: Host
+        run: |
+          uname -a
+          nproc
+          free -m
+          df -h / | tail -1
+          grep -m1 -E '^(model name|CPU implementer|Features|flags)' /proc/cpuinfo || true
+          cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null && echo "cgroup v2" || echo "no cgroup v2"
+          systemd-detect-virt 2>/dev/null || true
+
+      - name: KVM
+        run: |
+          ls -l /dev/kvm || echo "=== no /dev/kvm"
+          lsmod | grep -E '^kvm' || true
+          sudo dmesg 2>/dev/null | grep -i -E 'kvm|virtualization|hyp' | tail -5 || true
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+            # Open /dev/kvm and ask its API version (KVM_GET_API_VERSION, _IO(0xAE, 0x00)): 12
+            # means KVM works.
+            python3 -c 'import fcntl, os; fd = os.open("/dev/kvm", os.O_RDWR); print("KVM API version:", fcntl.ioctl(fd, 0xAE00))'
+          fi
+
+      - name: Docker and kernel modules
+        run: |
+          docker version --format 'Docker: client {{.Client.Version}}, server {{.Server.Version}}' || echo "=== no working Docker"
+          for m in tun vhost_net vhost_vsock nf_tables; do
+            sudo modprobe "$m" 2>/dev/null && echo "$m: loaded" || echo "$m: unavailable"
+          done
+          ls -l /dev/net/tun /dev/vhost-net 2>&1 || true
