@@ -49,6 +49,8 @@
   a backing file under /vm (the image's view in the container) below its
   own destination is left out; and a volume's unrelated file with a
   backing file's name, at the container path of that backing file, is kept.
+  Disks whose backing files are reached through symbolic links to paths
+  with a space and a tab start, mounted, when created and when reused.
 - Invalid plans create nothing, and change no existing disk: a later disk
   without a size, or with a malformed one; a backing file path that is
   relative, or has a '.' or '..' component (including '..' after a directory
@@ -482,6 +484,32 @@ for (kind, fs), r in zip(BACKING, t.parallel(run_backing, BACKING)):
     else:
         t.check("%s: no backing file on the disk" % name, ["link.img"] if kind == "dangling" else [],
                 [e for e in entries if e.endswith(".img")])
+
+# Backing files reached through symbolic links to paths with a space and a tab: each Container/VM
+# starts with both disks mounted, creating them, then finding them again.
+def run_whitespace_links():
+    volume = t.unique("whitespace-links-disks")
+    t.volume_create(volume)
+    runc(volume, "mkdir '/disks/store dir' \"$(printf '/disks/tab\\tdir')\" && ln -s 'store dir/a.img' /disks/a-link && "
+                 "ln -s \"$(printf 'tab\\tdir/b.img')\" /disks/b-link")
+    disks = "/disks/a-link,/srv/a,ext4,16M;/disks/b-link,/srv/b,ext4,16M"
+    probe = 'mountpoint -q /srv/a && mountpoint -q /srv/b && echo mounted=yes'
+    first = vm("whitespace-links-1", disks, [], probe, disks_volume=volume)
+    second = vm("whitespace-links-2", disks, [], probe, disks_volume=volume)
+    listing = t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v", "%s:/disks" % volume,
+                       "alpine", "sh", "-c", "ls '/disks/store dir' /disks/tab*").stdout
+    return first, second, listing
+
+
+WS_FIRST, WS_SECOND, WS_LISTING = run_whitespace_links()
+for step, r in (("created", WS_FIRST), ("found again", WS_SECOND)):
+    name = "backing files through links to paths with a space and a tab, " + step
+    if not t.check("%s: exit status" % name, 0, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+        continue
+    t.check("%s: both disks mounted" % name, "yes", values(r).get("mounted"))
+t.check("backing files through links to paths with a space and a tab: created at the links' targets",
+        ["a.img", "b.img"], sorted(w for w in WS_LISTING.split() if w.endswith(".img")))
 
 # --- Invalid plans ------------------------------------------------------------------------------
 

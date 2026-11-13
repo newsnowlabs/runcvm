@@ -1194,7 +1194,8 @@ disk_add_device() {
     # $discard              : discard=unmap,detect-zeroes=unmap passes guest TRIM/UNMAP, and
     #                          converts guest zero writes into UNMAPs, to the backing file;
     #                          discard=ignore,detect-zeroes=off does neither (see above)
-    -drive id=drv$id,file=${src//,/,,},if=none,format=raw,media=disk,cache=none,aio=io_uring,$discard
+    # The whole argument is quoted: the path may hold whitespace.
+    -drive "id=drv$id,file=${src//,/,,},if=none,format=raw,media=disk,cache=none,aio=io_uring,$discard"
 
     # Create a dedicated I/O thread (dataplane) to offload block I/O
     # -object iothread,id=ioth$id : defines an iothread with a unique identifier
