@@ -758,19 +758,26 @@ disk_parse() {
     done
   fi
 
-  # The backing file's canonical path: an existing file's, or, for a new one, its directory's, where
-  # that exists, with its name.
+  # The backing file's canonical path, where it is or will be created: an existing file's; or, for
+  # a new one, its nearest existing ancestor directory's, with the components below it that creating
+  # the file creates. A dangling symbolic link among those components is rejected, as creating the
+  # directories could not follow it.
   if [ -e "$file" ]; then
     disk_realpath "$file"
     path="$REPLY"
   else
     dir="${file%/*}"
-    if [ -d "${dir:-/}" ]; then
-      disk_realpath "${dir:-/}"
-      path="${REPLY%/}/${file##*/}"
-    else
-      path="$file"
-    fi
+    value="/${file##*/}"
+    while ! [ -d "${dir:-/}" ]
+    do
+      if [ -L "$dir" ]; then
+        error "Error: disk spec '$spec' invalid: src '$src' is below '$dir', a symbolic link to nothing"
+      fi
+      value="/${dir##*/}$value"
+      dir="${dir%/*}"
+    done
+    disk_realpath "${dir:-/}"
+    path="${REPLY%/}$value"
   fi
 
   # The canonical path shows any symbolic links in the directories above the file.
@@ -849,6 +856,10 @@ tmpfs_parse() {
     i="${#TMPFS_ENTRY[@]}"
     TMPFS_ENTRY[$i]="$line"
     disk_image_path "$dst"
+    if path_has_control "$REPLY"; then
+      path_shown "$REPLY"
+      error "Error: tmpfs mount destination '$dst' leads, through symbolic links in the image, to $REPLY, which must not contain control characters (bytes 0x01-0x1F and 0x7F)"
+    fi
     mount_add "$REPLY" tmpfs dir "$i"
   done <<< "$RUNCVM_TMPFS"
 }

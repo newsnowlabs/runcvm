@@ -312,6 +312,18 @@ for name, disks, setup, tmpfs, error in [
      "Error: mount destination $'/srv/a\\001b' " + CTL),
     ("tmpfs-0x7f", "/disks/a,/srv,ext4,16M", None, ["tmpfs /srv/t\x7f tmpfs defaults 0 0"],
      "Error: tmpfs mount destination $'/srv/t\\177' " + CTL),
+    ("tmpfs-through-link", "/disks/a,/data,ext4,16M", "mkdir $'/srv/dir\\n' && ln -s $'dir\\n' /srv/safe", ["tmpfs /srv/safe tmpfs defaults 0 0"],
+     "Error: tmpfs mount destination '/srv/safe' leads, through symbolic links in the image, to $'/srv/dir\\n', which " + CTL),
+    ("dst-through-link", "/disks/a,/srv/safe2,ext4,16M", "mkdir $'/srv/d\\001' && ln -s $'d\\001' /srv/safe2", [],
+     "Error: disk spec '/disks/a,/srv/safe2,ext4,16M' invalid: dst '/srv/safe2' leads, through symbolic links in the image, "
+     "to $'/srv/d\\001', which " + CTL),
+    ("src-new-below-linked-ancestor", "/disks/alias/new/state.img,/srv/a,ext4,16M",
+     "mkdir $'/disks/st\\001' && ln -s $'st\\001' /disks/alias", [],
+     "Error: disk spec '/disks/alias/new/state.img,/srv/a,ext4,16M' invalid: src '/disks/alias/new/state.img' leads to "
+     "$'/disks/st\\001/new/state.img', which " + CTL),
+    ("src-below-dangling-link", "/disks/dang/new/state.img,/srv/a,ext4,16M", "ln -s nowhere /disks/dang", [],
+     "Error: disk spec '/disks/dang/new/state.img,/srv/a,ext4,16M' invalid: src '/disks/dang/new/state.img' is below "
+     "'/disks/dang', a symbolic link to nothing"),
 ]:
     CASES.append(dict(name=name, disks=disks, setup=setup, tmpfs=tmpfs, error=error))
 valid("utf8-and-printable-backslash-n-accepted", "/disks/a\\nb,/srv/caf\u00e9:/srv/no\u00a0break,ext4,16M",
@@ -364,6 +376,10 @@ valid("view-own-existing-not-excluded", "/disks/state.img,/data,ext4", setup="vo
       has=["view 0 /data/state.img", "disk 0 new=0 layout=root"], lacks=["excl /data /data/state.img file"])
 valid("view-other-disks", "/disks/a.img,/data,ext4,16M;/disks/b.img,/other,ext4,16M", setup="volume v /disks /data",
       has=["excl /data /data/a.img file", "excl /data /data/b.img file"])
+valid("view-new-file-below-linked-ancestor", "/disks/alias/new/state.img,/data,ext4,16M,layout=root",
+      setup="volume v /disks /data && mkdir /disks/real && ln -s real /disks/alias",
+      has=["view 0 /data/real/new/state.img", "excl /data /real/new/state.img file"],
+      lacks=["excl /data /alias/new/state.img file"])
 valid("view-prefixed", "/vm/srv/state.img,/srv,ext4,16M", has=["view 0 /srv/state.img", "excl /srv /srv/state.img file"])
 valid("view-none-unrelated-file", "/data/state.img,/data,ext4,16M",
       setup="volume s /data && echo seed >/vols/s/state.img", lacks=["view 0 /data/state.img"])
