@@ -178,6 +178,7 @@ create_aliases() {
     poweroff
     ps
     qemu-ga
+    qemu-system-aarch64
     qemu-system-x86_64
     rm
     rmdir

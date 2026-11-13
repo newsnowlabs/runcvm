@@ -217,8 +217,10 @@ Under way:
 
 RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM. It is highly portable among Linux distributions and development platforms providing KVM, and can even be installed on [GitHub Codespaces](https://github.com/features/codespaces).
 
+Support for arm64 (aarch64) hosts is experimental. RunCVM's published images are for amd64 only, so on an arm64 host, build RunCVM there and install that build (see [Building](#building)). CI builds RunCVM for arm64 and runs a few of its tests on arm64 under software emulation, but none under KVM. RunCVM detects the host's architecture when it creates a Container/VM; `--env=RUNCVM_QEMU_ARCH=<x86_64|arm64>` overrides it.
+
 RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and these features of the host's kernel, which the kernels of common distributions provide, built in or as modules that load on demand:
-- KVM: `kvm`, with `kvm_intel` or `kvm_amd`;
+- KVM: `kvm`, with `kvm_intel` or `kvm_amd` on x86_64 (on arm64, KVM is part of `kvm` itself);
 - `tun` (`CONFIG_TUN`), for the tap device that connects the VM to the container;
 - the Linux bridge, `bridge` (`CONFIG_BRIDGE`), which RunCVM creates in each container between the tap device and the container's network interface;
 - `nf_tables`, with which RunCVM installs firewall rules in each container, as Docker's own networking does: its IPv4, ARP and bridge families (`CONFIG_NF_TABLES_IPV4`, `CONFIG_NF_TABLES_ARP`, `CONFIG_NF_TABLES_BRIDGE`), bridge `meta` expressions (`nft_meta_bridge`, `CONFIG_NFT_BRIDGE_META`), NAT (`nft_nat` and `nft_chain_nat`, `CONFIG_NFT_NAT`) and redirection (`nft_redir`, `CONFIG_NFT_REDIR`), with connection tracking;
@@ -229,6 +231,15 @@ RunCVM does not need the `br_netfilter` module; [docs/adr/0001-container-firewal
 RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
 RunCVM is tested on x86-64 hosts with KVM running Debian 12 (Bookworm) and Ubuntu 24.04 LTS (Noble Numbat), with Docker Engine, both Docker's own packages and Ubuntu's `docker.io`. The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
+
+### macOS on Apple Silicon
+
+Running RunCVM on macOS is experimental, as is arm64 support. On macOS, Docker runs inside an arm64 Linux VM, such as one that [Lima](https://lima-vm.io/) provides (e.g. with its `docker` template). RunCVM can run inside that VM, as on any arm64 host: build RunCVM within the VM, and install that build. For KVM acceleration, the VM needs nested virtualisation, so that `/dev/kvm` exists inside it; Apple's Virtualization framework offers it on M3 and later chips, with macOS 15 or later. Without `/dev/kvm`, launch Container/VMs with `--env=RUNCVM_QEMU_ACCEL=auto` or `tcg` for software emulation, which is much slower.
+
+- With Lima, enable nested virtualisation for the VM, e.g. `limactl start --set='.nestedVirtualization=true' template://docker` for a new VM, or `limactl stop <vm> && limactl edit <vm> --set '.nestedVirtualization=true' && limactl start <vm>` for an existing one.
+- [Podman Desktop](https://podman-desktop.io/)'s VM is untested: it provides Podman but not Docker, which RunCVM's build and installer need.
+
+Check that `/dev/kvm` exists inside the VM (e.g. `limactl shell <vm> ls -l /dev/kvm`) before installing RunCVM there. The VM may also lack `/dev/vhost-net` (needed by `RUNCVM_QEMU_NET_VHOST=1`) and hugepages (needed by `RUNCVM_HUGETLB=1`); both options are off by default.
 
 ## Installation
 
@@ -992,7 +1003,7 @@ Enable USB interface.
 
 **`RUNCVM_BIOS=EFI`**
 
-By default SeaBIOS is used to boot the VM. Enable OVMF EFI boot with this option.
+By default SeaBIOS is used to boot the VM (on arm64, QEMU boots the kernel directly, without firmware). Enable OVMF EFI boot with this option, on x86_64 only: on arm64, the Container/VM fails to start with an error.
 
 ### RUNCVM_QEMU_NET_VHOST
 
