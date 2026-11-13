@@ -548,3 +548,19 @@ RUN for d in /opt/runcvm/kernels/*; do \
 RUN bad=$(find /opt/runcvm ! -type l \( ! -perm -o=r -o -type d ! -perm -o=x -o -perm /022 \)) || \
       { echo "Checking permissions in /opt/runcvm failed" >&2; exit 1; } && \
     [ -z "$bad" ] || { echo "Files with the wrong permissions in /opt/runcvm:" >&2; echo "$bad" | head -20 >&2; exit 1; }
+
+# Record the build's version and revision (the commit's full ID), as build/build.sh gives them (see
+# there), as labels and in the package as VERSION, '<version> (<short revision>)'; a 'docker build'
+# run without build/build.sh records version 'unknown' and no revision. This comes last, so that a
+# change of version rebuilds no other layer; the file is given the permissions the check above
+# requires.
+ARG RUNCVM_VERSION=unknown
+ARG RUNCVM_REVISION=
+LABEL org.opencontainers.image.version="$RUNCVM_VERSION" \
+      org.opencontainers.image.revision="$RUNCVM_REVISION"
+RUN if [ -n "$RUNCVM_REVISION" ]; then \
+      echo "$RUNCVM_VERSION ($(echo "$RUNCVM_REVISION" | cut -c1-7))"; \
+    else \
+      echo "$RUNCVM_VERSION"; \
+    fi >/opt/runcvm/VERSION && \
+    chmod 644 /opt/runcvm/VERSION
