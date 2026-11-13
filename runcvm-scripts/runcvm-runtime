@@ -638,6 +638,14 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     error "RUNCVM_KERNEL_MODULES '$RUNCVM_KERNEL_MODULES' invalid (should be a comma-separated list of kernel module names, e.g. kvm_intel,vxlan)"
   fi
 
+  # RUNCVM_SHUTDOWN: how runcvm-ctr-shutdown asks the guest to power off when the container is
+  # stopped (see runcvm-vm-init, which resolves 'auto'). A signal is a number, or a name that
+  # RunCVM's busybox kill knows, with or without 'SIG'.
+  RUNCVM_SHUTDOWN="$(get_config_env 'RUNCVM_SHUTDOWN')"
+  if [ -n "$RUNCVM_SHUTDOWN" ] && ! [[ "$RUNCVM_SHUTDOWN" =~ ^(auto|systemd|busybox|acpi|all|signal:([1-9][0-9]?|(SIG)?[A-Z][A-Z0-9]*))$ ]]; then
+    error "RUNCVM_SHUTDOWN '$RUNCVM_SHUTDOWN' invalid (should be auto, systemd, busybox, acpi, all, or signal:<signal>, e.g. signal:PWR or signal:38)"
+  fi
+
   # QEMU acceleration:
   # - kvm (default): use KVM; fail at creation if /dev/kvm is unavailable on this host
   # - auto: use KVM if /dev/kvm is available, otherwise (much slower) software emulation
