@@ -889,7 +889,7 @@ The VM still boots from the container's filesystem over virtiofs. Early in boot,
 
 The disk is populated only when it is created. While it exists, later changes to the image, or to the container's own filesystem, are not seen in the VM; and changes the VM makes outside volumes are made to the disk, not the container's filesystem, so `docker diff`, `docker cp`, `docker commit` and `docker export` do not see them. To start afresh from the image, remove the disk's backing file.
 
-Every write outside volumes goes to the disk, so [Shutdown](#shutdown) below applies to all of them. With `--init`, RunCVM's init syncs every disk, the whole-root disk included, and remounts the whole-root disk read-only before the VM powers off; an image whose entrypoint is its own init (such as systemd) does the same as it powers off. Without either, a workload whose data must survive should run `sync -f /` before it exits. This flushes the whole-root disk only.
+Every write outside volumes goes to the disk, so [Shutdown](#shutdown) below applies to all of them. With `--init`, RunCVM's init syncs every disk, the whole-root disk included, and remounts the whole-root disk read-only before the VM powers off; an image whose entrypoint is its own init (such as systemd) unmounts its file systems, and remounts its root file system read-only, as it powers off. Without either, a workload whose data must survive should run `sync -f /` before it exits. This flushes the whole-root disk only.
 
 Compared with disks whose destinations are other paths, such as `/var/lib/docker` or `/home` (here called multi-path disks):
 
