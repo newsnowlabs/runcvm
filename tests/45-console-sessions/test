@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""The VM's console and sessions, with each kernel.
+
+The initramfses of the AlmaLinux, Fedora and openSUSE kernels (made by
+dracut) run systemd, which leaves the VM's PID 1 holding a terminal (tty1)
+as its controlling terminal. RunCVM gives it up for the console, and its
+own daemons (dropbear, for 'docker exec', and the QEMU guest agent) run in
+sessions of their own, so that neither giving up a terminal nor a hangup
+on it ends them.
+
+For each kernel:
+- With almalinux/9-init, whose entrypoint is systemd, which gives up the
+  controlling terminal as it starts: 'docker exec' works once the VM has
+  booted; systemd reaches 'running' (or 'degraded', if some unit of the
+  image's own fails in a VM); and the QEMU guest agent is still running.
+- With '-t', with and without --init: the workload's controlling terminal
+  is the console, which is also its standard input, so that e.g. Ctrl-C
+  reaches it.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+SYSTEMD_IMAGE = "almalinux/9-init"
+KERNELS = ["almalinux", "fedora", "opensuse", "debian", "ubuntu"]
+TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+# Prints the controlling terminal's and standard input's device numbers, as major:minor in hex.
+TTY_PROBE = ("set -- $(cat /proc/self/stat); n=$7; "
+             "printf 'ctty=%x:%x\\n' $(( (n >> 8) & 0xfff )) $(( (n & 0xff) | ((n >> 12) & 0xfff00) )); "
+             "stat -L -c 'stdin=%t:%T' /proc/self/fd/0")
+
+t.docker("pull", "-q", SYSTEMD_IMAGE, check=True)
+
+
+def run_systemd(kernel):
+    container = t.unique("systemd-%s" % kernel)
+    t.cleanup_container(container)
+    r = t.docker("run", "-d", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 "--env=RUNCVM_KERNEL=%s" % kernel, SYSTEMD_IMAGE)
+    if r.returncode != 0:
+        return False, r.stdout, None, None
+    if not t.wait_for_exec(container, TIMEOUT):
+        return False, t.docker("logs", container).stdout, None, None
+    state = t.docker("exec", container, "timeout", str(TIMEOUT), "systemctl", "is-system-running", "--wait")
+    agent = t.docker("exec", container, "sh", "-c", "grep -qx qemu-ga /proc/[0-9]*/comm")
+    return True, "", state.stdout.strip(), agent.returncode == 0
+
+
+def run_tty(case):
+    kernel, init = case
+    r = t.docker("run", "--rm", "-t", *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 *(["--init"] if init else []), "--env=RUNCVM_KERNEL=%s" % kernel, "alpine", "sh", "-c", TTY_PROBE,
+                 timeout=TIMEOUT)
+    values = dict(line.split("=", 1) for line in r.stdout.replace("\r", "").splitlines() if "=" in line)
+    return values.get("ctty"), values.get("stdin"), r.stdout
+
+
+TTY_CASES = [(kernel, init) for kernel in KERNELS for init in (False, True)]
+systemd_results = t.parallel(run_systemd, KERNELS)
+tty_results = t.parallel(run_tty, TTY_CASES)
+
+for kernel, (booted, output, state, agent) in zip(KERNELS, systemd_results):
+    if not t.check("%s kernel, systemd: 'docker exec' works" % kernel, True, booted):
+        t.log("output:\n%s" % output)
+        continue
+    t.log("%s kernel, systemd: state %r" % (kernel, state))
+    t.check("%s kernel, systemd: running or degraded" % kernel, True, state in ("running", "degraded"))
+    t.check("%s kernel, systemd: QEMU guest agent running" % kernel, True, agent)
+
+for (kernel, init), (ctty, stdin, output) in zip(TTY_CASES, tty_results):
+    desc = "%s kernel, -t, %s" % (kernel, "--init" if init else "no --init")
+    if stdin is None:
+        t.check("%s: probe ran" % desc, True, False)
+        t.log("output:\n%s" % output)
+        continue
+    t.check("%s: controlling terminal is the console (standard input)" % desc, stdin, ctty)
+
+t.finish()

@@ -17,12 +17,22 @@ ARG ALPINE_KERNEL_VERSION=3.24
 # OpenWrt kernels' modules are unaffected.
 ARG KERNEL_MODULE_COMPRESSION=xz
 
+# Where the Alpine build stages fetch aports (Alpine's package build recipes) from, and, if set,
+# the base URL of an Alpine distfiles mirror (with a v<version> directory per Alpine version) from
+# which abuild fetches the packages' sources before trying their upstream URLs. The defaults are
+# Alpine's own; CI on GitHub-hosted runners, which gitlab.alpinelinux.org refuses, uses
+# https://github.com/alpinelinux/aports.git and https://distfiles.alpinelinux.org/distfiles.
+ARG APORTS_URL=https://gitlab.alpinelinux.org/alpine/aports.git
+ARG ALPINE_DISTFILES_MIRROR=
+
 # --- BUILD STAGE ---
 # Build base alpine-sdk image for later build stages
 FROM alpine:$ALPINE_VERSION as alpine-sdk
 
-# Redeclare so $ALPINE_VERSION is visible inside this stage's RUN
+# Redeclare so these are visible inside this stage's RUN
 ARG ALPINE_VERSION
+ARG APORTS_URL
+ARG ALPINE_DISTFILES_MIRROR
 
 # aports must be checked out at the stable branch matching the base image:
 # APKBUILDs on master can depend on abuild features that the base release
@@ -31,9 +41,11 @@ RUN apk update && apk add --no-cache alpine-sdk coreutils && \
     abuild-keygen -an && \
     # Copy the public keys to the system keys
     cp -a /root/.abuild/*.pub /etc/apk/keys && \
+    { [ -z "$ALPINE_DISTFILES_MIRROR" ] || \
+      echo "DISTFILES_MIRROR=$ALPINE_DISTFILES_MIRROR/v${ALPINE_VERSION}" >>/etc/abuild.conf; } && \
     git clone --depth 1 --single-branch --filter=blob:none --sparse \
       --branch ${ALPINE_VERSION}-stable \
-      https://gitlab.alpinelinux.org/alpine/aports.git ~/aports && \
+      "$APORTS_URL" ~/aports && \
     cd ~/aports/ && \
     git sparse-checkout set main/seabios main/dnsmasq main/dropbear
 
@@ -42,13 +54,17 @@ RUN apk update && apk add --no-cache alpine-sdk coreutils && \
 FROM alpine:$ALPINE_KERNEL_VERSION as alpine-sdk-kernel
 
 ARG ALPINE_KERNEL_VERSION
+ARG APORTS_URL
+ARG ALPINE_DISTFILES_MIRROR
 
 RUN apk update && apk add --no-cache alpine-sdk coreutils && \
     abuild-keygen -an && \
     cp -a /root/.abuild/*.pub /etc/apk/keys && \
+    { [ -z "$ALPINE_DISTFILES_MIRROR" ] || \
+      echo "DISTFILES_MIRROR=$ALPINE_DISTFILES_MIRROR/v${ALPINE_KERNEL_VERSION}" >>/etc/abuild.conf; } && \
     git clone --depth 1 --single-branch --filter=blob:none --sparse \
       --branch ${ALPINE_KERNEL_VERSION}-stable \
-      https://gitlab.alpinelinux.org/alpine/aports.git ~/aports && \
+      "$APORTS_URL" ~/aports && \
     cd ~/aports/ && \
     git sparse-checkout set main/mkinitfs
 
@@ -125,6 +141,10 @@ set -e
 cd /root/aports/main/mkinitfs
 echo 'sha512sums="${sha512sums}$(sha512sum nlplug-findfs.patch)"' >>APKBUILD
 echo 'source="${source} nlplug-findfs.patch"' >>APKBUILD
+# Skip mkinitfs's own test suite, which Alpine runs in its own CI: some of its cases have
+# 5-second time limits, which a loaded build host (e.g. a CI runner building every stage at once)
+# can exceed, failing the build.
+echo 'options="$options !check"' >>APKBUILD
 abuild -rFf
 EOF
 
@@ -275,9 +295,14 @@ FROM amd64/debian:trixie as debian-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG KERNEL_MODULE_COMPRESSION
+# The initrd holds only the modules listed (MODULES=list), those the VM needs as it boots: its
+# virtual devices' drivers (runcvm-vm-init needs the network device from the start) and virtiofs,
+# for its root, rather than most of the kernel's modules (initramfs-tools' default). A VM unpacks
+# its initrd into memory as it boots, and RunCVM loads any other module the VM needs from the
+# kernel's bundled modules once the root is mounted.
 RUN apt update && apt install -y linux-image-amd64:amd64 xz-utils && \
-    echo 'virtiofs' >>/etc/initramfs-tools/modules && \
-    echo 'virtio_console' >>/etc/initramfs-tools/modules && \
+    printf '%s\n' virtio_pci virtio_blk virtio_console virtio_net virtio_rng virtio_scsi virtiofs >>/etc/initramfs-tools/modules && \
+    echo "MODULES=list" >/etc/initramfs-tools/conf.d/runcvm-modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
 # Debian compresses its kernel modules with xz.
@@ -304,9 +329,14 @@ ARG KERNEL_MODULE_COMPRESSION
 # The initrd must be built by initramfs-tools, not dracut (Ubuntu's default initrd generator), as
 # runcvm-runtime boots the Ubuntu kernel with initramfs-tools' arguments for a virtiofs root
 # (rootfstype=virtiofs root=runcvmfs).
+# The initrd holds only the modules listed (MODULES=list), those the VM needs as it boots: its
+# virtual devices' drivers (runcvm-vm-init needs the network device from the start) and virtiofs,
+# for its root, rather than most of the kernel's modules (initramfs-tools' default). A VM unpacks
+# its initrd into memory as it boots, and RunCVM loads any other module the VM needs from the
+# kernel's bundled modules once the root is mounted.
 RUN apt update && apt install -y linux-generic:amd64 initramfs-tools zstd xz-utils && \
-    echo 'virtiofs' >>/etc/initramfs-tools/modules && \
-    echo 'virtio_console' >>/etc/initramfs-tools/modules && \
+    printf '%s\n' virtio_pci virtio_blk virtio_console virtio_net virtio_rng virtio_scsi virtiofs >>/etc/initramfs-tools/modules && \
+    echo "MODULES=list" >/etc/initramfs-tools/conf.d/runcvm-modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
     update-initramfs -u
 # Ubuntu compresses its kernel modules with zstd, which busybox modprobe (used by runcvm-vm-init,
@@ -426,6 +456,11 @@ RUN apk update && apk add --no-cache rsync
 ADD runcvm-scripts /opt/runcvm/scripts/
 ADD runcvm-etc /opt/runcvm/etc/
 COPY LICENSE NOTICE /opt/runcvm/
+
+# Files copied from the build context keep the checkout's permissions, which follow the umask of
+# whoever checked it out (e.g. group-writable under Ubuntu's default umask for users, 002), so give
+# them the package's own (see the check below).
+RUN chmod -R a+rX,go-w /opt/runcvm/scripts /opt/runcvm/etc /opt/runcvm/LICENSE /opt/runcvm/NOTICE
 
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]
