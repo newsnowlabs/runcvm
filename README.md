@@ -627,7 +627,7 @@ Instead of a disk, you can mount Docker volumes at `/var/lib/docker` and `/var/l
 docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker --mount=type=volume,src=mycontainerd1,dst=/var/lib/containerd --env=RUNCVM_SYS_ADMIN=1 docker:dind
 ```
 
-> N.B. This option adds `CAP_SYS_ADMIN` capabilities to the container and then launches `virtiofsd` with `-o modcaps=+sys_admin`.
+> N.B. This option adds `CAP_SYS_ADMIN` capabilities to the container and then launches `virtiofsd` with `--modcaps=+sys_admin`.
 
 ### Container runtimes inside RunCVM
 
@@ -784,7 +784,7 @@ opensuse/6.12.0-160100.8-default
 opensuse/latest
 ```
 
-RunCVM bundles the kernels of Debian 13 (trixie), Ubuntu 26.04 (resolute), AlmaLinux 10, Fedora 45, openSUSE Leap 16.1 and Alpine (`linux-virt`, also used for OpenWrt images), each at the version its distribution provides when the RunCVM image is built. The Alpine kernel's release is set by the build argument `ALPINE_KERNEL_VERSION` (by default `3.24`), separately from `ALPINE_VERSION` (by default `3.19`), the release RunCVM's own binaries and libraries are built from, e.g. `DOCKER_BUILDKIT=1 docker build --build-arg ALPINE_KERNEL_VERSION=3.23 -t newsnowlabs/runcvm .`.
+RunCVM bundles the kernels of Debian 13 (trixie), Ubuntu 26.04 (resolute), AlmaLinux 10, Fedora 45, openSUSE Leap 16.1 and Alpine (`linux-virt`, also used for OpenWrt images), each at the version its distribution provides when the RunCVM image is built. The Alpine kernel's release is set by the build argument `ALPINE_KERNEL_VERSION` (by default `3.24`), separately from `ALPINE_VERSION` (by default `3.24`), the release RunCVM's own binaries and libraries are built from, e.g. `DOCKER_BUILDKIT=1 docker build --build-arg ALPINE_KERNEL_VERSION=3.23 -t newsnowlabs/runcvm .`.
 
 Example:
 
@@ -1037,7 +1037,7 @@ Under software emulation (see `RUNCVM_QEMU_ACCEL`), sets the size of QEMU's cach
 
 **`RUNCVM_SYS_ADMIN=1`**
 
-By default, `virtiofsd` is not launched with `-o modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.
+By default, `virtiofsd` is not launched with `--modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.
 
 ### RUNCVM_KERNEL_MOUNT_LIB_MODULES
 
@@ -1096,7 +1096,7 @@ Default is `off`, but `on` may deliver improved performance in some scenarios at
 
 **`RUNCVM_VIRTIOFSD_CACHE=<auto|none|always>`**
 
-Specifies the cache policy passed to `virtiofsd` via `-o cache=<value>`. The default policy is `auto`. Use `none` to avoid caching issues when multiple RunCVM instances need to share access to a volume or bind-mount on the host.
+Specifies the cache policy passed to `virtiofsd` via `--cache=<value>`, with `none` passed as `never`; `virtiofsd`'s other policies, such as `metadata`, are also accepted. The default policy is `auto`. Use `none` to avoid caching issues when multiple RunCVM instances need to share access to a volume or bind-mount on the host.
 
 ### RUNCVM_CGROUPFS
 

@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.3-labs
 
 # Alpine version to build RunCVM's own binaries and libraries with
-ARG ALPINE_VERSION=3.19
+ARG ALPINE_VERSION=3.24
 
 # Alpine version whose kernel (linux-virt) RunCVM bundles as its Alpine and OpenWrt kernels, with
 # an initramfs built by that version's (patched) mkinitfs. It may differ from ALPINE_VERSION, but
@@ -182,7 +182,7 @@ EOF
 FROM alpine:$ALPINE_VERSION as binaries
 
 RUN apk update && \
-    apk add --no-cache file bash qemu-system-x86_64 qemu-virtiofsd qemu-ui-curses qemu-guest-agent \
+    apk add --no-cache file bash qemu-system-x86_64 virtiofsd qemu-ui-curses qemu-guest-agent \
         qemu-hw-display-virtio-vga \
         ovmf \
         jq iproute2 netcat-openbsd blkid util-linux \
