@@ -12,6 +12,7 @@ them deliberately.
 """
 
 import os
+import platform
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -53,9 +54,10 @@ for (name, opts, cpus, memory), result in zip(CASES, t.parallel(run, CASES)):
         continue
     got_cpus, got_mem, cmdline = result
     t.check("%s: VM CPUs" % name, cpus, got_cpus)
-    # MemTotal excludes memory reserved by the kernel: allow up to 12% less than the VM's memory.
+    # MemTotal excludes memory reserved by the kernel: allow up to 12% less than the VM's memory
+    # (16% on arm64, whose kernels reserve more).
     t.check("%s: VM memory about %dM (MemTotal %dM)" % (name, memory, got_mem), True,
-            memory * 0.88 <= got_mem <= memory)
+            memory * (0.84 if platform.machine() == "aarch64" else 0.88) <= got_mem <= memory)
     if name == "kernel-append":
         t.check("%s: argument on the kernel command line" % name, True, "runcvm.test=marker" in cmdline.split())
 
