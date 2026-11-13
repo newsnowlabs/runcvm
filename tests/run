@@ -62,11 +62,24 @@ to 1 (framework helper tcg_cases): when asked to, or when VMs do not use KVM
 anyway (--accel tcg, or no /dev/kvm). Otherwise the test records them as
 skipped.
 
+Image refresh (--pull, or RUNCVM_TEST_PULL=1): tests pull the images they boot
+before using them (Python framework helper pull_images), so that a tag that
+upstream re-points to new images, such as alpine:3.24 or fedora:45 at each
+rebuild, is tested as published now. Without it, docker pulls an image only if
+the host has no copy, so a host goes on testing the copy it first pulled, and
+runs need no network access for images already present. Tests see
+RUNCVM_TEST_PULL=1 or 0.
+
 Detail lines (framework helper log_detail) record step-by-step progress, such
 as each of many requests' outcomes. They are written to the test's log, but to
 the terminal only with --verbose (or RUNCVM_TEST_VERBOSE=1). A detail line is
 one that starts with the ASCII record separator (0x1e), which the runner
 removes.
+
+Shards (--shard I/N) split a run across hosts, e.g. CI runners: of the tests
+otherwise selected (by tier and TEST), in name order, shard I runs every Nth,
+starting with the Ith, so that shards 1/N to N/N together run each test once.
+A shard with no tests runs none, and exits 0.
 
 Requires only Python 3.6+ and the docker CLI.
 """
@@ -160,8 +173,9 @@ def warn(msg):
 
 
 class Environment:
-    def __init__(self, runtime, mock, run_id, use_docker, accel=None, tcg_cases=False):
+    def __init__(self, runtime, mock, run_id, use_docker, accel=None, tcg_cases=False, pull=False):
         self.runtime = runtime
+        self.pull = pull
         self.mock = mock
         self.accel = accel
         # TCG cases run when asked for, or when VMs do not use KVM anyway
@@ -339,6 +353,7 @@ def run_test(test, env, logs_dir, kill_after, verbose=False):
         "RUNCVM_TEST_MOCK": "1" if env.mock else "0",
         "RUNCVM_TEST_ACCEL": env.accel or "",
         "RUNCVM_TEST_TCG_CASES": "1" if env.tcg_cases else "0",
+        "RUNCVM_TEST_PULL": "1" if env.pull else "0",
         "RUNCVM_TEST_RUN_ID": env.run_id,
         "RUNCVM_TEST_NAME": test.name,
         "RUNCVM_TEST_CHECKS": checks_path,
@@ -464,7 +479,7 @@ def write_junit(path, results, env, logs_dir):
         props = ET.SubElement(suite, "properties")
         for k, v in [("runtime", env.runtime), ("mock", "1" if env.mock else "0"),
                      ("accel", env.accel or ""), ("tcg_cases", "1" if env.tcg_cases else "0"),
-                     ("tier", r.test.tier), ("requires", " ".join(r.test.requires))] + r.params:
+                     ("pull", "1" if env.pull else "0"), ("tier", r.test.tier), ("requires", " ".join(r.test.requires))] + r.params:
             ET.SubElement(props, "property", name=k, value=v)
         for status, desc in r.checks:
             case = ET.SubElement(suite, "testcase", classname=r.test.name, name=desc)
@@ -487,7 +502,7 @@ def write_junit(path, results, env, logs_dir):
 def write_json(path, results, env, tier, status_code, running):
     data = {
         "run_id": env.run_id, "runtime": env.runtime, "mock": env.mock, "accel": env.accel,
-        "tcg_cases": env.tcg_cases, "tier": tier,
+        "tcg_cases": env.tcg_cases, "pull": env.pull, "tier": tier,
         "complete": status_code is not None, "running": running, "status": status_code,
         "tests": [{
             "name": r.test.name, "tier": r.test.tier, "requires": r.test.requires,
@@ -506,8 +521,9 @@ def write_results(results_dir, logs_dir, results, env, args, selected, status_co
     progress, with the test named by 'running' (if any) under way. Each file is written to a
     temporary name and renamed into place, so that a reader never sees a partly written file."""
     counts = {s: sum(1 for r in results if r.status == s) for s in ("pass", "fail", "timeout", "skip")}
-    header = "run id: %s; runtime: %s; mock: %d; accel: %s; tcg cases: %d; tier: %s" % (
-        env.run_id, env.runtime, int(args.mock), args.accel or "default", int(env.tcg_cases), args.tier)
+    header = "run id: %s; runtime: %s; mock: %d; accel: %s; tcg cases: %d; pull: %d; tier: %s" % (
+        env.run_id, env.runtime, int(args.mock), args.accel or "default", int(env.tcg_cases), int(env.pull),
+        args.tier)
 
     lines = ["%-8s %-32s %5ss  %s" % (r.status.upper(), r.test.name, r.duration, r.reason) for r in results]
     if running:
@@ -553,6 +569,13 @@ def truthy(value):
     return (value or "").strip().lower() in ("1", "yes", "true", "on")
 
 
+def shard_arg(value):
+    m = re.match(r"^(\d+)/(\d+)$", value)
+    if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
+        raise argparse.ArgumentTypeError("'%s' is not I/N, with 1 <= I <= N" % value)
+    return int(m.group(1)), int(m.group(2))
+
+
 def parse_args(argv):
     here = os.path.dirname(os.path.abspath(__file__))
     p = argparse.ArgumentParser(
@@ -561,6 +584,7 @@ def parse_args(argv):
                     "(e.g. 10-user-workdir) or a shell pattern (e.g. '1*'). With no TEST, "
                     "all tests in the selected tier run.",
         epilog="Environment: RUNTIME, RUNCVM_TEST_MOCK, RUNCVM_TEST_ACCEL, RUNCVM_TEST_TCG_CASES, "
+               "RUNCVM_TEST_PULL, "
                "RUNCVM_TEST_RUN_ID, RUNCVM_TEST_RESULTS, "
                "RUNCVM_TEST_KILL_AFTER (seconds between SIGTERM and SIGKILL on timeout; "
                "default %d), RUNCVM_TEST_JOBS (Container/VMs a test may run at once; default 3). See the comment at the top of this file for details." % DEFAULT_KILL_AFTER)
@@ -583,10 +607,17 @@ def parse_args(argv):
     p.add_argument("--tcg-cases", action="store_true", default=truthy(os.environ.get("RUNCVM_TEST_TCG_CASES")),
                    help="run checks that launch Container/VMs under software emulation (TCG) even "
                         "where VMs use KVM (always on with --accel tcg, or without /dev/kvm)")
+    p.add_argument("--pull", action="store_true", default=truthy(os.environ.get("RUNCVM_TEST_PULL")),
+                   help="have tests pull the images they boot first, refreshing tags that upstream has "
+                        "re-pointed (default: use the host's copy, pulling only images it lacks)")
     p.add_argument("-v", "--verbose", action="store_true", default=truthy(os.environ.get("RUNCVM_TEST_VERBOSE")),
                    help="show tests' detail lines on the terminal as well as in their logs")
     p.add_argument("-x", "--exitfirst", action="store_true", help="stop after the first failure or timeout")
     p.add_argument("-l", "--list", action="store_true", help="list selected tests and exit")
+    p.add_argument("--shard", type=shard_arg, metavar="I/N",
+                   help="run only shard I of N: of the tests otherwise selected, in name order, "
+                        "every Nth, starting with the Ith; for splitting a run across hosts. A "
+                        "shard with no tests runs none, and exits 0")
     p.add_argument("--no-preflight", action="store_true",
                    help="skip Docker checks and clean-up (for tests that do not use Docker)")
     return p.parse_args(argv)
@@ -620,6 +651,13 @@ def main(argv):
                 raise HarnessError("test '%s' has unknown requirement '%s' (known: %s)"
                                    % (t.name, req, ", ".join(KNOWN_REQUIREMENTS + ("docker>=<major>.<minor>",))))
 
+    if args.shard:
+        index, count = args.shard
+        selected = selected[index - 1::count]
+        if not selected and not args.list:
+            print("No tests in shard %d/%d." % (index, count))
+            return 0
+
     if args.list:
         for t in selected:
             print("%-32s %-9s %6ss  %s" % (t.name, t.tier, t.timeout, " ".join(t.requires)))
@@ -629,7 +667,7 @@ def main(argv):
                            % (args.tier, ", patterns: " + " ".join(args.tests) if args.tests else ""))
 
     env = Environment(runtime, args.mock, run_id, use_docker=not args.no_preflight, accel=args.accel,
-                      tcg_cases=args.tcg_cases)
+                      tcg_cases=args.tcg_cases, pull=args.pull)
     if not args.no_preflight:
         env.preflight()
 
@@ -648,6 +686,7 @@ def main(argv):
     say("  runtime:  %s%s" % (runtime, " (stand-in mode)" if args.mock else ""))
     say("  accel:    %s" % (args.accel or "(RunCVM default)"))
     say("  tcg:      %s" % ("cases run" if env.tcg_cases else "cases skipped (--tcg-cases to run them)"))
+    say("  pull:     %s" % ("images refreshed" if env.pull else "host's copies used (--pull to refresh)"))
     say("  tier:     %s" % args.tier)
     say("  tests:    %s" % " ".join(t.name for t in selected))
     say("  results:  %s" % results_dir)

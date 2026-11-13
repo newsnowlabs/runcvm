@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """'docker stop' and 'docker kill' of a running RunCVM Container/VM.
 
-On 'docker stop', RunCVM asks the VM to power off (ACPI), then runs
-'poweroff' in it, then sends SIGTERM to the VM's PID 1:
+On 'docker stop', RunCVM asks the VM to power off as RUNCVM_SHUTDOWN's
+default chooses: with --init, busybox 'poweroff'; without, where the
+entrypoint is not an init, ACPI, 'poweroff' and SIGTERM to the VM's
+PID 1 at once (see tests/49-vm-shutdown for the other methods):
 
 - With --init, busybox init powers the VM off cleanly: exit status 0,
   well within the stop timeout.
@@ -13,6 +15,9 @@ On 'docker stop', RunCVM asks the VM to power off (ACPI), then runs
   /.runcvm/exitcode and exit: that status is reported, in either mode.
 
 'docker kill' ends the Container/VM at once: exit status 137.
+
+RunCVM's requests to QEMU while stopping a Container/VM (e.g. its monitor's
+'system_powerdown') do not appear in the container's output ('docker logs').
 
 The expected values describe current behaviour. A change to it must update
 them deliberately.
@@ -60,7 +65,7 @@ def run(case):
     t.docker("wait", container, timeout=STOP_TIMEOUT * 2)
     elapsed = time.time() - start
     status = t.docker("inspect", "-f", "{{.State.ExitCode}}", container).stdout.strip()
-    return int(status) if status.isdigit() else status, elapsed, ""
+    return int(status) if status.isdigit() else status, elapsed, t.docker("logs", container).stdout
 
 
 results = t.parallel(run, CASES)
@@ -75,5 +80,8 @@ for (name, init, entrypoint, action, expected, prompt), (status, elapsed, output
     t.check("%s: exit status" % desc, expected, status)
     if prompt:
         t.check("%s: finished before the %ds stop timeout" % (desc, STOP_TIMEOUT), True, elapsed < STOP_TIMEOUT)
+    if action == "stop" and not t.check("%s: no QEMU monitor dialogue in 'docker logs'" % desc, False,
+                                        "QEMU" in output and "monitor" in output or "system_powerdown" in output):
+        t.log("docker logs:\n%s" % output)
 
 t.finish()

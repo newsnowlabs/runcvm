@@ -82,7 +82,7 @@ if [ -f /.runcvm/rootdisk ]; then
 
   # Bind each path over the same path on the disk, recursively, so that each carries the mounts
   # below it, creating a mountpoint of the same kind if the disk lacks one: the disk holds an empty
-  # directory at each mountpoint that is a directory, and nothing at a mounted file.
+  # directory at each mountpoint that is a directory, and an empty file at a mounted file.
   ROOTDISK_CARRIED=()
   while IFS= read -r path
   do
@@ -330,6 +330,25 @@ else
   cgroupfs_mount "${RUNCVM_CGROUPFS:-2}"
 fi
 
+# Record how runcvm-ctr-shutdown asks the guest to power off, as RUNCVM_SHUTDOWN requests; by
+# default ('auto'), as the guest's init understands: 'busybox' for RunCVM's own init (--init) or
+# an entrypoint .../init that is busybox's; 'systemd' for systemd; otherwise 'all'.
+case "${RUNCVM_SHUTDOWN:-auto}" in
+  auto)
+    if [ "$RUNCVM_INIT" = "1" ] || [[ "${ARGS[0]}" =~ /init$ && "$ARGS_INIT" =~ /busybox$ ]]; then
+      shutdown_mode=busybox
+    elif [[ "$ARGS_INIT" =~ /systemd$ ]]; then
+      shutdown_mode=systemd
+    else
+      shutdown_mode=all
+    fi
+    ;;
+  *)
+    shutdown_mode="$RUNCVM_SHUTDOWN"
+    ;;
+esac
+echo "$shutdown_mode" >/.runcvm/state/shutdown
+
 # Make directory for dropbear host keys and public/private keypair
 mkdir -p /.runcvm/dropbear
 
@@ -366,7 +385,7 @@ null::respawn:$RUNCVM_GUEST/scripts/runcvm-vm-qemu-ga
 null::respawn:$RUNCVM_GUEST/usr/sbin/dropbear -REF -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/usr/lib/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
 null::ctrlaltdel:$RUNCVM_GUEST/bin/poweroff
 null::restart:$RUNCVM_GUEST/bin/poweroff
-null::shutdown:$RUNCVM_GUEST/bin/poweroff
+null::shutdown:$RUNCVM_GUEST/scripts/runcvm-vm-shutdown
 _EOE_
 
   # Allow runcvm-vm-start to run once (and only once)
@@ -380,15 +399,24 @@ else
   # Clean RUNCVM env vars
   clean_env
 
+  # Each daemon below runs in a session of its own, as a child of PID 1, with its output discarded.
+  # This VM's PID 1 may hold a terminal as its controlling terminal (as after a dracut initramfs's
+  # systemd switches root to it), and giving it up, as runcvm-init and systemd each do, makes the
+  # kernel send SIGHUP to PID 1's process group, which would otherwise include them. The session is
+  # created in the foreground, so it exists before runcvm-init runs.
+  start_daemon() {
+    busybox setsid $RUNCVM_GUEST/bin/bash -c '"$@" &>/dev/null &' start_daemon "$@"
+  }
+
   # Run the qemu guest agent, needed to support future functionality
-  $RUNCVM_GUEST/scripts/runcvm-vm-qemu-ga &>/dev/null &
+  start_daemon $RUNCVM_GUEST/scripts/runcvm-vm-qemu-ga
 
   # Run dropbear SSH server, needed to support 'docker exec'.
   # It accepts only RunCVM's own key (via the EPKA plugin), and has no password logins; -j and -k
   # disable port forwarding. It runs commands with RunCVM's bash, and its sessions inherit its
   # environment, so it starts with an empty one: variables from the image, such as BASH_ENV,
   # would otherwise reach that bash.
-  busybox env -i $RUNCVM_GUEST/usr/sbin/dropbear -REF -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/usr/lib/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid &>/dev/null &
+  start_daemon busybox env -i $RUNCVM_GUEST/usr/sbin/dropbear -REF -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/usr/lib/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
 
   # Run init from the image
   # Pipe input/output from/to console device
