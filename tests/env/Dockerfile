@@ -5,7 +5,7 @@
 # README.md in this directory.
 
 # The RunCVM image whose /opt/runcvm is preinstalled: the RunCVM that L1 runs L2s with.
-ARG RUNCVM_IMAGE=newsnowlabs/runcvm:v1.7.0
+ARG RUNCVM_IMAGE=newsnowlabs/runcvm:v1.8.0
 
 FROM ${RUNCVM_IMAGE} AS runcvm
 
