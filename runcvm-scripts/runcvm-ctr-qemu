@@ -577,7 +577,7 @@ disk_add_device() {
     # drive=drv$id               : connect to backend created above
     # iothread=ioth$id           : process requests in dedicated I/O thread
     # queue-size=1024            : set depth of each virtqueue
-    # num-queues=4               : create 4 queues, allowing parallel I/O across vCPUs
+    # num-queues=$queues         : one queue per vCPU, up to 8, allowing parallel I/O across vCPUs
     -device virtio-blk-pci,drive=drv$id,iothread=ioth$id,queue-size=1024,num-queues=$queues
   )
 }
@@ -715,7 +715,7 @@ else
   # QEMU machine configuration:
   # - q35: modern Intel chipset with PCIe and UEFI support
   # - accel=kvm: enable KVM for near-native performance (requires hardware virtualisation)
-  # - usb=on: enable USB support (e.g., for peripherals or boot devices)
+  # - usb=$USB: USB support, off unless RUNCVM_QEMU_USB=on (see below)
   # - sata=off: disable SATA controller if using virtio/NVMe instead
   # - vmport=off: disable VMware backdoor port for improved security/stealth
   # - smm=on: enable System Management Mode (required for UEFI Secure Boot)
@@ -723,7 +723,7 @@ else
   # - hpet=off: disable High Precision Event Timer to avoid timing issues in some guests
   # - kernel_irqchip=on: enable kernel-based interrupt controller for better performance
 
-  # - usb=on: enable USB support when requested
+  # USB support, for RUNCVM_QEMU_USB=on only.
   if [ "$RUNCVM_QEMU_USB" = "on" ]; then
     USB="on"
   else
@@ -861,7 +861,7 @@ fi
 
 if [ "$RUNCVM_BIOS_DEBUG" != "1" ] && [ "$RUNCVM_QEMU_ARCH" != "arm64" ]; then
   # Disable SeaBIOS serial console (on every architecture but ARM64, which uses no SeaBIOS).
-  # This fw_cfg path is modified from the SeaBIOS default (to avoid an otherwise-inevitable QEMU
+  # This -fw_cfg path is modified from the SeaBIOS default (to avoid an otherwise-inevitable QEMU
   # warning being emitted) and so requires patched bios.bin file(s) (see Dockerfile)
   OPTS+=(-fw_cfg opt/org.seabios/etc/sercon-port,string=0)
 fi
@@ -978,6 +978,18 @@ ARGS=(
   -L $RUNCVM_GUEST/usr/share/qemu
   -append "$RUNCVM_KERNEL_ROOT $INIT rw ${APPEND[*]} $RUNCVM_KERNEL_APPEND"
 )
+
+# With a terminal ('docker run -t') as standard input, QEMU's stdio console keeps output
+# processing (OPOST) on the container's terminal, while the VM's console translates each LF to
+# CR LF itself, as a terminal does: stop the container's terminal from translating it again, so
+# lines end CR LF, not CR CR LF.
+#
+# This applies where the VM's console is QEMU's stdio, which every console device but tty0 is, in
+# any display mode and on any architecture (e.g. hvc0, or a serial port's ttyS0): so tty0 alone,
+# the console of display mode 'vnc', which is the VM's display, is left out.
+if [ -t 0 ] && [ "$CONSOLE_DEV" != tty0 ]; then
+  busybox stty -onlcr 2>/dev/null || true
+fi
 
 # virtiofsd is started in the background by runcvm-ctr-entrypoint, and QEMU fails at once if the
 # virtiofsd socket does not yet exist: wait up to 30s for it.

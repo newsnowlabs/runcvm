@@ -96,15 +96,15 @@ jobs:
         run: tests/selftest/run-selftest --docker
 
   build:
-    # Pull requests: not drafts, nor with ci:skip; for label changes, only adding a ci: label
-    # other than ci:skip, or removing ci:skip. The test jobs need this one, so they run or are
-    # skipped with it.
+    # Pull requests: not drafts, nor with ci:skip; for label changes, only adding ci:extended
+    # or ci:all, or removing ci:skip. The test jobs need this one, so they run or are skipped
+    # with it.
     if: >-
       github.event_name != 'pull_request' || (
         !github.event.pull_request.draft &&
         !contains(github.event.pull_request.labels.*.name, 'ci:skip') &&
         (github.event.action != 'labeled' ||
-          (startsWith(github.event.label.name, 'ci:') && github.event.label.name != 'ci:skip')) &&
+          github.event.label.name == 'ci:extended' || github.event.label.name == 'ci:all') &&
         (github.event.action != 'unlabeled' || github.event.label.name == 'ci:skip')
       )
     concurrency:
@@ -172,8 +172,8 @@ jobs:
           # The runner image's Docker can lag Docker's releases; RunCVM's tests need 29.4 or later.
           sudo apt-get remove -y moby-engine moby-cli moby-buildx moby-compose moby-containerd moby-runc || true
           curl -fsSL https://get.docker.com -o "$RUNNER_TEMP/get-docker.sh"
+          # get-docker.sh enables and starts the daemon itself, and checks it with 'docker version'.
           sudo sh "$RUNNER_TEMP/get-docker.sh"
-          sudo systemctl restart docker
 
       - name: Runner facts
         run: |
