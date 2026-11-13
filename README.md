@@ -217,8 +217,10 @@ Under way:
 
 RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM. It is highly portable among Linux distributions and development platforms providing KVM, and can even be installed on [GitHub Codespaces](https://github.com/features/codespaces).
 
+Support for arm64 (aarch64) hosts is experimental. RunCVM's published images are for amd64 only, so on an arm64 host, build RunCVM there and install that build (see [Building](#building)). CI builds RunCVM for arm64 and runs a few of its tests on arm64 under software emulation, but none under KVM. RunCVM detects the host's architecture when it creates a Container/VM; `--env=RUNCVM_QEMU_ARCH=<x86_64|arm64>` overrides it.
+
 RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and these features of the host's kernel, which the kernels of common distributions provide, built in or as modules that load on demand:
-- KVM: `kvm`, with `kvm_intel` or `kvm_amd`;
+- KVM: `kvm`, with `kvm_intel` or `kvm_amd` on x86_64 (on arm64, KVM is part of `kvm` itself);
 - `tun` (`CONFIG_TUN`), for the tap device that connects the VM to the container;
 - the Linux bridge, `bridge` (`CONFIG_BRIDGE`), which RunCVM creates in each container between the tap device and the container's network interface;
 - `nf_tables`, with which RunCVM installs firewall rules in each container, as Docker's own networking does: its IPv4, ARP and bridge families (`CONFIG_NF_TABLES_IPV4`, `CONFIG_NF_TABLES_ARP`, `CONFIG_NF_TABLES_BRIDGE`), bridge `meta` expressions (`nft_meta_bridge`, `CONFIG_NFT_BRIDGE_META`), NAT (`nft_nat` and `nft_chain_nat`, `CONFIG_NFT_NAT`) and redirection (`nft_redir`, `CONFIG_NFT_REDIR`), with connection tracking;
@@ -229,6 +231,15 @@ RunCVM does not need the `br_netfilter` module; [docs/adr/0001-container-firewal
 RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
 RunCVM is tested on x86-64 hosts with KVM running Debian 12 (Bookworm) and Ubuntu 24.04 LTS (Noble Numbat), with Docker Engine, both Docker's own packages and Ubuntu's `docker.io`. The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
+
+### macOS on Apple Silicon
+
+Running RunCVM on macOS is experimental, as is arm64 support. On macOS, Docker runs inside an arm64 Linux VM, such as one that [Lima](https://lima-vm.io/) provides (e.g. with its `docker` template). RunCVM can run inside that VM, as on any arm64 host: build RunCVM within the VM, and install that build. For KVM acceleration, the VM needs nested virtualisation, so that `/dev/kvm` exists inside it; Apple's Virtualization framework offers it on M3 and later chips, with macOS 15 or later. Without `/dev/kvm`, launch Container/VMs with `--env=RUNCVM_QEMU_ACCEL=auto` or `tcg` for software emulation, which is much slower.
+
+- With Lima, enable nested virtualisation for the VM, e.g. `limactl start --set='.nestedVirtualization=true' template://docker` for a new VM, or `limactl stop <vm> && limactl edit <vm> --set '.nestedVirtualization=true' && limactl start <vm>` for an existing one.
+- [Podman Desktop](https://podman-desktop.io/)'s VM is untested: it provides Podman but not Docker, which RunCVM's build and installer need.
+
+Check that `/dev/kvm` exists inside the VM (e.g. `limactl shell <vm> ls -l /dev/kvm`) before installing RunCVM there. The VM may also lack `/dev/vhost-net` (needed by `RUNCVM_QEMU_NET_VHOST=1`) and hugepages (needed by `RUNCVM_HUGETLB=1`); both options are off by default.
 
 ## Installation
 
@@ -616,7 +627,7 @@ Some points to bear in mind:
 
 - **Where to keep the backing file.** A backing file under `/disks` in a named Docker volume, as above, is kept outside the container's overlay filesystem, survives removal of the container, and can be reused by a later Container/VM. Without the `--mount`, the backing file is created in the container's own filesystem, and goes when the container is removed.
 - **Disk size.** A backing file is sparse by default, so it takes host space only as `dockerd` writes to it. Size the disk for every image, container and volume `dockerd` will hold. With the containerd image store, each image takes space twice: once compressed, and once unpacked. If the host's filesystem fills up, `dockerd`'s writes to a sparse disk fail with I/O errors, which can leave Docker's storage inconsistent. For a long-lived `dockerd`, consider adding `prealloc=on` (e.g. `RUNCVM_DISKS=/disks/docker,/var/lib/docker:/var/lib/containerd,ext4,10G,prealloc=on`), which takes the disk's full size on the host from the start, and keeps it taken, even after images are removed (see [Preallocated disks](#preallocated-disks)).
-- **Keeping the data.** Launch with `--init`, or from an image whose entrypoint is its own init, such as systemd, so that the VM flushes the disk when it stops (see the warning under [`RUNCVM_DISKS`](#runcvm_disks)). A disk thrown away after each run needs no flushing.
+- **Keeping the data.** Launch with `--init`, or from an image whose entrypoint is its own init, such as systemd, so that the VM flushes the disk when it stops (see [Shutdown and disk data integrity](#shutdown-and-disk-data-integrity) under [`RUNCVM_DISKS`](#runcvm_disks)). A disk thrown away after each run needs no flushing.
 - **Existing disks.** A destination cannot be added to an existing disk. A disk created for `/var/lib/docker` alone (e.g. with `RUNCVM_DISKS=/disks/docker,/var/lib/docker,ext4,5G`), by this or an earlier release, has layout `root` and holds only that one destination. To add `/var/lib/containerd`, give the new spec a new backing file, or remove the old one, losing its contents.
 - **Nested RunCVM.** When the inner `dockerd` itself runs RunCVM Container/VMs, as in [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm), consider adding `/opt/runcvm` to the disk's destinations too, so the inner Container/VMs are not served RunCVM over nested virtiofs. RunCVM's own test environment, in `tests/env/Dockerfile`, uses `RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G`.
 
@@ -628,7 +639,7 @@ Instead of a disk, you can mount Docker volumes at `/var/lib/docker` and `/var/l
 docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker --mount=type=volume,src=mycontainerd1,dst=/var/lib/containerd --env=RUNCVM_SYS_ADMIN=1 docker:dind
 ```
 
-> N.B. This option adds `CAP_SYS_ADMIN` capabilities to the container and then launches `virtiofsd` with `-o modcaps=+sys_admin`.
+> N.B. This option adds `CAP_SYS_ADMIN` capabilities to the container and then launches `virtiofsd` with `--modcaps=+sys_admin`.
 
 ### Container runtimes inside RunCVM
 
@@ -785,7 +796,7 @@ opensuse/6.12.0-160100.8-default
 opensuse/latest
 ```
 
-RunCVM bundles the kernels of Debian 13 (trixie), Ubuntu 26.04 (resolute), AlmaLinux 10, Fedora 45, openSUSE Leap 16.1 and Alpine (`linux-virt`, also used for OpenWrt images), each at the version its distribution provides when the RunCVM image is built. The Alpine kernel's release is set by the build argument `ALPINE_KERNEL_VERSION` (by default `3.24`), separately from `ALPINE_VERSION` (by default `3.19`), the release RunCVM's own binaries and libraries are built from, e.g. `DOCKER_BUILDKIT=1 docker build --build-arg ALPINE_KERNEL_VERSION=3.23 -t newsnowlabs/runcvm .`.
+RunCVM bundles the kernels of Debian 13 (trixie), Ubuntu 26.04 (resolute), AlmaLinux 10, Fedora 45, openSUSE Leap 16.1 and Alpine (`linux-virt`, also used for OpenWrt images), each at the version its distribution provides when the RunCVM image is built. The Alpine kernel's release is set by the build argument `ALPINE_KERNEL_VERSION` (by default `3.24`), separately from `ALPINE_VERSION` (by default `3.24`), the release RunCVM's own binaries and libraries are built from, e.g. `DOCKER_BUILDKIT=1 docker build --build-arg ALPINE_KERNEL_VERSION=3.23 -t newsnowlabs/runcvm .`.
 
 Example:
 
@@ -845,16 +856,7 @@ When RunCVM creates a Container/VM, fstab entries will be drafted, identifying e
 
 As in Docker, where a deeper mount is mounted over a shallower one, disks, volumes, bind mounts and tmpfs mounts (`--mount type=tmpfs`, `--tmpfs`) are mounted in the VM in order of the depth of their destinations, whatever the order of the disks in `RUNCVM_DISKS`, so each path is the deepest mount at or above it: e.g. with `--mount=type=volume,src=shared,dst=/home/user/shared` and a disk with destination `/home`, the VM's `/home` is on the disk, and `/home/user/shared` is the volume; with disks at `/home` and `/home/b`, or a tmpfs mount or volume at `/home` and a disk at `/home/b`, `/home/b` is that disk; and with a disk at `/home`, a volume at `/home/user/shared` and a disk at `/home/user/shared/db`, each is at its own destination. If the mount above lacks a mountpoint for a mount below it, RunCVM creates one. A disk may not share a destination with another disk or a tmpfs mount. A destination that does not exist in the image is created before any disk is, as a directory with mode `0755`, owned by `root`, as are any missing directories above it. A disk at a volume's or bind mount's destination is mounted over it, so is prepopulated from its contents when created: e.g. a disk at `/var/lib/docker`, where the `docker:dind` image declares a `VOLUME`; this holds too where that disk is itself below another disk or a tmpfs mount. Docker's volumes and bind mounts that a disk or tmpfs mount hides are held during boot and mounted again over it; how they appear in the VM's `/etc/fstab` is set by [`RUNCVM_FSTAB`](#runcvm_fstab). [docs/adr/0002-disk-mount-planning.md](docs/adr/0002-disk-mount-planning.md) records how RunCVM plans the disks, their population and the VM's mounts. A new disk leaves an empty directory at each other disk's `<dst>` below its own, whatever their order, as that disk is mounted there in the VM and holds its files.
 
-> **Warning: launch with `--init` if a disk's contents must survive the VM ending.** Data written to a disk stays in the VM's memory until the VM's kernel writes it out, so whether it reaches the backing file depends on how the VM ends:
->
-> - With `--init`, the VM's init syncs its file systems before powering off, both when the entrypoint exits and on `docker stop`.
-> - Without `--init`, `docker stop` runs `poweroff` in the VM, which also syncs file systems first. But when the entrypoint exits by itself, the VM ends at once: the entrypoint is the VM's PID 1, and nothing runs after it. Data not yet written out is lost, and the file system needs journal recovery when next mounted.
-> - `docker kill` ends the VM at once in either mode.
-> - Launch an image whose entrypoint is its own init, such as systemd, without `--init`, which would displace it as the VM's PID 1. Such an init normally runs until `docker stop`, which syncs file systems as above.
->
-> To keep a disk's data without `--init`, the workload must flush the disk before its entrypoint exits, with `sync -f <dst>` for one `<dst>` of each disk, which flushes only that disk's file system and needs no special privileges. A workload running as root may instead unmount the disk once nothing still uses it, which also leaves the disk's file system clean, needing no journal recovery. That means unmounting the disk's own mount: `umount <dst>` does so only where the disk is mounted directly at `<dst>`. Where `<dst>` is a bind mount from the disk, `umount <dst>` removes only the bind mount and leaves the disk mounted, unflushed. A plain `sync` also works, but flushes every file system in the VM, including its root file system, whether that is shared with the container or is a whole-root disk.
->
-> A disk whose contents are thrown away after each run, such as a `/var/lib/docker` for a disposable test, needs no flushing.
+Data written to a disk stays in the VM's memory until the VM's kernel writes it out, so whether a disk's contents survive the VM ending depends on how the VM shuts down: see [Shutdown and disk data integrity](#shutdown-and-disk-data-integrity) below.
 
 #### Preallocated disks
 
@@ -910,7 +912,7 @@ The VM still boots from the container's filesystem over virtiofs. Early in boot,
 
 The disk is populated only when it is created. While it exists, later changes to the image, or to the container's own filesystem, are not seen in the VM; and changes the VM makes outside volumes are made to the disk, not the container's filesystem, so `docker diff`, `docker cp`, `docker commit` and `docker export` do not see them. To start afresh from the image, remove the disk's backing file.
 
-Every write outside volumes goes to the disk, so the warning above on keeping a disk's data applies to all of them. With `--init`, or an image whose entrypoint is its own init (such as systemd), the VM syncs its filesystems when it powers off. Without either, a workload whose data must survive should run `sync -f /` before it exits. This flushes the whole-root disk only.
+Every write outside volumes goes to the disk, so [Shutdown and disk data integrity](#shutdown-and-disk-data-integrity) below applies to all of them. With `--init`, RunCVM's init syncs every disk, the whole-root disk included, and remounts the whole-root disk read-only before the VM powers off; an image whose entrypoint is its own init (such as systemd) unmounts its file systems, and remounts its root file system read-only, as it powers off. Without either, a workload whose data must survive should run `sync -f /` before it exits. This flushes the whole-root disk only.
 
 Compared with disks whose destinations are other paths, such as `/var/lib/docker` or `/home` (here called multi-path disks):
 
@@ -923,7 +925,22 @@ Compared with disks whose destinations are other paths, such as `/var/lib/docker
 | `docker diff`, `docker cp`, `docker commit`, `docker export` | Unaffected, except for the listed paths | Do not see changes made in the VM outside volumes |
 | If the disk outlives the image | The listed paths are stale | The whole root is stale: image updates are not seen |
 
-#### Example #1
+#### Shutdown and disk data integrity
+
+Data written to a disk stays in the VM's memory until the VM's kernel writes it out, so whether it reaches the backing file depends on how the VM ends:
+
+- With `--init`, RunCVM's init ends every other process, then syncs and unmounts the disks (remounting read-only any it cannot unmount) before powering off, so each disk's file system is left clean. On `docker stop`, or another stop signal (see [`RUNCVM_SHUTDOWN`](#runcvm_shutdown)), it sends every process SIGTERM and waits for them however long they take, syncing the disks every second (each with `sync -f`, so as not to sync the host's file systems shared with the VM), so that Docker's stop timeout (`-t`) alone limits the wait, as for any container; writes made before Docker ends the VM are kept. When the entrypoint exits by itself, it kills any process left at once, as Docker's own init does.
+- With an image whose entrypoint is its own init, such as systemd, launched without `--init` (which would displace it as the VM's PID 1): on `docker stop`, RunCVM asks that init to power off (see [`RUNCVM_SHUTDOWN`](#runcvm_shutdown)), and it stops its services and unmounts its file systems first.
+- Without `--init`, with an entrypoint that is not an init, `docker stop` sends the entrypoint, the VM's PID 1, SIGTERM and SIGUSR2, and presses the VM's ACPI power button. When the entrypoint exits, on those signals or by itself, the VM ends at once: nothing runs after the VM's PID 1. Data not yet written out is lost, and the file system needs journal recovery when next mounted.
+- `docker kill` (SIGKILL), `docker stop -t 0` and `docker rm -f` end the VM at once in every mode.
+
+So for a disk's contents to survive the VM ending, launch with `--init`, or with an image whose entrypoint is its own init. Otherwise, the workload must flush the disk before its entrypoint exits, with `sync -f <dst>` for one `<dst>` of each disk, which flushes only that disk's file system and needs no special privileges. A workload running as root may instead unmount the disk once nothing still uses it, which also leaves the disk's file system clean, needing no journal recovery. That means unmounting the disk's own mount: `umount <dst>` does so only where the disk is mounted directly at `<dst>`. Where `<dst>` is a bind mount from the disk, `umount <dst>` removes only the bind mount and leaves the disk mounted, unflushed. A plain `sync` also works, but flushes every file system in the VM, including its root file system, whether that is shared with the container or is a whole-root disk.
+
+A disk whose contents are thrown away after each run, such as a `/var/lib/docker` for a disposable test, needs no flushing.
+
+#### Examples
+
+##### Example #1
 
 ```console
 docker run -it --runtime=runcvm --init --env=RUNCVM_DISKS=/disk1,/home,ext4,5G <docker-image>
@@ -931,7 +948,7 @@ docker run -it --runtime=runcvm --init --env=RUNCVM_DISKS=/disk1,/home,ext4,5G <
 
 In this example, RunCVM will check for existence of a file at `/disk1` within `<docker-image>`, and if not found create a 5G backing file (in the container's filesystem, typically overlay2) with an ext4 filesystem holding a directory `home` prepopulated with any preexisting contents of `/home`, then add the disk to `/etc/fstab`, mount it within the VM, and bind-mount its `home` directory at `/home`. With `--env=RUNCVM_DISKS=/disk1,/home,ext4,5G,layout=root`, the disk would instead hold the contents of `/home` at its root, and be mounted directly at `/home`.
 
-#### Example #2
+##### Example #2
 
 ```console
 docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=/disks/disk1,/home,ext4,5G;/disks/disk2,/opt,ext4,2G' <docker-image>
@@ -939,7 +956,7 @@ docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=
 
 This example behaves similarly, except that the `runcvm-disks` persistent Docker volume is first mounted at `/disks` within the container's filesystem, and therefore the backing files at `/disks/disk1` and `/disks/disk2` (mounted in the VM at `/home` and `/opt` respectively) are stored in the _persistent volume_ (typically stored in `/var/lib/docker` on the host, bypassing overlay2).
 
-#### Example #3
+##### Example #3
 
 ```console
 docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=/disks/data,/var/lib/docker:/var/lib/containerd:/home,ext4,40G' <docker-image>
@@ -1009,7 +1026,7 @@ Enable USB interface.
 
 **`RUNCVM_BIOS=EFI`**
 
-By default SeaBIOS is used to boot the VM. Enable OVMF EFI boot with this option.
+By default SeaBIOS is used to boot the VM (on arm64, QEMU boots the kernel directly, without firmware). Enable OVMF EFI boot with this option, on x86_64 only: on arm64, the Container/VM fails to start with an error.
 
 ### RUNCVM_QEMU_NET_VHOST
 
@@ -1054,7 +1071,7 @@ Under software emulation (see `RUNCVM_QEMU_ACCEL`), sets the size of QEMU's cach
 
 **`RUNCVM_SYS_ADMIN=1`**
 
-By default, `virtiofsd` is not launched with `-o modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.
+By default, `virtiofsd` is not launched with `--modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.
 
 ### RUNCVM_KERNEL_MOUNT_LIB_MODULES
 
@@ -1113,7 +1130,7 @@ Default is `off`, but `on` may deliver improved performance in some scenarios at
 
 **`RUNCVM_VIRTIOFSD_CACHE=<auto|none|always>`**
 
-Specifies the cache policy passed to `virtiofsd` via `-o cache=<value>`. The default policy is `auto`. Use `none` to avoid caching issues when multiple RunCVM instances need to share access to a volume or bind-mount on the host.
+Specifies the cache policy passed to `virtiofsd` via `--cache=<value>`, with `none` passed as `never`; `virtiofsd`'s other policies, such as `metadata`, are also accepted. The default policy is `auto`. Use `none` to avoid caching issues when multiple RunCVM instances need to share access to a volume or bind-mount on the host.
 
 ### RUNCVM_CGROUPFS
 
@@ -1138,6 +1155,30 @@ Use `1` or `hybrid` only for software that requires cgroup v1. A kernel built wi
 If cgroup2 is already mounted on `/sys/fs/cgroup` when the VM starts, as the systemd-based initramfs of some distributions (such as Oracle Linux) leaves it, RunCVM mounts nothing more, whatever the value.
 
 Please also note that in the case your distribution is running Systemd you may instead set `--env=RUNCVM_KERNEL_APPEND='systemd.unified_cgroup_hierarchy=<boolean>'` (where `<boolean>` is `0` or `1`) to request Systemd to create either hybrid or cgroup2-only cgroup filesystem(s) itself.
+
+### RUNCVM_SHUTDOWN
+
+**`RUNCVM_SHUTDOWN=<auto|systemd|busybox|acpi|all|signal:<signal>>`**
+
+Specifies how RunCVM asks the VM to power off when the container is stopped: by `docker stop`, or by any of SIGTERM, SIGINT, SIGPWR, SIGRTMIN+3 and SIGRTMIN+4 (e.g. from `docker kill -s`). RunCVM does not pass these signals to QEMU: the container stops once the VM has powered off, or when `docker stop`'s timeout (`-t`, by default 10 seconds) runs out and Docker kills it. Acceptable values are:
+
+- `systemd` - send the VM's PID 1 SIGRTMIN+4, systemd's request to power off; systemd stops its services and unmounts its file systems first
+- `busybox` - run RunCVM's busybox `poweroff`, which asks busybox init, such as RunCVM's own with `--init`, to power off; RunCVM's own init first ends every other process, then syncs and unmounts the disks
+- `acpi` - press the VM's ACPI power button, which a VM running `acpid` or `systemd-logind` acts on
+- `signal:<signal>` - send the VM's PID 1 `<signal>`, by name (e.g. `PWR` or `SIGINT`) or by number, for an init that RunCVM does not recognise; numbers follow Docker's, in which SIGRTMIN is 34
+- `all` - press the ACPI power button, run busybox `poweroff`, and send the VM's PID 1 SIGTERM, all at once
+
+If `RUNCVM_SHUTDOWN` is left undefined, set to an empty string or set to `auto`, RunCVM chooses:
+
+- `busybox`, with `--init`, or if the specified entrypoint ends in `/init` and is (or, if a symlink, its target is) busybox;
+- `systemd`, if the specified entrypoint (or, if a symlink, its target) matches the regex `/systemd$`, as for `RUNCVM_CGROUPFS`;
+- else `all`.
+
+`systemd`, `busybox` and `signal:<signal>` act through the channel `docker exec` uses; where that fails, e.g. while the VM is still booting, RunCVM does `all` instead.
+
+What happens to the VM's disks as it powers off, whether they are synced and unmounted, depends on the VM's init, provided `RUNCVM_SHUTDOWN` asks it in a way it acts on: see [Shutdown and disk data integrity](#shutdown-and-disk-data-integrity) under [`RUNCVM_DISKS`](#runcvm_disks).
+
+To stop a Container/VM without a clean shutdown, e.g. one whose disks are thrown away, use `docker stop -t 0`, `docker kill` or `docker rm -f`.
 
 ## Upgrading
 
@@ -1220,7 +1261,7 @@ The `runcvm-ctr-entrypoint`:
 
 The `runcvm-init` process:
 - Is RunCVM's custom init process, that takes over as PID1 within the container, supervising `runcvm-ctr-qemu` to launch the VM.
-- Waits for a TERM signal. On receiving one, it spawns `runcvm-ctr-shutdown`, which cycles through a number of methods to try to shut down the VM cleanly.
+- Waits for a stop signal: SIGTERM, SIGINT, SIGPWR, or SIGRTMIN+3 or SIGRTMIN+4, which images for systemd declare as their stop signal. On receiving one, it spawns `runcvm-ctr-shutdown`, which asks the VM to power off as [`RUNCVM_SHUTDOWN`](#runcvm_shutdown) specifies. It never passes these signals to QEMU, which would end it at once.
 - Waits for its child (QEMU) to exit. When it does, execs `runcvm-ctr-exit` to retrieve any saved exit code (written by the application to `/.runcvm/exitcode`) and exit with this code.
 
 The `runcvm-ctr-qemu` script:
@@ -1233,7 +1274,7 @@ The `runcvm-vm-init` process:
 - Populates each new `xfs` or `btrfs` disk from the image, then switches the root filesystem to a whole-root disk, if `RUNCVM_DISKS` defines one, with `pivot_root`, binding onto it the mounts that must stay live, before anything else uses the root
 - Retrieves the container configuration - network (IPv4, and IPv6 if present), environment, disk and tmpfs mounts - saved by `runcvm-ctr-entrypoint` to `/.runcvm`, and reproduces it within the VM
 - Launches the container's pre-existing entrypoint, in one of two ways.
-   1. If `RUNCVM_INIT` is `1` (i.e. the container was originally intended to be launched with Docker's own init process) then it configures and execs busybox `init`, which becomes the VM's PID1, to supervise `dropbear`, run `runcvm-vm-start` and `poweroff` the VM if signalled to do so.
+   1. If `RUNCVM_INIT` is `1` (i.e. the container was originally intended to be launched with Docker's own init process) then it configures and execs busybox `init`, which becomes the VM's PID1, to supervise `dropbear`, run `runcvm-vm-start` and `poweroff` the VM if signalled to do so, first ending every other process and unmounting the disks (`runcvm-vm-shutdown`).
    2. Else, it backgrounds `dropbear`, then execs (via `runcvm-init`, purely to create a controlling tty) `runcvm-vm-start`, which runs as the VM's PID1.
 - In both cases, `dropbear` accepts only RunCVM's own key (used by `docker exec`), with password logins and port forwarding disabled. It ignores the image's `/etc/passwd`, `/etc/shadow`, `/etc/shells` and `authorized_keys`, and runs `runcvm-vm-exec` with RunCVM's own `bash`, so `docker exec` works whatever shell, if any, the image gives root. `dropbear` listens on port 22222 on every address of the VM, but RunCVM's nft rules in the container's network namespace drop TCP to that port in every frame bridged to the VM, on any of its networks, so other containers and hosts cannot reach it; `docker exec` connects from the container's own network namespace, which those rules do not filter. The VM's own firewall is left to the workload.
 

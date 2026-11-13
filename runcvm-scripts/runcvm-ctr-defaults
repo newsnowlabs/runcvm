@@ -48,6 +48,7 @@ RUNCVM_ENV_VARS=(
   RUNCVM_QEMU_VGA
   RUNCVM_QEMU_VNC_DISPLAY
   RUNCVM_RUNTIME_DEBUG
+  RUNCVM_SHUTDOWN
   RUNCVM_SYS_ADMIN
   RUNCVM_TMPFS
   RUNCVM_TTY
@@ -178,6 +179,7 @@ create_aliases() {
     poweroff
     ps
     qemu-ga
+    qemu-system-aarch64
     qemu-system-x86_64
     rm
     rmdir

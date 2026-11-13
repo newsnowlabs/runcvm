@@ -4,11 +4,15 @@
 . /.runcvm/guest/scripts/runcvm-ctr-defaults
 
 if [ "$RUNCVM_SYS_ADMIN" = "1" ]; then
-  OPTS+=(-o modcaps=+sys_admin)
+  OPTS+=(--modcaps=+sys_admin)
 fi
 
+# RUNCVM_VIRTIOFSD_CACHE takes virtiofsd's --cache values, and 'none' as a name for 'never'
 VIRTIOFSD_CACHE=${RUNCVM_VIRTIOFSD_CACHE:-auto}
-OPTS+=(-o "cache=$VIRTIOFSD_CACHE")
+[ "$VIRTIOFSD_CACHE" = "none" ] && VIRTIOFSD_CACHE=never
+OPTS+=(--cache="$VIRTIOFSD_CACHE")
 
+# --inode-file-handles=never keeps virtiofsd from requiring CAP_DAC_READ_SEARCH, which containers
+# lack by default (virtiofsd's default, 'prefer', needs it).
 # Send logs to /run in container (not in VM)
-exec "$(which virtiofsd)" "${OPTS[@]}" -o announce_submounts -o xattr --socket-path=$QEMU_VIRTIOFSD_SOCKET -o source=$RUNCVM_VM_MOUNTPOINT -o sandbox=chroot >/run/.virtiofsd.log 2>&1
+exec "$(which virtiofsd)" "${OPTS[@]}" --announce-submounts --xattr --inode-file-handles=never --socket-path=$QEMU_VIRTIOFSD_SOCKET --shared-dir=$RUNCVM_VM_MOUNTPOINT --sandbox=chroot >/run/.virtiofsd.log 2>&1
