@@ -3,6 +3,13 @@
 # Alpine version to build RunCVM's own binaries and libraries with
 ARG ALPINE_VERSION=3.24
 
+# BuildKit predefines the platform args (TARGETARCH, TARGETPLATFORM) in the
+# global scope, so the FROM lines below use them without an ARG declaration
+# here. They are not visible inside a stage unless declared there: each stage
+# that needs $TARGETARCH in a RUN declares ARG TARGETARCH after its own FROM
+# (see the "binaries" stage). Giving either a default here would override the
+# predefined value.
+
 # Alpine version whose kernel (linux-virt) RunCVM bundles as its Alpine and OpenWrt kernels, with
 # an initramfs built by that version's (patched) mkinitfs. It may differ from ALPINE_VERSION, but
 # the kernel's modules must stay loadable by ALPINE_VERSION's busybox modprobe, which
@@ -69,10 +76,10 @@ RUN apk update && apk add --no-cache alpine-sdk coreutils && \
     git sparse-checkout set main/mkinitfs
 
 # --- BUILD STAGE ---
-# Build patched SeaBIOS packages
+# Build patched SeaBIOS packages (x86_64 only: SeaBIOS uses the ISA bus, which ARM64 lacks)
 # to allow disabling of BIOS output by QEMU
 # (without triggering QEMU warnings)
-FROM alpine-sdk as alpine-seabios
+FROM alpine-sdk as alpine-seabios-amd64
 
 ADD patches/seabios/qemu-fw-cfg-fix.patch /root/aports/main/seabios/0003-qemu-fw-cfg-fix.patch
 
@@ -83,6 +90,13 @@ echo 'sha512sums="${sha512sums}$(sha512sum 0003-qemu-fw-cfg-fix.patch)"' >>APKBU
 echo 'source="${source}0003-qemu-fw-cfg-fix.patch"' >>APKBUILD
 abuild -rFf
 EOF
+
+# arm64 no-op: empty packages dir so COPY --from=alpine-seabios is always valid
+FROM alpine:$ALPINE_VERSION as alpine-seabios-arm64
+RUN mkdir -p /root/packages/main
+
+# Select the correct SeaBIOS stage for the target platform
+FROM alpine-seabios-${TARGETARCH} as alpine-seabios
 
 # --- BUILD STAGE ---
 # Build patched dnsmasq
@@ -180,11 +194,16 @@ EOF
 # --- BUILD STAGE ---
 # Build dist-independent dynamic binaries and libraries
 FROM alpine:$ALPINE_VERSION as binaries
+ARG TARGETARCH
 
 RUN apk update && \
-    apk add --no-cache file bash qemu-system-x86_64 virtiofsd qemu-ui-curses qemu-guest-agent \
-        qemu-hw-display-virtio-vga \
-        ovmf \
+    QEMU_SYSTEM=$([ "$TARGETARCH" = "arm64" ] && echo qemu-system-aarch64 || echo qemu-system-x86_64) && \
+    UEFI_PKG=$([ "$TARGETARCH" = "arm64" ] && echo aavmf || echo ovmf) && \
+    # arm64's virt machine has no VGA, so its virtio display is virtio-gpu-pci
+    DISPLAY_PKG=$([ "$TARGETARCH" = "arm64" ] && echo qemu-hw-display-virtio-gpu-pci || echo qemu-hw-display-virtio-vga) && \
+    apk add --no-cache file bash $QEMU_SYSTEM virtiofsd qemu-ui-curses qemu-guest-agent \
+        $DISPLAY_PKG \
+        $UEFI_PKG \
         jq iproute2 netcat-openbsd blkid util-linux \
         s6 dnsmasq nftables \
         ncurses coreutils \
@@ -195,21 +214,31 @@ ADD runcvm-etc/disk-filesystems /tmp/disk-filesystems
 RUN packages=$(awk '$1 !~ /^#/ && NF && $3 != "-" { gsub(",", " ", $3); print $3 }' /tmp/disk-filesystems) && \
     if [ -n "$packages" ]; then apk add --no-cache $packages; fi
 
-# Install patched SeaBIOS
-COPY --from=alpine-seabios /root/packages/main/x86_64 /tmp/seabios/
-RUN apk add --allow-untrusted /tmp/seabios/*.apk && cp -a /usr/share/seabios/bios*.bin /usr/share/qemu/
+# Install patched SeaBIOS (x86_64 only: SeaBIOS is x86-specific)
+COPY --from=alpine-seabios /root/packages/main /tmp/seabios-pkgs/
+RUN ALPINE_ARCH=$(uname -m) && \
+    if [ "$ALPINE_ARCH" = "x86_64" ]; then \
+      apk add --allow-untrusted /tmp/seabios-pkgs/$ALPINE_ARCH/*.apk && \
+      cp -a /usr/share/seabios/bios*.bin /usr/share/qemu/; \
+    fi
 
 # Install patched dnsmasq
-COPY --from=alpine-dnsmasq /root/packages/main/x86_64 /tmp/dnsmasq/
-RUN apk add --allow-untrusted /tmp/dnsmasq/dnsmasq-2*.apk /tmp/dnsmasq/dnsmasq-common*.apk
+COPY --from=alpine-dnsmasq /root/packages/main /tmp/dnsmasq-pkgs/
+RUN ALPINE_ARCH=$(uname -m) && \
+    apk add --allow-untrusted /tmp/dnsmasq-pkgs/$ALPINE_ARCH/dnsmasq-2*.apk \
+                              /tmp/dnsmasq-pkgs/$ALPINE_ARCH/dnsmasq-common*.apk
 
 # Install patched mke2fs
 COPY --from=e2fsprogs /usr/local/sbin/mke2fs /sbin/mke2fs
 
 # Install patched dropbear
-COPY --from=alpine-dropbear /root/packages/main/x86_64 /tmp/dropbear/
+# dropbear's EPKA plugin, libepka_file.so, is bundled from /usr/lib/dropbear (see BUNDELF_EXTRA_LIBS)
+COPY --from=alpine-dropbear /root/packages/main /tmp/dropbear-pkgs/
 COPY --from=alpine-dropbear /usr/local/lib/libepka_file.so /usr/lib/dropbear/
-RUN apk add --allow-untrusted /tmp/dropbear/dropbear-ssh*.apk /tmp/dropbear/dropbear-dbclient*.apk /tmp/dropbear/dropbear-2*.apk
+RUN ALPINE_ARCH=$(uname -m) && \
+    apk add --allow-untrusted /tmp/dropbear-pkgs/$ALPINE_ARCH/dropbear-ssh*.apk \
+                              /tmp/dropbear-pkgs/$ALPINE_ARCH/dropbear-dbclient*.apk \
+                              /tmp/dropbear-pkgs/$ALPINE_ARCH/dropbear-2*.apk
 
 # Patch the binaries and set up symlinks
 COPY build-utils/make-bundelf-bundle.sh /usr/local/bin/make-bundelf-bundle.sh
@@ -218,8 +247,11 @@ ENV BUNDELF_EXTRA_LIBS="/usr/libexec/coreutils /usr/lib/dropbear/libepka_file.so
 ENV BUNDELF_CODE_PATH="/opt/runcvm"
 ENV BUNDELF_EXEC_PATH="/.runcvm/guest"
 
-# Bundle, as well, each filesystem's mkfs command (field 6 of disk-filesystems)
-RUN for cmd in $(awk '$1 !~ /^#/ && NF { print $6 }' /tmp/disk-filesystems); do \
+# Bundle, as well, each filesystem's mkfs command (field 6 of disk-filesystems), and the QEMU
+# system emulator for the target architecture
+RUN QEMU_BIN=$([ "$TARGETARCH" = "arm64" ] && echo qemu-system-aarch64 || echo qemu-system-x86_64) && \
+    BUNDELF_BINARIES=$(echo "$BUNDELF_BINARIES" | sed "s/qemu-system-x86_64/$QEMU_BIN/") && \
+    for cmd in $(awk '$1 !~ /^#/ && NF { print $6 }' /tmp/disk-filesystems); do \
       case " $BUNDELF_BINARIES " in *" $cmd "*) ;; *) BUNDELF_BINARIES="$BUNDELF_BINARIES $cmd" ;; esac; \
     done && \
     BUNDELF_BINARIES="$BUNDELF_BINARIES" /usr/local/bin/make-bundelf-bundle.sh --bundle && \
@@ -234,7 +266,11 @@ RUN for cmd in $(awk '$1 !~ /^#/ && NF { print $6 }' /tmp/disk-filesystems); do 
     mkdir -p $BUNDELF_CODE_PATH/usr/share && \
     cp -a /usr/share/qemu $BUNDELF_CODE_PATH/usr/share && \
     cp -a /etc/terminfo $BUNDELF_CODE_PATH/usr/share && \
-    cp -a /usr/share/OVMF $BUNDELF_CODE_PATH/usr/share && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+      cp -a /usr/share/AAVMF $BUNDELF_CODE_PATH/usr/share 2>/dev/null || true; \
+    else \
+      cp -a /usr/share/OVMF $BUNDELF_CODE_PATH/usr/share; \
+    fi && \
     # Remove setuid/setgid bits from any/all binaries; make the package readable by all users, and
     # writable by root only (see the check at the end of the installer stage)
     chmod -R -s,a+rX,go-w $BUNDELF_CODE_PATH/
@@ -264,8 +300,9 @@ RUN cd /root/qemu-exit && cc -o /root/qemu-exit/qemu-exit -std=gnu99 -static -s 
 FROM alpine:$ALPINE_KERNEL_VERSION as alpine-kernel
 
 # Install patched mkinitfs
-COPY --from=alpine-mkinitfs /root/packages/main/x86_64 /tmp/mkinitfs/
-RUN apk add --allow-untrusted /tmp/mkinitfs/*.apk
+# NB: no coreutils in this stage, so avoid relying on GNU cp semantics
+COPY --from=alpine-mkinitfs /root/packages/main /tmp/mkinitfs-pkgs/
+RUN apk add --allow-untrusted /tmp/mkinitfs-pkgs/$(uname -m)/*.apk
 RUN apk add --no-cache linux-virt
 RUN (grep -qxF 'kernel/fs/fuse/virtiofs*' /etc/mkinitfs/features.d/virtio.modules || \
       echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules) && \
@@ -291,7 +328,7 @@ RUN mkdir -p /opt/runcvm/kernels/openwrt/$(basename $(ls -d /lib/modules/*))/mod
 
 # --- BUILD STAGE ---
 # Build Debian trixie kernel and initramfs with virtiofs module
-FROM amd64/debian:trixie as debian-kernel
+FROM --platform=$TARGETPLATFORM debian:trixie as debian-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG KERNEL_MODULE_COMPRESSION
@@ -300,7 +337,9 @@ ARG KERNEL_MODULE_COMPRESSION
 # for its root, rather than most of the kernel's modules (initramfs-tools' default). A VM unpacks
 # its initrd into memory as it boots, and RunCVM loads any other module the VM needs from the
 # kernel's bundled modules once the root is mounted.
-RUN apt update && apt install -y linux-image-amd64:amd64 xz-utils && \
+RUN apt update && \
+    DEB_ARCH=$(dpkg --print-architecture) && \
+    apt install -y linux-image-${DEB_ARCH}:${DEB_ARCH} xz-utils && \
     printf '%s\n' virtio_pci virtio_blk virtio_console virtio_net virtio_rng virtio_scsi virtiofs >>/etc/initramfs-tools/modules && \
     echo "MODULES=list" >/etc/initramfs-tools/conf.d/runcvm-modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
@@ -322,7 +361,7 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
 
 # --- BUILD STAGE ---
 # Build Ubuntu 26.04 (resolute) kernel and initramfs with virtiofs module
-FROM amd64/ubuntu:resolute as ubuntu-kernel
+FROM --platform=$TARGETPLATFORM ubuntu:resolute as ubuntu-kernel
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG KERNEL_MODULE_COMPRESSION
@@ -334,7 +373,9 @@ ARG KERNEL_MODULE_COMPRESSION
 # for its root, rather than most of the kernel's modules (initramfs-tools' default). A VM unpacks
 # its initrd into memory as it boots, and RunCVM loads any other module the VM needs from the
 # kernel's bundled modules once the root is mounted.
-RUN apt update && apt install -y linux-generic:amd64 initramfs-tools zstd xz-utils && \
+RUN apt update && \
+    DEB_ARCH=$(dpkg --print-architecture) && \
+    apt install -y linux-generic:${DEB_ARCH} initramfs-tools zstd xz-utils binutils && \
     printf '%s\n' virtio_pci virtio_blk virtio_console virtio_net virtio_rng virtio_scsi virtiofs >>/etc/initramfs-tools/modules && \
     echo "MODULES=list" >/etc/initramfs-tools/conf.d/runcvm-modules && \
     echo "RESUME=none" >/etc/initramfs-tools/conf.d/resume && \
@@ -352,7 +393,13 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
       xargs -0 -r -n 64 -P "$(nproc)" sh -ec 'm=$1; shift; for f; do zstd -q -d --rm "$f"; [ "$m" = none ] || xz -q --check=crc32 --lzma2=dict=1MiB "${f%.zst}"; done' sh "$KERNEL_MODULE_COMPRESSION" && \
     depmod $BASENAME && \
     mkdir -p /opt/runcvm/kernels/ubuntu/$BASENAME && \
-    cp -aL /boot/vmlinuz-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/vmlinuz && \
+    # On arm64, Ubuntu's vmlinuz is a systemd-stub EFI application, which QEMU cannot boot, holding
+    # the kernel in its .linux section, with device trees for particular machines: take the kernel.
+    if objdump -h /boot/vmlinuz-$BASENAME 2>/dev/null | grep ' \.linux ' >/dev/null; then \
+      objcopy -O binary --only-section=.linux /boot/vmlinuz-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/vmlinuz; \
+    else \
+      cp -aL /boot/vmlinuz-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/vmlinuz; \
+    fi && \
     cp -aL /boot/initrd.img-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/initrd && \
     cp -a /lib/modules/ /opt/runcvm/kernels/ubuntu/$BASENAME/ && \
     cp -a /boot/config-$BASENAME /opt/runcvm/kernels/ubuntu/$BASENAME/modules/$BASENAME/config && \
@@ -361,7 +408,7 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
 # --- BUILD STAGE ---
 # Build AlmaLinux 10 kernel and initramfs with virtiofs module: the kernel for images of the RHEL
 # family (see RUNCVM_KERNEL_RHEL_FAMILY in runcvm-runtime)
-FROM almalinux:10 as almalinux-kernel
+FROM --platform=$TARGETPLATFORM almalinux:10 as almalinux-kernel
 
 ARG KERNEL_MODULE_COMPRESSION
 # The almalinux image has no /boot, where the kernel package and dracut install the kernel and
@@ -437,7 +484,9 @@ RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
       xargs -0 -r -n 64 -P "$(nproc)" sh -ec 'm=$1; shift; for f; do zstd -q -d --rm "$f"; [ "$m" = none ] || xz -q --check=crc32 --lzma2=dict=1MiB "${f%.zst}"; done' sh "$KERNEL_MODULE_COMPRESSION" && \
     depmod $BASENAME && \
     mkdir -p /opt/runcvm/kernels/opensuse/$BASENAME && \
-    mv /lib/modules/$BASENAME/vmlinuz /opt/runcvm/kernels/opensuse/$BASENAME/vmlinuz && \
+    # The kernel image is vmlinuz on x86_64, Image on arm64
+    KIMAGE=$(ls /lib/modules/$BASENAME/vmlinuz /lib/modules/$BASENAME/Image 2>/dev/null | head -n 1) && \
+    mv "$KIMAGE" /opt/runcvm/kernels/opensuse/$BASENAME/vmlinuz && \
     rm -f /lib/modules/$BASENAME/vmlinux.xz && \
     cp -aL /boot/initrd-$BASENAME /opt/runcvm/kernels/opensuse/$BASENAME/initrd && \
     cp -a /lib/modules/ /opt/runcvm/kernels/opensuse/$BASENAME/ && \

@@ -1,4 +1,4 @@
-#!/opt/runcvm/lib/ld-musl-x86_64.so.1 /opt/runcvm/bin/bash
+#!/opt/runcvm/lib/ld /opt/runcvm/bin/bash
 
 # REFERENCES
 
@@ -631,6 +631,15 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   set_config_env "RUNCVM_KERNEL_PATH" "$RUNCVM_KERNEL_PATH"
   set_config_env "RUNCVM_KERNEL_INITRAMFS_PATH" "$RUNCVM_KERNEL_INITRAMFS_PATH"
   set_config_env "RUNCVM_KERNEL_ROOT" "$RUNCVM_KERNEL_ROOT"
+
+  # Auto-detect host architecture; respect user-supplied RUNCVM_QEMU_ARCH if set
+  case "$(uname -m)" in
+    aarch64) RUNCVM_QEMU_ARCH_DEFAULT="arm64" ;;
+    x86_64)  RUNCVM_QEMU_ARCH_DEFAULT="x86_64" ;;
+    *)       RUNCVM_QEMU_ARCH_DEFAULT="x86_64" ;;
+  esac
+  RUNCVM_QEMU_ARCH="$(get_config_env 'RUNCVM_QEMU_ARCH' "$RUNCVM_QEMU_ARCH_DEFAULT")"
+  set_config_env "RUNCVM_QEMU_ARCH" "$RUNCVM_QEMU_ARCH"
 
   # RUNCVM_KERNEL_MODULES: kernel modules for runcvm-vm-init to load at boot, by name.
   RUNCVM_KERNEL_MODULES="$(get_config_env 'RUNCVM_KERNEL_MODULES')"
