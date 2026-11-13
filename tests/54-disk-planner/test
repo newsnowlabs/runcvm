@@ -16,13 +16,15 @@ the manifests); and that the checks and planning left /disks unchanged.
   with disks or tmpfs mounts) are rejected with their messages.
 - Backing file paths: relative, with '.' or '..' components, ending in '/',
   or through a symbolic link to such a path in a directory that does not
-  exist, are rejected; '//' is collapsed; a dangling symbolic link is
+  exist, or to a path with a newline (including through a directory whose
+  name ends in one), are rejected; '//' is collapsed; a dangling symbolic link is
   followed to where the file will be created, also through a link with
   '../' or './' in a directory that exists.
 - Backing-file identity: one file by two spellings, through one volume
   mounted at two paths (existing or not), or as hard links, is rejected;
   two existing disks with one filesystem UUID are rejected; distinct files
-  are not.
+  are not. Creating a new disk's backing file refuses one that appeared
+  after the checks, leaving it as it is.
 - Sizes: a size that truncate rejects ('garbage', '1.5G', '10T'), also on a
   later disk, is rejected; a valid one is accepted.
 - mke2fs's limits: 257 exclusions below an ext4 disk's destination, and 65
@@ -122,6 +124,8 @@ before=$(find /disks | sort; find /disks -type f -exec md5sum {} + | sort)
   [ ! -f /.runcvm/fstab ] || busybox sed 's/^/fstab /' /.runcvm/fstab
   [ ! -f /.runcvm/held-mounts ] || busybox sed 's/^/held-mounts /' /.runcvm/held-mounts
   echo planned
+  # A case's further step, run once planning is done (e.g. creating a disk's backing file).
+  [ -z "$AFTER_PLAN" ] || eval "$AFTER_PLAN"
 ) 2>&1
 after=$(find /disks | sort; find /disks -type f -exec md5sum {} + | sort)
 [ "$before" = "$after" ] && echo "disks unchanged" || echo "disks changed"
@@ -153,9 +157,6 @@ def run_case(case):
             return ["timed out after 60s"]
     return r.stdout.splitlines()
 
-
-if not os.path.exists(os.path.join(GUEST, "bin", "bash")):
-    t.skip("RunCVM is not installed at %s" % GUEST)
 
 # Disk specs that are invalid alone: (name, RUNCVM_DISKS, expected message).
 INVALID = [
@@ -245,9 +246,9 @@ def invalid(name, disks, message, spec=None, setup=None, tmpfs=()):
                       error="Error: disk spec '%s' invalid: %s" % (spec or disks, message)))
 
 
-def valid(name, disks, has=(), lacks=(), setup=None, tmpfs=(), env=()):
+def valid(name, disks, has=(), lacks=(), setup=None, tmpfs=(), env=(), changes_disks=False):
     CASES.append(dict(name=name, disks=disks, setup=setup, tmpfs=list(tmpfs), env=list(env), has=list(has),
-                      lacks=list(lacks)))
+                      lacks=list(lacks), changes_disks=changes_disks))
 
 
 # Disk specs alone.
@@ -275,9 +276,13 @@ valid("src-link-up-existing-dir", "/disks/sub/up.img,/data,ext4,16M",
       setup="volume v /disks /data && mkdir -p /disks/x /disks/sub && ln -s ../x/s.img /disks/sub/up.img",
       has=["disk 0 new=1 layout=subdirs", "view 0 /data/x/s.img", "excl /data /data/x/s.img file"])
 invalid("src-link-up-missing-dir", "/disks/bad.img,/srv/a,ext4,16M",
-        "src '/disks/bad.img' is a symbolic link to '/disks/../nope/s.img', which " + SRC_RULE +
-        ", where the directory holding it does not exist",
+        "src '/disks/bad.img' is a symbolic link to '/disks/../nope/s.img', which must be an absolute path to a "
+        "file, without '.' or '..' components, where the directory holding it does not exist",
         setup="ln -s ../nope/s.img /disks/bad.img")
+invalid("src-link-newline-dir", "/disks/link.img,/srv/a,ext4",
+        "src '/disks/link.img' is a symbolic link to a path with a newline",
+        setup="mkdir -p '/disks/store\n' && existing_disk '/disks/store\n/state.img' && "
+              "ln -s 'store\n' /disks/alias && ln -s alias/state.img /disks/link.img")
 invalid("src-link-loop", "/disks/l1,/srv/a,ext4,16M", "src '/disks/l1' has too many levels of symbolic links",
         setup="ln -s l2 /disks/l1 && ln -s l1 /disks/l2")
 
@@ -296,6 +301,10 @@ invalid("same-file-hard-link", "/disks/a,/srv/a,ext4;/disks/h,/srv/h,ext4",
 invalid("same-uuid", "/disks/a,/srv/a,ext4;/disks/c,/srv/c,ext4",
         "src '/disks/c' has the same filesystem UUID as the src of an earlier disk, '/disks/a'",
         spec="/disks/c,/srv/c,ext4", setup="existing_disk /disks/a && cp /disks/a /disks/c")
+valid("claim-refuses-file-created-after-checks", "/disks/a,/srv/a,ext4,16M",
+      env=[("AFTER_PLAN", '( echo other >/disks/a && disk_create_file 0 ); echo "content=$(cat /disks/a)"')],
+      has=["Error: disk spec '/disks/a,/srv/a,ext4,16M' invalid: src '/disks/a' exists, though it did not when the "
+           "disks were checked", "content=other"], changes_disks=True)
 valid("distinct-files", "/disks/a,/srv/a,ext4,16M;/disks/b,/srv/b,ext4,16M",
       has=["disk 0 new=1 layout=subdirs", "disk 1 new=1 layout=subdirs"])
 
@@ -370,7 +379,8 @@ assert len(names) == len(set(names)), "case names must be unique"
 for case, lines in zip(CASES, t.parallel(run_case, CASES, jobs=8)):
     name = case["name"]
     ok = t.check("%s: finished" % name, False, "timed out after 60s" in lines)
-    ok &= t.check("%s: disks unchanged" % name, True, "disks unchanged" in lines)
+    if not case.get("changes_disks"):
+        ok &= t.check("%s: disks unchanged" % name, True, "disks unchanged" in lines)
     if "error" in case:
         ok &= t.check("%s: rejected" % name, False, "planned" in lines)
         ok &= t.check("%s: error message" % name, True, any(case["error"] in line for line in lines))

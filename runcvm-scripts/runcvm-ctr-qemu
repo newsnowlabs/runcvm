@@ -272,6 +272,13 @@ disk_backing_views() {
   done
 }
 
+# Sets REPLY to the canonical path of existing path $1, as realpath gives it, whole: $(...) alone
+# would drop any newlines it ends in.
+disk_realpath() {
+  REPLY=$(busybox realpath "$1"; echo /)
+  REPLY="${REPLY%$'\n/'}"
+}
+
 # Sets REPLY to the file that disk backing file path $1 names, or will name once created: the path,
 # with repeated '/' collapsed, and each symbolic link it ends in followed, as creating the file would
 # follow it. Fails, setting REPLY to the reason, unless the path is absolute, without '.' or '..'
@@ -306,11 +313,15 @@ disk_src_file() {
 
     dir="${target%/*}"
     if [[ "${target##*/}" != "" && "${target##*/}" != "." && "${target##*/}" != ".." && -d "${dir:-/}" ]]; then
-      dir=$(busybox realpath "${dir:-/}")
-      target="${dir%/}/${target##*/}"
+      disk_realpath "${dir:-/}"
+      target="${REPLY%/}/${target##*/}"
     fi
-    if [[ "$target" = */ || "/$target/" = */./* || "/$target/" = */../* || "$target" = *$'\n'* ]]; then
-      REPLY="is a symbolic link to '$target', which must be an absolute path to a file, without '.' or '..' components or a newline, where the directory holding it does not exist"
+    if [[ "$target" = *$'\n'* ]]; then
+      REPLY="is a symbolic link to a path with a newline"
+      return 1
+    fi
+    if [[ "$target" = */ || "/$target/" = */./* || "/$target/" = */../* ]]; then
+      REPLY="is a symbolic link to '$target', which must be an absolute path to a file, without '.' or '..' components, where the directory holding it does not exist"
       return 1
     fi
     path="$target"
@@ -341,17 +352,18 @@ disk_src_key() {
 }
 
 # Creates disk $1's backing file, at the path disk_src_file gave it, with its directory if needed.
-# disk_parse has checked the size. A file that has appeared there since disk_parse found none is not
-# touched: it may be another disk's.
+# disk_parse has checked the size. The file is claimed by creating it exclusively (bash's noclobber
+# opens it with O_EXCL), so that a file that has appeared there since disk_parse found none, such as
+# one another Container/VM starting at the same time is creating, is not touched: only a file this
+# claim created is sized and formatted.
 disk_create_file() {
   local id="$1" file="${DISK_SRC_FILE[$1]}" dir
 
-  if [ -e "$file" ]; then
-    error "Error: disk spec '${DISK_SPEC[$id]}' invalid: src '${DISK_SRC[$id]}' exists, though it did not when the disks were checked"
-  fi
-
   dir="${file%/*}"
   [ -d "${dir:-/}" ] || mkdir -p "$dir"
+
+  ( set -o noclobber; : >"$file" ) 2>/dev/null || \
+    error "Error: disk spec '${DISK_SPEC[$id]}' invalid: src '${DISK_SRC[$id]}' exists, though it did not when the disks were checked"
 
   busybox truncate -s "${DISK_SIZE[$id]}" "$file" >&2 || \
     error "Error: disk spec '${DISK_SPEC[$id]}' invalid: truncate on '${DISK_SRC[$id]}' with size '${DISK_SIZE[$id]}' failed"
@@ -700,12 +712,13 @@ disk_parse() {
   # The backing file's canonical path: an existing file's, or, for a new one, its directory's, where
   # that exists, with its name.
   if [ -e "$file" ]; then
-    path=$(busybox realpath "$file")
+    disk_realpath "$file"
+    path="$REPLY"
   else
     dir="${file%/*}"
     if [ -d "${dir:-/}" ]; then
-      path=$(busybox realpath "${dir:-/}")
-      path="${path%/}/${file##*/}"
+      disk_realpath "${dir:-/}"
+      path="${REPLY%/}/${file##*/}"
     else
       path="$file"
     fi
@@ -1013,10 +1026,10 @@ disks_create() {
       # configuration, not the image's /etc/mke2fs.conf and /etc/blkid.conf.
       path=$(which "${DISK_FS_MKFS[0]}")
       MKE2FS_CONFIG="$RUNCVM_GUEST/etc/mke2fs.conf" BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null \
-        "$path" "${DISK_FS_MKFS[@]:1}" "${populate[@]}" "${DISK_SRC[$id]}" >&2 || \
+        "$path" "${DISK_FS_MKFS[@]:1}" "${populate[@]}" "${DISK_SRC_FILE[$id]}" >&2 || \
         error "Error: disk spec '${DISK_SPEC[$id]}' invalid: ${DISK_FS_MKFS[0]} on '${DISK_SRC[$id]}' with fs '${DISK_FS[$id]}' failed"
 
-      DISK_UUID[$id]=$(blkid -p -s UUID -o value "${DISK_SRC[$id]}") || true
+      DISK_UUID[$id]=$(blkid -p -s UUID -o value "${DISK_SRC_FILE[$id]}") || true
       if [ -z "${DISK_UUID[$id]}" ]; then
         error "Error: disk spec '${DISK_SPEC[$id]}' invalid: no filesystem UUID found in src '${DISK_SRC[$id]}'"
       fi
@@ -1035,9 +1048,9 @@ disks_create() {
       fi
     fi
 
-    [ "${DISK_PREALLOC[$id]}" = "off" ] || disk_prealloc "${DISK_SPEC[$id]}" "${DISK_SRC[$id]}"
+    [ "${DISK_PREALLOC[$id]}" = "off" ] || disk_prealloc "${DISK_SPEC[$id]}" "${DISK_SRC_FILE[$id]}"
 
-    disk_add_device "${DISK_SRC[$id]}" "$id" "${DISK_PREALLOC[$id]}"
+    disk_add_device "${DISK_SRC_FILE[$id]}" "$id" "${DISK_PREALLOC[$id]}"
   done
 
   [ -z "$ROOT_DISK_ID" ] || do_root_disk
@@ -1061,7 +1074,7 @@ do_root_disk() {
   local -a excludes=()
 
   spec="${DISK_SPEC[$id]}"
-  src="${DISK_SRC[$id]}"
+  src="${DISK_SRC_FILE[$id]}"
 
   if [ "${DISK_NEW[$id]}" = "1" ]; then
     disk_create_file "$id"
@@ -1075,11 +1088,11 @@ do_root_disk() {
 
     MKE2FS_CONFIG="$RUNCVM_GUEST/etc/mke2fs.conf" BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null \
       mke2fs -q -F -t ext4 -d "$RUNCVM_VM_MOUNTPOINT" -E one_file_system "${excludes[@]}" "$src" >&2 || \
-      error "Error: disk spec '$spec' invalid: mke2fs on '$src' with fs 'ext4' failed"
+      error "Error: disk spec '$spec' invalid: mke2fs on '${DISK_SRC[$id]}' with fs 'ext4' failed"
 
     DISK_UUID[$id]=$(blkid -p -s UUID -o value "$src") || true
     if [ -z "${DISK_UUID[$id]}" ]; then
-      error "Error: disk spec '$spec' invalid: no filesystem UUID found in src '$src'"
+      error "Error: disk spec '$spec' invalid: no filesystem UUID found in src '${DISK_SRC[$id]}'"
     fi
   fi
 
@@ -1172,7 +1185,7 @@ disk_add_device() {
   DISKS+=(
     # Create a block backend (no implicit frontend device attached)
     # -drive id=drv$id       : give this backend a unique identifier
-    # file=$src              : source image file
+    # file=${src//,/,,}      : source image file, each ',' doubled, as QEMU's option syntax needs
     # if=none                : do not attach directly, will be bound later with -device
     # format=raw             : treat the file as raw block device
     # media=disk             : marks this as a disk, not a CD-ROM
@@ -1181,7 +1194,7 @@ disk_add_device() {
     # $discard              : discard=unmap,detect-zeroes=unmap passes guest TRIM/UNMAP, and
     #                          converts guest zero writes into UNMAPs, to the backing file;
     #                          discard=ignore,detect-zeroes=off does neither (see above)
-    -drive id=drv$id,file=$src,if=none,format=raw,media=disk,cache=none,aio=io_uring,$discard
+    -drive id=drv$id,file=${src//,/,,},if=none,format=raw,media=disk,cache=none,aio=io_uring,$discard
 
     # Create a dedicated I/O thread (dataplane) to offload block I/O
     # -object iothread,id=ioth$id : defines an iothread with a unique identifier
