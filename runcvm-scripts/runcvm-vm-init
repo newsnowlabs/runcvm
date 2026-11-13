@@ -330,6 +330,25 @@ else
   cgroupfs_mount "${RUNCVM_CGROUPFS:-2}"
 fi
 
+# Record how runcvm-ctr-shutdown asks the guest to power off, as RUNCVM_SHUTDOWN requests; by
+# default ('auto'), as the guest's init understands: 'busybox' for RunCVM's own init (--init) or
+# an entrypoint .../init that is busybox's; 'systemd' for systemd; otherwise 'all'.
+case "${RUNCVM_SHUTDOWN:-auto}" in
+  auto)
+    if [ "$RUNCVM_INIT" = "1" ] || [[ "${ARGS[0]}" =~ /init$ && "$ARGS_INIT" =~ /busybox$ ]]; then
+      shutdown_mode=busybox
+    elif [[ "$ARGS_INIT" =~ /systemd$ ]]; then
+      shutdown_mode=systemd
+    else
+      shutdown_mode=all
+    fi
+    ;;
+  *)
+    shutdown_mode="$RUNCVM_SHUTDOWN"
+    ;;
+esac
+echo "$shutdown_mode" >/.runcvm/state/shutdown
+
 # Make directory for dropbear host keys and public/private keypair
 mkdir -p /.runcvm/dropbear
 
@@ -366,7 +385,7 @@ null::respawn:$RUNCVM_GUEST/scripts/runcvm-vm-qemu-ga
 null::respawn:$RUNCVM_GUEST/usr/sbin/dropbear -REF -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/usr/lib/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid
 null::ctrlaltdel:$RUNCVM_GUEST/bin/poweroff
 null::restart:$RUNCVM_GUEST/bin/poweroff
-null::shutdown:$RUNCVM_GUEST/bin/poweroff
+null::shutdown:$RUNCVM_GUEST/scripts/runcvm-vm-shutdown
 _EOE_
 
   # Allow runcvm-vm-start to run once (and only once)

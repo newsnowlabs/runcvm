@@ -135,6 +135,20 @@ void quit(int exit_status) {
 }
 
 /*
+ * Whether signal signum asks the container to stop: SIGTERM, SIGINT, SIGPWR, and the signals
+ * systemd takes as requests to halt and to power off, which images for systemd declare as their
+ * stop signal (e.g. STOPSIGNAL SIGRTMIN+3). Docker numbers SIGRTMIN+n from 34, as glibc does;
+ * this program, built against musl, has its own SIGRTMIN, so these two are given by number.
+ */
+#define DOCKER_SIGRTMIN_3 37
+#define DOCKER_SIGRTMIN_4 38
+
+int is_stop_signal(int signum) {
+    return signum == SIGTERM || signum == SIGINT || signum == SIGPWR ||
+           signum == DOCKER_SIGRTMIN_3 || signum == DOCKER_SIGRTMIN_4;
+}
+
+/*
  * The dumb-init signal handler.
  *
  * The main job of this signal handler is to forward signals along to our child
@@ -157,10 +171,12 @@ void quit(int exit_status) {
 void handle_signal(int signum) {
     DEBUG("Received signal %d.\n", signum);
 
-    if (signal_temporary_ignores[signum] == 1) {
+    if (signum <= MAXSIG && signal_temporary_ignores[signum] == 1) {
         DEBUG("Ignoring tty hand-off signal %d.\n", signum);
         signal_temporary_ignores[signum] = 0;
-    } else if (signum == SIGTERM) {
+    } else if (is_stop_signal(signum)) {
+        // QEMU is never sent these signals, which would end the VM at once: the guest is asked
+        // to shut down, and the VM ends when it powers off.
         shutdown();
     } else if (signum == SIGCHLD) {
         int status, exit_status;
