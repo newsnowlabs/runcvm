@@ -440,8 +440,20 @@ if [ "$COMMAND" = "create" ]; then
   # CONFIGURE MOUNTS
   set_config_env "RUNCVM_VM_MOUNTPOINT" "$RUNCVM_VM_MOUNTPOINT"
 
-  # First extract list of tmpfs mounts in fstab form, then delete them from the config
-  RUNCVM_TMPFS=$(jq_get "$CFG" '( .mounts[] | select(.type == "tmpfs" and (.destination | test("^/dev(/|$)") | not) ) ) | [.source + " " + .destination + " tmpfs " + (.options | map(select(. != "rprivate" and . != "private")) | join(",")) + " 0 0"] | .[0]')
+  # No mount's destination may contain an ASCII control character (a byte 0x01-0x1F or 0x7F, such
+  # as a tab or a newline): RunCVM names the destinations in the files it passes to the VM. The
+  # first such destination is reported, in bash's $'...' notation. (runcvm-ctr-qemu rejects a
+  # destination that leads to such a path through symbolic links in the image.)
+  mapfile -d '' -t bad < <(jq -j '.mounts[].destination | select(test("[\u0001-\u001f\u007f]")) | . + "\u0000"' "$CFG")
+  if [ "${#bad[@]}" -gt 0 ]; then
+    bad=$(LC_ALL=C printf '%q' "${bad[0]}")
+    error "mount destination $bad must not contain control characters (bytes 0x01-0x1F and 0x7F)"
+  fi
+
+  # First extract list of tmpfs mounts in fstab form, then delete them from the config. Each field
+  # is encoded with fstab's octal escapes for '\', space, tab and newline before the fields are
+  # joined, so that each field's boundaries survive.
+  RUNCVM_TMPFS=$(jq_get "$CFG" 'def enc: gsub("\\\\"; "\\134") | gsub(" "; "\\040") | gsub("\t"; "\\011") | gsub("\n"; "\\012"); ( .mounts[] | select(.type == "tmpfs" and (.destination | test("^/dev(/|$)") | not) ) ) | [(.source | enc) + " " + (.destination | enc) + " tmpfs " + (.options | map(select(. != "rprivate" and . != "private")) | join(",") | enc) + " 0 0"] | .[0]')
   jq_set "$CFG" -r 'del( .mounts[] | select(.type == "tmpfs" and (.destination | test("^/dev(/|$)") | not) ) )'
   set_config_env "RUNCVM_TMPFS" "$RUNCVM_TMPFS"
 
@@ -668,6 +680,15 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     error "/dev/kvm is unavailable on this host; launch with --env=RUNCVM_QEMU_ACCEL=auto or --env=RUNCVM_QEMU_ACCEL=tcg to allow (much slower) software emulation"
   fi
   set_config_env "RUNCVM_QEMU_ACCEL" "$RUNCVM_QEMU_ACCEL"
+
+  # What /.runcvm/fstab lists of the container's volumes and bind mounts that a disk or tmpfs mount
+  # hides, and that runcvm-vm-init mounts again over it (see write_manifests in runcvm-ctr-qemu):
+  # - disks (default): each only as a comment, with the tmpfs that held it detached after boot
+  # - all: each as a bind mount from where it is held, which systemd and 'mount -a' can mount again
+  case "$(get_config_env 'RUNCVM_FSTAB' 'disks')" in
+    disks|all) ;;
+    *) error "RUNCVM_FSTAB '$(get_config_env 'RUNCVM_FSTAB')' invalid (should be disks or all)" ;;
+  esac
 
   # The address at which the VM reaches dnsmasq, and from which 'docker exec' connects to the VM.
   RUNCVM_DNS_IP="$(get_config_env 'RUNCVM_DNS_IP' "$RUNCVM_DNS_IP_DEFAULT")"
