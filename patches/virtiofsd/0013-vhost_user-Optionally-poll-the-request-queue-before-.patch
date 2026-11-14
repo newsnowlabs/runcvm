@@ -1,4 +1,4 @@
-From b12d649528458fa7e79c2b0056c23b9acb831f29 Mon Sep 17 00:00:00 2001
+From 3285c98be19e7f9e3b7119487a7551c898fb3a72 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 20:36:30 +0000
 Subject: [PATCH] vhost_user: Optionally poll the request queue before
