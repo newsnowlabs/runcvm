@@ -1,4 +1,4 @@
-From 3b26f1d6a71a1aad7a28afc90a63921a7f1d0ef7 Mon Sep 17 00:00:00 2001
+From fa20541ad78a70301792da88ddd7d0ba44ed874a Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 02:02:49 +0000
 Subject: [PATCH] passthrough: Keep a cache policy per inode
@@ -16,9 +16,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../device_state/deserialization.rs           |  3 +
  .../preserialization/find_paths.rs            |  1 +
- src/passthrough/inode_store.rs                |  4 ++
+ src/passthrough/inode_store.rs                |  5 ++
  src/passthrough/mod.rs                        | 62 ++++++++++++++-----
- 4 files changed, 53 insertions(+), 17 deletions(-)
+ 4 files changed, 54 insertions(+), 17 deletions(-)
 
 diff --git a/src/passthrough/device_state/deserialization.rs b/src/passthrough/device_state/deserialization.rs
 index 975bbef..f1459fe 100644
@@ -61,22 +61,23 @@ index 3c2c82a..f65e275 100644
          };
  
 diff --git a/src/passthrough/inode_store.rs b/src/passthrough/inode_store.rs
-index fc9c7c5..5f6b165 100644
+index fc9c7c5..6722212 100644
 --- a/src/passthrough/inode_store.rs
 +++ b/src/passthrough/inode_store.rs
-@@ -54,6 +54,10 @@ pub(crate) struct InodeData {
+@@ -54,6 +54,11 @@ pub(crate) struct InodeData {
      // File type and mode
      pub mode: u32,
  
-+    // Cache policy of the mount this inode is on, if it differs from the file system's default
-+    // (`Config::cache_policy`); always `None` unless per-mount cache policies are configured.
++    // Cache policy of the mount this inode is on, where per-mount cache policies give it one;
++    // `None` for the file system's default (`Config::cache_policy`), and always `None` unless
++    // per-mount cache policies are configured.
 +    pub cache_policy: Option<super::CachePolicy>,
 +
      // Constructed in the `prepare_serialization` phase of migration, and must be set on all inodes
      // when we are actually going to serialize our internal state to send it to the migration
      // destination.
 diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
-index ef26852..31329ec 100644
+index 4bbf723..579171c 100644
 --- a/src/passthrough/mod.rs
 +++ b/src/passthrough/mod.rs
 @@ -91,7 +91,7 @@ impl Drop for ScopedWorkingDirectory {

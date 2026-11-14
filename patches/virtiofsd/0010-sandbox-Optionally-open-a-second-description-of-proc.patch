@@ -1,4 +1,4 @@
-From 3bf89120059f63446ce34d954a625be01b0d76b1 Mon Sep 17 00:00:00 2001
+From 9a983dca7cf5b4abba73d85288a8fd811a4ba7cb Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 02:02:49 +0000
 Subject: [PATCH] sandbox: Optionally open a second description of
@@ -21,7 +21,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 28 insertions(+), 1 deletion(-)
 
 diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
-index 31329ec..0d9bb1e 100644
+index 579171c..8236e86 100644
 --- a/src/passthrough/mod.rs
 +++ b/src/passthrough/mod.rs
 @@ -270,6 +270,10 @@ pub struct Config {

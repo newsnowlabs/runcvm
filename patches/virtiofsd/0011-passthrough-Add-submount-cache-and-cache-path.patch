@@ -1,4 +1,4 @@
-From a713235ceb27de09fec396546ec021eed7ea6936 Mon Sep 17 00:00:00 2001
+From 4934873c7ac168488772987b81fde541b2200ee6 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 02:02:49 +0000
 Subject: [PATCH] passthrough: Add --submount-cache and --cache-path
@@ -170,7 +170,7 @@ index f65e275..2474b3a 100644
          };
  
 diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
-index 0d9bb1e..893cd9f 100644
+index 8236e86..d71261a 100644
 --- a/src/passthrough/mod.rs
 +++ b/src/passthrough/mod.rs
 @@ -34,15 +34,16 @@ use crate::{fuse, oslib};
