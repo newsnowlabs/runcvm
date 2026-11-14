@@ -1,0 +1,51 @@
+From f54c2bd22708d1a32246a06a6ca418b6e024eb3d Mon Sep 17 00:00:00 2001
+From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
+Date: Sat, 14 Nov 2026 02:22:15 +0000
+Subject: [PATCH 2/4] passthrough: Set FOPEN_NOFLUSH on files opened read-only
+
+The guest kernel sends FUSE_FLUSH on every close() of a FUSE file, and
+the close() waits for the reply.  virtiofsd answers it by dup()ing and
+closing the host descriptor, which matters only for a descriptor that
+can write (to pass on write-back errors from the host file system on
+close) or that holds POSIX locks.  virtiofsd does not implement POSIX
+or BSD locks (the guest kernel handles them locally), so for a file
+opened O_RDONLY the FLUSH round trip achieves nothing.
+
+Set FOPEN_NOFLUSH in the OPEN reply for such files, so that the guest
+skips it.  Workloads that open and read many small files, such as a
+shell running scripts, a compiler reading headers, or `cat` and
+`grep` over a tree, save one synchronous round trip per file.
+
+Kernels older than 5.16 ignore the flag, and the guest kernel ignores
+it when writeback caching is on, so behaviour is unchanged there.
+Files opened for writing still get FLUSH as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/passthrough/mod.rs | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
+index d0712d3..ad5e912 100644
+--- a/src/passthrough/mod.rs
++++ b/src/passthrough/mod.rs
+@@ -987,6 +987,16 @@ impl PassthroughFs {
+             _ => {}
+         };
+ 
++        // `flush()` only dup()s and closes the host file descriptor, to pass on the guest's
++        // close() to the host file system.  For a descriptor without write access, that has no
++        // observable effect: there is no data to write back, and we do not support POSIX locks
++        // (the guest kernel handles them locally), so no host lock can be released by it.  Tell
++        // the guest it need not send FUSE_FLUSH on every close() of such a file.  (The guest
++        // ignores this when writeback caching is enabled.)
++        if flags & (libc::O_ACCMODE as u32) == libc::O_RDONLY as u32 {
++            opts |= OpenOptions::NOFLUSH;
++        }
++
+         Ok((Some(handle), opts))
+     }
+ 
+-- 
+2.43.0
+

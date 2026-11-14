@@ -1,0 +1,64 @@
+From c605e876f4312a4461d006c5ea70276c2d48e621 Mon Sep 17 00:00:00 2001
+From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
+Date: Sat, 14 Nov 2026 10:07:21 +0000
+Subject: [PATCH 4/4] passthrough: Let the guest decide on setuid/setgid in
+ copy_file_range
+
+With KILLPRIV_V2, the guest kernel leaves clearing the setuid and
+setgid bits of a modified file to virtiofsd, and says when to with a
+flag on open, write and setattr, made from the caller's capabilities:
+a caller with CAP_FSETID keeps the bits, as on a local file system.
+copy_file_range carries no such flag, so we clear the bits for every
+caller, including privileged ones, e.g. root's 'cp' over an existing
+setuid file, which uses copy_file_range.
+
+Where the destination has setuid, or setgid with group-execute, bits,
+decline the copy with EOPNOTSUPP. The guest kernel's FUSE client then
+falls back to copying with ordinary writes (as Linux 5.15, 6.1 and 6.18
+do), which carry its own decision, so the bits are kept or cleared
+exactly as on a local file system. ENOSYS would
+instead make the guest stop offloading copies for good. Copies to
+other files are offloaded as before, and should the bits appear after
+the check, the copy still clears them.
+
+fallocate has no such fallback, so it still clears the bits for every
+caller.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/passthrough/mod.rs | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
+index 29edd62..5d132d2 100644
+--- a/src/passthrough/mod.rs
++++ b/src/passthrough/mod.rs
+@@ -2665,6 +2665,25 @@ impl FileSystem for PassthroughFs {
+         // Take just a read lock as we're not going to alter the file descriptor offset.
+         let fd_out = data_out.file.get()?.read().unwrap().as_raw_fd();
+ 
++        // With KILLPRIV_V2, where the destination has setuid or setgid bits that a copy could
++        // clear, decline the copy with EOPNOTSUPP: the guest kernel then copies with ordinary
++        // writes, which carry its own decision whether to clear them (FUSE_WRITE_KILL_SUIDGID),
++        // made from the caller's capabilities, so the bits are kept or cleared as on a local file
++        // system. (Not ENOSYS, after which the guest would stop offloading copies altogether.)
++        // Should the bits appear after this check, the copy below still clears them.
++        if self.cfg.killpriv_v2 {
++            let mut st = MaybeUninit::<libc::stat64>::zeroed();
++            // Safe because this only writes to `st` and we check the return value.
++            if unsafe { libc::fstat64(fd_out, st.as_mut_ptr()) } == 0 {
++                // Safe because fstat64() succeeded.
++                let mode = unsafe { st.assume_init() }.st_mode;
++                let sgid_exec = libc::S_ISGID | libc::S_IXGRP;
++                if mode & libc::S_ISUID != 0 || mode & sgid_exec == sgid_exec {
++                    return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
++                }
++            }
++        }
++
+         // There is no kill-suidgid flag for this operation. The guest kernel
+         // cannot instruct us to strip privilege bits. Drop CAP_FSETID
+         // unconditionally so the host kernel does it. This removes the bits
+-- 
+2.43.0
+

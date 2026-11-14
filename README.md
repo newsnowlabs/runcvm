@@ -1109,6 +1109,17 @@ Default is `off`, but `on` may deliver improved performance in some scenarios at
 
 Specifies the cache policy passed to `virtiofsd` via `--cache=<value>`, with `none` passed as `never`; `virtiofsd`'s other policies, such as `metadata`, are also accepted. The default policy is `auto`. Use `none` to avoid caching issues when multiple RunCVM instances need to share access to a volume or bind-mount on the host.
 
+### RUNCVM_VIRTIOFSD_KILLPRIV
+
+**`RUNCVM_VIRTIOFSD_KILLPRIV=<0|1>`**
+
+**[EXPERIMENTAL]** With `1`, `virtiofsd` clears a file's setuid and setgid bits and file capabilities (`security.capability`) when the VM modifies it, as a local file system would (FUSE's `KILLPRIV_V2`). By default (`0`), the VM's kernel does so, at the cost of a request to `virtiofsd`, to check for file capabilities, before each `write()` to a file over virtiofs: with `1`, a workload making many small writes makes about half as many requests.
+
+It comes with these restrictions:
+
+- Volumes and bind mounts on NFS, or other network file systems, are unsupported: there, setuid and setgid bits may survive a write by a process that should clear them.
+- `fallocate()` clears the bits for every caller, where a local file system keeps them for a caller with `CAP_FSETID` (e.g. root). (RunCVM's `virtiofsd` patches make `copy_file_range()`, used by `cp`, keep or clear them as a local file system would.)
+
 ### RUNCVM_CGROUPFS
 
 **`RUNCVM_CGROUPFS=<value>`**
