@@ -6,6 +6,8 @@
   the error from runcvm-runtime.
 - RUNCVM_VIRTIOFSD_KILLPRIV other than 0 or 1: creation fails (125), with
   the error from runcvm-runtime.
+- RUNCVM_VIRTIOFSD_POLL_US other than a whole number from 0 to 1000:
+  creation fails (125), with the error from runcvm-runtime.
 - A RUNCVM_DISKS spec missing its fields: the Container/VM exits with
   status 1 before the VM starts, with the error from the entrypoint.
 """
@@ -24,6 +26,8 @@ CASES = [
      "RunCVM: Error: Kernel 'Not/A/Kernel' invalid"),
     ("virtiofsd-killpriv", ["--env=RUNCVM_VIRTIOFSD_KILLPRIV=yes"], 125,
      "RunCVM: Error: RUNCVM_VIRTIOFSD_KILLPRIV 'yes' invalid (should be 0 or 1)"),
+    ("virtiofsd-poll", ["--env=RUNCVM_VIRTIOFSD_POLL_US=1001"], 125,
+     "RunCVM: Error: RUNCVM_VIRTIOFSD_POLL_US '1001' invalid (should be a whole number of microseconds from 0 to 1000)"),
     ("disks", ["--env=RUNCVM_DISKS=/disks/disk1"], 1,
      "disk spec '/disks/disk1' invalid: src, dst and fs must all be specified"),
 ]

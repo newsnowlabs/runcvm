@@ -1121,6 +1121,14 @@ It comes with these restrictions:
 - `fallocate()` clears the bits for every caller, where a local file system keeps them for a caller with `CAP_FSETID` (e.g. root). (RunCVM's `virtiofsd` patches make `copy_file_range()`, used by `cp`, keep or clear them as a local file system would.)
 - A setgid bit without group-execute (a legacy marker, not a privilege) is kept or cleared by a write according to `virtiofsd`'s own group membership (group `root` alone), not the writer's: so it is cleared from files of other groups even when the writer is in the file's group, and kept on files of group `root` even when the writer is not.
 
+### RUNCVM_VIRTIOFSD_POLL_US
+
+**`RUNCVM_VIRTIOFSD_POLL_US=<microseconds>`** (default `0`)
+
+**[EXPERIMENTAL]** With a value from `1` to `1000`, `virtiofsd` keeps polling the VM's request queue for up to that many microseconds after handling the last request, before waiting to be notified of the next. A request the VM makes within that time costs neither a notification from the VM (a VM exit) nor waking `virtiofsd`, which shortens each request when one follows another closely: small writes, creating, copying and deleting files, and other metadata-heavy work. `50` is a good starting point. Reading large files gains little.
+
+The polling uses CPU on the host, up to one core per Container/VM while its VM is issuing requests over virtiofs (none while it is idle), so it suits hosts with spare cores. On hosts whose cores are all busy, including laptops on battery, it can slow the VM down, as polling competes for CPU with the VM itself.
+
 ### RUNCVM_CGROUPFS
 
 **`RUNCVM_CGROUPFS=<value>`**
