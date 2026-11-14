@@ -1,0 +1,170 @@
+From 89dc24ff7ada560dc70027f4bff7e8e4d5404b7f Mon Sep 17 00:00:00 2001
+From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
+Date: Sat, 14 Nov 2026 21:44:43 +0000
+Subject: [PATCH] passthrough: Optionally let the guest cache names that do not
+ exist
+
+Add --negative-timeout=SECONDS (fractions allowed; default 0, off).
+With --cache=auto or always, a lookup of a name that does not exist is
+answered with a negative entry (an inode of 0) that the guest may cache
+for that long, capped at the policy's entry timeout, rather than with
+ENOENT, which it does not cache. The guest then stops asking about
+names it has just found missing: a shell's PATH search, a dynamic
+loader's library path, a language runtime probing for modules.
+
+A name the guest creates itself replaces its negative entry at once;
+one created outside the guest becomes visible to it after at most the
+timeout, as other changes made outside it do under auto and always.
+With --cache=metadata or never, lookups fail with ENOENT as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/main.rs            | 43 ++++++++++++++++++++++++++++++++++++++++++
+ src/passthrough/mod.rs | 38 ++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 80 insertions(+), 1 deletion(-)
+
+diff --git a/src/main.rs b/src/main.rs
+index d4c72e7..f80875a 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -103,6 +103,18 @@ impl FromStr for InodeFileHandlesCommandLineMode {
+     }
+ }
+ 
++/// Parse a `--negative-timeout` value: a non-negative number of seconds, fractions allowed, of at
++/// most a day.
++fn parse_negative_timeout(secs: &str) -> std::result::Result<Duration, String> {
++    let secs: f64 = secs
++        .parse()
++        .map_err(|_| format!("\"{secs}\" is not a number of seconds"))?;
++    if !(0.0..=86400.0).contains(&secs) {
++        return Err(format!("{secs} is not from 0 to 86400 seconds"));
++    }
++    Ok(Duration::from_secs_f64(secs))
++}
++
+ fn parse_tag(tag: &str) -> Result<String> {
+     if !tag.is_empty() && tag.len() <= MAX_TAG_LEN {
+         Ok(tag.into())
+@@ -212,6 +224,14 @@ struct Opt {
+     #[arg(long, default_value = "auto")]
+     cache: CachePolicy,
+ 
++    /// With --cache=auto or always, let the guest cache that a name it looked
++    /// up does not exist, for this many seconds (fractions allowed), at most
++    /// the cache policy's timeout for names that do exist. The guest then sees
++    /// a file created outside it under such a name after at most this long.
++    /// "0" disables it
++    #[arg(long, default_value = "0", value_parser = parse_negative_timeout)]
++    negative_timeout: Duration,
++
+     /// When used with --cache={metadata, never} will allow shared files to be mmap'd.
+     /// Regardless of the selected cache policy, this option should only be enabled
+     /// when the file system has exclusive access to the directory.
+@@ -822,6 +842,7 @@ fn main() {
+     let fs_cfg = passthrough::Config {
+         entry_timeout: timeout,
+         attr_timeout: timeout,
++        negative_timeout: opt.negative_timeout,
+         cache_policy: opt.cache,
+         root_dir: sandbox.get_root_dir(),
+         mountinfo_prefix: sandbox.get_mountinfo_prefix(),
+@@ -918,3 +939,25 @@ fn run_generic_fs<F: FileSystem + SerializableFileSystem + Send + Sync + 'static
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn negative_timeout_values() {
++        assert_eq!(parse_negative_timeout("0"), Ok(Duration::ZERO));
++        assert_eq!(parse_negative_timeout("1"), Ok(Duration::from_secs(1)));
++        assert_eq!(
++            parse_negative_timeout("0.25"),
++            Ok(Duration::from_millis(250))
++        );
++        assert_eq!(
++            parse_negative_timeout("86400"),
++            Ok(Duration::from_secs(86400))
++        );
++        for bad in ["-1", "86401", "inf", "NaN", "", "1s"] {
++            assert!(parse_negative_timeout(bad).is_err(), "{bad} accepted");
++        }
++    }
++}
+diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
+index 01d438d..1208c88 100644
+--- a/src/passthrough/mod.rs
++++ b/src/passthrough/mod.rs
+@@ -222,6 +222,14 @@ pub struct Config {
+     /// The default value for this option is 5 seconds.
+     pub attr_timeout: Duration,
+ 
++    /// How long the FUSE client may consider that a name it looked up does not exist, with the
++    /// `Auto` and `Always` cache policies, capped at `entry_timeout`. With other policies, or when
++    /// zero, a lookup of a name that does not exist fails with `ENOENT`, which the client does not
++    /// cache.
++    ///
++    /// The default value for this option is zero.
++    pub negative_timeout: Duration,
++
+     /// The caching policy the file system should use. See the documentation of `CachePolicy` for
+     /// more details.
+     pub cache_policy: CachePolicy,
+@@ -397,6 +405,7 @@ impl Default for Config {
+         Config {
+             entry_timeout: Duration::from_secs(5),
+             attr_timeout: Duration::from_secs(5),
++            negative_timeout: Duration::ZERO,
+             cache_policy: Default::default(),
+             writeback: false,
+             root_dir: String::from("/"),
+@@ -858,6 +867,16 @@ impl PassthroughFs {
+             .map(|result| result.0)
+     }
+ 
++    /// How long the client may cache that a name does not exist (see `Config::negative_timeout`).
++    fn negative_timeout(&self) -> Duration {
++        match self.cfg.cache_policy {
++            CachePolicy::Auto | CachePolicy::Always => {
++                std::cmp::min(self.cfg.negative_timeout, self.cfg.entry_timeout)
++            }
++            CachePolicy::Never | CachePolicy::Metadata => Duration::ZERO,
++        }
++    }
++
+     fn do_lookup(&self, parent: Inode, name: &CStr) -> io::Result<Entry> {
+         let p = self.inodes.get(parent).ok_or_else(ebadf)?;
+         let (existing_inode, path_fd, st, handle) = self.try_lookup_implementation(&p, name)?;
+@@ -1631,7 +1650,24 @@ impl FileSystem for PassthroughFs {
+     }
+ 
+     fn lookup(&self, _ctx: Context, parent: Inode, name: &CStr) -> io::Result<Entry> {
+-        self.do_lookup(parent, name)
++        match self.do_lookup(parent, name) {
++            Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
++                let entry_timeout = self.negative_timeout();
++                if entry_timeout.is_zero() {
++                    return Err(e);
++                }
++                // An inode of 0 is a negative entry, which the client caches for
++                // `entry_timeout`, or until it creates the name itself.
++                Ok(Entry {
++                    inode: 0,
++                    generation: 0,
++                    attr: Default::default(),
++                    attr_timeout: Duration::ZERO,
++                    entry_timeout,
++                })
++            }
++            result => result,
++        }
+     }
+ 
+     fn forget(&self, _ctx: Context, inode: Inode, count: u64) {
+-- 
+2.43.0
+

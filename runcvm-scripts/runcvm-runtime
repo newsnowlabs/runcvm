@@ -655,6 +655,16 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     error "RUNCVM_SHUTDOWN '$RUNCVM_SHUTDOWN' invalid (should be auto, systemd, busybox, acpi, all, or signal:<signal>, e.g. signal:PWR or signal:38)"
   fi
 
+  # RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT: how long, in seconds (fractions allowed, at most 86400), the
+  # VM may cache that a name it looked up does not exist (see runcvm-ctr-virtiofsd).
+  RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT="$(get_config_env 'RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT')"
+  if [ -n "$RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT" ] && ! {
+      [[ "$RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT" =~ ^(0|[1-9][0-9]{0,4})(\.[0-9]{1,9})?$ ]] &&
+      { [ "${RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT%%.*}" -lt 86400 ] || [[ "$RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT" =~ ^86400(\.0+)?$ ]]; }
+    }; then
+    error "RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT '$RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT' invalid (should be a number of seconds from 0 to 86400, e.g. 1 or 0.5)"
+  fi
+
   # RUNCVM_VIRTIOFSD_KILLPRIV: whether virtiofsd clears setuid and setgid bits itself (1; see
   # runcvm-ctr-virtiofsd) or leaves it to the VM (0, the default).
   RUNCVM_VIRTIOFSD_KILLPRIV="$(get_config_env 'RUNCVM_VIRTIOFSD_KILLPRIV')"
