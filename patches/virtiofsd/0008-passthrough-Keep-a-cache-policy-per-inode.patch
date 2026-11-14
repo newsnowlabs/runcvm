@@ -1,7 +1,7 @@
-From fb7e8f8e4d85805325251120f41afb345ecd7613 Mon Sep 17 00:00:00 2001
+From ca2497c2840552ff8f25e6ea6d8aa43d870f39ae Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 02:02:49 +0000
-Subject: [PATCH 07/10] passthrough: Keep a cache policy per inode
+Subject: [PATCH 08/11] passthrough: Keep a cache policy per inode
 
 Add InodeData::cache_policy, the cache policy of the mount the inode is
 on, with None standing for the file system's default policy, and take
@@ -16,8 +16,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  .../device_state/deserialization.rs           |  3 ++
  .../preserialization/find_paths.rs            |  1 +
  src/passthrough/inode_store.rs                |  4 ++
- src/passthrough/mod.rs                        | 39 ++++++++++++++-----
- 4 files changed, 38 insertions(+), 9 deletions(-)
+ src/passthrough/mod.rs                        | 49 ++++++++++++++-----
+ 4 files changed, 45 insertions(+), 12 deletions(-)
 
 diff --git a/src/passthrough/device_state/deserialization.rs b/src/passthrough/device_state/deserialization.rs
 index 975bbef..f1459fe 100644
@@ -75,7 +75,7 @@ index fc9c7c5..5f6b165 100644
      // when we are actually going to serialize our internal state to send it to the migration
      // destination.
 diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
-index 34ae571..a4374c3 100644
+index 30c17f9..f26049b 100644
 --- a/src/passthrough/mod.rs
 +++ b/src/passthrough/mod.rs
 @@ -91,7 +91,7 @@ impl Drop for ScopedWorkingDirectory {
@@ -114,13 +114,14 @@ index 34ae571..a4374c3 100644
  
          let attr = fuse::Attr::try_with_flags(
              st.st,
-@@ -956,8 +961,8 @@ impl PassthroughFs {
+@@ -955,9 +960,9 @@ impl PassthroughFs {
+             // refcount via `FORGET` later.
              inode: unsafe { inode.leak() },
              generation: 0,
+-            attr_timeout: self.attr_timeout_for(attr.mode),
++            attr_timeout: self.attr_timeout_for(attr.mode, attr_timeout),
              attr,
--            attr_timeout: self.cfg.attr_timeout,
 -            entry_timeout: self.cfg.entry_timeout,
-+            attr_timeout,
 +            entry_timeout,
          })
      }
@@ -151,16 +152,39 @@ index 34ae571..a4374c3 100644
              .open_options(flags & (libc::O_DIRECTORY as u32) != 0);
  
          // `flush()` only dup()s and closes the host file descriptor, to pass on the guest's
-@@ -1043,7 +1048,7 @@ impl PassthroughFs {
+@@ -1036,15 +1041,16 @@ impl PassthroughFs {
+     /// With KILLPRIV_V2, the guest is not told when a write, fallocate or copy_file_range clears
+     /// setuid or setgid bits here, so it would keep the bits in its attribute cache, and exec the
+     /// file with them, until the attributes time out. Have the guest not cache the attributes of
+-    /// such files, so it fetches them afresh for permission checks (and so exec) and stat.
+-    fn attr_timeout_for(&self, mode: u32) -> Duration {
++    /// such files, so it fetches them afresh for permission checks (and so exec) and stat. Other
++    /// files' attributes keep `timeout`, their cache policy's.
++    fn attr_timeout_for(&self, mode: u32, timeout: Duration) -> Duration {
+         if self.cfg.killpriv_v2
+             && mode & libc::S_IFMT == libc::S_IFREG
+             && mode & (libc::S_ISUID | libc::S_ISGID) != 0
+         {
+             Duration::ZERO
+         } else {
+-            self.cfg.attr_timeout
++            timeout
+         }
+     }
+ 
+@@ -1058,7 +1064,10 @@ impl PassthroughFs {
              |gid| self.map_host_gid(gid),
          )?;
  
--        Ok((attr, self.cfg.attr_timeout))
-+        Ok((attr, self.timeouts(data.cache_policy).1))
+-        Ok((attr, self.attr_timeout_for(st.st_mode)))
++        Ok((
++            attr,
++            self.attr_timeout_for(st.st_mode, self.timeouts(data.cache_policy).1),
++        ))
      }
  
      fn do_unlink(&self, parent: Inode, name: &CStr, flags: libc::c_int) -> io::Result<()> {
-@@ -1284,6 +1289,20 @@ impl PassthroughFs {
+@@ -1299,6 +1308,20 @@ impl PassthroughFs {
          }
      }
  
@@ -181,7 +205,7 @@ index 34ae571..a4374c3 100644
      pub fn open_root_node(&self) -> io::Result<()> {
          // We use `O_PATH` because we just want this for traversing the directory tree
          // and not for actually reading the contents. We don't use `open_relative_to()`
-@@ -1332,6 +1351,7 @@ impl PassthroughFs {
+@@ -1347,6 +1370,7 @@ impl PassthroughFs {
                  mnt_id: st.mnt_id,
              },
              mode: st.st.st_mode,
@@ -189,7 +213,7 @@ index 34ae571..a4374c3 100644
              migration_info: Mutex::new(migration_info),
          };
          self.inodes.new_inode(inode)?;
-@@ -1823,7 +1843,8 @@ impl FileSystem for PassthroughFs {
+@@ -1838,7 +1862,8 @@ impl FileSystem for PassthroughFs {
              }
          };
  

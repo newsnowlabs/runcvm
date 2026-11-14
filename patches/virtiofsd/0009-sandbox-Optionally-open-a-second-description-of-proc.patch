@@ -1,7 +1,7 @@
-From 8f75e9ca3b7593144b15ac181d88a9b8baf26b4e Mon Sep 17 00:00:00 2001
+From ca155488e76c49ce34608b93211163c72239ce77 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 02:02:49 +0000
-Subject: [PATCH 08/10] sandbox: Optionally open a second description of
+Subject: [PATCH 09/11] sandbox: Optionally open a second description of
  /proc/self/mountinfo
 
 Add Sandbox::want_cache_mountinfo(), to be called before entering the
@@ -21,7 +21,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 28 insertions(+), 1 deletion(-)
 
 diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
-index a4374c3..db86ce2 100644
+index f26049b..ee8eea0 100644
 --- a/src/passthrough/mod.rs
 +++ b/src/passthrough/mod.rs
 @@ -262,6 +262,10 @@ pub struct Config {

@@ -1,7 +1,7 @@
-From 1656a24f321c6eb60561879137a082e58d732ac1 Mon Sep 17 00:00:00 2001
+From 0f77cce637efe3c2fa307e7170a7d6fe5f8b08b0 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 02:02:49 +0000
-Subject: [PATCH 05/10] sandbox: Open /proc/self/mountinfo close-on-exec
+Subject: [PATCH 06/11] sandbox: Open /proc/self/mountinfo close-on-exec
 
 virtiofsd keeps its /proc/self/mountinfo descriptor for itself; like any
 such descriptor, it should not be inherited across exec(), e.g. by the

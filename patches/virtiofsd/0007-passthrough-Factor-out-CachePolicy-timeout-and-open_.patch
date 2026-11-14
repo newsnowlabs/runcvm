@@ -1,7 +1,7 @@
-From 82976ef37b27422b5cd6a5a08d10df237cf1cb3c Mon Sep 17 00:00:00 2001
+From 51d9d06b7e47abc842d4d1e71ae049f42e80ada9 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 02:02:49 +0000
-Subject: [PATCH 06/10] passthrough: Factor out CachePolicy::timeout() and
+Subject: [PATCH 07/11] passthrough: Factor out CachePolicy::timeout() and
  open_options()
 
 Move the mapping from cache policy to entry/attribute timeout (main.rs)
@@ -41,7 +41,7 @@ index d4c72e7..b4579c9 100644
      let umask = if opt.socket_group.is_some() {
          libc::S_IROTH | libc::S_IWOTH | libc::S_IXOTH
 diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
-index 5d132d2..34ae571 100644
+index 01d438d..30c17f9 100644
 --- a/src/passthrough/mod.rs
 +++ b/src/passthrough/mod.rs
 @@ -119,6 +119,42 @@ pub enum CachePolicy {
@@ -120,7 +120,7 @@ index 5d132d2..34ae571 100644
  
          // `flush()` only dup()s and closes the host file descriptor, to pass on the guest's
          // close() to the host file system.  For a descriptor without write access, that has no
-@@ -1805,13 +1823,7 @@ impl FileSystem for PassthroughFs {
+@@ -1820,13 +1838,7 @@ impl FileSystem for PassthroughFs {
              }
          };
  
@@ -135,7 +135,7 @@ index 5d132d2..34ae571 100644
  
          Ok((entry, Some(handle), opts))
      }
-@@ -2749,3 +2761,32 @@ impl From<GuestFile> for HandleDataFile {
+@@ -2765,3 +2777,32 @@ impl From<GuestFile> for HandleDataFile {
          HandleDataFile::File(RwLock::new(file))
      }
  }

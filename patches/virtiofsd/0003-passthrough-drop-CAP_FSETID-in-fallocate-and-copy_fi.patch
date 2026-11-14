@@ -1,7 +1,7 @@
 From cc7410173991ffbe51f7c6fb968f6418e86ba57d Mon Sep 17 00:00:00 2001
 From: German Maglione <gmaglione@redhat.com>
 Date: Sat, 14 Nov 2026 10:00:25 +0000
-Subject: [PATCH 3/4] passthrough: drop CAP_FSETID in fallocate and
+Subject: [PATCH 3/5] passthrough: drop CAP_FSETID in fallocate and
  copy_file_range
 
 Unlike open, create, write, and setattr, the FUSE protocol doesn't

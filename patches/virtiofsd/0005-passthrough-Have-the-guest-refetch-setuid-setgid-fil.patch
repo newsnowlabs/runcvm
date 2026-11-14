@@ -1,0 +1,77 @@
+From 163f88e8c74688c50a77f19a39b846a2d91ed700 Mon Sep 17 00:00:00 2001
+From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
+Date: Sat, 14 Nov 2026 11:09:45 +0000
+Subject: [PATCH 5/5] passthrough: Have the guest refetch setuid/setgid files'
+ attributes
+
+With KILLPRIV_V2, virtiofsd clears the setuid and setgid bits of a
+file that the guest modifies, but the guest is not told: a WRITE reply
+carries no attributes, and the guest's FUSE client marks only size,
+times and blocks as stale after a write, fallocate or copy_file_range,
+never the mode. So the guest keeps the bits in its attribute cache
+until the attributes time out (a second with --cache=auto, a day with
+always): a mode-only statx shows them, and with writeback caching,
+where size and times are not refetched either, exec applies them. A
+user able to write to a setuid-root file could then run it as root
+after modifying it.
+
+With KILLPRIV_V2, give the attributes of regular files with a setuid
+or setgid bit a timeout of zero, in lookup and getattr replies, so the
+guest fetches them afresh for every permission check (and so exec) and
+stat. Once a file's bits are cleared, its next reply has the usual
+timeout. Setuid and setgid files are few, so the cost, a GETATTR for
+each access to one, is small.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/passthrough/mod.rs | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
+index 80fe402..01d438d 100644
+--- a/src/passthrough/mod.rs
++++ b/src/passthrough/mod.rs
+@@ -919,8 +919,8 @@ impl PassthroughFs {
+             // refcount via `FORGET` later.
+             inode: unsafe { inode.leak() },
+             generation: 0,
++            attr_timeout: self.attr_timeout_for(attr.mode),
+             attr,
+-            attr_timeout: self.cfg.attr_timeout,
+             entry_timeout: self.cfg.entry_timeout,
+         })
+     }
+@@ -1015,6 +1015,21 @@ impl PassthroughFs {
+         Err(ebadf())
+     }
+ 
++    /// With KILLPRIV_V2, the guest is not told when a write, fallocate or copy_file_range clears
++    /// setuid or setgid bits here, so it would keep the bits in its attribute cache, and exec the
++    /// file with them, until the attributes time out. Have the guest not cache the attributes of
++    /// such files, so it fetches them afresh for permission checks (and so exec) and stat.
++    fn attr_timeout_for(&self, mode: u32) -> Duration {
++        if self.cfg.killpriv_v2
++            && mode & libc::S_IFMT == libc::S_IFREG
++            && mode & (libc::S_ISUID | libc::S_ISGID) != 0
++        {
++            Duration::ZERO
++        } else {
++            self.cfg.attr_timeout
++        }
++    }
++
+     fn do_getattr(&self, inode: Inode) -> io::Result<(fuse::Attr, Duration)> {
+         let data = self.inodes.get(inode).ok_or_else(ebadf)?;
+         let inode_file = data.get_file()?;
+@@ -1025,7 +1040,7 @@ impl PassthroughFs {
+             |gid| self.map_host_gid(gid),
+         )?;
+ 
+-        Ok((attr, self.cfg.attr_timeout))
++        Ok((attr, self.attr_timeout_for(st.st_mode)))
+     }
+ 
+     fn do_unlink(&self, parent: Inode, name: &CStr, flags: libc::c_int) -> io::Result<()> {
+-- 
+2.43.0
+
