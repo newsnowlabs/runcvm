@@ -61,6 +61,91 @@ fi
 # available to the kernel for the VM's lifetime, including after a switch to a whole-root disk.
 echo "$RUNCVM_GUEST/scripts/runcvm-vm-modprobe" >/proc/sys/kernel/modprobe
 
+# Reports error $1 on the console device, which the container's output is connected to, and powers
+# the VM off with exit status 1.
+vm_init_error() {
+  local console
+
+  read -r console </.runcvm/console
+  echo "RunCVM: Error: $1" >"/dev/$console"
+  echo 1 >/.runcvm/exitcode
+  poweroff -f
+  exit 1
+}
+
+# Loads the module for each virtio device that has no driver: a PCI device of vendor 1af4, which the
+# virtio specification assigns to virtio PCI devices (device IDs 1000-107f), or a device on the
+# virtio bus, which appears only once its transport's driver (e.g. virtio_pci) binds to the PCI
+# device. The initramfs hands over once its device discovery falls quiet (Alpine's
+# nlplug-findfs) or its udev queue empties (initramfs-tools, dracut), and nothing loads drivers for
+# a device that appears after that. Each modalias is tried once.
+declare -A VM_MODALIASES_TRIED=()
+load_virtio_drivers() {
+  local dev modalias
+  local -a modaliases=()
+
+  for dev in /sys/bus/pci/devices/* /sys/bus/virtio/devices/*
+  do
+    [ -e "$dev/driver" ] && continue
+    read -r modalias <"$dev/modalias" 2>/dev/null || continue
+    [[ "$modalias" = pci:v00001AF4* || "$modalias" = virtio:* ]] || continue
+    [ -n "${VM_MODALIASES_TRIED[$modalias]}" ] && continue
+    VM_MODALIASES_TRIED[$modalias]=1
+    modaliases+=("$modalias")
+  done
+
+  # A modalias that no module provides (e.g. a device whose driver is built in, and bound only once
+  # its own bus is ready) is not an error here: the wait below reports any device left missing.
+  [ ${#modaliases[@]} -eq 0 ] || busybox modprobe -q -a "${modaliases[@]}" || true
+}
+
+# Prints, one per line, each device this script configures that the VM does not yet have: each
+# network interface (by the MAC address runcvm-ctr-qemu gives it), each disk holding a filesystem
+# (by UUID) and the guest agent's virtio-serial port.
+missing_devices() {
+  local ifpath if mac uuid
+
+  for ifpath in /.runcvm/network/devices/*
+  do
+    if=$(busybox basename "$ifpath")
+    [ "$if" = "default" ] && continue
+    [ -s "$ifpath" ] || continue
+    load_network "$if"
+    mac=$(busybox sed -r 's/^..:..:../52:54:00/' <<<$DOCKER_IF_MAC)
+    cat /sys/class/net/*/address 2>/dev/null | grep -qixF "$mac" || echo "network interface $DOCKER_IF (MAC $mac)"
+  done
+
+  for uuid in $(
+    { [ -f /.runcvm/rootdisk ] && cat /.runcvm/rootdisk
+      [ -f /.runcvm/fstab ] && awk '$1 ~ /^UUID=/ { print substr($1, 6) }' /.runcvm/fstab
+    } | busybox sort -u
+  )
+  do
+    BLKID_CONF="$RUNCVM_GUEST/etc/blkid.conf" BLKID_FILE=/dev/null blkid -U "$uuid" >/dev/null 2>&1 || echo "disk with UUID $uuid"
+  done
+
+  cat /sys/class/virtio-ports/*/name 2>/dev/null | grep -qxF org.qemu.guest_agent.0 || echo "guest agent's virtio-serial port"
+}
+
+# Wait, for up to 30 seconds, for the devices that missing_devices names, loading the drivers of
+# any virtio devices that appear meanwhile. Every device QEMU attaches is present on its bus from
+# the start, so the wait lasts only while a driver binds late, or for the whole 30 seconds where a
+# device never appears. A network interface or disk still missing then is an error, as the VM
+# cannot be configured as the container was; the guest agent's port, which nothing the workload
+# depends on uses, is not.
+load_virtio_drivers
+VM_DEVICE_WAIT_DEADLINE=$((SECONDS + 30))
+while VM_DEVICES_MISSING=$(missing_devices) && [ -n "$VM_DEVICES_MISSING" ]
+do
+  if [ $SECONDS -ge $VM_DEVICE_WAIT_DEADLINE ]; then
+    VM_DEVICES_MISSING=$(grep -vF "guest agent" <<<"$VM_DEVICES_MISSING" || true)
+    [ -z "$VM_DEVICES_MISSING" ] && break
+    vm_init_error "these devices did not appear in the VM within 30s: ${VM_DEVICES_MISSING//$'\n'/; }"
+  fi
+  busybox usleep 20000
+  load_virtio_drivers
+done
+
 # Switch the root filesystem to the whole-root disk, if RUNCVM_DISKS defines one (see do_root_disk
 # in runcvm-ctr-qemu). This must happen before anything else uses the root: everything after it,
 # and the workload, sees the disk as /.
@@ -217,18 +302,6 @@ done </.runcvm/network/routes6
 
 # Setup hostname
 hostname -F /etc/hostname
-
-# Reports error $1 on the console device, which the container's output is connected to, and powers
-# the VM off with exit status 1.
-vm_init_error() {
-  local console
-
-  read -r console </.runcvm/console
-  echo "RunCVM: Error: $1" >"/dev/$console"
-  echo 1 >/.runcvm/exitcode
-  poweroff -f
-  exit 1
-}
 
 # Load the kernel modules that RUNCVM_KERNEL_MODULES names (checked by runcvm-runtime as a
 # comma-separated list of module names), before the workload starts: for modules that nothing
