@@ -31,6 +31,21 @@ case "$RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE" in
   *) OPTS+=(--submount-cache="$RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE") ;;
 esac
 
+# RUNCVM_VIRTIOFSD_CACHE_PATHS, which runcvm-runtime validates, is a ';'-separated list of
+# <path>=<policy>: each mount at or below <path> takes <policy>, as RunCVM's patched virtiofsd's
+# --cache-path gives it, the longest matching path winning, ahead of
+# RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE. virtiofsd shares the container's root filesystem, so its paths
+# are the container's.
+if [ -n "$RUNCVM_VIRTIOFSD_CACHE_PATHS" ]; then
+  IFS=';' read -r -a cache_paths <<<"$RUNCVM_VIRTIOFSD_CACHE_PATHS"
+  for cache_path_entry in "${cache_paths[@]}"
+  do
+    cache_policy="${cache_path_entry##*=}"
+    [ "$cache_policy" = "none" ] && cache_policy=never
+    OPTS+=(--cache-path="${cache_path_entry%=*}=$cache_policy")
+  done
+fi
+
 # RUNCVM_VIRTIOFSD_KILLPRIV=1, which runcvm-runtime validates, has virtiofsd clear setuid and setgid
 # bits and file capabilities when the VM modifies a file (FUSE's KILLPRIV_V2), sparing the VM a
 # request to check for file capabilities before each write. RunCVM's virtiofsd patches (see

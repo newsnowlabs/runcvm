@@ -716,6 +716,25 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     *) error "RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE '$RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE' invalid (should be one of the cache policies auto, always, metadata and none (or never))" ;;
   esac
 
+  # The cache policies for the mounts at or below given paths (see runcvm-ctr-virtiofsd): a
+  # ';'-separated list of <path>=<policy>, each path absolute, other than '/', and without a '..'
+  # component. A path's last '=' separates it from its policy, so a path may contain '='.
+  RUNCVM_VIRTIOFSD_CACHE_PATHS="$(get_config_env 'RUNCVM_VIRTIOFSD_CACHE_PATHS')"
+  if [ -n "$RUNCVM_VIRTIOFSD_CACHE_PATHS" ]; then
+    IFS=';' read -r -a cache_paths <<<"$RUNCVM_VIRTIOFSD_CACHE_PATHS"
+    for cache_path_entry in "${cache_paths[@]}"
+    do
+      cache_path="${cache_path_entry%=*}"
+      if [[ "$cache_path_entry" != *=* || "$cache_path" != /* || "$cache_path" =~ ^/+$ || "/$cache_path/" == */../* ]]; then
+        error "RUNCVM_VIRTIOFSD_CACHE_PATHS entry '$cache_path_entry' invalid (should be <path>=<policy>, with <path> absolute, other than '/', and without '..')"
+      fi
+      case "${cache_path_entry##*=}" in
+        auto|always|metadata|none|never) ;;
+        *) error "RUNCVM_VIRTIOFSD_CACHE_PATHS entry '$cache_path_entry' invalid (its policy should be one of the cache policies auto, always, metadata and none (or never))" ;;
+      esac
+    done
+  fi
+
   # Under software emulation, QEMU keeps a cache of translated code, whose size is set by
   # RUNCVM_QEMU_TCG_TB_MEM_SIZE (Mb) and added to the container's memory limit (below), so
   # that the VM's own memory and the container's memory limit remain aligned.

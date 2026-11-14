@@ -23,6 +23,12 @@ container over virtiofs:
   file in a volume, rewritten from outside the VM after the VM has read
   them, are read afresh in the VM; a file in the root filesystem, replaced
   with 'docker cp' after the VM has read it, is still read as before.
+- With RUNCVM_VIRTIOFSD_CACHE=always and RUNCVM_VIRTIOFSD_CACHE_PATHS
+  giving 'auto' for one volume's destination, virtiofsd runs with
+  --cache-path for it: a file in that volume, rewritten from another
+  container after the VM has read it, is read afresh, while a file in a
+  second volume that no path covers keeps the root's 'always' and is still
+  read as before.
 
 The expected values describe current behaviour. A change to it must update
 them deliberately.
@@ -178,8 +184,39 @@ def case_submount_cache():
         shutil.rmtree(host, ignore_errors=True)
 
 
+def case_cache_paths():
+    fresh, stale = t.unique("cachepath-a"), t.unique("cachepath-b")
+    for volume in (fresh, stale):
+        t.volume_create(volume)
+        t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v",
+                 volume + ":/v", "alpine", "sh", "-c", "echo old >/v/f")
+    name = start("cachepath", "-v", fresh + ":/data/a", "-v", stale + ":/srv/b",
+                 "--env=RUNCVM_VIRTIOFSD_CACHE=always",
+                 "--env=RUNCVM_VIRTIOFSD_CACHE_PATHS=/data=auto")
+    if not name:
+        return [("cache paths: Container/VM started", True, False)]
+    top = t.docker("top", name).stdout
+    before = ex(name, "cat", "/data/a/f", "/srv/b/f").stdout
+    rewritten = [t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v",
+                          volume + ":/v", "alpine", "sh", "-c", "echo new >/v/f").returncode
+                 for volume in (fresh, stale)]
+    # Wait past the 1-second timeouts of 'auto' before reading again: a fixed wait, as polling
+    # for the new contents would read the files in the meantime.
+    t.docker("exec", name, "sleep", "3")
+    return [
+        ("cache paths: virtiofsd runs with --cache-path=/data=auto", True,
+         any("virtiofsd" in line and "--cache-path=/data=auto" in line for line in top.splitlines())),
+        ("cache paths: files read in the VM before", "old\nold\n", before),
+        ("cache paths: both volumes' files rewritten from another container", [0, 0], rewritten),
+        ("cache paths (/data=auto): volume file at /data/a rewritten from outside is read afresh",
+         "new", ex(name, "cat", "/data/a/f").stdout.strip()),
+        ("cache paths (uncovered, always): volume file at /srv/b rewritten from outside is read as before",
+         "old", ex(name, "cat", "/srv/b/f").stdout.strip()),
+    ]
+
+
 for results in t.parallel(lambda f: f(), [case_volume_and_binds, case_shared_volume, case_writeback,
-                                          case_submount_cache], jobs=4):
+                                          case_submount_cache, case_cache_paths], jobs=5):
     for desc, expected, actual in results:
         t.check(desc, expected, actual)
 

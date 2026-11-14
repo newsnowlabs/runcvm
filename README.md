@@ -1141,6 +1141,16 @@ This lets the image's own files, which nothing outside the VM normally changes, 
 
 With `always` for the root filesystem, the VM may still go on seeing, for up to a day, the old version of a root filesystem file changed from outside it, e.g. with `docker cp` into the running container.
 
+### RUNCVM_VIRTIOFSD_CACHE_PATHS
+
+**`RUNCVM_VIRTIOFSD_CACHE_PATHS=<path>=<policy>[;<path>=<policy>...]`**
+
+**[EXPERIMENTAL]** Specifies a cache policy, as for [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache) (`auto`, `always`, `metadata` or `none`), for the volumes and bind mounts at or below each `<path>`: e.g. `--env='RUNCVM_VIRTIOFSD_CACHE_PATHS=/data=none;/srv/static=always'`. Each mount takes the policy of the longest `<path>` that is its destination or a directory above it (`/data` covers `/data` and `/data/db`, but not `/database`); a mount no `<path>` covers takes [`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE`](#runcvm_virtiofsd_submount_cache)'s policy, if set, and otherwise `RUNCVM_VIRTIOFSD_CACHE`'s.
+
+Each `<path>` is a path in the container, absolute, other than `/`, without `..`, and need not exist: a mount at or below it is matched when the VM first reaches it. It applies to mounts only: a directory of the root filesystem takes `RUNCVM_VIRTIOFSD_CACHE`'s policy, whatever `<path>` covers it. A `<path>` may contain `=` (the last `=` in each entry separates it from its policy), but not `;`.
+
+This suits a Container/VM with mounts that need different trade-offs: e.g. `none` for a volume that other containers write to, for which the VM must see each change at once, and `always` for a bind mount of files that do not change while it runs.
+
 ### RUNCVM_VIRTIOFSD_KILLPRIV
 
 **`RUNCVM_VIRTIOFSD_KILLPRIV=<0|1>`**
