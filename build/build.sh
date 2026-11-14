@@ -34,7 +34,8 @@ org.opencontainers.image.version and .revision labels and as /opt/runcvm/VERSION
 installs, e.g. 'v1.8.0 (2211e3e)'. The version is the nearest git tag, as 'git describe --tags
 --dirty' gives it ('untagged' where no tag is reachable); or the value of RUNCVM_VERSION, where
 set, e.g. 'RUNCVM_VERSION=my-build $0'; or 'unknown', outside a git checkout without
-RUNCVM_VERSION.
+RUNCVM_VERSION. Outside a git checkout, the commit is recorded as 'unknown', and VERSION gives the
+version alone.
 _EOE_
 }
 
@@ -85,15 +86,15 @@ cd "$(dirname "$0")/.." || exit 1
 # 'v1.8.0' for a release, or 'v1.8.0-2-ge77f189-dirty' for a build two commits after it, with
 # uncommitted changes; or 'untagged' where no tag is reachable, as in a shallow clone. The revision
 # is the commit's full ID. RUNCVM_VERSION, where set, gives the version instead, e.g. for a build
-# from a source tree without git's history, which has no revision; without it, such a build's
-# version is 'unknown'. Git is consulted only where the build context is the top of a git checkout,
-# not where it is a source tree within some other repository.
-RUNCVM_REVISION=
+# from a source tree without git's history, whose revision is 'unknown'; without it, such a build's
+# version is 'unknown' too. Git is consulted only where the build context is the top of a git
+# checkout, not where it is a source tree within some other repository.
+RUNCVM_REVISION=unknown
 if [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ]; then
-  RUNCVM_REVISION=$(git rev-parse HEAD) || RUNCVM_REVISION=
+  RUNCVM_REVISION=$(git rev-parse HEAD) || RUNCVM_REVISION=unknown
 fi
 if [ -z "$RUNCVM_VERSION" ]; then
-  if [ -n "$RUNCVM_REVISION" ]; then
+  if [ "$RUNCVM_REVISION" != "unknown" ]; then
     RUNCVM_VERSION=$(git describe --tags --dirty 2>/dev/null) || RUNCVM_VERSION=untagged
   else
     RUNCVM_VERSION=unknown
@@ -143,7 +144,7 @@ RunCVM build successful
 
 Built:    ${tags[*]/#/$REPO:}
 Version:  $RUNCVM_VERSION
-Revision: ${RUNCVM_REVISION:-none}
+Revision: $RUNCVM_REVISION
 _EOE_
 
 case "$push" in
