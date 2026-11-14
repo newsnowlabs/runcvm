@@ -1177,6 +1177,8 @@ To upgrade, follow this procedure:
 2. Rerun the installation command, which installs the latest release, or the release named in `REPO` (see [Installation](#installation)), and runs that release's own installer.
 3. Start any RunCVM containers.
 
+The installer reports the version it installed. To see the version installed later, run `cat /opt/runcvm/VERSION`, which gives the release's tag and commit, e.g. `v1.8.0 (2211e3e)`; for a build of other commits, see [Building](#building). Releases up to v1.8.0 install no `VERSION` file.
+
 ## Building
 
 Building RunCVM requires Docker. To build RunCVM, first clone the repo, then run the build script, as follows:
@@ -1187,6 +1189,8 @@ cd runcvm
 ```
 
 The build script creates a Docker image named `newsnowlabs/runcvm:latest`. To tag it otherwise, give `--tag <tag>`, once or more, e.g. `--tag dev` for a development build, or `--tag v1.2.3 --tag latest` for a release. Arguments after `--` are passed to `docker build`.
+
+The build records its version and the commit it was built from: in the image's `org.opencontainers.image.version` and `org.opencontainers.image.revision` labels (the commit's full ID), and in `/opt/runcvm/VERSION`, which the installer reports and installs, as `<version> (<short commit ID>)`, e.g. `v1.8.0-2-ge77f189 (e77f189)` for a build two commits after `v1.8.0`. The version is the nearest tag, as `git describe --tags --dirty` gives it, with `-dirty` added for a build with uncommitted changes, or `untagged` where no tag is reachable, as in a shallow clone. To record another version, e.g. for a build from a source tree without git's history, set `RUNCVM_VERSION`: `RUNCVM_VERSION=my-build ./build/build.sh`. A build outside a git checkout records the commit as `unknown`, and `/opt/runcvm/VERSION` then gives the version alone; without `RUNCVM_VERSION`, it records version `unknown` too, as does `docker build` run alone.
 
 To publish the build, add `--push`, which after a successful build pushes each tag to Docker Hub (`newsnowlabs/runcvm:<tag>`), then copies it to GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`) with `docker buildx imagetools create`, giving the copy's index the image's `org.opencontainers.image.*` labels (its source repository, description and licence) as annotations, which GitHub uses to link the package on ghcr.io to this repository; `--push=dockerhub` pushes to Docker Hub only. Both need `docker login` to the registries concerned, and `--push` (with `all`) needs Docker's [containerd image store](https://docs.docker.com/engine/storage/containerd/) (the default for new installations of Docker Engine 29 and later): with Docker's classic store, the copy on ghcr.io would be a Docker manifest list, which cannot carry annotations, so the script stops before building. `./build/build.sh --help` lists the options.
 
