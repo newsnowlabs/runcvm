@@ -241,6 +241,8 @@ Running RunCVM on macOS is experimental, as is arm64 support. On macOS, Docker r
 
 Check that `/dev/kvm` exists inside the VM (e.g. `limactl shell <vm> ls -l /dev/kvm`) before installing RunCVM there. The VM may also lack `/dev/vhost-net` (needed by `RUNCVM_QEMU_NET_VHOST=1`) and hugepages (needed by `RUNCVM_HUGETLB=1`); both options are off by default.
 
+Under nested virtualisation, reads over virtiofs are slow, and RunCVM's default cache policy, `RUNCVM_VIRTIOFSD_CACHE=auto`, has the VM read each program afresh from the container's filesystem every time it runs it, so a Container/VM starts slowly: on an M3 Mac, `docker run --rm --runtime=runcvm alpine true` takes about 21 seconds. While arm64 support is experimental, launch Container/VMs on macOS with `--env=RUNCVM_VIRTIOFSD_CACHE=always`, which keeps files' contents cached in the VM and cuts that time to about 13 seconds. Do not use `always` for a Container/VM with volumes or bind mounts whose files change outside the VM, e.g. files edited on the host, as the VM may not see those changes for up to a day; keep the default for those, or use `none` for volumes shared with other Container/VMs (see [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)). Fewer vCPUs also start faster there: `--cpus=1` saves about a further 2.5 seconds.
+
 ## Installation
 
 Run:
