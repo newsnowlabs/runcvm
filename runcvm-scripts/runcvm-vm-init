@@ -73,9 +73,10 @@ vm_init_error() {
   exit 1
 }
 
-# Loads the module for each virtio device that has no driver: a virtio PCI device (vendor 1af4), or
-# a device on the virtio bus, which appears only once its transport's driver (e.g. virtio_pci)
-# binds to the PCI device. The initramfs hands over once its device discovery falls quiet (Alpine's
+# Loads the module for each virtio device that has no driver: a PCI device of vendor 1af4, which the
+# virtio specification assigns to virtio PCI devices (device IDs 1000-107f), or a device on the
+# virtio bus, which appears only once its transport's driver (e.g. virtio_pci) binds to the PCI
+# device. The initramfs hands over once its device discovery falls quiet (Alpine's
 # nlplug-findfs) or its udev queue empties (initramfs-tools, dracut), and nothing loads drivers for
 # a device that appears after that. Each modalias is tried once.
 declare -A VM_MODALIASES_TRIED=()
