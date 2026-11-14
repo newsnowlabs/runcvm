@@ -1,0 +1,216 @@
+From 3fa064f7ae200616f2279c37ceb05584dcf6c56d Mon Sep 17 00:00:00 2001
+From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
+Date: Sat, 14 Nov 2026 20:36:30 +0000
+Subject: [PATCH] vhost_user: Optionally poll the request queue before waiting
+
+Add --queue-poll-us=N (0 to 1000; default 0, off). Without a thread
+pool, with EVENT_IDX, once the request queue runs dry virtiofsd keeps
+polling it, with the guest's notifications still suppressed, for up to
+N microseconds before re-enabling notifications and waiting. A request
+the guest adds within that time is then picked up without the guest
+notifying virtiofsd (a VM exit) or virtiofsd being woken.
+
+It spends host CPU while the guest is issuing requests, in exchange
+for lower latency on requests that follow one another closely, such as
+metadata operations and small writes. Only the request queue is
+polled, not the high-priority queue.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/main.rs       | 18 ++++++++++++++--
+ src/vhost_user.rs | 53 ++++++++++++++++++++++++++++++++++++++++++++---
+ 2 files changed, 66 insertions(+), 5 deletions(-)
+
+diff --git a/src/main.rs b/src/main.rs
+index d4c72e7..7dbff75 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -156,6 +156,14 @@ struct Opt {
+     #[arg(long, default_value = "0")]
+     thread_pool_size: usize,
+ 
++    /// After the request queue runs dry, keep polling it for up to this many
++    /// microseconds (at most 1000) before waiting for the guest to notify.
++    /// Spends host CPU to save the notification and wake-up on a request that
++    /// follows closely. Applies without a thread pool, and where the guest has
++    /// negotiated VIRTIO_RING_F_EVENT_IDX, only. "0" disables it
++    #[arg(long, default_value = "0", value_parser = clap::value_parser!(u64).range(0..=1000))]
++    queue_poll_us: u64,
++
+     /// Enable support for extended attributes
+     #[arg(long)]
+     xattr: bool,
+@@ -697,6 +705,10 @@ fn main() {
+     let xattrmap = opt.xattrmap.clone();
+     let xattr = xattrmap.is_some() || opt.posix_acl || opt.security_label || opt.xattr;
+     let thread_pool_size = opt.thread_pool_size;
++    let queue_poll = Duration::from_micros(opt.queue_poll_us);
++    if !queue_poll.is_zero() && thread_pool_size > 0 {
++        warn!("--queue-poll-us applies without a thread pool only; ignoring it");
++    }
+     let readdirplus = match opt.cache {
+         CachePolicy::Never => false,
+         _ => !opt.no_readdirplus,
+@@ -867,13 +879,13 @@ fn main() {
+             error!("Failed to create internal filesystem representation: {e}");
+             process::exit(1);
+         });
+-        run_generic_fs(fs, listener, thread_pool_size, opt.tag);
++        run_generic_fs(fs, listener, thread_pool_size, queue_poll, opt.tag);
+     } else {
+         let fs = PassthroughFs::new(fs_cfg).unwrap_or_else(|e| {
+             error!("Failed to create internal filesystem representation: {e}");
+             process::exit(1);
+         });
+-        run_generic_fs(fs, listener, thread_pool_size, opt.tag);
++        run_generic_fs(fs, listener, thread_pool_size, queue_poll, opt.tag);
+     }
+ }
+ 
+@@ -882,11 +894,13 @@ fn run_generic_fs<F: FileSystem + SerializableFileSystem + Send + Sync + 'static
+     fs: F,
+     listener: Listener,
+     thread_pool_size: usize,
++    queue_poll: Duration,
+     tag: Option<String>,
+ ) {
+     let fs_backend = Arc::new(
+         VhostUserFsBackendBuilder::default()
+             .set_thread_pool_size(thread_pool_size)
++            .set_queue_poll(queue_poll)
+             .set_tag(tag)
+             .build(fs)
+             .unwrap_or_else(|error| {
+diff --git a/src/vhost_user.rs b/src/vhost_user.rs
+index 22a6cbc..1c7c489 100644
+--- a/src/vhost_user.rs
++++ b/src/vhost_user.rs
+@@ -7,6 +7,7 @@ use std::fs::File;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::{Arc, Mutex, RwLock};
+ use std::thread::{self, JoinHandle};
++use std::time::{Duration, Instant};
+ use std::{convert, error, fmt, io};
+ 
+ use futures::executor::{ThreadPool, ThreadPoolBuilder};
+@@ -21,7 +22,7 @@ use virtio_bindings::bindings::virtio_config::*;
+ use virtio_bindings::bindings::virtio_ring::{
+     VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
+ };
+-use virtio_queue::{DescriptorChain, QueueOwnedT};
++use virtio_queue::{DescriptorChain, QueueOwnedT, QueueT};
+ use vm_memory::{
+     ByteValued, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap, Le32,
+ };
+@@ -121,10 +122,13 @@ struct VhostUserFsThread<F: FileSystem + Send + Sync + 'static> {
+     vu_req: Option<Backend>,
+     event_idx: bool,
+     pool: Option<ThreadPool>,
++    // How long to keep polling the request queue, with the guest's notifications suppressed,
++    // after it runs dry (serial processing with EVENT_IDX only). Zero disables polling.
++    queue_poll: Duration,
+ }
+ 
+ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFsThread<F> {
+-    fn new(fs: F, thread_pool_size: usize) -> Result<Self> {
++    fn new(fs: F, thread_pool_size: usize, queue_poll: Duration) -> Result<Self> {
+         let pool = if thread_pool_size > 0 {
+             // Test that unshare(CLONE_FS) works, it will be called for each thread.
+             // It's an unprivileged system call but some Docker/Moby versions are
+@@ -159,6 +163,7 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
+             vu_req: None,
+             event_idx: false,
+             pool,
++            queue_poll,
+         })
+     }
+ 
+@@ -322,6 +327,28 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
+         Ok(())
+     }
+ 
++    /// Polls `vring_state`'s queue for up to `self.queue_poll`, returning true as soon as the
++    /// guest has made a new request available, and false once the time is up.
++    fn poll_queue(&self, vring_state: &mut VringState<LoggedMemoryAtomic>) -> bool {
++        let mem = match &self.mem {
++            Some(m) => m.memory(),
++            None => return false,
++        };
++        let deadline = Instant::now() + self.queue_poll;
++        loop {
++            let queue = vring_state.get_queue();
++            match queue.avail_idx(&*mem, Ordering::Acquire) {
++                Ok(idx) if idx.0 != queue.next_avail() => return true,
++                Ok(_) => {}
++                Err(_) => return false,
++            }
++            if Instant::now() >= deadline {
++                return false;
++            }
++            std::hint::spin_loop();
++        }
++    }
++
+     fn handle_event_serial(
+         &self,
+         device_event: u16,
+@@ -338,6 +365,7 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
+             }
+             _ => return Err(Error::HandleEventUnknownEvent.into()),
+         };
++        let poll = device_event == REQ_QUEUE_EVENT && !self.queue_poll.is_zero();
+ 
+         if self.event_idx {
+             // vm-virtio's Queue implementation only checks avail_index
+@@ -350,6 +378,12 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
+                 if let Err(e) = self.process_queue_serial(&mut vring_state) {
+                     error!("processing the vring: {e}");
+                 }
++                // While notifications are disabled, the guest adds requests without notifying
++                // (which costs it a VM exit, and virtiofsd a wake-up), so keep watching the
++                // request queue for a while before going back to waiting.
++                if poll && self.poll_queue(&mut vring_state) {
++                    continue;
++                }
+                 if !vring_state.enable_notification().unwrap() {
+                     break;
+                 }
+@@ -392,6 +426,7 @@ struct PremigrationThread {
+ #[derive(Debug, Default)]
+ pub struct VhostUserFsBackendBuilder {
+     thread_pool_size: usize,
++    queue_poll: Duration,
+     tag: Option<String>,
+ }
+ 
+@@ -404,6 +439,14 @@ impl VhostUserFsBackendBuilder {
+         self
+     }
+ 
++    /// Set how long to keep polling the request queue after it runs dry, before waiting for the
++    /// guest to notify. Polling applies without a thread pool only; zero, the default, disables
++    /// it.
++    pub fn set_queue_poll(mut self, duration: Duration) -> Self {
++        self.queue_poll = duration;
++        self
++    }
++
+     /// Set the tag to use for the file system.
+     ///
+     /// The tag length must not exceed [`MAX_TAG_LEN`] bytes.
+@@ -417,7 +460,11 @@ impl VhostUserFsBackendBuilder {
+     where
+         F: FileSystem + SerializableFileSystem + Send + Sync + 'static,
+     {
+-        let thread = RwLock::new(VhostUserFsThread::new(fs, self.thread_pool_size)?);
++        let thread = RwLock::new(VhostUserFsThread::new(
++            fs,
++            self.thread_pool_size,
++            self.queue_poll,
++        )?);
+         Ok(VhostUserFsBackend {
+             thread,
+             premigration_thread: None.into(),
+-- 
+2.43.0
+

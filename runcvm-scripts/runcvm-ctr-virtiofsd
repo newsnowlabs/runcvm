@@ -20,6 +20,13 @@ if [ "$RUNCVM_VIRTIOFSD_KILLPRIV" = "1" ]; then
   OPTS+=(--killpriv-v2)
 fi
 
+# RUNCVM_VIRTIOFSD_POLL_US=<microseconds>, which runcvm-runtime validates (0 to 1000), has virtiofsd
+# keep polling the VM's request queue for that long after it runs dry, before waiting to be
+# notified (RunCVM's virtiofsd patch 0006).
+if [ "${RUNCVM_VIRTIOFSD_POLL_US:-0}" -gt 0 ]; then
+  OPTS+=(--queue-poll-us="$RUNCVM_VIRTIOFSD_POLL_US")
+fi
+
 # --inode-file-handles=never keeps virtiofsd from requiring CAP_DAC_READ_SEARCH, which containers
 # lack by default (virtiofsd's default, 'prefer', needs it).
 # Send logs to /run in container (not in VM)

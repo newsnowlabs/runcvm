@@ -663,6 +663,13 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     *) error "RUNCVM_VIRTIOFSD_KILLPRIV '$RUNCVM_VIRTIOFSD_KILLPRIV' invalid (should be 0 or 1)" ;;
   esac
 
+  # RUNCVM_VIRTIOFSD_POLL_US: how long, in microseconds, virtiofsd keeps polling the VM's request
+  # queue after it runs dry (see runcvm-ctr-virtiofsd); 0, the default, disables polling.
+  RUNCVM_VIRTIOFSD_POLL_US="$(get_config_env 'RUNCVM_VIRTIOFSD_POLL_US')"
+  if [ -n "$RUNCVM_VIRTIOFSD_POLL_US" ] && ! [[ "$RUNCVM_VIRTIOFSD_POLL_US" =~ ^(0|[1-9][0-9]{0,2}|1000)$ ]]; then
+    error "RUNCVM_VIRTIOFSD_POLL_US '$RUNCVM_VIRTIOFSD_POLL_US' invalid (should be a whole number of microseconds from 0 to 1000)"
+  fi
+
   # QEMU acceleration:
   # - kvm (default): use KVM; fail at creation if /dev/kvm is unavailable on this host
   # - auto: use KVM if /dev/kvm is available, otherwise (much slower) software emulation
