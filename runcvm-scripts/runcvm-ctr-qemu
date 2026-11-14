@@ -535,10 +535,73 @@ do_root_disk() {
   disk_add_device "$src" "$ROOT_DISK_ID" "$ROOT_DISK_PREALLOC"
 }
 
+# Sets DISK_AIO to QEMU's asynchronous I/O mode for disks, the first available of:
+# - io_uring: Linux io_uring, with the lowest overhead;
+# - native: Linux AIO (libaio);
+# - threads: a pool of threads making ordinary system calls, which works wherever the file does.
+# QEMU fails to open a disk in a mode that is unavailable, so the VM would not start. io_uring is
+# unavailable where the host kernel has it turned off (sysctl kernel.io_uring_disabled: 2 for every
+# process; 1 for processes without CAP_SYS_ADMIN outside kernel.io_uring_group), or where a seccomp
+# filter on the container denies io_uring_setup, io_uring_enter and io_uring_register, as Docker's
+# default profile does.
+#
+# With no seccomp filter (Seccomp 0 in /proc/self/status) and kernel.io_uring_disabled 0 or 2 (or
+# absent, before Linux 6.6), the mode is chosen from these alone: io_uring, or native where
+# io_uring is turned off. Otherwise, as a filter's rules cannot be read from inside the container,
+# each remaining mode is tried in turn, by opening disk backing file $1 (the first disk's),
+# read-only and with O_DIRECT as for cache=none, in a QEMU with no machine.
+disk_choose_aio() {
+  local src="$1" disabled=0 seccomp qemu aio out reason="" modes=(io_uring native)
+
+  [ -r /proc/sys/kernel/io_uring_disabled ] && read -r disabled </proc/sys/kernel/io_uring_disabled
+  seccomp=$(awk '$1 == "Seccomp:" { print $2 }' /proc/self/status)
+
+  if [ "$disabled" = "2" ]; then
+    modes=(native)
+    reason="turned off in the host kernel: kernel.io_uring_disabled=2"
+  fi
+
+  if [ "$seccomp" = "0" ] && [ "$disabled" != "1" ]; then
+    DISK_AIO="${modes[0]}"
+  else
+    if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
+      qemu="$(which qemu-system-aarch64)"
+    else
+      qemu="$(which qemu-system-x86_64)"
+    fi
+
+    for aio in "${modes[@]}"
+    do
+      # QEMU opens the file while processing its options, exiting with an error if it cannot, and
+      # otherwise quits on the monitor's 'quit'.
+      if out=$(busybox timeout 10 "$qemu" -nodefaults -machine none -display none -monitor stdio \
+            -blockdev "driver=file,node-name=probe,filename=$src,read-only=on,cache.direct=on,aio=$aio" \
+            <<<quit 2>&1 >/dev/null); then
+        DISK_AIO="$aio"
+        break
+      fi
+
+      # QEMU's message follows its option, e.g. "...,aio=io_uring: Unable to use io_uring: ...".
+      if [ -z "$reason" ]; then
+        reason="${out#*aio=$aio: }"
+        reason="QEMU: ${reason%%$'\n'*}"
+      fi
+    done
+
+    DISK_AIO="${DISK_AIO:-threads}"
+  fi
+
+  if [ "$DISK_AIO" != "io_uring" ]; then
+    echo "RunCVM: Warning: io_uring is unavailable for disks (${reason:-unknown reason}); using aio=$DISK_AIO instead" >&2
+  fi
+}
+
 # Adds disk backing file $1 to the QEMU command line, as disk number $2, with prealloc $3 ('on' or
 # 'off').
 disk_add_device() {
   local src="$1" id="$2" prealloc="$3" queues discard
+
+  [ -n "$DISK_AIO" ] || disk_choose_aio "$src"
 
   if [ "${RUNCVM_CPUS:-1}" -gt 8 ]; then
     queues=8
@@ -562,11 +625,11 @@ disk_add_device() {
     # format=raw             : treat the file as raw block device
     # media=disk             : marks this as a disk, not a CD-ROM
     # cache=none             : use O_DIRECT, bypass host page cache, rely on guest flushes for durability
-    # aio=io_uring           : use Linux io_uring for asynchronous I/O (lower overhead than libaio)
+    # aio=$DISK_AIO          : asynchronous I/O mode: io_uring where available (see disk_choose_aio)
     # $discard              : discard=unmap,detect-zeroes=unmap passes guest TRIM/UNMAP, and
     #                          converts guest zero writes into UNMAPs, to the backing file;
     #                          discard=ignore,detect-zeroes=off does neither (see above)
-    -drive id=drv$id,file=$src,if=none,format=raw,media=disk,cache=none,aio=io_uring,$discard
+    -drive id=drv$id,file=$src,if=none,format=raw,media=disk,cache=none,aio=$DISK_AIO,$discard
 
     # Create a dedicated I/O thread (dataplane) to offload block I/O
     # -object iothread,id=ioth$id : defines an iothread with a unique identifier
@@ -589,6 +652,7 @@ do_disks() {
   local id=0
   ROOT_DISK_SPEC=""
   DISK_EXCLUDES=()
+  DISK_AIO=""
 
   for disk in $1
   do
