@@ -1,7 +1,7 @@
-From ca155488e76c49ce34608b93211163c72239ce77 Mon Sep 17 00:00:00 2001
+From 3bf89120059f63446ce34d954a625be01b0d76b1 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 02:02:49 +0000
-Subject: [PATCH 09/11] sandbox: Optionally open a second description of
+Subject: [PATCH] sandbox: Optionally open a second description of
  /proc/self/mountinfo
 
 Add Sandbox::want_cache_mountinfo(), to be called before entering the
@@ -21,10 +21,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 28 insertions(+), 1 deletion(-)
 
 diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
-index f26049b..ee8eea0 100644
+index 31329ec..0d9bb1e 100644
 --- a/src/passthrough/mod.rs
 +++ b/src/passthrough/mod.rs
-@@ -262,6 +262,10 @@ pub struct Config {
+@@ -270,6 +270,10 @@ pub struct Config {
      /// more details.
      pub cache_policy: CachePolicy,
  
@@ -35,9 +35,9 @@ index f26049b..ee8eea0 100644
      /// Whether the file system should enabled writeback caching. This can improve performance as it
      /// allows the FUSE client to cache and coalesce multiple writes before sending them to the file
      /// system. However, enabling this option can increase the risk of data corruption if the file
-@@ -434,6 +438,7 @@ impl Default for Config {
-             entry_timeout: Duration::from_secs(5),
+@@ -443,6 +447,7 @@ impl Default for Config {
              attr_timeout: Duration::from_secs(5),
+             negative_timeout: Duration::ZERO,
              cache_policy: Default::default(),
 +            proc_mountinfo_cache_rawfd: None,
              writeback: false,

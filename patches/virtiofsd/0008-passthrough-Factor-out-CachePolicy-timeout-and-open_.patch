@@ -1,7 +1,7 @@
-From 51d9d06b7e47abc842d4d1e71ae049f42e80ada9 Mon Sep 17 00:00:00 2001
+From a5a91129082f6e88a60e6f2b8bd9fd85c0cb6681 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 02:02:49 +0000
-Subject: [PATCH 07/11] passthrough: Factor out CachePolicy::timeout() and
+Subject: [PATCH] passthrough: Factor out CachePolicy::timeout() and
  open_options()
 
 Move the mapping from cache policy to entry/attribute timeout (main.rs)
@@ -10,23 +10,15 @@ CachePolicy.  No change in behaviour.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- src/main.rs            |  8 +---
+ src/main.rs            |  7 +--
  src/passthrough/mod.rs | 99 +++++++++++++++++++++++++++++-------------
- 2 files changed, 71 insertions(+), 36 deletions(-)
+ 2 files changed, 71 insertions(+), 35 deletions(-)
 
 diff --git a/src/main.rs b/src/main.rs
-index d4c72e7..b4579c9 100644
+index f80875a..a8f202c 100644
 --- a/src/main.rs
 +++ b/src/main.rs
-@@ -11,7 +11,6 @@ use std::os::unix::io::{FromRawFd, RawFd};
- use std::path::Path;
- use std::str::FromStr;
- use std::sync::Arc;
--use std::time::Duration;
- use std::{cmp, env, process};
- use virtiofsd::idmap::{GidMap, UidMap};
- 
-@@ -702,12 +701,7 @@ fn main() {
+@@ -722,12 +722,7 @@ fn main() {
          _ => !opt.no_readdirplus,
      };
  
@@ -41,7 +33,7 @@ index d4c72e7..b4579c9 100644
      let umask = if opt.socket_group.is_some() {
          libc::S_IROTH | libc::S_IWOTH | libc::S_IXOTH
 diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
-index 01d438d..30c17f9 100644
+index 1208c88..ef26852 100644
 --- a/src/passthrough/mod.rs
 +++ b/src/passthrough/mod.rs
 @@ -119,6 +119,42 @@ pub enum CachePolicy {
@@ -87,7 +79,7 @@ index 01d438d..30c17f9 100644
  impl FromStr for CachePolicy {
      type Err = &'static str;
  
-@@ -964,28 +1000,10 @@ impl PassthroughFs {
+@@ -983,28 +1019,10 @@ impl PassthroughFs {
  
          self.handles.write().unwrap().insert(handle, Arc::new(data));
  
@@ -120,7 +112,7 @@ index 01d438d..30c17f9 100644
  
          // `flush()` only dup()s and closes the host file descriptor, to pass on the guest's
          // close() to the host file system.  For a descriptor without write access, that has no
-@@ -1820,13 +1838,7 @@ impl FileSystem for PassthroughFs {
+@@ -1856,13 +1874,7 @@ impl FileSystem for PassthroughFs {
              }
          };
  
@@ -135,7 +127,7 @@ index 01d438d..30c17f9 100644
  
          Ok((entry, Some(handle), opts))
      }
-@@ -2765,3 +2777,32 @@ impl From<GuestFile> for HandleDataFile {
+@@ -2801,3 +2813,32 @@ impl From<GuestFile> for HandleDataFile {
          HandleDataFile::File(RwLock::new(file))
      }
  }

@@ -1,23 +1,24 @@
-From ca2497c2840552ff8f25e6ea6d8aa43d870f39ae Mon Sep 17 00:00:00 2001
+From 3b26f1d6a71a1aad7a28afc90a63921a7f1d0ef7 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 02:02:49 +0000
-Subject: [PATCH 08/11] passthrough: Keep a cache policy per inode
+Subject: [PATCH] passthrough: Keep a cache policy per inode
 
 Add InodeData::cache_policy, the cache policy of the mount the inode is
 on, with None standing for the file system's default policy, and take
 the FOPEN_* flags and the entry/attribute timeouts of every reply from
-it.  Nothing sets it yet, so there is no change in behaviour.
+it, and the timeout of a negative entry from its parent directory's.
+Nothing sets it yet, so there is no change in behaviour.
 
 do_open() now resolves the inode once, before opening it, and uses the
 same InodeData for the open flags.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- .../device_state/deserialization.rs           |  3 ++
+ .../device_state/deserialization.rs           |  3 +
  .../preserialization/find_paths.rs            |  1 +
  src/passthrough/inode_store.rs                |  4 ++
- src/passthrough/mod.rs                        | 49 ++++++++++++++-----
- 4 files changed, 45 insertions(+), 12 deletions(-)
+ src/passthrough/mod.rs                        | 62 ++++++++++++++-----
+ 4 files changed, 53 insertions(+), 17 deletions(-)
 
 diff --git a/src/passthrough/device_state/deserialization.rs b/src/passthrough/device_state/deserialization.rs
 index 975bbef..f1459fe 100644
@@ -75,7 +76,7 @@ index fc9c7c5..5f6b165 100644
      // when we are actually going to serialize our internal state to send it to the migration
      // destination.
 diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
-index 30c17f9..f26049b 100644
+index ef26852..31329ec 100644
 --- a/src/passthrough/mod.rs
 +++ b/src/passthrough/mod.rs
 @@ -91,7 +91,7 @@ impl Drop for ScopedWorkingDirectory {
@@ -87,7 +88,7 @@ index 30c17f9..f26049b 100644
  pub enum CachePolicy {
      /// The client should never cache file data and all I/O should be directly forwarded to the
      /// server. This policy must be selected when file contents may change without the knowledge of
-@@ -649,9 +649,12 @@ impl PassthroughFs {
+@@ -658,9 +658,12 @@ impl PassthroughFs {
              .ok_or_else(ebadf)
      }
  
@@ -101,7 +102,24 @@ index 30c17f9..f26049b 100644
          // When writeback caching is enabled, the kernel may send read requests even if the
          // userspace program opened the file write-only. So we need to ensure that we have opened
          // the file for reading as well as writing.
-@@ -938,10 +941,12 @@ impl PassthroughFs {
+@@ -903,11 +906,12 @@ impl PassthroughFs {
+             .map(|result| result.0)
+     }
+ 
+-    /// How long the client may cache that a name does not exist (see `Config::negative_timeout`).
+-    fn negative_timeout(&self) -> Duration {
+-        match self.cfg.cache_policy {
++    /// How long the client may cache that a name does not exist in a directory whose
++    /// `InodeData::cache_policy` is `policy` (see `Config::negative_timeout`).
++    fn negative_timeout(&self, policy: Option<CachePolicy>) -> Duration {
++        match self.effective_policy(policy) {
+             CachePolicy::Auto | CachePolicy::Always => {
+-                std::cmp::min(self.cfg.negative_timeout, self.cfg.entry_timeout)
++                std::cmp::min(self.cfg.negative_timeout, self.timeouts(policy).0)
+             }
+             CachePolicy::Never | CachePolicy::Metadata => Duration::ZERO,
+         }
+@@ -957,10 +961,12 @@ impl PassthroughFs {
                      mnt_id: st.mnt_id,
                  },
                  mode: st.st.st_mode,
@@ -114,7 +132,7 @@ index 30c17f9..f26049b 100644
  
          let attr = fuse::Attr::try_with_flags(
              st.st,
-@@ -955,9 +960,9 @@ impl PassthroughFs {
+@@ -974,9 +980,9 @@ impl PassthroughFs {
              // refcount via `FORGET` later.
              inode: unsafe { inode.leak() },
              generation: 0,
@@ -126,7 +144,7 @@ index 30c17f9..f26049b 100644
          })
      }
  
-@@ -978,13 +983,14 @@ impl PassthroughFs {
+@@ -997,13 +1003,14 @@ impl PassthroughFs {
              flags &= !(libc::O_NOATIME as u32)
          }
  
@@ -142,7 +160,7 @@ index 30c17f9..f26049b 100644
          };
  
          if flags & (libc::O_TRUNC as u32) != 0 {
-@@ -1001,8 +1007,7 @@ impl PassthroughFs {
+@@ -1020,8 +1027,7 @@ impl PassthroughFs {
          self.handles.write().unwrap().insert(handle, Arc::new(data));
  
          let mut opts = self
@@ -152,7 +170,7 @@ index 30c17f9..f26049b 100644
              .open_options(flags & (libc::O_DIRECTORY as u32) != 0);
  
          // `flush()` only dup()s and closes the host file descriptor, to pass on the guest's
-@@ -1036,15 +1041,16 @@ impl PassthroughFs {
+@@ -1055,15 +1061,16 @@ impl PassthroughFs {
      /// With KILLPRIV_V2, the guest is not told when a write, fallocate or copy_file_range clears
      /// setuid or setgid bits here, so it would keep the bits in its attribute cache, and exec the
      /// file with them, until the attributes time out. Have the guest not cache the attributes of
@@ -172,7 +190,7 @@ index 30c17f9..f26049b 100644
          }
      }
  
-@@ -1058,7 +1064,10 @@ impl PassthroughFs {
+@@ -1077,7 +1084,10 @@ impl PassthroughFs {
              |gid| self.map_host_gid(gid),
          )?;
  
@@ -184,7 +202,7 @@ index 30c17f9..f26049b 100644
      }
  
      fn do_unlink(&self, parent: Inode, name: &CStr, flags: libc::c_int) -> io::Result<()> {
-@@ -1299,6 +1308,20 @@ impl PassthroughFs {
+@@ -1318,6 +1328,20 @@ impl PassthroughFs {
          }
      }
  
@@ -205,7 +223,7 @@ index 30c17f9..f26049b 100644
      pub fn open_root_node(&self) -> io::Result<()> {
          // We use `O_PATH` because we just want this for traversing the directory tree
          // and not for actually reading the contents. We don't use `open_relative_to()`
-@@ -1347,6 +1370,7 @@ impl PassthroughFs {
+@@ -1366,6 +1390,7 @@ impl PassthroughFs {
                  mnt_id: st.mnt_id,
              },
              mode: st.st.st_mode,
@@ -213,7 +231,18 @@ index 30c17f9..f26049b 100644
              migration_info: Mutex::new(migration_info),
          };
          self.inodes.new_inode(inode)?;
-@@ -1838,7 +1862,8 @@ impl FileSystem for PassthroughFs {
+@@ -1670,7 +1695,9 @@ impl FileSystem for PassthroughFs {
+     fn lookup(&self, _ctx: Context, parent: Inode, name: &CStr) -> io::Result<Entry> {
+         match self.do_lookup(parent, name) {
+             Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
+-                let entry_timeout = self.negative_timeout();
++                // A name that does not exist would be on its parent directory's mount.
++                let policy = self.inodes.get(parent).and_then(|p| p.cache_policy);
++                let entry_timeout = self.negative_timeout(policy);
+                 if entry_timeout.is_zero() {
+                     return Err(e);
+                 }
+@@ -1874,7 +1901,8 @@ impl FileSystem for PassthroughFs {
              }
          };
  

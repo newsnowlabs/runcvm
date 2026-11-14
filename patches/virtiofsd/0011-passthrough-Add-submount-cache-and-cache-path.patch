@@ -1,7 +1,7 @@
-From c861e4bbdaa0a638f4e64b2f7f063070edcfcb54 Mon Sep 17 00:00:00 2001
+From a713235ceb27de09fec396546ec021eed7ea6936 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 02:02:49 +0000
-Subject: [PATCH 10/11] passthrough: Add --submount-cache and --cache-path
+Subject: [PATCH] passthrough: Add --submount-cache and --cache-path
 
 Let one virtiofsd apply different cache policies to different mounts
 within the shared directory, e.g. --cache=always for an image's root
@@ -36,12 +36,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  5 files changed, 601 insertions(+), 8 deletions(-)
 
 diff --git a/src/main.rs b/src/main.rs
-index b4579c9..dd37bef 100644
+index a8f202c..0b3a8bd 100644
 --- a/src/main.rs
 +++ b/src/main.rs
-@@ -211,6 +211,22 @@ struct Opt {
-     #[arg(long, default_value = "auto")]
-     cache: CachePolicy,
+@@ -232,6 +232,22 @@ struct Opt {
+     #[arg(long, default_value = "0", value_parser = parse_negative_timeout)]
+     negative_timeout: Duration,
  
 +    /// Cache policy for mounts at or below PATH, as PATH=POLICY (repeatable).  PATH is absolute,
 +    /// within the shared directory, and need not exist or be a mount point; a mount takes the
@@ -62,7 +62,7 @@ index b4579c9..dd37bef 100644
      /// When used with --cache={metadata, never} will allow shared files to be mmap'd.
      /// Regardless of the selected cache policy, this option should only be enabled
      /// when the file system has exclusive access to the directory.
-@@ -703,6 +719,18 @@ fn main() {
+@@ -724,6 +740,18 @@ fn main() {
  
      let timeout = opt.cache.timeout();
  
@@ -81,7 +81,7 @@ index b4579c9..dd37bef 100644
      let umask = if opt.socket_group.is_some() {
          libc::S_IROTH | libc::S_IWOTH | libc::S_IXOTH
      } else {
-@@ -806,6 +834,10 @@ fn main() {
+@@ -827,6 +855,10 @@ fn main() {
          process::exit(1)
      });
  
@@ -92,9 +92,9 @@ index b4579c9..dd37bef 100644
      // Enter the sandbox, from this point the process will be isolated (or not)
      // as chosen in '--sandbox'.
      let listener = sandbox.enter(listener).unwrap_or_else(|error| {
-@@ -817,12 +849,15 @@ fn main() {
-         entry_timeout: timeout,
+@@ -839,12 +871,15 @@ fn main() {
          attr_timeout: timeout,
+         negative_timeout: opt.negative_timeout,
          cache_policy: opt.cache,
 +        cache_paths,
 +        submount_cache: opt.submount_cache,
@@ -170,7 +170,7 @@ index f65e275..2474b3a 100644
          };
  
 diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
-index ee8eea0..5b0e277 100644
+index 0d9bb1e..893cd9f 100644
 --- a/src/passthrough/mod.rs
 +++ b/src/passthrough/mod.rs
 @@ -34,15 +34,16 @@ use crate::{fuse, oslib};
@@ -348,7 +348,7 @@ index ee8eea0..5b0e277 100644
  }
  
  impl FromStr for CachePolicy {
-@@ -262,8 +412,20 @@ pub struct Config {
+@@ -270,8 +420,20 @@ pub struct Config {
      /// more details.
      pub cache_policy: CachePolicy,
  
@@ -371,16 +371,16 @@ index ee8eea0..5b0e277 100644
      pub proc_mountinfo_cache_rawfd: Option<File>,
  
      /// Whether the file system should enabled writeback caching. This can improve performance as it
-@@ -438,6 +600,8 @@ impl Default for Config {
-             entry_timeout: Duration::from_secs(5),
+@@ -447,6 +609,8 @@ impl Default for Config {
              attr_timeout: Duration::from_secs(5),
+             negative_timeout: Duration::ZERO,
              cache_policy: Default::default(),
 +            cache_paths: Vec::new(),
 +            submount_cache: None,
              proc_mountinfo_cache_rawfd: None,
              writeback: false,
              root_dir: String::from("/"),
-@@ -527,6 +691,19 @@ pub struct PassthroughFs {
+@@ -536,6 +700,19 @@ pub struct PassthroughFs {
  
      cfg: Config,
  
@@ -400,7 +400,7 @@ index ee8eea0..5b0e277 100644
      /// Map to translate between host and guest UIDs.
      uid_map: IdMap<GuestUid, HostUid>,
  
-@@ -536,6 +713,32 @@ pub struct PassthroughFs {
+@@ -545,6 +722,32 @@ pub struct PassthroughFs {
  
  impl PassthroughFs {
      pub fn new(mut cfg: Config) -> io::Result<PassthroughFs> {
@@ -433,7 +433,7 @@ index ee8eea0..5b0e277 100644
          let proc_self_fd = if let Some(fd) = cfg.proc_sfd_rawfd.take() {
              fd
          } else {
-@@ -596,6 +799,11 @@ impl PassthroughFs {
+@@ -605,6 +808,11 @@ impl PassthroughFs {
              sup_group_extension: AtomicBool::new(false),
              os_facts: oslib::OsFacts::new(),
              track_migration_info: AtomicBool::new(false),
@@ -445,7 +445,7 @@ index ee8eea0..5b0e277 100644
              cfg,
              uid_map,
              gid_map,
-@@ -612,6 +820,7 @@ impl PassthroughFs {
+@@ -621,6 +829,7 @@ impl PassthroughFs {
              .map(CString::from);
  
          fs.check_working_file_handles()?;
@@ -453,7 +453,7 @@ index ee8eea0..5b0e277 100644
  
          // We need to clear the umask here because we want the client to be
          // able to set all the bits in the mode.
-@@ -916,8 +1125,14 @@ impl PassthroughFs {
+@@ -936,8 +1145,14 @@ impl PassthroughFs {
          }
  
          let inode = if let Some(inode) = existing_inode {
@@ -468,7 +468,7 @@ index ee8eea0..5b0e277 100644
              let file_or_handle = if let Some(h) = handle.as_ref() {
                  FileOrHandle::Handle(self.make_file_handle_openable(h)?)
              } else {
-@@ -946,7 +1161,7 @@ impl PassthroughFs {
+@@ -966,7 +1181,7 @@ impl PassthroughFs {
                      mnt_id: st.mnt_id,
                  },
                  mode: st.st.st_mode,
@@ -477,7 +477,7 @@ index ee8eea0..5b0e277 100644
                  migration_info: Mutex::new(mig_info),
              };
              self.inodes.get_or_insert(inode_data)?
-@@ -1313,6 +1528,145 @@ impl PassthroughFs {
+@@ -1333,6 +1548,145 @@ impl PassthroughFs {
          }
      }
  
@@ -623,7 +623,7 @@ index ee8eea0..5b0e277 100644
      /// The policy that applies to an inode whose `InodeData::cache_policy` is `policy`.
      fn effective_policy(&self, policy: Option<CachePolicy>) -> CachePolicy {
          policy.unwrap_or(self.cfg.cache_policy)
-@@ -1340,6 +1694,8 @@ impl PassthroughFs {
+@@ -1360,6 +1714,8 @@ impl PassthroughFs {
          )?;
  
          let st = statx(&path_fd, None)?;
@@ -632,7 +632,7 @@ index ee8eea0..5b0e277 100644
          let handle = self.get_file_handle_opt(&path_fd, &st)?;
  
          let file_or_handle = if let Some(h) = handle.as_ref() {
-@@ -2835,4 +3191,174 @@ mod cache_policy_tests {
+@@ -2874,4 +3230,174 @@ mod cache_policy_tests {
          assert_eq!(Auto.timeout(), Duration::from_secs(1));
          assert_eq!(Always.timeout(), Duration::from_secs(86400));
      }
