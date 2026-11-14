@@ -1,7 +1,7 @@
-From e3a26f46021e9b6213a0483b4ed0dd53c4baa3c1 Mon Sep 17 00:00:00 2001
+From 4b445ce9186ab38a16bd1ca9a5e4c9839030e280 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 02:02:49 +0000
-Subject: [PATCH 6/7] README: Document --cache-path and --submount-cache
+Subject: [PATCH 10/10] README: Document --cache-path and --submount-cache
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

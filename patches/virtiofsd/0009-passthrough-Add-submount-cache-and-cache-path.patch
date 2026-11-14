@@ -1,7 +1,7 @@
-From 66d41e08279ac51b3a1a56a37553329774f40f2a Mon Sep 17 00:00:00 2001
+From 7d98fd3a788b5ee09d57fb3425f0ee9c730258a7 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 02:02:49 +0000
-Subject: [PATCH 5/7] passthrough: Add --submount-cache and --cache-path
+Subject: [PATCH 09/10] passthrough: Add --submount-cache and --cache-path
 
 Let one virtiofsd apply different cache policies to different mounts
 within the shared directory, e.g. --cache=always for an image's root
@@ -170,7 +170,7 @@ index f65e275..2474b3a 100644
          };
  
 diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
-index 8a91543..6115a4e 100644
+index db86ce2..224883b 100644
 --- a/src/passthrough/mod.rs
 +++ b/src/passthrough/mod.rs
 @@ -34,15 +34,16 @@ use crate::{fuse, oslib};
@@ -477,7 +477,7 @@ index 8a91543..6115a4e 100644
                  migration_info: Mutex::new(mig_info),
              };
              self.inodes.get_or_insert(inode_data)?
-@@ -1284,6 +1499,145 @@ impl PassthroughFs {
+@@ -1294,6 +1509,145 @@ impl PassthroughFs {
          }
      }
  
@@ -623,7 +623,7 @@ index 8a91543..6115a4e 100644
      /// The policy that applies to an inode whose `InodeData::cache_policy` is `policy`.
      fn effective_policy(&self, policy: Option<CachePolicy>) -> CachePolicy {
          policy.unwrap_or(self.cfg.cache_policy)
-@@ -1311,6 +1665,8 @@ impl PassthroughFs {
+@@ -1321,6 +1675,8 @@ impl PassthroughFs {
          )?;
  
          let st = statx(&path_fd, None)?;
@@ -632,7 +632,7 @@ index 8a91543..6115a4e 100644
          let handle = self.get_file_handle_opt(&path_fd, &st)?;
  
          let file_or_handle = if let Some(h) = handle.as_ref() {
-@@ -2751,4 +3107,174 @@ mod cache_policy_tests {
+@@ -2815,4 +3171,174 @@ mod cache_policy_tests {
          assert_eq!(Auto.timeout(), Duration::from_secs(1));
          assert_eq!(Always.timeout(), Duration::from_secs(86400));
      }

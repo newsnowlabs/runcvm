@@ -115,10 +115,9 @@ abuild -rFf
 EOF
 
 # --- BUILD STAGE ---
-# Build patched virtiofsd, which can apply a different cache policy to the mounts within its
-# shared directory (--submount-cache, --cache-path; see RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE): Alpine's
-# own package, built with patches/virtiofsd/*.patch, a series against the virtiofsd version that
-# Alpine ships, to be dropped once a virtiofsd release includes it.
+# Build patched virtiofsd: Alpine's own package, built with patches/virtiofsd/*.patch, a series
+# against the virtiofsd version that Alpine ships, each patch in a file of its own, applied in order
+# (see patches/virtiofsd/README.md for each one's origin, and when to drop it).
 FROM alpine-sdk as alpine-virtiofsd
 
 ADD patches/virtiofsd/ /root/aports/community/virtiofsd/

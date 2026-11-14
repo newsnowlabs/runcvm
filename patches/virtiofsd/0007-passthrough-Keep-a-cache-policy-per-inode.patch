@@ -1,7 +1,7 @@
-From 371b72b97223b670baf73e08d110c8af84afb979 Mon Sep 17 00:00:00 2001
+From fb7e8f8e4d85805325251120f41afb345ecd7613 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 02:02:49 +0000
-Subject: [PATCH 3/7] passthrough: Keep a cache policy per inode
+Subject: [PATCH 07/10] passthrough: Keep a cache policy per inode
 
 Add InodeData::cache_policy, the cache policy of the mount the inode is
 on, with None standing for the file system's default policy, and take
@@ -75,7 +75,7 @@ index fc9c7c5..5f6b165 100644
      // when we are actually going to serialize our internal state to send it to the migration
      // destination.
 diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
-index 90a4bb0..96f239d 100644
+index 34ae571..a4374c3 100644
 --- a/src/passthrough/mod.rs
 +++ b/src/passthrough/mod.rs
 @@ -91,7 +91,7 @@ impl Drop for ScopedWorkingDirectory {
@@ -144,14 +144,14 @@ index 90a4bb0..96f239d 100644
 @@ -1001,8 +1007,7 @@ impl PassthroughFs {
          self.handles.write().unwrap().insert(handle, Arc::new(data));
  
-         let opts = self
+         let mut opts = self
 -            .cfg
 -            .cache_policy
 +            .effective_policy(inode_data.cache_policy)
              .open_options(flags & (libc::O_DIRECTORY as u32) != 0);
  
-         Ok((Some(handle), opts))
-@@ -1033,7 +1038,7 @@ impl PassthroughFs {
+         // `flush()` only dup()s and closes the host file descriptor, to pass on the guest's
+@@ -1043,7 +1048,7 @@ impl PassthroughFs {
              |gid| self.map_host_gid(gid),
          )?;
  
@@ -160,7 +160,7 @@ index 90a4bb0..96f239d 100644
      }
  
      fn do_unlink(&self, parent: Inode, name: &CStr, flags: libc::c_int) -> io::Result<()> {
-@@ -1274,6 +1279,20 @@ impl PassthroughFs {
+@@ -1284,6 +1289,20 @@ impl PassthroughFs {
          }
      }
  
@@ -181,7 +181,7 @@ index 90a4bb0..96f239d 100644
      pub fn open_root_node(&self) -> io::Result<()> {
          // We use `O_PATH` because we just want this for traversing the directory tree
          // and not for actually reading the contents. We don't use `open_relative_to()`
-@@ -1322,6 +1341,7 @@ impl PassthroughFs {
+@@ -1332,6 +1351,7 @@ impl PassthroughFs {
                  mnt_id: st.mnt_id,
              },
              mode: st.st.st_mode,
@@ -189,7 +189,7 @@ index 90a4bb0..96f239d 100644
              migration_info: Mutex::new(migration_info),
          };
          self.inodes.new_inode(inode)?;
-@@ -1803,7 +1823,8 @@ impl FileSystem for PassthroughFs {
+@@ -1823,7 +1843,8 @@ impl FileSystem for PassthroughFs {
              }
          };
  

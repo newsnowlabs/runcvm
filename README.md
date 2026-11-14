@@ -1141,6 +1141,17 @@ This lets the image's own files, which nothing outside the VM normally changes, 
 
 With `always` for the root filesystem, the VM may still go on seeing, for up to a day, the old version of a root filesystem file changed from outside it, e.g. with `docker cp` into the running container.
 
+### RUNCVM_VIRTIOFSD_KILLPRIV
+
+**`RUNCVM_VIRTIOFSD_KILLPRIV=<0|1>`**
+
+**[EXPERIMENTAL]** With `1`, `virtiofsd` clears a file's setuid and setgid bits and file capabilities (`security.capability`) when the VM modifies it, as a local file system would (FUSE's `KILLPRIV_V2`). By default (`0`), the VM's kernel does so, at the cost of a request to `virtiofsd`, to check for file capabilities, before each `write()` to a file over virtiofs: with `1`, a workload making many small writes makes about half as many requests.
+
+It comes with these restrictions:
+
+- Volumes and bind mounts on NFS, or other network file systems, are unsupported: there, setuid and setgid bits may survive a write by a process that should clear them.
+- `fallocate()` clears the bits for every caller, where a local file system keeps them for a caller with `CAP_FSETID` (e.g. root). (RunCVM's `virtiofsd` patches make `copy_file_range()`, used by `cp`, keep or clear them as a local file system would.)
+
 ### RUNCVM_CGROUPFS
 
 **`RUNCVM_CGROUPFS=<value>`**

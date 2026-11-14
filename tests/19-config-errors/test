@@ -7,6 +7,10 @@
 - RUNCVM_VIRTIOFSD_CACHE asking for writeback caching with a policy that
   does not cache file contents ('none,writeback'): Container/VM creation
   fails (exit status 125), with the error from runcvm-runtime.
+- RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE other than a cache policy: creation
+  fails (125), with the error from runcvm-runtime.
+- RUNCVM_VIRTIOFSD_KILLPRIV other than 0 or 1: creation fails (125), with
+  the error from runcvm-runtime.
 - A RUNCVM_DISKS spec missing its fields: the Container/VM exits with
   status 1 before the VM starts, with the error from the entrypoint.
 """
@@ -27,6 +31,8 @@ CASES = [
      "RunCVM: Error: RUNCVM_VIRTIOFSD_CACHE 'none,writeback' invalid"),
     ("virtiofsd-submount-cache", ["--env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=writeback"], 125,
      "RunCVM: Error: RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE 'writeback' invalid"),
+    ("virtiofsd-killpriv", ["--env=RUNCVM_VIRTIOFSD_KILLPRIV=yes"], 125,
+     "RunCVM: Error: RUNCVM_VIRTIOFSD_KILLPRIV 'yes' invalid (should be 0 or 1)"),
     ("disks", ["--env=RUNCVM_DISKS=/disks/disk1"], 1,
      "disk spec '/disks/disk1' invalid: src, dst and fs must all be specified"),
 ]

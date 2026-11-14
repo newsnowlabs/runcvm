@@ -673,6 +673,14 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     error "RUNCVM_SHUTDOWN '$RUNCVM_SHUTDOWN' invalid (should be auto, systemd, busybox, acpi, all, or signal:<signal>, e.g. signal:PWR or signal:38)"
   fi
 
+  # RUNCVM_VIRTIOFSD_KILLPRIV: whether virtiofsd clears setuid and setgid bits itself (1; see
+  # runcvm-ctr-virtiofsd) or leaves it to the VM (0, the default).
+  RUNCVM_VIRTIOFSD_KILLPRIV="$(get_config_env 'RUNCVM_VIRTIOFSD_KILLPRIV')"
+  case "$RUNCVM_VIRTIOFSD_KILLPRIV" in
+    ''|0|1) ;;
+    *) error "RUNCVM_VIRTIOFSD_KILLPRIV '$RUNCVM_VIRTIOFSD_KILLPRIV' invalid (should be 0 or 1)" ;;
+  esac
+
   # QEMU acceleration:
   # - kvm (default): use KVM; fail at creation if /dev/kvm is unavailable on this host
   # - auto: use KVM if /dev/kvm is available, otherwise (much slower) software emulation
