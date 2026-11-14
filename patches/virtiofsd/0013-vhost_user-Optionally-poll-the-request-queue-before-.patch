@@ -1,4 +1,4 @@
-From 6454922a09c1ae2b82f4067cb908c14f3605d948 Mon Sep 17 00:00:00 2001
+From b12d649528458fa7e79c2b0056c23b9acb831f29 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 20:36:30 +0000
 Subject: [PATCH] vhost_user: Optionally poll the request queue before
@@ -23,10 +23,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 66 insertions(+), 5 deletions(-)
 
 diff --git a/src/main.rs b/src/main.rs
-index 2fac562..9558549 100644
+index 0b3a8bd..d93decf 100644
 --- a/src/main.rs
 +++ b/src/main.rs
-@@ -167,6 +167,14 @@ struct Opt {
+@@ -168,6 +168,14 @@ struct Opt {
      #[arg(long, default_value = "0")]
      thread_pool_size: usize,
  
@@ -41,7 +41,7 @@ index 2fac562..9558549 100644
      /// Enable support for extended attributes
      #[arg(long)]
      xattr: bool,
-@@ -732,6 +740,10 @@ fn main() {
+@@ -733,6 +741,10 @@ fn main() {
      let xattrmap = opt.xattrmap.clone();
      let xattr = xattrmap.is_some() || opt.posix_acl || opt.security_label || opt.xattr;
      let thread_pool_size = opt.thread_pool_size;
@@ -52,7 +52,7 @@ index 2fac562..9558549 100644
      let readdirplus = match opt.cache {
          CachePolicy::Never => false,
          _ => !opt.no_readdirplus,
-@@ -917,13 +929,13 @@ fn main() {
+@@ -918,13 +930,13 @@ fn main() {
              error!("Failed to create internal filesystem representation: {e}");
              process::exit(1);
          });
@@ -68,7 +68,7 @@ index 2fac562..9558549 100644
      }
  }
  
-@@ -932,11 +944,13 @@ fn run_generic_fs<F: FileSystem + SerializableFileSystem + Send + Sync + 'static
+@@ -933,11 +945,13 @@ fn run_generic_fs<F: FileSystem + SerializableFileSystem + Send + Sync + 'static
      fs: F,
      listener: Listener,
      thread_pool_size: usize,
