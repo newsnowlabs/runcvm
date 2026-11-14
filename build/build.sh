@@ -28,6 +28,14 @@ Builds the RunCVM image as $REPO:<tag>, for each tag given.
 
   -h, --help
       Show this help.
+
+The image records its version and the commit it was built from, as its
+org.opencontainers.image.version and .revision labels and as /opt/runcvm/VERSION in the package it
+installs, e.g. 'v1.8.0 (2211e3e)'. The version is the nearest git tag, as 'git describe --tags
+--dirty' gives it ('untagged' where no tag is reachable); or the value of RUNCVM_VERSION, where
+set, e.g. 'RUNCVM_VERSION=my-build $0'; or 'unknown', outside a git checkout without
+RUNCVM_VERSION. Outside a git checkout, the commit is recorded as 'unknown', and VERSION gives the
+version alone.
 _EOE_
 }
 
@@ -72,12 +80,34 @@ fi
 # The build context is the repository root, wherever the script is run from.
 cd "$(dirname "$0")/.." || exit 1
 
+# The build's version and revision, given to the image as its org.opencontainers.image.version and
+# .revision labels, and recorded in the package as /opt/runcvm/VERSION, '<version> (<short
+# revision>)'. The version is the nearest tag, as 'git describe --tags --dirty' gives it, e.g.
+# 'v1.8.0' for a release, or 'v1.8.0-2-ge77f189-dirty' for a build two commits after it, with
+# uncommitted changes; or 'untagged' where no tag is reachable, as in a shallow clone. The revision
+# is the commit's full ID. RUNCVM_VERSION, where set, gives the version instead, e.g. for a build
+# from a source tree without git's history, whose revision is 'unknown'; without it, such a build's
+# version is 'unknown' too. Git is consulted only where the build context is the top of a git
+# checkout, not where it is a source tree within some other repository.
+RUNCVM_REVISION=unknown
+if [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ]; then
+  RUNCVM_REVISION=$(git rev-parse HEAD) || RUNCVM_REVISION=unknown
+fi
+if [ -z "$RUNCVM_VERSION" ]; then
+  if [ "$RUNCVM_REVISION" != "unknown" ]; then
+    RUNCVM_VERSION=$(git describe --tags --dirty 2>/dev/null) || RUNCVM_VERSION=untagged
+  else
+    RUNCVM_VERSION=unknown
+  fi
+fi
+
 tag_opts=()
 for tag in "${tags[@]}"; do
   tag_opts+=(-t "$REPO:$tag")
 done
 
-DOCKER_BUILDKIT=1 docker build "${tag_opts[@]}" "${build_opts[@]}" . || die "build failed"
+DOCKER_BUILDKIT=1 docker build "${tag_opts[@]}" --build-arg RUNCVM_VERSION="$RUNCVM_VERSION" \
+  --build-arg RUNCVM_REVISION="$RUNCVM_REVISION" "${build_opts[@]}" . || die "build failed"
 
 if [ -n "$push" ]; then
   for tag in "${tags[@]}"; do
@@ -112,7 +142,9 @@ cat <<_EOE_
 RunCVM build successful
 =======================
 
-Built:  ${tags[*]/#/$REPO:}
+Built:    ${tags[*]/#/$REPO:}
+Version:  $RUNCVM_VERSION
+Revision: $RUNCVM_REVISION
 _EOE_
 
 case "$push" in
