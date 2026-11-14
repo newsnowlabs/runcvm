@@ -4,6 +4,8 @@
 - RUNCVM_KERNEL naming a kernel that is not installed, or not of the form
   <dist>[/<version>]: Container/VM creation fails (exit status 125), with
   the error from runcvm-runtime.
+- RUNCVM_HUGETLB other than 0, 1 or auto: creation fails (125), with the
+  error from runcvm-runtime.
 - A RUNCVM_DISKS spec missing its fields: the Container/VM exits with
   status 1 before the VM starts, with the error from the entrypoint.
 """
@@ -20,6 +22,8 @@ CASES = [
      "RunCVM: Error: Kernel 'nosuchdist/1.0' not found"),
     ("kernel-format", ["--env=RUNCVM_KERNEL=Not/A/Kernel"], 125,
      "RunCVM: Error: Kernel 'Not/A/Kernel' invalid"),
+    ("hugetlb", ["--env=RUNCVM_HUGETLB=on"], 125,
+     "RunCVM: Error: RUNCVM_HUGETLB 'on' invalid (should be 0, 1 or auto)"),
     ("disks", ["--env=RUNCVM_DISKS=/disks/disk1"], 1,
      "disk spec '/disks/disk1' invalid: src, dst and fs must all be specified"),
 ]

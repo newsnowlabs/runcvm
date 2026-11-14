@@ -1091,9 +1091,13 @@ Enable breakpoints (falling to bash shell) during the RunCVM Container/VM boot p
 
 ### RUNCVM_HUGETLB
 
-**`RUNCVM_HUGETLB=1`**
+**`RUNCVM_HUGETLB=<0|1|auto>`**
 
-**[EXPERIMENTAL]** Enable use of preallocated hugetlb memory backend, which can improve performance in some scenarios.
+**[EXPERIMENTAL]** Specifies where the VM's memory comes from:
+
+- `0` (the default): a file in the container's `/dev/shm`, whose pages are allocated as the VM first uses them, unless preallocated (see [`RUNCVM_QEMU_MEM_PREALLOC`](#runcvm_qemu_mem_prealloc)).
+- `1`: the host's pool of hugepages (e.g. 2 MB each), which can improve performance in some scenarios, and makes the VM much faster to start under nested virtualisation, e.g. on macOS (see [macOS on Apple Silicon](#macos-on-apple-silicon)). The pool must be reserved in advance with the host's `vm.nr_hugepages` sysctl, and have enough free pages for the VM's memory (512 MB by default, or as given by `--memory`), or the Container/VM fails to start. The pool's memory is set aside for hugepages alone, whether used or not.
+- `auto`: hugepages where the host's pool has enough free pages for the VM's memory, and `/dev/shm` otherwise, noting on the container's standard error where a pool exists but has too few free pages. Should other Container/VMs take the free pages first, QEMU is started again with `/dev/shm`, with a note saying so.
 
 ### RUNCVM_QEMU_MEM_PREALLOC
 

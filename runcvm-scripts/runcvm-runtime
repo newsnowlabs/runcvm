@@ -727,7 +727,14 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   log "RUNCVM_MEM_SIZE=${RUNCVM_MEM_SIZE}M"
   set_config_env "RUNCVM_MEM_SIZE" "${RUNCVM_MEM_SIZE}M"
 
+  # RUNCVM_HUGETLB: the VM's memory from the host's hugepages (1), from /dev/shm (0, the default),
+  # or from hugepages where enough are free and /dev/shm otherwise (auto; see runcvm-ctr-qemu), for
+  # which /dev/shm is sized as for 0.
   RUNCVM_HUGETLB=$(get_config_env "RUNCVM_HUGETLB")
+  case "$RUNCVM_HUGETLB" in
+    ''|0|1|auto) ;;
+    *) error "RUNCVM_HUGETLB '$RUNCVM_HUGETLB' invalid (should be 0, 1 or auto)" ;;
+  esac
   if [ "$RUNCVM_HUGETLB" != "1" ]; then
     jq_set "$CFG" --arg size "${RUNCVM_MEM_SIZE}M" '( .mounts[] | select(.destination == "/dev/shm") ) = {"destination": "/dev/shm","type": "tmpfs","source": "shm","options": ["nosuid","noexec","nodev","mode=1777","size=" + $size]}'
   # else
