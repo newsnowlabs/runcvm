@@ -1,4 +1,4 @@
-From e851a66a71fb5e6d98a773b639e2b259c38f7e8a Mon Sep 17 00:00:00 2001
+From 3d237f0843855395f9a0df4236e658a99f1f7333 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 21:50:12 +0000
 Subject: [PATCH] vhost_user: Optionally adapt the polling window to the
@@ -23,8 +23,8 @@ whose requests are far apart, costs no polling.
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/main.rs       |  87 +++++++++++++++++++---
- src/vhost_user.rs | 181 +++++++++++++++++++++++++++++++++++++++++-----
- 2 files changed, 239 insertions(+), 29 deletions(-)
+ src/vhost_user.rs | 184 +++++++++++++++++++++++++++++++++++++++++-----
+ 2 files changed, 242 insertions(+), 29 deletions(-)
 
 diff --git a/src/main.rs b/src/main.rs
 index d93decf..3ed6e24 100644
@@ -158,7 +158,7 @@ index d93decf..3ed6e24 100644
 +    }
  }
 diff --git a/src/vhost_user.rs b/src/vhost_user.rs
-index 1c7c489..1a70e6d 100644
+index 1c7c489..a95c44e 100644
 --- a/src/vhost_user.rs
 +++ b/src/vhost_user.rs
 @@ -122,13 +122,72 @@ struct VhostUserFsThread<F: FileSystem + Send + Sync + 'static> {
@@ -291,7 +291,7 @@ index 1c7c489..1a70e6d 100644
          loop {
              let queue = vring_state.get_queue();
              match queue.avail_idx(&*mem, Ordering::Acquire) {
-@@ -365,7 +451,13 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
+@@ -365,7 +451,16 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
              }
              _ => return Err(Error::HandleEventUnknownEvent.into()),
          };
@@ -299,14 +299,17 @@ index 1c7c489..1a70e6d 100644
 +        let poll = device_event == REQ_QUEUE_EVENT && self.queue_poll != QueuePoll::None;
 +        if poll {
 +            // The guest notified virtiofsd of this request after it went back to waiting.
-+            if let Some(dry) = self.poll_state.lock().unwrap().dry_since.take() {
++            // Take `dry_since` before adjusting the window: `poll_missed()` locks `poll_state`
++            // itself, so the lock must not be held across the call.
++            let dry_since = self.poll_state.lock().unwrap().dry_since.take();
++            if let Some(dry) = dry_since {
 +                self.poll_missed(dry);
 +            }
 +        }
  
          if self.event_idx {
              // vm-virtio's Queue implementation only checks avail_index
-@@ -381,12 +473,23 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
+@@ -381,12 +476,23 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
                  // While notifications are disabled, the guest adds requests without notifying
                  // (which costs it a VM exit, and virtiofsd a wake-up), so keep watching the
                  // request queue for a while before going back to waiting.
@@ -332,7 +335,7 @@ index 1c7c489..1a70e6d 100644
              }
          } else {
              // Without EVENT_IDX, a single call is enough.
-@@ -426,7 +529,7 @@ struct PremigrationThread {
+@@ -426,7 +532,7 @@ struct PremigrationThread {
  #[derive(Debug, Default)]
  pub struct VhostUserFsBackendBuilder {
      thread_pool_size: usize,
@@ -341,7 +344,7 @@ index 1c7c489..1a70e6d 100644
      tag: Option<String>,
  }
  
-@@ -439,11 +542,10 @@ impl VhostUserFsBackendBuilder {
+@@ -439,11 +545,10 @@ impl VhostUserFsBackendBuilder {
          self
      }
  
@@ -357,7 +360,7 @@ index 1c7c489..1a70e6d 100644
          self
      }
  
-@@ -763,3 +865,48 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> Drop
+@@ -763,3 +868,48 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> Drop
          }
      }
  }
