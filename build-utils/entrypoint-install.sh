@@ -33,9 +33,11 @@ rsync -aR --delete /opt/runcvm/./ $MNT/ || exit 1
 
 if [ -z "$QUIET" ]; then
 
-  cat <<"_EOE_" >&2
+  cat <<_EOE_ >&2
 RunCVM install/upgrade successful
 =================================
+
+Version: $(cat /opt/runcvm/VERSION 2>/dev/null || echo unknown)
 
 RunCVM is copyright 2022-2026 NewsNow Publishing Limited, Struan Bartlett, and contributors,
 and licensed under the Apache License, Version 2.0: see /opt/runcvm/LICENSE and /opt/runcvm/NOTICE.
