@@ -1109,6 +1109,30 @@ Default is `off`, but `on` may deliver improved performance in some scenarios at
 
 Specifies the cache policy passed to `virtiofsd` via `--cache=<value>`, with `none` passed as `never`; `virtiofsd`'s other policies, such as `metadata`, are also accepted. The default policy is `auto`. Use `none` to avoid caching issues when multiple RunCVM instances need to share access to a volume or bind-mount on the host.
 
+### RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT
+
+**`RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=<seconds>`** (default `1`)
+
+How long, in seconds (fractions allowed, from `0` to `86400`), the VM may remember that a file it looked for over virtiofs does not exist, under the `auto` and `always` cache policies ([`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)); `0` disables it, as do the `metadata` and `none` policies. It is capped at the policy's own timeout for files that do exist (1 second under `auto`).
+
+Workloads look for many files that do not exist: a shell searching `PATH` for each command, the dynamic loader searching its library path, Python or Node.js probing for modules. Without this, each such lookup is a request to `virtiofsd`, however often it is repeated.
+
+A file the VM creates is visible to it at once, whether or not it looked for it before. A file created outside the VM (on the host in a bind mount, by another container in a shared volume, or with `docker cp`) under a name the VM has just looked for becomes visible to it after at most this long, as other changes made outside the VM already do under `auto`. A workload that waits for another container to create a file, and needs to see it at once, should use `none` for that mount.
+
+Under `always`, longer values suit a Container/VM whose root filesystem nothing outside the VM changes while it runs, as `always` already assumes for files that do exist: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always --env=RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600`. A file missing when the VM looked for it is then not looked for again for up to an hour, which helps workloads that repeat the same failed lookups seconds or minutes apart (a shell starting commands, a service starting worker processes), not only in quick succession. A file added from outside under such a name, e.g. with `docker cp`, stays invisible to the VM for as long. The value applies to volumes and bind mounts too, which share the root filesystem's cache policy, so a long one does not suit a Container/VM whose mounts are changed from outside it.
+
+### RUNCVM_VIRTIOFSD_KILLPRIV
+
+**`RUNCVM_VIRTIOFSD_KILLPRIV=<0|1>`**
+
+**[EXPERIMENTAL]** With `1`, `virtiofsd` clears a file's setuid and setgid bits and file capabilities (`security.capability`) when the VM modifies it, as a local file system would (FUSE's `KILLPRIV_V2`). By default (`0`), the VM's kernel does so, at the cost of a request to `virtiofsd`, to check for file capabilities, before each `write()` to a file over virtiofs: with `1`, a workload making many small writes makes about half as many requests.
+
+It comes with these restrictions:
+
+- Volumes and bind mounts on NFS, or other network file systems, are unsupported: there, setuid and setgid bits may survive a write by a process that should clear them.
+- `fallocate()` clears the bits for every caller, where a local file system keeps them for a caller with `CAP_FSETID` (e.g. root). (RunCVM's `virtiofsd` patches make `copy_file_range()`, used by `cp`, keep or clear them as a local file system would.)
+- A setgid bit without group-execute (a legacy marker, not a privilege) is kept or cleared by a write according to `virtiofsd`'s own group membership (group `root` alone), not the writer's: so it is cleared from files of other groups even when the writer is in the file's group, and kept on files of group `root` even when the writer is not.
+
 ### RUNCVM_CGROUPFS
 
 **`RUNCVM_CGROUPFS=<value>`**

@@ -1,0 +1,77 @@
+From cc7410173991ffbe51f7c6fb968f6418e86ba57d Mon Sep 17 00:00:00 2001
+From: German Maglione <gmaglione@redhat.com>
+Date: Sat, 14 Nov 2026 10:00:25 +0000
+Subject: [PATCH 3/5] passthrough: drop CAP_FSETID in fallocate and
+ copy_file_range
+
+Unlike open, create, write, and setattr, the FUSE protocol doesn't
+define a kill-suidgid flag for fallocate or copy_file_range.
+When KILLPRIV_V2 is negotiated, the guest kernel expects virtiofsd to
+strip privilege bits.
+
+Without the per-request flag we don't receive a signal to do it.
+Drop CAP_FSETID from the effective set before the syscall so the host
+kernel strips setuid and setgid bits. Clear 'security.capability' manually.
+This matches the approach in libfuse's passthrough_hp.cc.
+
+This removes the bits even when the file owner is the caller.
+In that case, the file owner will need to re-apply setuid or setgid
+with chmod after a fallocate or copy_file_range that modifies the file.
+
+Backported to v1.13.3 from upstream commit
+fc18227075d9940ad62bcb115933b7539962a7fa (German Maglione
+<gmaglione@redhat.com>), adapted to v1.13.3's
+clear_file_capabilities(fd, o_path).
+
+Signed-off-by: German Maglione <gmaglione@redhat.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/passthrough/mod.rs | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
+index ad5e912..29edd62 100644
+--- a/src/passthrough/mod.rs
++++ b/src/passthrough/mod.rs
+@@ -2593,6 +2593,19 @@ impl FileSystem for PassthroughFs {
+         let data = self.find_handle(handle, inode)?;
+ 
+         let fd = data.file.get()?.write().unwrap().as_raw_fd();
++
++        // There is no kill-suidgid flag for this operation. The guest kernel
++        // cannot instruct us to strip privilege bits. Drop CAP_FSETID
++        // unconditionally so the host kernel does it. This removes the bits
++        // even when the file owner is the caller.
++        let _killpriv_guard = if self.cfg.killpriv_v2 {
++            drop_effective_cap("FSETID")?
++        } else {
++            None
++        };
++
++        self.clear_file_capabilities(fd, false)?;
++
+         // Safe because this doesn't modify any memory and we check the return value.
+         let res = unsafe {
+             libc::fallocate64(
+@@ -2652,6 +2665,18 @@ impl FileSystem for PassthroughFs {
+         // Take just a read lock as we're not going to alter the file descriptor offset.
+         let fd_out = data_out.file.get()?.read().unwrap().as_raw_fd();
+ 
++        // There is no kill-suidgid flag for this operation. The guest kernel
++        // cannot instruct us to strip privilege bits. Drop CAP_FSETID
++        // unconditionally so the host kernel does it. This removes the bits
++        // even when the file owner is the caller.
++        let _killpriv_guard = if self.cfg.killpriv_v2 {
++            drop_effective_cap("FSETID")?
++        } else {
++            None
++        };
++
++        self.clear_file_capabilities(fd_out, false)?;
++
+         // Safe because this will only modify `offset_in` and `offset_out` and we check
+         // the return value.
+         let res = unsafe {
+-- 
+2.43.0
+
