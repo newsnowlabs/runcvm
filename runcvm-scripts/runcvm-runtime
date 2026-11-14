@@ -701,6 +701,13 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     error "RUNCVM_VIRTIOFSD_CACHE '$RUNCVM_VIRTIOFSD_CACHE' invalid (should be one of the cache policies auto, always, metadata and none (or never), optionally with 'writeback', which needs auto or always, e.g. 'always,writeback')"
   fi
 
+  # The cache policy for the mounts within the VM's root filesystem (see runcvm-ctr-virtiofsd).
+  RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE="$(get_config_env 'RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE')"
+  case "$RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE" in
+    ''|auto|always|metadata|none|never) ;;
+    *) error "RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE '$RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE' invalid (should be one of the cache policies auto, always, metadata and none (or never))" ;;
+  esac
+
   # Under software emulation, QEMU keeps a cache of translated code, whose size is set by
   # RUNCVM_QEMU_TCG_TB_MEM_SIZE (Mb) and added to the container's memory limit (below), so
   # that the VM's own memory and the container's memory limit remain aligned.

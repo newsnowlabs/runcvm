@@ -1,0 +1,173 @@
+From df52cf7354ee7e018810de0bd84275a9be597724 Mon Sep 17 00:00:00 2001
+From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
+Date: Sat, 14 Nov 2026 02:02:49 +0000
+Subject: [PATCH 2/7] passthrough: Factor out CachePolicy::timeout() and
+ open_options()
+
+Move the mapping from cache policy to entry/attribute timeout (main.rs)
+and to FOPEN_* flags (open, opendir, create) into methods on
+CachePolicy.  No change in behaviour.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/main.rs            |  8 +---
+ src/passthrough/mod.rs | 99 +++++++++++++++++++++++++++++-------------
+ 2 files changed, 71 insertions(+), 36 deletions(-)
+
+diff --git a/src/main.rs b/src/main.rs
+index d4c72e7..b4579c9 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -11,7 +11,6 @@ use std::os::unix::io::{FromRawFd, RawFd};
+ use std::path::Path;
+ use std::str::FromStr;
+ use std::sync::Arc;
+-use std::time::Duration;
+ use std::{cmp, env, process};
+ use virtiofsd::idmap::{GidMap, UidMap};
+ 
+@@ -702,12 +701,7 @@ fn main() {
+         _ => !opt.no_readdirplus,
+     };
+ 
+-    let timeout = match opt.cache {
+-        CachePolicy::Never => Duration::from_secs(0),
+-        CachePolicy::Metadata => Duration::from_secs(86400),
+-        CachePolicy::Auto => Duration::from_secs(1),
+-        CachePolicy::Always => Duration::from_secs(86400),
+-    };
++    let timeout = opt.cache.timeout();
+ 
+     let umask = if opt.socket_group.is_some() {
+         libc::S_IROTH | libc::S_IWOTH | libc::S_IXOTH
+diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
+index 38f49db..90a4bb0 100644
+--- a/src/passthrough/mod.rs
++++ b/src/passthrough/mod.rs
+@@ -119,6 +119,42 @@ pub enum CachePolicy {
+     Always,
+ }
+ 
++impl CachePolicy {
++    /// The entry and attribute timeout that goes with this policy.
++    pub fn timeout(&self) -> Duration {
++        match self {
++            CachePolicy::Never => Duration::from_secs(0),
++            CachePolicy::Metadata => Duration::from_secs(86400),
++            CachePolicy::Auto => Duration::from_secs(1),
++            CachePolicy::Always => Duration::from_secs(86400),
++        }
++    }
++
++    /// The FOPEN_* flags to return for an open (or create) under this policy.
++    fn open_options(&self, is_dir: bool) -> OpenOptions {
++        let mut opts = OpenOptions::empty();
++        match self {
++            // We only set the direct I/O option on files.
++            CachePolicy::Never => opts.set(OpenOptions::DIRECT_IO, !is_dir),
++            CachePolicy::Metadata => {
++                if !is_dir {
++                    opts |= OpenOptions::DIRECT_IO;
++                } else {
++                    opts |= OpenOptions::CACHE_DIR | OpenOptions::KEEP_CACHE;
++                }
++            }
++            CachePolicy::Always => {
++                opts |= OpenOptions::KEEP_CACHE;
++                if is_dir {
++                    opts |= OpenOptions::CACHE_DIR;
++                }
++            }
++            CachePolicy::Auto => {}
++        };
++        opts
++    }
++}
++
+ impl FromStr for CachePolicy {
+     type Err = &'static str;
+ 
+@@ -964,28 +1000,10 @@ impl PassthroughFs {
+ 
+         self.handles.write().unwrap().insert(handle, Arc::new(data));
+ 
+-        let mut opts = OpenOptions::empty();
+-        match self.cfg.cache_policy {
+-            // We only set the direct I/O option on files.
+-            CachePolicy::Never => opts.set(
+-                OpenOptions::DIRECT_IO,
+-                flags & (libc::O_DIRECTORY as u32) == 0,
+-            ),
+-            CachePolicy::Metadata => {
+-                if flags & (libc::O_DIRECTORY as u32) == 0 {
+-                    opts |= OpenOptions::DIRECT_IO;
+-                } else {
+-                    opts |= OpenOptions::CACHE_DIR | OpenOptions::KEEP_CACHE;
+-                }
+-            }
+-            CachePolicy::Always => {
+-                opts |= OpenOptions::KEEP_CACHE;
+-                if flags & (libc::O_DIRECTORY as u32) != 0 {
+-                    opts |= OpenOptions::CACHE_DIR;
+-                }
+-            }
+-            _ => {}
+-        };
++        let opts = self
++            .cfg
++            .cache_policy
++            .open_options(flags & (libc::O_DIRECTORY as u32) != 0);
+ 
+         Ok((Some(handle), opts))
+     }
+@@ -1785,13 +1803,7 @@ impl FileSystem for PassthroughFs {
+             }
+         };
+ 
+-        let mut opts = OpenOptions::empty();
+-        match self.cfg.cache_policy {
+-            CachePolicy::Never => opts |= OpenOptions::DIRECT_IO,
+-            CachePolicy::Metadata => opts |= OpenOptions::DIRECT_IO,
+-            CachePolicy::Always => opts |= OpenOptions::KEEP_CACHE,
+-            _ => {}
+-        };
++        let opts = self.cfg.cache_policy.open_options(false);
+ 
+         Ok((entry, Some(handle), opts))
+     }
+@@ -2685,3 +2697,32 @@ impl From<GuestFile> for HandleDataFile {
+         HandleDataFile::File(RwLock::new(file))
+     }
+ }
++
++#[cfg(test)]
++mod cache_policy_tests {
++    use super::*;
++    use CachePolicy::*;
++
++    #[test]
++    fn open_options_match_previous_global_behaviour() {
++        let d = OpenOptions::DIRECT_IO;
++        let k = OpenOptions::KEEP_CACHE;
++        let c = OpenOptions::CACHE_DIR;
++        for (p, dir, want) in [
++            (Never, false, d),
++            (Never, true, OpenOptions::empty()),
++            (Metadata, false, d),
++            (Metadata, true, c | k),
++            (Auto, false, OpenOptions::empty()),
++            (Auto, true, OpenOptions::empty()),
++            (Always, false, k),
++            (Always, true, k | c),
++        ] {
++            assert_eq!(p.open_options(dir), want, "{p:?} dir={dir}");
++        }
++        assert_eq!(Never.timeout(), Duration::from_secs(0));
++        assert_eq!(Metadata.timeout(), Duration::from_secs(86400));
++        assert_eq!(Auto.timeout(), Duration::from_secs(1));
++        assert_eq!(Always.timeout(), Duration::from_secs(86400));
++    }
++}
+-- 
+2.43.0
+

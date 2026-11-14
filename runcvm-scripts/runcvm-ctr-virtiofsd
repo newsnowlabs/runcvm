@@ -21,6 +21,16 @@ for item in "${VIRTIOFSD_CACHE_ITEMS[@]}"; do
 done
 OPTS+=(--cache="$VIRTIOFSD_CACHE")
 
+# RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE, which runcvm-runtime validates, is the cache policy for every
+# mount within the VM's root filesystem: volumes and bind mounts, including Docker's own of files
+# such as /etc/hosts (RunCVM's patched virtiofsd's --submount-cache). Unset, they take
+# RUNCVM_VIRTIOFSD_CACHE's policy.
+case "$RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE" in
+  '') ;;
+  none) OPTS+=(--submount-cache=never) ;;
+  *) OPTS+=(--submount-cache="$RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE") ;;
+esac
+
 # --inode-file-handles=never keeps virtiofsd from requiring CAP_DAC_READ_SEARCH, which containers
 # lack by default (virtiofsd's default, 'prefer', needs it).
 # Send logs to /run in container (not in VM)

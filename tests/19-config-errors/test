@@ -25,6 +25,8 @@ CASES = [
      "RunCVM: Error: Kernel 'Not/A/Kernel' invalid"),
     ("virtiofsd-cache", ["--env=RUNCVM_VIRTIOFSD_CACHE=none,writeback"], 125,
      "RunCVM: Error: RUNCVM_VIRTIOFSD_CACHE 'none,writeback' invalid"),
+    ("virtiofsd-submount-cache", ["--env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=writeback"], 125,
+     "RunCVM: Error: RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE 'writeback' invalid"),
     ("disks", ["--env=RUNCVM_DISKS=/disks/disk1"], 1,
      "disk spec '/disks/disk1' invalid: src, dst and fs must all be specified"),
 ]

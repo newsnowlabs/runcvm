@@ -1,0 +1,204 @@
+From 371b72b97223b670baf73e08d110c8af84afb979 Mon Sep 17 00:00:00 2001
+From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
+Date: Sat, 14 Nov 2026 02:02:49 +0000
+Subject: [PATCH 3/7] passthrough: Keep a cache policy per inode
+
+Add InodeData::cache_policy, the cache policy of the mount the inode is
+on, with None standing for the file system's default policy, and take
+the FOPEN_* flags and the entry/attribute timeouts of every reply from
+it.  Nothing sets it yet, so there is no change in behaviour.
+
+do_open() now resolves the inode once, before opening it, and uses the
+same InodeData for the open flags.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../device_state/deserialization.rs           |  3 ++
+ .../preserialization/find_paths.rs            |  1 +
+ src/passthrough/inode_store.rs                |  4 ++
+ src/passthrough/mod.rs                        | 39 ++++++++++++++-----
+ 4 files changed, 38 insertions(+), 9 deletions(-)
+
+diff --git a/src/passthrough/device_state/deserialization.rs b/src/passthrough/device_state/deserialization.rs
+index 975bbef..f1459fe 100644
+--- a/src/passthrough/device_state/deserialization.rs
++++ b/src/passthrough/device_state/deserialization.rs
+@@ -385,6 +385,7 @@ impl serialized::Inode {
+                 mnt_id: st.mnt_id,
+             },
+             mode: st.st.st_mode,
++            cache_policy: Default::default(),
+             migration_info: Mutex::new(None),
+         })
+     }
+@@ -408,6 +409,7 @@ impl serialized::Inode {
+                     refcount: AtomicU64::new(self.refcount),
+                     ids: Default::default(),
+                     mode: Default::default(),
++                    cache_policy: Default::default(),
+                     migration_info: Default::default(),
+                 })
+             }
+@@ -471,6 +473,7 @@ impl serialized::Inode {
+                 mnt_id: st.mnt_id,
+             },
+             mode: st.st.st_mode,
++            cache_policy: Default::default(),
+             migration_info: Mutex::new(None),
+         })
+     }
+diff --git a/src/passthrough/device_state/preserialization/find_paths.rs b/src/passthrough/device_state/preserialization/find_paths.rs
+index 3c2c82a..f65e275 100644
+--- a/src/passthrough/device_state/preserialization/find_paths.rs
++++ b/src/passthrough/device_state/preserialization/find_paths.rs
+@@ -304,6 +304,7 @@ impl<'a> Constructor<'a> {
+             refcount: AtomicU64::new(1),
+             ids,
+             mode: stat.st.st_mode,
++            cache_policy: Default::default(),
+             migration_info: Mutex::new(Some(mig_info)),
+         };
+ 
+diff --git a/src/passthrough/inode_store.rs b/src/passthrough/inode_store.rs
+index fc9c7c5..5f6b165 100644
+--- a/src/passthrough/inode_store.rs
++++ b/src/passthrough/inode_store.rs
+@@ -54,6 +54,10 @@ pub(crate) struct InodeData {
+     // File type and mode
+     pub mode: u32,
+ 
++    // Cache policy of the mount this inode is on, if it differs from the file system's default
++    // (`Config::cache_policy`); always `None` unless per-mount cache policies are configured.
++    pub cache_policy: Option<super::CachePolicy>,
++
+     // Constructed in the `prepare_serialization` phase of migration, and must be set on all inodes
+     // when we are actually going to serialize our internal state to send it to the migration
+     // destination.
+diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
+index 90a4bb0..96f239d 100644
+--- a/src/passthrough/mod.rs
++++ b/src/passthrough/mod.rs
+@@ -91,7 +91,7 @@ impl Drop for ScopedWorkingDirectory {
+ /// The caching policy that the file system should report to the FUSE client. By default the FUSE
+ /// protocol uses close-to-open consistency. This means that any cached contents of the file are
+ /// invalidated the next time that file is opened.
+-#[derive(Default, Debug, Clone)]
++#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum CachePolicy {
+     /// The client should never cache file data and all I/O should be directly forwarded to the
+     /// server. This policy must be selected when file contents may change without the knowledge of
+@@ -649,9 +649,12 @@ impl PassthroughFs {
+             .ok_or_else(ebadf)
+     }
+ 
+-    fn open_inode(&self, inode: Inode, mut flags: i32) -> io::Result<File> {
++    fn open_inode(&self, inode: Inode, flags: i32) -> io::Result<File> {
+         let data = self.inodes.get(inode).ok_or_else(ebadf)?;
++        self.open_inode_data(&data, flags)
++    }
+ 
++    fn open_inode_data(&self, data: &InodeData, mut flags: i32) -> io::Result<File> {
+         // When writeback caching is enabled, the kernel may send read requests even if the
+         // userspace program opened the file write-only. So we need to ensure that we have opened
+         // the file for reading as well as writing.
+@@ -938,10 +941,12 @@ impl PassthroughFs {
+                     mnt_id: st.mnt_id,
+                 },
+                 mode: st.st.st_mode,
++                cache_policy: None,
+                 migration_info: Mutex::new(mig_info),
+             };
+             self.inodes.get_or_insert(inode_data)?
+         };
++        let (entry_timeout, attr_timeout) = self.timeouts(inode.get().cache_policy);
+ 
+         let attr = fuse::Attr::try_with_flags(
+             st.st,
+@@ -956,8 +961,8 @@ impl PassthroughFs {
+             inode: unsafe { inode.leak() },
+             generation: 0,
+             attr,
+-            attr_timeout: self.cfg.attr_timeout,
+-            entry_timeout: self.cfg.entry_timeout,
++            attr_timeout,
++            entry_timeout,
+         })
+     }
+ 
+@@ -978,13 +983,14 @@ impl PassthroughFs {
+             flags &= !(libc::O_NOATIME as u32)
+         }
+ 
++        let inode_data = self.inodes.get(inode).ok_or_else(ebadf)?;
+         let file = {
+             let _killpriv_guard = if self.cfg.killpriv_v2 && kill_priv {
+                 drop_effective_cap("FSETID")?
+             } else {
+                 None
+             };
+-            self.open_inode(inode, flags as i32)?
++            self.open_inode_data(&inode_data, flags as i32)?
+         };
+ 
+         if flags & (libc::O_TRUNC as u32) != 0 {
+@@ -1001,8 +1007,7 @@ impl PassthroughFs {
+         self.handles.write().unwrap().insert(handle, Arc::new(data));
+ 
+         let opts = self
+-            .cfg
+-            .cache_policy
++            .effective_policy(inode_data.cache_policy)
+             .open_options(flags & (libc::O_DIRECTORY as u32) != 0);
+ 
+         Ok((Some(handle), opts))
+@@ -1033,7 +1038,7 @@ impl PassthroughFs {
+             |gid| self.map_host_gid(gid),
+         )?;
+ 
+-        Ok((attr, self.cfg.attr_timeout))
++        Ok((attr, self.timeouts(data.cache_policy).1))
+     }
+ 
+     fn do_unlink(&self, parent: Inode, name: &CStr, flags: libc::c_int) -> io::Result<()> {
+@@ -1274,6 +1279,20 @@ impl PassthroughFs {
+         }
+     }
+ 
++    /// The policy that applies to an inode whose `InodeData::cache_policy` is `policy`.
++    fn effective_policy(&self, policy: Option<CachePolicy>) -> CachePolicy {
++        policy.unwrap_or(self.cfg.cache_policy)
++    }
++
++    /// (entry, attribute) timeouts for an inode whose `InodeData::cache_policy` is `policy`: the
++    /// configured ones under the file system's default policy, else the policy's own.
++    fn timeouts(&self, policy: Option<CachePolicy>) -> (Duration, Duration) {
++        match policy {
++            Some(p) if p != self.cfg.cache_policy => (p.timeout(), p.timeout()),
++            _ => (self.cfg.entry_timeout, self.cfg.attr_timeout),
++        }
++    }
++
+     pub fn open_root_node(&self) -> io::Result<()> {
+         // We use `O_PATH` because we just want this for traversing the directory tree
+         // and not for actually reading the contents. We don't use `open_relative_to()`
+@@ -1322,6 +1341,7 @@ impl PassthroughFs {
+                 mnt_id: st.mnt_id,
+             },
+             mode: st.st.st_mode,
++            cache_policy: None,
+             migration_info: Mutex::new(migration_info),
+         };
+         self.inodes.new_inode(inode)?;
+@@ -1803,7 +1823,8 @@ impl FileSystem for PassthroughFs {
+             }
+         };
+ 
+-        let opts = self.cfg.cache_policy.open_options(false);
++        // The new file is on its parent's mount
++        let opts = self.effective_policy(data.cache_policy).open_options(false);
+ 
+         Ok((entry, Some(handle), opts))
+     }
+-- 
+2.43.0
+

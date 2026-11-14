@@ -1131,6 +1131,16 @@ Adding `writeback` to `auto` or `always`, e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=alw
 
 `writeback` cannot be combined with `metadata` or `none`, which do not cache file contents, and RunCVM refuses to create the Container/VM if it is.
 
+### RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE
+
+**`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=<auto|always|metadata|none>`**
+
+**[EXPERIMENTAL]** Specifies the cache policy, as for [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache), for the mounts within the VM's root filesystem: every volume and bind mount, including those of single files, such as the `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` that Docker bind-mounts and may rewrite. `RUNCVM_VIRTIOFSD_CACHE`'s policy then applies to the root filesystem alone. Unset, the mounts take `RUNCVM_VIRTIOFSD_CACHE`'s policy too.
+
+This lets the image's own files, which nothing outside the VM normally changes, be cached as with `always`, while volumes and bind mounts, which the host or other containers may change, keep `auto`'s 1-second timeouts and rereading of file contents on each open: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always --env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto`. Mounts are told apart by `virtiofsd` itself: RunCVM builds `virtiofsd` with patches (`patches/virtiofsd/`) that add its `--submount-cache` option, to be dropped once a `virtiofsd` release has it.
+
+With `always` for the root filesystem, the VM may still go on seeing, for up to a day, the old version of a root filesystem file changed from outside it, e.g. with `docker cp` into the running container.
+
 ### RUNCVM_CGROUPFS
 
 **`RUNCVM_CGROUPFS=<value>`**

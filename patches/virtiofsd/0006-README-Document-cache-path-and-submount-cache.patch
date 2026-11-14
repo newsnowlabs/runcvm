@@ -1,0 +1,44 @@
+From e3a26f46021e9b6213a0483b4ed0dd53c4baa3c1 Mon Sep 17 00:00:00 2001
+From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
+Date: Sat, 14 Nov 2026 02:02:49 +0000
+Subject: [PATCH 6/7] README: Document --cache-path and --submount-cache
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ README.md | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/README.md b/README.md
+index 2a4c843..b7cbbf8 100644
+--- a/README.md
++++ b/README.md
+@@ -263,6 +263,26 @@ The caching policy the file system should use (auto, always, metadata, never).
+ 
+ Default: auto.
+ 
++```shell
++--cache-path <PATH=POLICY>
++```
++Cache policy for mounts at or below PATH within the shared directory (repeatable).  PATH is absolute, relative to the
++shared directory, and is normalised lexically (`//`, `.`, `..` and a trailing `/`); it must not lead outside the shared
++directory, and need not exist or be a mount point.  A mount found within the shared directory, at any time, takes the
++policy of the longest PATH that is its mount point or a parent directory of it (`/a` covers `/a` and `/a/b`, not `/ab`);
++the order of the options does not matter.  Mount points are matched by their real paths, so a PATH through a symbolic
++link never matches (virtiofsd warns about one that exists at startup).  A mount's policy is decided when virtiofsd first
++sees it; a mount later moved with `mount --move` keeps it.  Requires mount IDs (Linux 5.8); unique mount IDs (Linux 6.8)
++let virtiofsd remember each mount's policy instead of looking it up again.
++
++```shell
++--submount-cache <POLICY>
++```
++Cache policy for every mount within the shared directory, other than the shared directory's own, that no `--cache-path`
++covers.
++
++Default: the `--cache` policy.
++
+ ```shell
+ --allow-mmap
+ ```
+-- 
+2.43.0
+
