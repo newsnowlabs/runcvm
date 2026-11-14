@@ -378,8 +378,9 @@ if [ "$COMMAND" = "create" ]; then
   set_config_env "RUNCVM_GUEST" "$RUNCVM_GUEST"
 
   ARG0=$(jq_get "$CFG" '.process.args[0]')
-  # Now look in mounts for destination == $ARG0 (this works for Docker and Podman)
-  if [ "$ARG0" = "/sbin/docker-init" ] || [ "$ARG0" = "/dev/init" ]; then
+  # Now look in mounts for destination == $ARG0 (this works for Docker and Podman): Docker's
+  # --init runs /sbin/docker-init or /dev/init, and Podman's /run/podman-init.
+  if [ "$ARG0" = "/sbin/docker-init" ] || [ "$ARG0" = "/dev/init" ] || [ "$ARG0" = "/run/podman-init" ]; then
   
     # User intended an init process to be run in the container,
     # so arrange to run our own instead, that will launch the original entrypoint
@@ -441,7 +442,7 @@ if [ "$COMMAND" = "create" ]; then
   set_config_env "RUNCVM_VM_MOUNTPOINT" "$RUNCVM_VM_MOUNTPOINT"
 
   # First extract list of tmpfs mounts in fstab form, then delete them from the config
-  RUNCVM_TMPFS=$(jq_get "$CFG" '( .mounts[] | select(.type == "tmpfs" and (.destination | test("^/dev(/|$)") | not) ) ) | [.source + " " + .destination + " tmpfs " + (.options | map(select(. != "rprivate" and . != "private")) | join(",")) + " 0 0"] | .[0]')
+  RUNCVM_TMPFS=$(jq_get "$CFG" '( .mounts[] | select(.type == "tmpfs" and (.destination | test("^/dev(/|$)") | not) ) ) | [.source + " " + .destination + " tmpfs " + (.options | map(select(. != "rprivate" and . != "private" and . != "tmpcopyup" and . != "notmpcopyup")) | join(",")) + " 0 0"] | .[0]')
   jq_set "$CFG" -r 'del( .mounts[] | select(.type == "tmpfs" and (.destination | test("^/dev(/|$)") | not) ) )'
   set_config_env "RUNCVM_TMPFS" "$RUNCVM_TMPFS"
 
@@ -454,7 +455,9 @@ if [ "$COMMAND" = "create" ]; then
   # container and VM.
   #
   # N.B. A mount at or underneath /disks will NOT be mapped to /vm/disks - this path is reserved for mounting disk files to the container
-  jq_set "$CFG" --arg vm "$RUNCVM_VM_MOUNTPOINT" '( .mounts[] | select(.type == "bind" and (.destination | test("^/disks(/|$)") | not) ) ).destination |= $vm + .'
+  # /dev/shm stays the container's own, not the VM's: it backs the VM's memory (see CONFIGURE
+  # MEMORY below). Docker supplies it as a tmpfs, but Podman as a bind mount of its own shm.
+  jq_set "$CFG" --arg vm "$RUNCVM_VM_MOUNTPOINT" '( .mounts[] | select(.type == "bind" and .destination != "/dev/shm" and (.destination | test("^/disks(/|$)") | not) ) ).destination |= $vm + .'
 
   # Mount / from container to $RUNCVM_VM_MOUNTPOINT, recursively binding all pre-existing mount points
   # (these being only the ones defined ahead of this item in the mounts[] array - so order matters!)
