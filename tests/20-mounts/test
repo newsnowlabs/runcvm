@@ -15,7 +15,7 @@ container over virtiofs:
   each other's writes at once.
 - By default, virtiofsd runs with --negative-timeout=1, and with
   RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=0 without it. A file the VM looked for
-  in a volume and did not find is visible in the VM at once once the VM
+  in a volume and did not find is visible in the VM as soon as the VM
   creates it, and, created from another container instead, within 3 s.
 - With RUNCVM_VIRTIOFSD_POLL=fixed or adaptive, virtiofsd runs with
   --queue-poll set accordingly, and the VM boots and creates, reads and
