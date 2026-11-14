@@ -1105,9 +1105,22 @@ Default is `off`, but `on` may deliver improved performance in some scenarios at
 
 ### RUNCVM_VIRTIOFSD_CACHE
 
-**`RUNCVM_VIRTIOFSD_CACHE=<auto|none|always>`**
+**`RUNCVM_VIRTIOFSD_CACHE=<auto|always|metadata|none>`**
 
-Specifies the cache policy passed to `virtiofsd` via `--cache=<value>`, with `none` passed as `never`; `virtiofsd`'s other policies, such as `metadata`, are also accepted. The default policy is `auto`. Use `none` to avoid caching issues when multiple RunCVM instances need to share access to a volume or bind-mount on the host.
+Sets how the VM caches the files it reads over virtiofs: their names, their attributes (such as size, ownership and modification time) and their contents. The container's root filesystem, its volumes and its bind mounts are all served by one `virtiofsd`, so one policy applies to all of them. The policy is passed to `virtiofsd` as `--cache=<value>`; `none` is passed as `never`, which is also accepted. The default is `auto`.
+
+| Policy | Names and attributes | File contents | Suits |
+|---|---|---|---|
+| `auto` (default) | cached for 1 second | cached while a file is open, and dropped each time it is opened | most uses, including files that change outside the VM, such as a bind mount edited on the host |
+| `always` | cached for up to a day | cached across opens | Container/VMs whose files nothing outside the VM changes, e.g. build or CI workloads without shared volumes or bind mounts; the fastest policy |
+| `metadata` | cached for up to a day | not cached | the same restriction as `always`, with slower reads; rarely useful |
+| `none` | not cached | not cached | volumes or bind mounts through which several Container/VMs, or a Container/VM and the host, exchange files and must see each other's changes; the slowest policy |
+
+Under every policy, the VM's writes reach the host's filesystem as each write is made, so the policy affects only how soon the VM sees changes made outside it: by the host, by other containers sharing a volume, by `docker cp`, or by Docker itself, which can rewrite files such as `/etc/hosts`. Under `always` and `metadata`, the VM may go on seeing a file's old name, attributes or contents for up to a day after it changes, and a program that acts on them can overwrite the newer version.
+
+For volumes that several Container/VMs share, use `none`. Under `auto`, files that one Container/VM writes to a shared volume can stay invisible to the others for many seconds, far longer than its 1-second timeouts suggest; `tests/50-http-docker-swarm`, whose nodes exchange files through a shared volume, uses `none` for this reason. Where the files exchanged are few and small, as there, `none` costs little.
+
+Reads under `always` can be several times faster than under `none`: e.g. rereading a Debian image's `/usr`, about 230 MB, takes roughly a quarter of the time. Choose a faster policy only where its restriction holds for every file the Container/VM can see.
 
 ### RUNCVM_CGROUPFS
 
