@@ -13,6 +13,10 @@ container over virtiofs:
   options.
 - Two Container/VMs sharing a volume with RUNCVM_VIRTIOFSD_CACHE=none see
   each other's writes at once.
+- By default, virtiofsd runs with --negative-timeout=1, and with
+  RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=0 without it. A file the VM looked for
+  in a volume and did not find is visible in the VM at once once the VM
+  creates it, and, created from another container instead, within 3 s.
 
 The expected values describe current behaviour. A change to it must update
 them deliberately.
@@ -96,7 +100,42 @@ def case_shared_volume():
     return results
 
 
-for results in t.parallel(lambda f: f(), [case_volume_and_binds, case_shared_volume], jobs=2):
+def case_negative_timeout():
+    volume = t.unique("negative")
+    t.volume_create(volume)
+    names = t.parallel(lambda opts: start(*opts),
+                       [("negative", "-v", volume + ":/vol"),
+                        ("negative-off", "--env=RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=0")], jobs=2)
+    if not all(names):
+        return [("negative timeout: both Container/VMs started", True, False)]
+    name, off = names
+
+    def virtiofsd_args(n):
+        return [line for line in t.docker("top", n, "-o", "pid,args").stdout.splitlines() if "virtiofsd" in line]
+
+    inside = ex(name, "sh", "-c", "[ -e /vol/inside ] || echo absent; touch /vol/inside && [ -e /vol/inside ] && echo present").stdout.split()
+    looked = ex(name, "sh", "-c", "[ -e /vol/outside ] || echo absent").stdout.strip()
+    created = t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v",
+                       volume + ":/v", "alpine", "touch", "/v/outside").returncode
+    # Wait past the 1-second negative timeout before looking again: a fixed wait, as polling would
+    # look up the name, and renew the negative entry, in the meantime.
+    t.docker("exec", name, "sleep", "3")
+    return [
+        ("negative timeout: virtiofsd runs with --negative-timeout=1 by default", True,
+         any("--negative-timeout=1" in line for line in virtiofsd_args(name))),
+        ("negative timeout: virtiofsd runs without it with RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=0", False,
+         any("--negative-timeout" in line for line in virtiofsd_args(off))),
+        ("negative timeout: a file not found, then created in the VM, is found at once",
+         ["absent", "present"], inside),
+        ("negative timeout: a file not found in the VM", "absent", looked),
+        ("negative timeout: the file created from another container", 0, created),
+        ("negative timeout: the file created from another container is found within 3 s", 0,
+         ex(name, "test", "-e", "/vol/outside").returncode),
+    ]
+
+
+for results in t.parallel(lambda f: f(), [case_volume_and_binds, case_shared_volume,
+                                          case_negative_timeout], jobs=3):
     for desc, expected, actual in results:
         t.check(desc, expected, actual)
 
