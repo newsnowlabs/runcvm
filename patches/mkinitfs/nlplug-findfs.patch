@@ -5,7 +5,7 @@
  #include <libcryptsetup.h>
  
 -#define MAX_EVENT_TIMEOUT	5000
-+#define MAX_EVENT_TIMEOUT	1000
++#define MAX_EVENT_TIMEOUT	250
  #define DEFAULT_EVENT_TIMEOUT	250
  /* usb mass storage needs 1 sec to settle */
  #define USB_STORAGE_TIMEOUT	1000
