@@ -33,6 +33,10 @@ container over virtiofs:
   RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=0 without it. A file the VM looked for
   in a volume and did not find is visible in the VM at once once the VM
   creates it, and, created from another container instead, within 3 s.
+- With RUNCVM_VIRTIOFSD_CACHE=always, RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto
+  and RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600, files the VM looked for and
+  did not find, then created outside it, are found within 3 s in a volume
+  (capped at auto's 1 second), and not in the root filesystem.
 
 The expected values describe current behaviour. A change to it must update
 them deliberately.
@@ -253,9 +257,40 @@ def case_negative_timeout():
     ]
 
 
+def case_negative_timeout_per_mount():
+    volume = t.unique("negcap")
+    t.volume_create(volume)
+    name = start("negcap", "-v", volume + ":/vol", "--env=RUNCVM_VIRTIOFSD_CACHE=always",
+                 "--env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto",
+                 "--env=RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600")
+    if not name:
+        return [("negative timeout per mount: Container/VM started", True, False)]
+    looked = ex(name, "sh", "-c", "[ -e /vol/added ] || echo absent; [ -e /added ] || echo absent").stdout.split()
+    created = t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v",
+                       volume + ":/v", "alpine", "touch", "/v/added").returncode
+    host = tempfile.mkdtemp(prefix="runcvm-test-")
+    try:
+        src = os.path.join(host, "added")
+        open(src, "w").close()
+        copied = t.docker("cp", src, name + ":/added").returncode
+    finally:
+        shutil.rmtree(host, ignore_errors=True)
+    # Wait past auto's 1-second cap before looking again (see case_negative_timeout).
+    t.docker("exec", name, "sleep", "3")
+    return [
+        ("negative timeout per mount: files not found in the VM", ["absent", "absent"], looked),
+        ("negative timeout per mount: files created outside the VM", [0, 0], [created, copied]),
+        ("negative timeout per mount (volume, auto): found within 3 s", 0,
+         ex(name, "test", "-e", "/vol/added").returncode),
+        ("negative timeout per mount (root, always, 3600 s): still not found", 1,
+         ex(name, "test", "-e", "/added").returncode),
+    ]
+
+
 for results in t.parallel(lambda f: f(), [case_volume_and_binds, case_shared_volume, case_writeback,
                                           case_submount_cache, case_cache_paths,
-                                          case_negative_timeout], jobs=6):
+                                          case_negative_timeout, case_negative_timeout_per_mount],
+                          jobs=7):
     for desc, expected, actual in results:
         t.check(desc, expected, actual)
 
