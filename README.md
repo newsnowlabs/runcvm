@@ -1119,6 +1119,8 @@ Workloads look for many files that do not exist: a shell searching `PATH` for ea
 
 A file the VM creates is visible to it at once, whether or not it looked for it before. A file created outside the VM (on the host in a bind mount, by another container in a shared volume, or with `docker cp`) under a name the VM has just looked for becomes visible to it after at most this long, as other changes made outside the VM already do under `auto`. A workload that waits for another container to create a file, and needs to see it at once, should use `none` for that mount.
 
+Under `always`, longer values suit a Container/VM whose root filesystem nothing outside the VM changes while it runs, as `always` already assumes for files that do exist: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always --env=RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600`. A file missing when the VM looked for it is then not looked for again for up to an hour, which helps workloads that repeat the same failed lookups seconds or minutes apart (a shell starting commands, a service starting worker processes), not only in quick succession. A file added from outside under such a name, e.g. with `docker cp`, stays invisible to the VM for as long. The value applies to volumes and bind mounts too, which share the root filesystem's cache policy, so a long one does not suit a Container/VM whose mounts are changed from outside it.
+
 ### RUNCVM_VIRTIOFSD_KILLPRIV
 
 **`RUNCVM_VIRTIOFSD_KILLPRIV=<0|1>`**
