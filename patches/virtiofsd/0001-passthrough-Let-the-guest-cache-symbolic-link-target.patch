@@ -1,7 +1,7 @@
 From d75eb0493fbbabba8abc1e767cd00ac32aebc325 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 02:22:15 +0000
-Subject: [PATCH 1/4] passthrough: Let the guest cache symbolic link targets
+Subject: [PATCH 1/5] passthrough: Let the guest cache symbolic link targets
 
 Negotiate FUSE_CACHE_SYMLINKS unless --cache=never is in effect.
 Without it, the guest kernel sends a FUSE_READLINK request every time
