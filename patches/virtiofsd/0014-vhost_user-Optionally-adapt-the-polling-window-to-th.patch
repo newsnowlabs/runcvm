@@ -1,0 +1,411 @@
+From a346fb4cb84b6d9a4b3ab1174fd7ae61cc7155e9 Mon Sep 17 00:00:00 2001
+From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
+Date: Sat, 14 Nov 2026 21:50:12 +0000
+Subject: [PATCH] vhost_user: Optionally adapt the polling window to the
+ guest
+
+Add --queue-poll=none|fixed|adaptive, the way to poll the request queue
+after it runs dry, with --queue-poll-us=N now the window: fixed's, or
+adaptive's largest (default 50 microseconds).  "none" is upstream's
+behaviour, and the default; "fixed" polls for N microseconds each time,
+as --queue-poll-us=N alone also does.
+
+"adaptive" polls for a window that starts at zero and adapts to how
+closely the guest's requests follow one another, as QEMU's adaptive
+polling of its event loops does: when the next request arrives after
+polling has given up, but within N microseconds of the queue running
+dry, the window grows (to 4 microseconds, then doubling, up to N); when
+it takes longer than N, the window halves (to zero below 4); when
+polling catches it, the window stays as it is.  So a guest issuing
+requests in quick succession is polled for, while an idle guest, or one
+whose requests are far apart, costs no polling.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/main.rs       |  87 +++++++++++++++++++---
+ src/vhost_user.rs | 181 +++++++++++++++++++++++++++++++++++++++++-----
+ 2 files changed, 239 insertions(+), 29 deletions(-)
+
+diff --git a/src/main.rs b/src/main.rs
+index 9558549..4365930 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -28,7 +28,7 @@ use virtiofsd::passthrough::{
+ use virtiofsd::sandbox::{Sandbox, SandboxMode};
+ use virtiofsd::seccomp::{enable_seccomp, SeccompAction};
+ use virtiofsd::util::write_pid_file;
+-use virtiofsd::vhost_user::{Error, VhostUserFsBackendBuilder, MAX_TAG_LEN};
++use virtiofsd::vhost_user::{Error, QueuePoll, VhostUserFsBackendBuilder, MAX_TAG_LEN};
+ use virtiofsd::{limits, oslib, soft_idmap};
+ use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
+ 
+@@ -114,6 +114,33 @@ fn parse_negative_timeout(secs: &str) -> std::result::Result<Duration, String> {
+     Ok(Duration::from_secs_f64(secs))
+ }
+ 
++#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
++enum QueuePollMode {
++    None,
++    Fixed,
++    Adaptive,
++}
++
++const DEFAULT_QUEUE_POLL_US: u64 = 50;
++
++/// The queue polling that `--queue-poll` and `--queue-poll-us` ask for.
++fn queue_poll(
++    mode: Option<QueuePollMode>,
++    window_us: Option<u64>,
++) -> std::result::Result<QueuePoll, String> {
++    let window = Duration::from_micros(window_us.unwrap_or(DEFAULT_QUEUE_POLL_US));
++    let queue_poll = match mode {
++        Some(QueuePollMode::None) => return Ok(QueuePoll::None),
++        None if window_us.unwrap_or(0) == 0 => return Ok(QueuePoll::None),
++        None | Some(QueuePollMode::Fixed) => QueuePoll::Fixed(window),
++        Some(QueuePollMode::Adaptive) => QueuePoll::Adaptive(window),
++    };
++    if window.is_zero() {
++        return Err("--queue-poll=fixed or adaptive needs a --queue-poll-us above 0".to_string());
++    }
++    Ok(queue_poll)
++}
++
+ fn parse_tag(tag: &str) -> Result<String> {
+     if !tag.is_empty() && tag.len() <= MAX_TAG_LEN {
+         Ok(tag.into())
+@@ -167,13 +194,22 @@ struct Opt {
+     #[arg(long, default_value = "0")]
+     thread_pool_size: usize,
+ 
+-    /// After the request queue runs dry, keep polling it for up to this many
+-    /// microseconds (at most 1000) before waiting for the guest to notify.
+-    /// Spends host CPU to save the notification and wake-up on a request that
+-    /// follows closely. Applies without a thread pool, and where the guest has
+-    /// negotiated VIRTIO_RING_F_EVENT_IDX, only. "0" disables it
+-    #[arg(long, default_value = "0", value_parser = clap::value_parser!(u64).range(0..=1000))]
+-    queue_poll_us: u64,
++    /// After the request queue runs dry, keep polling it before waiting for
++    /// the guest to notify: "none" (the default, unless --queue-poll-us is
++    /// given) waits at once; "fixed" polls for --queue-poll-us each time;
++    /// "adaptive" polls for a window, of at most --queue-poll-us, that grows
++    /// while requests follow one another closely and shrinks to nothing when
++    /// they do not. Spends host CPU to save the notification and wake-up on a
++    /// request that follows closely. Applies without a thread pool, and where
++    /// the guest has negotiated VIRTIO_RING_F_EVENT_IDX, only
++    #[arg(long, value_enum, value_name = "MODE")]
++    queue_poll: Option<QueuePollMode>,
++
++    /// The polling window, in microseconds (at most 1000), for --queue-poll:
++    /// fixed's window, or adaptive's largest [default: 50]. Given without
++    /// --queue-poll, polls for this window each time ("0": not at all)
++    #[arg(long, value_parser = clap::value_parser!(u64).range(0..=1000))]
++    queue_poll_us: Option<u64>,
+ 
+     /// Enable support for extended attributes
+     #[arg(long)]
+@@ -740,9 +776,12 @@ fn main() {
+     let xattrmap = opt.xattrmap.clone();
+     let xattr = xattrmap.is_some() || opt.posix_acl || opt.security_label || opt.xattr;
+     let thread_pool_size = opt.thread_pool_size;
+-    let queue_poll = Duration::from_micros(opt.queue_poll_us);
+-    if !queue_poll.is_zero() && thread_pool_size > 0 {
+-        warn!("--queue-poll-us applies without a thread pool only; ignoring it");
++    let queue_poll = queue_poll(opt.queue_poll, opt.queue_poll_us).unwrap_or_else(|e| {
++        error!("{e}");
++        process::exit(1)
++    });
++    if queue_poll != QueuePoll::None && thread_pool_size > 0 {
++        warn!("--queue-poll applies without a thread pool only; ignoring it");
+     }
+     let readdirplus = match opt.cache {
+         CachePolicy::Never => false,
+@@ -944,7 +983,7 @@ fn run_generic_fs<F: FileSystem + SerializableFileSystem + Send + Sync + 'static
+     fs: F,
+     listener: Listener,
+     thread_pool_size: usize,
+-    queue_poll: Duration,
++    queue_poll: QueuePoll,
+     tag: Option<String>,
+ ) {
+     let fs_backend = Arc::new(
+@@ -1003,4 +1042,28 @@ mod tests {
+             assert!(parse_negative_timeout(bad).is_err(), "{bad} accepted");
+         }
+     }
++
++    #[test]
++    fn queue_poll_options() {
++        use QueuePollMode::{Adaptive, Fixed};
++        let us = Duration::from_micros;
++        assert_eq!(queue_poll(None, None), Ok(QueuePoll::None));
++        assert_eq!(queue_poll(None, Some(0)), Ok(QueuePoll::None));
++        assert_eq!(queue_poll(None, Some(20)), Ok(QueuePoll::Fixed(us(20))));
++        assert_eq!(
++            queue_poll(Some(QueuePollMode::None), Some(20)),
++            Ok(QueuePoll::None)
++        );
++        assert_eq!(queue_poll(Some(Fixed), None), Ok(QueuePoll::Fixed(us(50))));
++        assert_eq!(
++            queue_poll(Some(Adaptive), None),
++            Ok(QueuePoll::Adaptive(us(50)))
++        );
++        assert_eq!(
++            queue_poll(Some(Adaptive), Some(200)),
++            Ok(QueuePoll::Adaptive(us(200)))
++        );
++        assert!(queue_poll(Some(Fixed), Some(0)).is_err());
++        assert!(queue_poll(Some(Adaptive), Some(0)).is_err());
++    }
+ }
+diff --git a/src/vhost_user.rs b/src/vhost_user.rs
+index 1c7c489..1a70e6d 100644
+--- a/src/vhost_user.rs
++++ b/src/vhost_user.rs
+@@ -122,13 +122,72 @@ struct VhostUserFsThread<F: FileSystem + Send + Sync + 'static> {
+     vu_req: Option<Backend>,
+     event_idx: bool,
+     pool: Option<ThreadPool>,
+-    // How long to keep polling the request queue, with the guest's notifications suppressed,
+-    // after it runs dry (serial processing with EVENT_IDX only). Zero disables polling.
+-    queue_poll: Duration,
++    // How to poll the request queue, with the guest's notifications suppressed, after it runs
++    // dry (serial processing with EVENT_IDX only).
++    queue_poll: QueuePoll,
++    // The adaptive polling window, and when the request queue last ran dry with polling not
++    // catching the next request (`QueuePoll::Adaptive` only).
++    poll_state: Mutex<PollState>,
++}
++
++/// How virtiofsd polls the request queue after it runs dry, before waiting for the guest to
++/// notify it of the next request.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub enum QueuePoll {
++    /// Wait at once.
++    #[default]
++    None,
++    /// Poll for this long each time.
++    Fixed(Duration),
++    /// Poll for a window that adapts to how closely requests follow one another, of at most this
++    /// long (see `PollWindow`).
++    Adaptive(Duration),
++}
++
++/// An adaptive polling window. It starts at zero; it grows (to `START`, then doubling, up to
++/// `max`) when the next request arrives after polling has given up, but within `max` of the queue
++/// running dry, as a longer window would have caught it; it halves (to zero below `START`) when the
++/// next request takes longer than `max`, as no window would have; and it stays as it is when
++/// polling catches the request.  So a guest issuing requests in quick succession is polled for, and
++/// an idle guest, or one whose requests are far apart, is not.
++#[derive(Debug, PartialEq, Eq)]
++struct PollWindow {
++    current: Duration,
++    max: Duration,
++}
++
++impl PollWindow {
++    const START: Duration = Duration::from_micros(4);
++
++    fn new(max: Duration) -> Self {
++        PollWindow {
++            current: Duration::ZERO,
++            max,
++        }
++    }
++
++    /// Adjusts the window after the next request arrived `waited` after the queue ran dry, with
++    /// polling for the current window not catching it.
++    fn missed(&mut self, waited: Duration) {
++        if waited > self.max {
++            self.current /= 2;
++            if self.current < Self::START {
++                self.current = Duration::ZERO;
++            }
++        } else if waited > self.current {
++            self.current = std::cmp::max(self.current * 2, Self::START).min(self.max);
++        }
++    }
++}
++
++#[derive(Debug)]
++struct PollState {
++    window: PollWindow,
++    dry_since: Option<Instant>,
+ }
+ 
+ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFsThread<F> {
+-    fn new(fs: F, thread_pool_size: usize, queue_poll: Duration) -> Result<Self> {
++    fn new(fs: F, thread_pool_size: usize, queue_poll: QueuePoll) -> Result<Self> {
+         let pool = if thread_pool_size > 0 {
+             // Test that unshare(CLONE_FS) works, it will be called for each thread.
+             // It's an unprivileged system call but some Docker/Moby versions are
+@@ -164,6 +223,13 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
+             event_idx: false,
+             pool,
+             queue_poll,
++            poll_state: Mutex::new(PollState {
++                window: PollWindow::new(match queue_poll {
++                    QueuePoll::Adaptive(max) => max,
++                    _ => Duration::ZERO,
++                }),
++                dry_since: None,
++            }),
+         })
+     }
+ 
+@@ -327,14 +393,34 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
+         Ok(())
+     }
+ 
+-    /// Polls `vring_state`'s queue for up to `self.queue_poll`, returning true as soon as the
+-    /// guest has made a new request available, and false once the time is up.
+-    fn poll_queue(&self, vring_state: &mut VringState<LoggedMemoryAtomic>) -> bool {
++    /// The window to poll the request queue for now.
++    fn poll_window(&self) -> Duration {
++        match self.queue_poll {
++            QueuePoll::None => Duration::ZERO,
++            QueuePoll::Fixed(window) => window,
++            QueuePoll::Adaptive(_) => self.poll_state.lock().unwrap().window.current,
++        }
++    }
++
++    /// With adaptive polling, adjusts the window for a request that arrived after polling, if
++    /// any, gave up: the queue ran dry at `dry`.
++    fn poll_missed(&self, dry: Instant) {
++        if matches!(self.queue_poll, QueuePoll::Adaptive(_)) {
++            self.poll_state.lock().unwrap().window.missed(dry.elapsed());
++        }
++    }
++
++    /// Polls `vring_state`'s queue until `deadline`, returning true as soon as the guest has made
++    /// a new request available, and false once the time is up.
++    fn poll_queue(
++        &self,
++        vring_state: &mut VringState<LoggedMemoryAtomic>,
++        deadline: Instant,
++    ) -> bool {
+         let mem = match &self.mem {
+             Some(m) => m.memory(),
+             None => return false,
+         };
+-        let deadline = Instant::now() + self.queue_poll;
+         loop {
+             let queue = vring_state.get_queue();
+             match queue.avail_idx(&*mem, Ordering::Acquire) {
+@@ -365,7 +451,13 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
+             }
+             _ => return Err(Error::HandleEventUnknownEvent.into()),
+         };
+-        let poll = device_event == REQ_QUEUE_EVENT && !self.queue_poll.is_zero();
++        let poll = device_event == REQ_QUEUE_EVENT && self.queue_poll != QueuePoll::None;
++        if poll {
++            // The guest notified virtiofsd of this request after it went back to waiting.
++            if let Some(dry) = self.poll_state.lock().unwrap().dry_since.take() {
++                self.poll_missed(dry);
++            }
++        }
+ 
+         if self.event_idx {
+             // vm-virtio's Queue implementation only checks avail_index
+@@ -381,12 +473,23 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
+                 // While notifications are disabled, the guest adds requests without notifying
+                 // (which costs it a VM exit, and virtiofsd a wake-up), so keep watching the
+                 // request queue for a while before going back to waiting.
+-                if poll && self.poll_queue(&mut vring_state) {
+-                    continue;
++                let dry = Instant::now();
++                if poll {
++                    let window = self.poll_window();
++                    if !window.is_zero() && self.poll_queue(&mut vring_state, dry + window) {
++                        continue;
++                    }
+                 }
+                 if !vring_state.enable_notification().unwrap() {
++                    if poll {
++                        self.poll_state.lock().unwrap().dry_since = Some(dry);
++                    }
+                     break;
+                 }
++                // A request arrived between polling giving up and notifications being enabled.
++                if poll {
++                    self.poll_missed(dry);
++                }
+             }
+         } else {
+             // Without EVENT_IDX, a single call is enough.
+@@ -426,7 +529,7 @@ struct PremigrationThread {
+ #[derive(Debug, Default)]
+ pub struct VhostUserFsBackendBuilder {
+     thread_pool_size: usize,
+-    queue_poll: Duration,
++    queue_poll: QueuePoll,
+     tag: Option<String>,
+ }
+ 
+@@ -439,11 +542,10 @@ impl VhostUserFsBackendBuilder {
+         self
+     }
+ 
+-    /// Set how long to keep polling the request queue after it runs dry, before waiting for the
+-    /// guest to notify. Polling applies without a thread pool only; zero, the default, disables
+-    /// it.
+-    pub fn set_queue_poll(mut self, duration: Duration) -> Self {
+-        self.queue_poll = duration;
++    /// Set how to poll the request queue after it runs dry, before waiting for the guest to
++    /// notify. Polling applies without a thread pool only; the default is not to poll.
++    pub fn set_queue_poll(mut self, queue_poll: QueuePoll) -> Self {
++        self.queue_poll = queue_poll;
+         self
+     }
+ 
+@@ -763,3 +865,48 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> Drop
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const fn us(n: u64) -> Duration {
++        Duration::from_micros(n)
++    }
++
++    #[test]
++    fn poll_window_grows_while_requests_follow_closely() {
++        let mut w = PollWindow::new(us(50));
++        for expected in [4, 8, 16, 32, 50, 50] {
++            w.missed(us(40));
++            assert_eq!(w.current, us(expected));
++        }
++    }
++
++    #[test]
++    fn poll_window_grows_only_as_far_as_needed() {
++        let mut w = PollWindow::new(us(1000));
++        w.missed(us(3));
++        assert_eq!(w.current, us(4));
++        // A wait within the current window means polling would have caught it.
++        w.missed(us(4));
++        assert_eq!(w.current, us(4));
++    }
++
++    #[test]
++    fn poll_window_shrinks_to_zero_when_requests_are_far_apart() {
++        let mut w = PollWindow::new(us(50));
++        w.current = us(50);
++        for expected in [25, 12, 6, 0, 0] {
++            w.missed(us(51));
++            assert_eq!(w.current.as_micros(), expected);
++        }
++    }
++
++    #[test]
++    fn poll_window_stays_at_zero_while_idle() {
++        let mut w = PollWindow::new(us(50));
++        w.missed(Duration::from_secs(10));
++        assert_eq!(w.current, Duration::ZERO);
++    }
++}
+-- 
+2.43.0
+

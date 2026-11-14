@@ -1121,13 +1121,18 @@ It comes with these restrictions:
 - `fallocate()` clears the bits for every caller, where a local file system keeps them for a caller with `CAP_FSETID` (e.g. root). (RunCVM's `virtiofsd` patches make `copy_file_range()`, used by `cp`, keep or clear them as a local file system would.)
 - A setgid bit without group-execute (a legacy marker, not a privilege) is kept or cleared by a write according to `virtiofsd`'s own group membership (group `root` alone), not the writer's: so it is cleared from files of other groups even when the writer is in the file's group, and kept on files of group `root` even when the writer is not.
 
-### RUNCVM_VIRTIOFSD_POLL_US
+### RUNCVM_VIRTIOFSD_POLL
 
-**`RUNCVM_VIRTIOFSD_POLL_US=<microseconds>`** (default `0`)
+**`RUNCVM_VIRTIOFSD_POLL=<none|fixed|adaptive>`** (default `none`)<br>
+**`RUNCVM_VIRTIOFSD_POLL_US=<microseconds>`** (default `50` with `fixed` or `adaptive`)
 
-**[EXPERIMENTAL]** With a value from `1` to `1000`, `virtiofsd` keeps polling the VM's request queue for up to that many microseconds after handling the last request, before waiting to be notified of the next. A request the VM makes within that time costs neither a notification from the VM (a VM exit) nor waking `virtiofsd`, which shortens each request when one follows another closely: small writes, creating, copying and deleting files, and other metadata-heavy work. `50` is a good starting point. Reading large files gains little.
+**[EXPERIMENTAL]** Sets whether, and for how long, `virtiofsd` keeps polling the VM's request queue after handling the last request, before waiting to be notified of the next. A request the VM makes while `virtiofsd` is polling costs neither a notification from the VM (a VM exit) nor waking `virtiofsd`, which shortens each request when one follows another closely: small writes, creating, copying and deleting files, and other metadata-heavy work. Reading large files gains little.
 
-The polling uses CPU on the host, up to one core per Container/VM while its VM is issuing requests over virtiofs (none while it is idle), so it suits hosts with spare cores. On hosts whose cores are all busy, including laptops on battery, it can slow the VM down, as polling competes for CPU with the VM itself.
+- `none` (the default): `virtiofsd` waits to be notified at once, as it does without RunCVM's patches.
+- `fixed`: `virtiofsd` polls for `RUNCVM_VIRTIOFSD_POLL_US` microseconds (`1` to `1000`) each time. `RUNCVM_VIRTIOFSD_POLL_US` alone, without `RUNCVM_VIRTIOFSD_POLL`, also selects `fixed`, and `0` alone selects `none`.
+- `adaptive`: `virtiofsd` polls for a window that adapts to how closely the VM's requests follow one another, of at most `RUNCVM_VIRTIOFSD_POLL_US` microseconds. The window starts at nothing; it grows (to 4 microseconds, then doubling) each time a request arrives after polling has given up but within the maximum, and halves (to nothing below 4) each time one takes longer than the maximum. So a VM issuing requests in quick succession is polled for, while an idle VM, or one whose requests are far apart, costs no polling.
+
+Polling uses CPU on the host, up to one core per Container/VM while its VM is issuing requests over virtiofs, so it suits hosts with spare cores. On hosts whose cores are all busy, including laptops on battery, it can slow the VM down, as polling competes for CPU with the VM itself. `adaptive` spends less CPU than `fixed` when requests are not in quick succession.
 
 ### RUNCVM_CGROUPFS
 
