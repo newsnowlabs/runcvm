@@ -456,6 +456,14 @@ if [ "$COMMAND" = "create" ]; then
   # N.B. A mount at or underneath /disks will NOT be mapped to /vm/disks - this path is reserved for mounting disk files to the container
   jq_set "$CFG" --arg vm "$RUNCVM_VM_MOUNTPOINT" '( .mounts[] | select(.type == "bind" and (.destination | test("^/disks(/|$)") | not) ) ).destination |= $vm + .'
 
+  # With a read-only root (docker run --read-only), runcvm-vm-init makes the VM's root read-only.
+  # The container's root, and $RUNCVM_VM_MOUNTPOINT, in which runc creates mount points, stay
+  # writable.
+  if [ "$(jq_get "$CFG" '.root.readonly')" = "true" ]; then
+    set_config_env "RUNCVM_ROOT_READONLY" "1"
+    jq_set "$CFG" '.root.readonly = false'
+  fi
+
   # Mount / from container to $RUNCVM_VM_MOUNTPOINT, recursively binding all pre-existing mount points
   # (these being only the ones defined ahead of this item in the mounts[] array - so order matters!)
   jq_set "$CFG" --arg root "$ROOT" --arg vm "$RUNCVM_VM_MOUNTPOINT" '.mounts |= [{"destination":$vm,"type":"bind","source":$root,"options":["rbind","private","rw"]}] + .'
