@@ -676,6 +676,12 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   fi
   set_config_env "RUNCVM_DNS_IP" "$RUNCVM_DNS_IP"
 
+  # The number of I/O threads among which each RUNCVM_DISKS disk's queues are shared.
+  RUNCVM_DISK_IOTHREADS="$(get_config_env 'RUNCVM_DISK_IOTHREADS')"
+  if [ -n "$RUNCVM_DISK_IOTHREADS" ] && ! [[ "$RUNCVM_DISK_IOTHREADS" =~ ^[1-8]$ ]]; then
+    error "RUNCVM_DISK_IOTHREADS '$RUNCVM_DISK_IOTHREADS' invalid (should be a number of I/O threads per disk, from 1 to 8)"
+  fi
+
   # Under software emulation, QEMU keeps a cache of translated code, whose size is set by
   # RUNCVM_QEMU_TCG_TB_MEM_SIZE (Mb) and added to the container's memory limit (below), so
   # that the VM's own memory and the container's memory limit remain aligned.
