@@ -1,8 +1,8 @@
-From 89dc24ff7ada560dc70027f4bff7e8e4d5404b7f Mon Sep 17 00:00:00 2001
+From 29e222e99c422b048d74f079782460979f117a57 Mon Sep 17 00:00:00 2001
 From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
 Date: Sat, 14 Nov 2026 21:44:43 +0000
-Subject: [PATCH] passthrough: Optionally let the guest cache names that do not
- exist
+Subject: [PATCH] passthrough: Optionally let the guest cache names that
+ do not exist
 
 Add --negative-timeout=SECONDS (fractions allowed; default 0, off).
 With --cache=auto or always, a lookup of a name that does not exist is
@@ -15,7 +15,7 @@ loader's library path, a language runtime probing for modules.
 A name the guest creates itself replaces its negative entry at once;
 one created outside the guest becomes visible to it after at most the
 timeout, as other changes made outside it do under auto and always.
-With --cache=metadata or never, lookups fail with ENOENT as before.
+With --cache=metadata or never, lookups of such names fail with ENOENT.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
@@ -96,7 +96,7 @@ index d4c72e7..f80875a 100644
 +    }
 +}
 diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
-index 01d438d..1208c88 100644
+index 01d438d..bf18099 100644
 --- a/src/passthrough/mod.rs
 +++ b/src/passthrough/mod.rs
 @@ -222,6 +222,14 @@ pub struct Config {
@@ -150,8 +150,8 @@ index 01d438d..1208c88 100644
 +                if entry_timeout.is_zero() {
 +                    return Err(e);
 +                }
-+                // An inode of 0 is a negative entry, which the client caches for
-+                // `entry_timeout`, or until it creates the name itself.
++                // An inode of 0 is a negative entry, which the client caches for this
++                // timeout, or until it creates the name itself.
 +                Ok(Entry {
 +                    inode: 0,
 +                    generation: 0,

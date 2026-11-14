@@ -31,7 +31,7 @@ container over virtiofs:
   read as before.
 - By default, virtiofsd runs with --negative-timeout=1, and with
   RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=0 without it. A file the VM looked for
-  in a volume and did not find is visible in the VM at once once the VM
+  in a volume and did not find is visible in the VM as soon as the VM
   creates it, and, created from another container instead, within 3 s.
 - With RUNCVM_VIRTIOFSD_CACHE=always, RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto
   and RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600, files the VM looked for and
