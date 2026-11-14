@@ -144,8 +144,12 @@ make install
 EOF
 
 # --- BUILD STAGE ---
-# Build patched mkinitfs/nlplug-findfs
-# with a shorter maximum device-event timeout than upstream (1s, not 5s), for faster boot
+# Build patched mkinitfs/nlplug-findfs, with a shorter wait than upstream for device events (250ms,
+# not 5s), for faster boot. The initramfs's nlplug-findfs triggers an event for every device,
+# loading each one's driver, and exits once the device given as root= appears, or once no event
+# has arrived for this long. RunCVM's root (root=runcvmfs, a virtiofs tag) is not a device it can
+# find, so every boot waits this long after the last event; it never cuts short events still
+# arriving, or drivers still loading, and waits a further 1s once it loads the USB storage driver.
 FROM alpine-sdk-kernel as alpine-mkinitfs
 
 ADD patches/mkinitfs/nlplug-findfs.patch /root/aports/main/mkinitfs/nlplug-findfs.patch
@@ -307,7 +311,6 @@ RUN apk add --no-cache linux-virt
 RUN (grep -qxF 'kernel/fs/fuse/virtiofs*' /etc/mkinitfs/features.d/virtio.modules || \
       echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules) && \
     sed -ri 's/\b(ata|nvme|raid|scsi|usb|cdrom|kms|mmc)\b//g; s/[ ]+/ /g' /etc/mkinitfs/mkinitfs.conf && \
-    sed -ri 's/(nlplug-findfs)/\1 --timeout=1000/' /usr/share/mkinitfs/initramfs-init && \
     mkinitfs $(basename $(ls -d /lib/modules/*))
 RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
     mkdir -p /opt/runcvm/kernels/alpine/$BASENAME && \
