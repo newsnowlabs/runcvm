@@ -1,0 +1,88 @@
+From e29a37c982d67a68299c6fa21081395c478e2ce4 Mon Sep 17 00:00:00 2001
+From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
+Date: Sat, 14 Nov 2026 02:02:49 +0000
+Subject: [PATCH] sandbox: Open /proc/self/mountinfo close-on-exec
+
+virtiofsd keeps its /proc/self/mountinfo descriptor for itself; like any
+such descriptor, it should not be inherited across exec(), e.g. by the
+newuidmap/newgidmap helpers that the sandbox runs with
+std::process::Command, which passes on every descriptor not marked
+close-on-exec.  Nothing is executed after the descriptor is opened
+today, so this is hardening rather than a fix.
+
+Open it in both sandbox modes through one helper, open_mountinfo().
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/sandbox.rs | 31 ++++++++++++++++---------------
+ 1 file changed, 16 insertions(+), 15 deletions(-)
+
+diff --git a/src/sandbox.rs b/src/sandbox.rs
+index 2ddc644..4ea81f9 100644
+--- a/src/sandbox.rs
++++ b/src/sandbox.rs
+@@ -4,11 +4,11 @@
+ 
+ use crate::{idmap, oslib, passthrough, util};
+ use idmap::{GidMap, IdMapSetUpPipeMessage, UidMap};
+-use std::ffi::CString;
++use std::ffi::{CStr, CString};
+ use std::fs::{self, File};
+ use std::io::{Read, Write};
+ use std::os::fd::OwnedFd;
+-use std::os::unix::io::{AsRawFd, FromRawFd};
++use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+ use std::path::Path;
+ use std::process::{self, Command};
+ use std::str::FromStr;
+@@ -147,6 +147,18 @@ impl FromStr for SandboxMode {
+     }
+ }
+ 
++/// Open `/proc/self/mountinfo`, given as `path` relative to `dir` (`libc::AT_FDCWD` for an
++/// absolute path), for reading, close-on-exec.
++fn open_mountinfo(dir: RawFd, path: &CStr) -> Result<File, Error> {
++    // Safe because `path` is a valid C string and we check the return value.
++    let fd = unsafe { libc::openat(dir, path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
++    if fd < 0 {
++        return Err(Error::OpenMountinfo(std::io::Error::last_os_error()));
++    }
++    // Safe because we just opened this fd.
++    Ok(unsafe { File::from_raw_fd(fd) })
++}
++
+ /// A helper for creating a sandbox for isolating the service.
+ pub struct Sandbox {
+     /// The directory that is going to be shared with the VM. The sandbox will be constructed on top
+@@ -313,13 +325,7 @@ impl Sandbox {
+ 
+         // Open `/proc/self/mountinfo` now
+         let c_mountinfo = CString::new("mountinfo").unwrap();
+-        let mountinfo_fd =
+-            unsafe { libc::openat(proc_self.as_raw_fd(), c_mountinfo.as_ptr(), libc::O_RDONLY) };
+-        if mountinfo_fd < 0 {
+-            return Err(Error::OpenMountinfo(std::io::Error::last_os_error()));
+-        }
+-        // Safe because we just opened this fd.
+-        self.mountinfo_fd = Some(unsafe { File::from_raw_fd(mountinfo_fd) });
++        self.mountinfo_fd = Some(open_mountinfo(proc_self.as_raw_fd(), &c_mountinfo)?);
+ 
+         Ok(())
+     }
+@@ -550,12 +556,7 @@ impl Sandbox {
+         self.proc_self_fd = Some(unsafe { File::from_raw_fd(proc_self_fd) });
+ 
+         let c_mountinfo = CString::new("/proc/self/mountinfo").unwrap();
+-        let mountinfo_fd = unsafe { libc::open(c_mountinfo.as_ptr(), libc::O_RDONLY) };
+-        if mountinfo_fd < 0 {
+-            return Err(Error::OpenMountinfo(std::io::Error::last_os_error()));
+-        }
+-        // Safe because we just opened this fd.
+-        self.mountinfo_fd = Some(unsafe { File::from_raw_fd(mountinfo_fd) });
++        self.mountinfo_fd = Some(open_mountinfo(libc::AT_FDCWD, &c_mountinfo)?);
+ 
+         let c_shared_dir = CString::new(self.shared_dir.clone()).unwrap();
+         let ret = unsafe { libc::chroot(c_shared_dir.as_ptr()) };
+-- 
+2.43.0
+

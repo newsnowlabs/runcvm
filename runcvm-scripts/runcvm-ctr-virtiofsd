@@ -21,6 +21,47 @@ for item in "${VIRTIOFSD_CACHE_ITEMS[@]}"; do
 done
 OPTS+=(--cache="$VIRTIOFSD_CACHE")
 
+# RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE, which runcvm-runtime validates, is the cache policy for every
+# mount within the VM's root filesystem: volumes and bind mounts, including Docker's own of files
+# such as /etc/hosts (RunCVM's patched virtiofsd's --submount-cache). Unset, they take
+# RUNCVM_VIRTIOFSD_CACHE's policy.
+case "$RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE" in
+  '') ;;
+  none) OPTS+=(--submount-cache=never) ;;
+  *) OPTS+=(--submount-cache="$RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE") ;;
+esac
+
+# RUNCVM_VIRTIOFSD_CACHE_PATHS, which runcvm-runtime validates, is a ';'-separated list of
+# <path>=<policy>: each mount at or below <path> takes <policy>, as RunCVM's patched virtiofsd's
+# --cache-path gives it, the longest matching path winning, ahead of
+# RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE. virtiofsd shares the container's root filesystem, so its paths
+# are the container's.
+if [ -n "$RUNCVM_VIRTIOFSD_CACHE_PATHS" ]; then
+  IFS=';' read -r -a cache_paths <<<"$RUNCVM_VIRTIOFSD_CACHE_PATHS"
+  for cache_path_entry in "${cache_paths[@]}"
+  do
+    cache_policy="${cache_path_entry##*=}"
+    [ "$cache_policy" = "none" ] && cache_policy=never
+    OPTS+=(--cache-path="${cache_path_entry%=*}=$cache_policy")
+  done
+fi
+
+# RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=<seconds> (default 1; 0 disables), which runcvm-runtime
+# validates, lets the VM cache that a name it looked up does not exist, for that long, under the
+# auto and always cache policies (RunCVM's virtiofsd patch 0006): a name created outside the VM is
+# then visible to it after at most that long, as other changes made outside it are under auto.
+if [[ ! "${RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT:-1}" =~ ^0(\.0+)?$ ]]; then
+  OPTS+=(--negative-timeout="${RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT:-1}")
+fi
+
+# RUNCVM_VIRTIOFSD_KILLPRIV=1, which runcvm-runtime validates, has virtiofsd clear setuid and setgid
+# bits and file capabilities when the VM modifies a file (FUSE's KILLPRIV_V2), sparing the VM a
+# request to check for file capabilities before each write. RunCVM's virtiofsd patches (see
+# patches/virtiofsd) cover fallocate and copy_file_range, which the protocol gives no flag for.
+if [ "$RUNCVM_VIRTIOFSD_KILLPRIV" = "1" ]; then
+  OPTS+=(--killpriv-v2)
+fi
+
 # --inode-file-handles=never keeps virtiofsd from requiring CAP_DAC_READ_SEARCH, which containers
 # lack by default (virtiofsd's default, 'prefer', needs it).
 # Send logs to /run in container (not in VM)

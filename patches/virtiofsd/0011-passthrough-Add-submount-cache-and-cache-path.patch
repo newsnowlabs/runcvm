@@ -1,0 +1,850 @@
+From a713235ceb27de09fec396546ec021eed7ea6936 Mon Sep 17 00:00:00 2001
+From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
+Date: Sat, 14 Nov 2026 02:02:49 +0000
+Subject: [PATCH] passthrough: Add --submount-cache and --cache-path
+
+Let one virtiofsd apply different cache policies to different mounts
+within the shared directory, e.g. --cache=always for an image's root
+filesystem and auto for volumes and bind mounts that are changed from
+outside the guest.
+
+A mount takes the policy of the longest --cache-path that is its mount
+point or a path-segment prefix of it; else --submount-cache; else
+--cache.  Configured paths are normalised lexically (bytes, not
+necessarily UTF-8) and need not exist or be mount points: mounts that
+appear later are matched when a lookup first crosses into them, using
+their mount point from the sandbox's second mountinfo description.  An
+inode on the same mount as its parent directory takes the parent's
+policy.  Unique mount IDs (Linux 6.8+) let us remember each mount's
+policy rather than read mountinfo again for each new inode at its root;
+if a mount point cannot be found, the most conservative configured
+policy applies.
+
+A known inode keeps the policy it was created with: every live inode
+pins its mount, so a mount ID can only be reused once all of its inodes
+are gone.
+
+Without the new options, behaviour is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/main.rs                                   |  35 ++
+ .../device_state/deserialization.rs           |   6 +-
+ .../preserialization/find_paths.rs            |   5 +-
+ src/passthrough/mod.rs                        | 536 +++++++++++++++++-
+ src/passthrough/stat.rs                       |  27 +
+ 5 files changed, 601 insertions(+), 8 deletions(-)
+
+diff --git a/src/main.rs b/src/main.rs
+index a8f202c..0b3a8bd 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -232,6 +232,22 @@ struct Opt {
+     #[arg(long, default_value = "0", value_parser = parse_negative_timeout)]
+     negative_timeout: Duration,
+ 
++    /// Cache policy for mounts at or below PATH, as PATH=POLICY (repeatable).  PATH is absolute,
++    /// within the shared directory, and need not exist or be a mount point; a mount takes the
++    /// policy of the longest PATH that is its mount point or a parent directory of it.  Mount
++    /// points are matched by their real paths, so a PATH through a symbolic link never matches
++    #[arg(
++        long = "cache-path",
++        value_name = "PATH=POLICY",
++        value_parser = clap::value_parser!(std::ffi::OsString)
++    )]
++    cache_path: Vec<std::ffi::OsString>,
++
++    /// Cache policy for every mount within the shared directory (other than the shared
++    /// directory's own) that no --cache-path covers [default: the --cache policy]
++    #[arg(long = "submount-cache", value_name = "POLICY")]
++    submount_cache: Option<CachePolicy>,
++
+     /// When used with --cache={metadata, never} will allow shared files to be mmap'd.
+     /// Regardless of the selected cache policy, this option should only be enabled
+     /// when the file system has exclusive access to the directory.
+@@ -724,6 +740,18 @@ fn main() {
+ 
+     let timeout = opt.cache.timeout();
+ 
++    let cache_paths: Vec<(Vec<u8>, CachePolicy)> = opt
++        .cache_path
++        .iter()
++        .map(|arg| {
++            use std::os::unix::ffi::OsStrExt;
++            virtiofsd::passthrough::parse_cache_path(arg.as_bytes()).unwrap_or_else(|e| {
++                error!("--cache-path: {e}");
++                process::exit(1)
++            })
++        })
++        .collect();
++
+     let umask = if opt.socket_group.is_some() {
+         libc::S_IROTH | libc::S_IWOTH | libc::S_IXOTH
+     } else {
+@@ -827,6 +855,10 @@ fn main() {
+         process::exit(1)
+     });
+ 
++    if !cache_paths.is_empty() || opt.submount_cache.is_some() {
++        sandbox.want_cache_mountinfo();
++    }
++
+     // Enter the sandbox, from this point the process will be isolated (or not)
+     // as chosen in '--sandbox'.
+     let listener = sandbox.enter(listener).unwrap_or_else(|error| {
+@@ -839,12 +871,15 @@ fn main() {
+         attr_timeout: timeout,
+         negative_timeout: opt.negative_timeout,
+         cache_policy: opt.cache,
++        cache_paths,
++        submount_cache: opt.submount_cache,
+         root_dir: sandbox.get_root_dir(),
+         mountinfo_prefix: sandbox.get_mountinfo_prefix(),
+         xattr,
+         xattrmap,
+         proc_sfd_rawfd: sandbox.get_proc_self_fd(),
+         proc_mountinfo_rawfd: sandbox.get_mountinfo_fd(),
++        proc_mountinfo_cache_rawfd: sandbox.get_cache_mountinfo_fd(),
+         announce_submounts,
+         inode_file_handles: opt.inode_file_handles.into(),
+         readdirplus,
+diff --git a/src/passthrough/device_state/deserialization.rs b/src/passthrough/device_state/deserialization.rs
+index f1459fe..1f7b493 100644
+--- a/src/passthrough/device_state/deserialization.rs
++++ b/src/passthrough/device_state/deserialization.rs
+@@ -368,6 +368,7 @@ impl serialized::Inode {
+ 
+         let st = statx(&fd, None)?;
+         let handle = fs.get_file_handle_opt(&fd, &st)?;
++        let cache_policy = fs.inode_cache_policy(st.mnt_id, &fd, None);
+ 
+         let file_or_handle = if let Some(h) = handle.as_ref() {
+             FileOrHandle::Handle(fs.make_file_handle_openable(h)?)
+@@ -385,7 +386,7 @@ impl serialized::Inode {
+                 mnt_id: st.mnt_id,
+             },
+             mode: st.st.st_mode,
+-            cache_policy: Default::default(),
++            cache_policy,
+             migration_info: Mutex::new(None),
+         })
+     }
+@@ -455,6 +456,7 @@ impl serialized::Inode {
+             .open(libc::O_PATH)
+             .err_context(|| "Opening file handle")?;
+         let st = statx(&fd, None).err_context(|| "stat")?;
++        let cache_policy = fs.inode_cache_policy(st.mnt_id, &fd, None);
+ 
+         let file_or_handle = match fs.cfg.inode_file_handles {
+             InodeFileHandlesMode::Never => FileOrHandle::File(fs.guest_fds.allocate(fd)?),
+@@ -473,7 +475,7 @@ impl serialized::Inode {
+                 mnt_id: st.mnt_id,
+             },
+             mode: st.st.st_mode,
+-            cache_policy: Default::default(),
++            cache_policy,
+             migration_info: Mutex::new(None),
+         })
+     }
+diff --git a/src/passthrough/device_state/preserialization/find_paths.rs b/src/passthrough/device_state/preserialization/find_paths.rs
+index f65e275..2474b3a 100644
+--- a/src/passthrough/device_state/preserialization/find_paths.rs
++++ b/src/passthrough/device_state/preserialization/find_paths.rs
+@@ -276,6 +276,9 @@ impl<'a> Constructor<'a> {
+         }
+ 
+         // However, in case of directories, we must create an entry, so we can return it.
++        let cache_policy =
++            self.fs
++                .inode_cache_policy(ids.mnt_id, &path_fd, Some(parent_reference.get()));
+         // (Our inode store may still have matching entries recursively downwards from this
+         // directory.  Because every node is serialized referencing its parent, this directory
+         // inode may end up being recursively referenced this way, we don't know yet.
+@@ -304,7 +307,7 @@ impl<'a> Constructor<'a> {
+             refcount: AtomicU64::new(1),
+             ids,
+             mode: stat.st.st_mode,
+-            cache_policy: Default::default(),
++            cache_policy,
+             migration_info: Mutex::new(Some(mig_info)),
+         };
+ 
+diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
+index 0d9bb1e..893cd9f 100644
+--- a/src/passthrough/mod.rs
++++ b/src/passthrough/mod.rs
+@@ -34,15 +34,16 @@ use crate::{fuse, oslib};
+ use file_handle::{FileHandle, FileOrHandle, OpenableFileHandle};
+ use guest_fd_limit::{GuestFdSemaphore, GuestFile};
+ use mount_fd::{MPRError, MountFds};
+-pub(crate) use stat::{statx, StatExt};
++pub(crate) use stat::{statx, MountId, StatExt};
+ use std::borrow::Cow;
+-use std::collections::{btree_map, BTreeMap};
++use std::collections::{btree_map, BTreeMap, HashMap};
+ use std::convert::TryInto;
+ use std::ffi::{CStr, CString};
+ use std::fs::File;
+ use std::io;
+ use std::io::ErrorKind;
+ use std::mem::MaybeUninit;
++use std::os::unix::fs::FileExt;
+ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+ use std::str::FromStr;
+ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+@@ -153,6 +154,155 @@ impl CachePolicy {
+         };
+         opts
+     }
++
++    /// How much the guest may cache: never < metadata < auto < always.
++    fn caching_rank(&self) -> u8 {
++        match self {
++            CachePolicy::Never => 0,
++            CachePolicy::Metadata => 1,
++            CachePolicy::Auto => 2,
++            CachePolicy::Always => 3,
++        }
++    }
++}
++
++/// Normalise a `--cache-path` path lexically: it must be absolute; `//`, `.` and a trailing `/`
++/// are dropped and `..` is applied, but must not climb above the shared directory.  Symbolic
++/// links are deliberately not resolved: the path is matched against mount points as the kernel
++/// records them, which never contain symbolic links.  The shared directory itself (`/`) is
++/// rejected, as its policy is `--cache`.  Paths are bytes, as the kernel's are.
++pub fn normalize_cache_path(path: &[u8]) -> Result<Vec<u8>, String> {
++    let show = path.escape_ascii();
++    if !path.starts_with(b"/") {
++        return Err(format!("\"{show}\" is not an absolute path"));
++    }
++    let mut components: Vec<&[u8]> = Vec::new();
++    for c in path.split(|b| *b == b'/') {
++        match c {
++            b"" | b"." => {}
++            b".." => {
++                if components.pop().is_none() {
++                    return Err(format!("\"{show}\" leads outside the shared directory"));
++                }
++            }
++            c => components.push(c),
++        }
++    }
++    if components.is_empty() {
++        return Err(format!(
++            "\"{show}\" is the shared directory itself; use --cache for its policy"
++        ));
++    }
++    let mut normalized = Vec::with_capacity(path.len());
++    for c in components {
++        normalized.push(b'/');
++        normalized.extend_from_slice(c);
++    }
++    Ok(normalized)
++}
++
++/// Parse a `--cache-path` argument, `PATH=POLICY`.
++pub fn parse_cache_path(arg: &[u8]) -> Result<(Vec<u8>, CachePolicy), String> {
++    let show = arg.escape_ascii();
++    let eq = arg
++        .iter()
++        .rposition(|b| *b == b'=')
++        .ok_or_else(|| format!("\"{show}\": expected PATH=POLICY"))?;
++    let policy = std::str::from_utf8(&arg[eq + 1..])
++        .ok()
++        .and_then(|p| CachePolicy::from_str(p).ok())
++        .ok_or_else(|| format!("\"{show}\": invalid cache policy"))?;
++    Ok((normalize_cache_path(&arg[..eq])?, policy))
++}
++
++/// Find the policy of the longest configured path that is `rel` or a path-segment prefix of it
++/// (`/a` covers `/a`, `/a/b`, `/a/b/c`, but not `/ab`).  `rel` must be normalised.
++fn match_cache_path(paths: &HashMap<Vec<u8>, CachePolicy>, rel: &[u8]) -> Option<CachePolicy> {
++    let mut p = rel;
++    loop {
++        if let Some(policy) = paths.get(p) {
++            return Some(*policy);
++        }
++        match p.iter().rposition(|b| *b == b'/') {
++            Some(i) if i > 0 => p = &p[..i],
++            _ => return None,
++        }
++    }
++}
++
++/// Undo the octal escapes (`\040` etc.) in a /proc/self/mountinfo field.  Only `\` followed by
++/// three octal digits forming a byte value (`\000` to `\377`) is an escape; anything else is
++/// copied as it is.
++fn unescape_mountinfo(field: &[u8]) -> Vec<u8> {
++    let octal = |c: u8| (b'0'..=b'7').contains(&c);
++    let mut out = Vec::with_capacity(field.len());
++    let mut i = 0;
++    while i < field.len() {
++        match field[i..] {
++            [b'\\', a @ b'0'..=b'3', b, c, ..] if octal(b) && octal(c) => {
++                out.push(((a - b'0') << 6) | ((b - b'0') << 3) | (c - b'0'));
++                i += 4;
++            }
++            _ => {
++                out.push(field[i]);
++                i += 1;
++            }
++        }
++    }
++    out
++}
++
++/// Find the mount point of mount `mnt_id` in the contents of /proc/self/mountinfo.
++fn find_mount_point(mountinfo: &[u8], mnt_id: MountId) -> Option<Vec<u8>> {
++    mountinfo.split(|b| *b == b'\n').find_map(|line| {
++        let mut columns = line.split(|b| *b == b' ');
++        let id: MountId = std::str::from_utf8(columns.next()?).ok()?.parse().ok()?;
++        if id != mnt_id {
++            return None;
++        }
++        // Skip parent mount ID, major:minor and root within the filesystem
++        columns.nth(3).map(unescape_mountinfo)
++    })
++}
++
++/// Turn a mount point as given in mountinfo into a path relative to the shared directory, which
++/// mountinfo shows as `prefix`.  Returns `None` if the mount point is the shared directory itself
++/// or lies outside it.
++fn relative_mount_point<'a>(mount_point: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
++    let mut prefix = prefix;
++    while let [rest @ .., b'/'] = prefix {
++        prefix = rest;
++    }
++    let rel = mount_point.strip_prefix(prefix)?;
++    (rel.starts_with(b"/") && rel.len() > 1).then_some(rel)
++}
++
++/// Cache policy of a mount, other than the shared directory's own, whose mount point relative to
++/// the shared directory is `rel`.  `None` in the result stands for the file system's default
++/// policy (`--cache`).
++///
++/// Precedence: the longest `--cache-path` that is `rel` or a path-segment prefix of it; else
++/// `--submount-cache`; else `--cache`.
++fn resolve_mount_policy(
++    paths: &HashMap<Vec<u8>, CachePolicy>,
++    submount_cache: Option<CachePolicy>,
++    rel: &[u8],
++) -> Option<CachePolicy> {
++    match_cache_path(paths, rel).or(submount_cache)
++}
++
++/// The policy that caches least among `default`, `submount_cache` and the configured paths'
++/// policies: what to use for a mount whose mount point cannot be found out.
++fn most_conservative_policy(
++    default: CachePolicy,
++    submount_cache: Option<CachePolicy>,
++    paths: &HashMap<Vec<u8>, CachePolicy>,
++) -> CachePolicy {
++    std::iter::once(default)
++        .chain(submount_cache)
++        .chain(paths.values().copied())
++        .min_by_key(CachePolicy::caching_rank)
++        .unwrap_or(default)
+ }
+ 
+ impl FromStr for CachePolicy {
+@@ -270,8 +420,20 @@ pub struct Config {
+     /// more details.
+     pub cache_policy: CachePolicy,
+ 
+-    /// An open description of `/proc/self/mountinfo`, separate from `proc_mountinfo_rawfd`, for
+-    /// finding the mount points of mounts (for per-mount cache policies).  Not used yet.
++    /// Per-mount overrides of `cache_policy`, as (path relative to the shared directory, policy).
++    /// A mount found within the shared directory takes the policy of the longest of these paths
++    /// that is its mount point or a path-segment prefix of it.  The paths need not exist, nor be
++    /// mount points.  See `normalize_cache_path()`.
++    pub cache_paths: Vec<(Vec<u8>, CachePolicy)>,
++
++    /// Policy for every mount other than the shared directory's own that `cache_paths` does not
++    /// cover.  If `None`, such mounts take `cache_policy`.
++    pub submount_cache: Option<CachePolicy>,
++
++    /// An open description of `/proc/self/mountinfo`, separate from `proc_mountinfo_rawfd`, used
++    /// to find the mount points of mounts for `cache_paths`.  If `None` (and `cache_paths` or
++    /// `submount_cache` is set), `/proc/self/mountinfo` is opened when needed.  Taken when
++    /// `PassthroughFs` is created.
+     pub proc_mountinfo_cache_rawfd: Option<File>,
+ 
+     /// Whether the file system should enabled writeback caching. This can improve performance as it
+@@ -447,6 +609,8 @@ impl Default for Config {
+             attr_timeout: Duration::from_secs(5),
+             negative_timeout: Duration::ZERO,
+             cache_policy: Default::default(),
++            cache_paths: Vec::new(),
++            submount_cache: None,
+             proc_mountinfo_cache_rawfd: None,
+             writeback: false,
+             root_dir: String::from("/"),
+@@ -536,6 +700,19 @@ pub struct PassthroughFs {
+ 
+     cfg: Config,
+ 
++    // Per-mount cache policies (only used if `cfg.cache_paths` or `cfg.submount_cache` is set):
++    // the configured paths; our own handle on /proc/self/mountinfo, to learn the mount points of
++    // newly seen mounts; the prefix under which mountinfo shows the shared directory; the mount ID
++    // of the root node; and the policies of mounts seen so far, by unique mount ID (only filled if
++    // the kernel provides unique mount IDs, which are never reused).
++    cache_paths: HashMap<Vec<u8>, CachePolicy>,
++    mountinfo: Option<File>,
++    mountinfo_prefix: Vec<u8>,
++    root_mnt_id: AtomicU64,
++    // Grows by one entry per mount seen during the file system's lifetime (it is cleared on
++    // `init`); bounded in practice by the mount churn below the shared directory.
++    mount_policies: RwLock<HashMap<u64, Option<CachePolicy>>>,
++
+     /// Map to translate between host and guest UIDs.
+     uid_map: IdMap<GuestUid, HostUid>,
+ 
+@@ -545,6 +722,32 @@ pub struct PassthroughFs {
+ 
+ impl PassthroughFs {
+     pub fn new(mut cfg: Config) -> io::Result<PassthroughFs> {
++        let mut cache_paths = HashMap::new();
++        let mut mountinfo = None;
++        let mut mountinfo_prefix = Vec::new();
++        if !cfg.cache_paths.is_empty() || cfg.submount_cache.is_some() {
++            for (path, policy) in &cfg.cache_paths {
++                let path = normalize_cache_path(path).map_err(other_io_error)?;
++                if let Some(other) = cache_paths.insert(path.clone(), *policy) {
++                    if other != *policy {
++                        return Err(other_io_error(format!(
++                            "Conflicting cache policies for {}: {other:?} and {policy:?}",
++                            path.escape_ascii()
++                        )));
++                    }
++                }
++            }
++            mountinfo = Some(match cfg.proc_mountinfo_cache_rawfd.take() {
++                Some(f) => f,
++                None => File::open("/proc/self/mountinfo")?,
++            });
++            mountinfo_prefix = cfg
++                .mountinfo_prefix
++                .clone()
++                .unwrap_or_else(|| cfg.root_dir.clone())
++                .into_bytes();
++        }
++
+         let proc_self_fd = if let Some(fd) = cfg.proc_sfd_rawfd.take() {
+             fd
+         } else {
+@@ -605,6 +808,11 @@ impl PassthroughFs {
+             sup_group_extension: AtomicBool::new(false),
+             os_facts: oslib::OsFacts::new(),
+             track_migration_info: AtomicBool::new(false),
++            cache_paths,
++            mountinfo,
++            mountinfo_prefix,
++            root_mnt_id: AtomicU64::new(0),
++            mount_policies: RwLock::new(HashMap::new()),
+             cfg,
+             uid_map,
+             gid_map,
+@@ -621,6 +829,7 @@ impl PassthroughFs {
+             .map(CString::from);
+ 
+         fs.check_working_file_handles()?;
++        fs.check_cache_paths();
+ 
+         // We need to clear the umask here because we want the client to be
+         // able to set all the bits in the mode.
+@@ -936,8 +1145,14 @@ impl PassthroughFs {
+         }
+ 
+         let inode = if let Some(inode) = existing_inode {
++            // A known inode keeps the policy it was created with.  That cannot go stale through
++            // mount ID reuse: every live inode pins its mount (through its O_PATH FD, or the mount
++            // FD that its file handle holds), so a mount ID can only be reused once all of its
++            // inodes are gone.  (Inodes restored by migration take their policy from the
++            // destination's mounts.)
+             inode
+         } else {
++            let cache_policy = self.inode_cache_policy(st.mnt_id, &path_fd, Some(&p));
+             let file_or_handle = if let Some(h) = handle.as_ref() {
+                 FileOrHandle::Handle(self.make_file_handle_openable(h)?)
+             } else {
+@@ -966,7 +1181,7 @@ impl PassthroughFs {
+                     mnt_id: st.mnt_id,
+                 },
+                 mode: st.st.st_mode,
+-                cache_policy: None,
++                cache_policy,
+                 migration_info: Mutex::new(mig_info),
+             };
+             self.inodes.get_or_insert(inode_data)?
+@@ -1333,6 +1548,145 @@ impl PassthroughFs {
+         }
+     }
+ 
++    fn per_mount_cache(&self) -> bool {
++        self.mountinfo.is_some()
++    }
++
++    /// Warn about configured cache paths that (as things stand) cannot match, because they
++    /// lead through a symbolic link, and about a host without mount IDs.
++    fn check_cache_paths(&self) {
++        if !self.per_mount_cache() {
++            return;
++        }
++        let Ok(root) = openat(
++            &libc::AT_FDCWD,
++            self.cfg.root_dir.as_str(),
++            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
++        ) else {
++            return;
++        };
++        if statx(&root, None).map(|st| st.mnt_id).unwrap_or(0) == 0 {
++            warn!("Mount IDs are not available; per-mount cache policies will not take effect");
++        }
++        for path in self.cache_paths.keys() {
++            let Ok(c_path) = CString::new(&path[1..]) else {
++                continue;
++            };
++            // SAFETY: all-zero byte-pattern represents a valid `libc::open_how`
++            let mut how: libc::open_how = unsafe { std::mem::zeroed() };
++            how.flags = (libc::O_PATH | libc::O_CLOEXEC) as u64;
++            how.resolve = libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS;
++            // SAFETY: `c_path` is a valid C string and `how` a valid `open_how`; we check the
++            // return value and close the FD if we get one.
++            let fd = unsafe {
++                libc::syscall(
++                    libc::SYS_openat2,
++                    root.as_raw_fd(),
++                    c_path.as_ptr(),
++                    std::ptr::addr_of!(how),
++                    std::mem::size_of::<libc::open_how>(),
++                )
++            };
++            if fd >= 0 {
++                // Safe because we just opened this fd; dropping the `File` closes it.
++                drop(unsafe { File::from_raw_fd(fd as RawFd) });
++            } else if io::Error::last_os_error().raw_os_error() == Some(libc::ELOOP) {
++                warn!(
++                    "Cache path {}: leads through a symbolic link; mount points are matched by \
++                    their real paths, so this cache path will not match mounts reached through it",
++                    path.escape_ascii()
++                );
++            }
++        }
++    }
++
++    /// Read /proc/self/mountinfo (as seen when the sandbox was set up).  We only use pread(),
++    /// so concurrent readers do not disturb each other.
++    fn read_mountinfo(&self) -> io::Result<Vec<u8>> {
++        let file = self
++            .mountinfo
++            .as_ref()
++            .ok_or_else(|| other_io_error("No mountinfo"))?;
++        let mut buf = Vec::new();
++        let mut chunk = vec![0u8; 16384];
++        loop {
++            let n = file.read_at(&mut chunk, buf.len() as u64)?;
++            if n == 0 {
++                break;
++            }
++            buf.extend_from_slice(&chunk[..n]);
++        }
++        Ok(buf)
++    }
++
++    /// Cache policy (`None` meaning `cfg.cache_policy`) for the mount with ID `mnt_id` and unique
++    /// mount ID `unique_id` (if the kernel provides one).  The caller must hold an FD on the mount,
++    /// which keeps it, and so its ID, from going away while we look it up.  Mounts are matched by
++    /// their mount point when first seen; with unique mount IDs (Linux 6.8+) the result is
++    /// remembered for the mount's lifetime.
++    fn mount_cache_policy(&self, mnt_id: MountId, unique_id: Option<u64>) -> Option<CachePolicy> {
++        if mnt_id == self.root_mnt_id.load(Ordering::Relaxed) {
++            return None;
++        }
++        if let Some(id) = unique_id {
++            if let Some(policy) = self.mount_policies.read().unwrap().get(&id) {
++                return *policy;
++            }
++        }
++        let mount_point = match self.read_mountinfo() {
++            Ok(text) => find_mount_point(&text, mnt_id).ok_or_else(|| "not found".to_string()),
++            Err(e) => Err(e.to_string()),
++        };
++        let mount_point = match mount_point {
++            Ok(mp) => mp,
++            Err(e) => {
++                // We cannot tell which paths cover this mount, so be as careful as any of them
++                // could ask for, and do not remember the result
++                let policy = most_conservative_policy(
++                    self.cfg.cache_policy,
++                    self.cfg.submount_cache,
++                    &self.cache_paths,
++                );
++                warn!(
++                    "Cannot find the mount point of mount {mnt_id} in mountinfo ({e}); using \
++                    the most conservative cache policy configured, {policy:?}"
++                );
++                return Some(policy);
++            }
++        };
++        let policy = match relative_mount_point(&mount_point, &self.mountinfo_prefix) {
++            Some(rel) => resolve_mount_policy(&self.cache_paths, self.cfg.submount_cache, rel),
++            // The shared directory itself, or outside it: the root's policy
++            None => None,
++        };
++        debug!(
++            "Mount {mnt_id} (unique ID {unique_id:?}) at \"{}\": cache policy {}",
++            mount_point.escape_ascii(),
++            policy.map_or("default".to_string(), |p| format!("{p:?}"))
++        );
++        if let Some(id) = unique_id {
++            self.mount_policies.write().unwrap().insert(id, policy);
++        }
++        policy
++    }
++
++    /// Cache policy for a new inode on mount `mnt_id`, open as `fd`, found in directory `parent`
++    /// (if known): the same as `parent`'s if on the same mount, else the mount's.
++    fn inode_cache_policy(
++        &self,
++        mnt_id: MountId,
++        fd: &impl AsRawFd,
++        parent: Option<&InodeData>,
++    ) -> Option<CachePolicy> {
++        if !self.per_mount_cache() {
++            return None;
++        }
++        match parent {
++            Some(p) if p.ids.mnt_id == mnt_id => p.cache_policy,
++            _ => self.mount_cache_policy(mnt_id, stat::mount_id_unique(fd)),
++        }
++    }
++
+     /// The policy that applies to an inode whose `InodeData::cache_policy` is `policy`.
+     fn effective_policy(&self, policy: Option<CachePolicy>) -> CachePolicy {
+         policy.unwrap_or(self.cfg.cache_policy)
+@@ -1360,6 +1714,8 @@ impl PassthroughFs {
+         )?;
+ 
+         let st = statx(&path_fd, None)?;
++        self.root_mnt_id.store(st.mnt_id, Ordering::Relaxed);
++        self.mount_policies.write().unwrap().clear();
+         let handle = self.get_file_handle_opt(&path_fd, &st)?;
+ 
+         let file_or_handle = if let Some(h) = handle.as_ref() {
+@@ -2874,4 +3230,174 @@ mod cache_policy_tests {
+         assert_eq!(Auto.timeout(), Duration::from_secs(1));
+         assert_eq!(Always.timeout(), Duration::from_secs(86400));
+     }
++
++    #[test]
++    fn normalisation() {
++        let ok = |p: &[u8]| normalize_cache_path(p).unwrap();
++        assert_eq!(ok(b"/a"), b"/a");
++        assert_eq!(ok(b"/a/"), b"/a");
++        assert_eq!(ok(b"//a//b///"), b"/a/b");
++        assert_eq!(ok(b"/./a/./b/."), b"/a/b");
++        assert_eq!(ok(b"/a/b/../c"), b"/a/c");
++        assert_eq!(ok(b"/a/../b"), b"/b");
++        assert_eq!(ok(b"/a b/c=d"), b"/a b/c=d");
++        // Not UTF-8: kept byte for byte
++        assert_eq!(ok(b"/x\xff/./y\xfe/"), b"/x\xff/y\xfe");
++        for bad in [
++            &b""[..],
++            b"a",
++            b"a/b",
++            b"./a",
++            b"/",
++            b"//",
++            b"/.",
++            b"/a/..",
++            b"/..",
++            b"/../a",
++            b"/a/../../b",
++        ] {
++            assert!(normalize_cache_path(bad).is_err(), "{:?} accepted", bad);
++        }
++    }
++
++    #[test]
++    fn parsing() {
++        assert_eq!(
++            parse_cache_path(b"/a/=never").unwrap(),
++            (b"/a".to_vec(), Never)
++        );
++        assert_eq!(
++            parse_cache_path(b"/a=b=Always").unwrap(),
++            (b"/a=b".to_vec(), Always)
++        );
++        assert_eq!(
++            parse_cache_path(b"/\xff=auto").unwrap(),
++            (b"/\xff".to_vec(), Auto)
++        );
++        assert!(parse_cache_path(b"/a").is_err());
++        assert!(parse_cache_path(b"/a=sometimes").is_err());
++        assert!(parse_cache_path(b"/a=auto\xff").is_err());
++        assert!(parse_cache_path(b"a=auto").is_err());
++        assert!(parse_cache_path(b"/=auto").is_err());
++        assert!(parse_cache_path(b"/x/../..=auto").is_err());
++    }
++
++    fn paths(v: &[(&[u8], CachePolicy)]) -> HashMap<Vec<u8>, CachePolicy> {
++        v.iter().map(|(p, c)| (p.to_vec(), *c)).collect()
++    }
++
++    #[test]
++    fn segment_prefix_and_longest_match() {
++        let p = paths(&[(b"/x", Never), (b"/x/y", Always), (b"/srv", Auto)]);
++        let m = |rel: &[u8]| match_cache_path(&p, rel);
++        assert_eq!(m(b"/x"), Some(Never));
++        assert_eq!(m(b"/x/a"), Some(Never));
++        assert_eq!(m(b"/x/a/b"), Some(Never));
++        assert_eq!(m(b"/x/y"), Some(Always));
++        assert_eq!(m(b"/x/y/z"), Some(Always));
++        assert_eq!(m(b"/x/yz"), Some(Never));
++        assert_eq!(m(b"/xa"), None);
++        assert_eq!(m(b"/xa/y"), None);
++        assert_eq!(m(b"/srv/a"), Some(Auto));
++        assert_eq!(m(b"/srv/b/c"), Some(Auto));
++        assert_eq!(m(b"/other"), None);
++        // Insertion order does not matter
++        let q = paths(&[(b"/x/y", Always), (b"/x", Never)]);
++        assert_eq!(match_cache_path(&q, b"/x/y/z"), Some(Always));
++        assert_eq!(match_cache_path(&q, b"/x/z"), Some(Never));
++        // Bytes are compared exactly: no lossy UTF-8 conversion merges distinct names
++        let r = paths(&[(b"/a\xff", Never), ("/a\u{fffd}".as_bytes(), Always)]);
++        assert_eq!(match_cache_path(&r, b"/a\xff/b"), Some(Never));
++        assert_eq!(
++            match_cache_path(&r, "/a\u{fffd}/b".as_bytes()),
++            Some(Always)
++        );
++        assert_eq!(match_cache_path(&r, b"/a\xfe"), None);
++    }
++
++    #[test]
++    fn precedence() {
++        let p = paths(&[(b"/vol", Never)]);
++        // configured path > --submount-cache > --cache (None)
++        assert_eq!(resolve_mount_policy(&p, Some(Auto), b"/vol/a"), Some(Never));
++        assert_eq!(
++            resolve_mount_policy(&p, Some(Auto), b"/etc/hosts"),
++            Some(Auto)
++        );
++        assert_eq!(resolve_mount_policy(&p, None, b"/etc/hosts"), None);
++        // RunCVM: --cache=always --submount-cache=auto, no paths
++        let none = paths(&[]);
++        assert_eq!(
++            resolve_mount_policy(&none, Some(Auto), b"/data"),
++            Some(Auto)
++        );
++    }
++
++    #[test]
++    fn conservative_fallback() {
++        let p = paths(&[(b"/a", Auto), (b"/b", Never)]);
++        assert_eq!(most_conservative_policy(Always, Some(Auto), &p), Never);
++        let q = paths(&[(b"/a", Auto)]);
++        assert_eq!(
++            most_conservative_policy(Always, Some(Metadata), &q),
++            Metadata
++        );
++        assert_eq!(most_conservative_policy(Always, None, &q), Auto);
++        assert_eq!(
++            most_conservative_policy(Auto, Some(Always), &paths(&[])),
++            Auto
++        );
++    }
++
++    #[test]
++    fn mount_points() {
++        assert_eq!(relative_mount_point(b"/vm/a", b"/vm"), Some(&b"/a"[..]));
++        assert_eq!(
++            relative_mount_point(b"/vm/a/b", b"/vm/"),
++            Some(&b"/a/b"[..])
++        );
++        assert_eq!(relative_mount_point(b"/vm", b"/vm"), None);
++        assert_eq!(relative_mount_point(b"/vmx/a", b"/vm"), None);
++        assert_eq!(relative_mount_point(b"/", b"/vm"), None);
++        assert_eq!(relative_mount_point(b"/a", b"/"), Some(&b"/a"[..]));
++        assert_eq!(relative_mount_point(b"/", b"/"), None);
++
++        let mi: &[u8] = b"22 1 0:21 / / rw - overlay overlay rw\n\
++                  30 22 0:30 / /vm rw - overlay overlay rw\n\
++                  31 30 8:1 /volumes/x/_data /vm/my\\040data rw - ext4 /dev/sda1 rw\n\
++                  32 30 8:1 /containers/c/hosts /vm/etc/hosts rw - ext4 /dev/sda1 rw\n\
++                  33 30 8:1 /x /vm/n\xff\\011t rw - ext4 /dev/sda1 rw\n";
++        assert_eq!(
++            find_mount_point(mi, 31).as_deref(),
++            Some(&b"/vm/my data"[..])
++        );
++        assert_eq!(
++            find_mount_point(mi, 32).as_deref(),
++            Some(&b"/vm/etc/hosts"[..])
++        );
++        assert_eq!(
++            find_mount_point(mi, 33).as_deref(),
++            Some(&b"/vm/n\xff\tt"[..])
++        );
++        assert_eq!(find_mount_point(mi, 3), None);
++    }
++
++    #[test]
++    fn unescaping() {
++        assert_eq!(unescape_mountinfo(b"a\\011b\\134c"), b"a\tb\\c");
++        assert_eq!(unescape_mountinfo(b"\\000\\377"), b"\x00\xff");
++        // A first digit above 3 would overflow a byte: not an escape, copied as it is
++        for raw in [
++            &b"\\400"[..],
++            b"\\777x",
++            b"\\04",
++            b"\\0",
++            b"\\",
++            b"\\08a",
++            b"\\a12",
++        ] {
++            assert_eq!(unescape_mountinfo(raw), raw, "{:?}", raw);
++        }
++        assert_eq!(unescape_mountinfo(b"\\4000\\040"), b"\\4000 ");
++    }
+ }
+diff --git a/src/passthrough/stat.rs b/src/passthrough/stat.rs
+index 08d05a2..28cd9af 100644
+--- a/src/passthrough/stat.rs
++++ b/src/passthrough/stat.rs
+@@ -109,6 +109,33 @@ unsafe fn do_statx(
+     libc::syscall(libc::SYS_statx, dirfd, pathname, flags, mask, statxbuf) as libc::c_int
+ }
+ 
++/// `STATX_MNT_ID_UNIQUE` (Linux 6.8+); not in all libc crates yet.
++const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
++
++/// Return the unique (never reused) mount ID of the mount `fd` is on, or `None` if the kernel
++/// does not provide one (before Linux 6.8).
++pub fn mount_id_unique(fd: &impl AsRawFd) -> Option<u64> {
++    let mut stx_ui = MaybeUninit::<statx_st>::zeroed();
++    // Safe because this is a constant value and a valid C string.
++    let path = unsafe { CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR) };
++    // Safe because the kernel will only write data in `stx_ui` and we check the return value.
++    let res = unsafe {
++        do_statx(
++            fd.as_raw_fd(),
++            path.as_ptr(),
++            libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
++            STATX_MNT_ID_UNIQUE,
++            stx_ui.as_mut_ptr(),
++        )
++    };
++    if res < 0 {
++        return None;
++    }
++    // Safe because the kernel has initialised it (or it is still zeroed).
++    let stx = unsafe { stx_ui.assume_init() };
++    (stx.stx_mask & STATX_MNT_ID_UNIQUE != 0).then_some(stx.stx_mnt_id)
++}
++
+ // Real statx() that depends on do_statx()
+ pub fn statx(dir: &impl AsRawFd, path: Option<&CStr>) -> io::Result<StatExt> {
+     let mut stx_ui = MaybeUninit::<statx_st>::zeroed();
+-- 
+2.43.0
+

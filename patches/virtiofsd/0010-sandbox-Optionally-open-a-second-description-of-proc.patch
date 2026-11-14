@@ -1,0 +1,113 @@
+From 3bf89120059f63446ce34d954a625be01b0d76b1 Mon Sep 17 00:00:00 2001
+From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
+Date: Sat, 14 Nov 2026 02:02:49 +0000
+Subject: [PATCH] sandbox: Optionally open a second description of
+ /proc/self/mountinfo
+
+Add Sandbox::want_cache_mountinfo(), to be called before entering the
+sandbox, which makes the sandbox open a second, independent description
+of /proc/self/mountinfo alongside the first, at the same point and so
+with the same view, and Sandbox::get_cache_mountinfo_fd() to take it;
+and Config::proc_mountinfo_cache_rawfd to pass it on.
+
+Per-mount cache policies will read mount points from it with pread(),
+without sharing a file position or seq_file state with MountFds.
+Nothing asks for it yet, so there is no change in behaviour.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/passthrough/mod.rs |  5 +++++
+ src/sandbox.rs         | 24 +++++++++++++++++++++++-
+ 2 files changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
+index 31329ec..0d9bb1e 100644
+--- a/src/passthrough/mod.rs
++++ b/src/passthrough/mod.rs
+@@ -270,6 +270,10 @@ pub struct Config {
+     /// more details.
+     pub cache_policy: CachePolicy,
+ 
++    /// An open description of `/proc/self/mountinfo`, separate from `proc_mountinfo_rawfd`, for
++    /// finding the mount points of mounts (for per-mount cache policies).  Not used yet.
++    pub proc_mountinfo_cache_rawfd: Option<File>,
++
+     /// Whether the file system should enabled writeback caching. This can improve performance as it
+     /// allows the FUSE client to cache and coalesce multiple writes before sending them to the file
+     /// system. However, enabling this option can increase the risk of data corruption if the file
+@@ -443,6 +447,7 @@ impl Default for Config {
+             attr_timeout: Duration::from_secs(5),
+             negative_timeout: Duration::ZERO,
+             cache_policy: Default::default(),
++            proc_mountinfo_cache_rawfd: None,
+             writeback: false,
+             root_dir: String::from("/"),
+             mountinfo_prefix: None,
+diff --git a/src/sandbox.rs b/src/sandbox.rs
+index 4ea81f9..6151a86 100644
+--- a/src/sandbox.rs
++++ b/src/sandbox.rs
+@@ -168,6 +168,10 @@ pub struct Sandbox {
+     proc_self_fd: Option<File>,
+     /// A `File` object for `/proc/self/mountinfo` obtained from the sandboxed context.
+     mountinfo_fd: Option<File>,
++    /// Whether to open a second, independent description of `/proc/self/mountinfo`
++    want_cache_mountinfo: bool,
++    /// The second description of `/proc/self/mountinfo`, for per-mount cache policies.
++    cache_mountinfo_fd: Option<File>,
+     /// Mechanism to be used for setting up the sandbox.
+     sandbox_mode: SandboxMode,
+     /// UidMap to be used for `newuidmap(1)` command line arguments
+@@ -192,6 +196,8 @@ impl Sandbox {
+             shared_dir: shared_dir_rp_str.into(),
+             proc_self_fd: None,
+             mountinfo_fd: None,
++            want_cache_mountinfo: false,
++            cache_mountinfo_fd: None,
+             sandbox_mode,
+             uid_map,
+             gid_map,
+@@ -323,9 +329,12 @@ impl Sandbox {
+         unsafe { libc::close(newroot_fd) };
+         unsafe { libc::close(oldroot_fd) };
+ 
+-        // Open `/proc/self/mountinfo` now
++        // Open `/proc/self/mountinfo` now (twice, if wanted)
+         let c_mountinfo = CString::new("mountinfo").unwrap();
+         self.mountinfo_fd = Some(open_mountinfo(proc_self.as_raw_fd(), &c_mountinfo)?);
++        if self.want_cache_mountinfo {
++            self.cache_mountinfo_fd = Some(open_mountinfo(proc_self.as_raw_fd(), &c_mountinfo)?);
++        }
+ 
+         Ok(())
+     }
+@@ -557,6 +566,9 @@ impl Sandbox {
+ 
+         let c_mountinfo = CString::new("/proc/self/mountinfo").unwrap();
+         self.mountinfo_fd = Some(open_mountinfo(libc::AT_FDCWD, &c_mountinfo)?);
++        if self.want_cache_mountinfo {
++            self.cache_mountinfo_fd = Some(open_mountinfo(libc::AT_FDCWD, &c_mountinfo)?);
++        }
+ 
+         let c_shared_dir = CString::new(self.shared_dir.clone()).unwrap();
+         let ret = unsafe { libc::chroot(c_shared_dir.as_ptr()) };
+@@ -673,6 +685,16 @@ impl Sandbox {
+         self.mountinfo_fd.take()
+     }
+ 
++    /// Ask for a second, independent description of `/proc/self/mountinfo` to be opened when
++    /// entering the sandbox (for per-mount cache policies); call before `enter()`.
++    pub fn want_cache_mountinfo(&mut self) {
++        self.want_cache_mountinfo = true;
++    }
++
++    pub fn get_cache_mountinfo_fd(&mut self) -> Option<File> {
++        self.cache_mountinfo_fd.take()
++    }
++
+     pub fn get_root_dir(&self) -> String {
+         match self.sandbox_mode {
+             SandboxMode::Namespace | SandboxMode::Chroot => "/".to_string(),
+-- 
+2.43.0
+

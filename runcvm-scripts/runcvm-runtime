@@ -673,6 +673,24 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     error "RUNCVM_SHUTDOWN '$RUNCVM_SHUTDOWN' invalid (should be auto, systemd, busybox, acpi, all, or signal:<signal>, e.g. signal:PWR or signal:38)"
   fi
 
+  # RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT: how long, in seconds (fractions allowed, at most 86400), the
+  # VM may cache that a name it looked up does not exist (see runcvm-ctr-virtiofsd).
+  RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT="$(get_config_env 'RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT')"
+  if [ -n "$RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT" ] && ! {
+      [[ "$RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT" =~ ^(0|[1-9][0-9]{0,4})(\.[0-9]{1,9})?$ ]] &&
+      { [ "${RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT%%.*}" -lt 86400 ] || [[ "$RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT" =~ ^86400(\.0+)?$ ]]; }
+    }; then
+    error "RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT '$RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT' invalid (should be a number of seconds from 0 to 86400, e.g. 1 or 0.5)"
+  fi
+
+  # RUNCVM_VIRTIOFSD_KILLPRIV: whether virtiofsd clears setuid and setgid bits itself (1; see
+  # runcvm-ctr-virtiofsd) or leaves it to the VM (0, the default).
+  RUNCVM_VIRTIOFSD_KILLPRIV="$(get_config_env 'RUNCVM_VIRTIOFSD_KILLPRIV')"
+  case "$RUNCVM_VIRTIOFSD_KILLPRIV" in
+    ''|0|1) ;;
+    *) error "RUNCVM_VIRTIOFSD_KILLPRIV '$RUNCVM_VIRTIOFSD_KILLPRIV' invalid (should be 0 or 1)" ;;
+  esac
+
   # QEMU acceleration:
   # - kvm (default): use KVM; fail at creation if /dev/kvm is unavailable on this host
   # - auto: use KVM if /dev/kvm is available, otherwise (much slower) software emulation
@@ -699,6 +717,32 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   RUNCVM_VIRTIOFSD_CACHE="$(get_config_env 'RUNCVM_VIRTIOFSD_CACHE')"
   if ! valid_virtiofsd_cache "$RUNCVM_VIRTIOFSD_CACHE"; then
     error "RUNCVM_VIRTIOFSD_CACHE '$RUNCVM_VIRTIOFSD_CACHE' invalid (should be one of the cache policies auto, always, metadata and none (or never), optionally with 'writeback', which needs auto or always, e.g. 'always,writeback')"
+  fi
+
+  # The cache policy for the mounts within the VM's root filesystem (see runcvm-ctr-virtiofsd).
+  RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE="$(get_config_env 'RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE')"
+  case "$RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE" in
+    ''|auto|always|metadata|none|never) ;;
+    *) error "RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE '$RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE' invalid (should be one of the cache policies auto, always, metadata and none (or never))" ;;
+  esac
+
+  # The cache policies for the mounts at or below given paths (see runcvm-ctr-virtiofsd): a
+  # ';'-separated list of <path>=<policy>, each path absolute, other than '/', and without a '..'
+  # component. A path's last '=' separates it from its policy, so a path may contain '='.
+  RUNCVM_VIRTIOFSD_CACHE_PATHS="$(get_config_env 'RUNCVM_VIRTIOFSD_CACHE_PATHS')"
+  if [ -n "$RUNCVM_VIRTIOFSD_CACHE_PATHS" ]; then
+    IFS=';' read -r -a cache_paths <<<"$RUNCVM_VIRTIOFSD_CACHE_PATHS"
+    for cache_path_entry in "${cache_paths[@]}"
+    do
+      cache_path="${cache_path_entry%=*}"
+      if [[ "$cache_path_entry" != *=* || "$cache_path" != /* || "$cache_path" =~ ^/+$ || "/$cache_path/" == */../* ]]; then
+        error "RUNCVM_VIRTIOFSD_CACHE_PATHS entry '$cache_path_entry' invalid (should be <path>=<policy>, with <path> absolute, other than '/', and without '..')"
+      fi
+      case "${cache_path_entry##*=}" in
+        auto|always|metadata|none|never) ;;
+        *) error "RUNCVM_VIRTIOFSD_CACHE_PATHS entry '$cache_path_entry' invalid (its policy should be one of the cache policies auto, always, metadata and none (or never))" ;;
+      esac
+    done
   fi
 
   # Under software emulation, QEMU keeps a cache of translated code, whose size is set by

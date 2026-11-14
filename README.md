@@ -1131,6 +1131,50 @@ Adding `writeback` to `auto` or `always`, e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=alw
 
 `writeback` cannot be combined with `metadata` or `none`, which do not cache file contents, and RunCVM refuses to create the Container/VM if it is.
 
+### RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE
+
+**`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=<auto|always|metadata|none>`**
+
+**[EXPERIMENTAL]** Specifies the cache policy, as for [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache), for the mounts within the VM's root filesystem: every volume and bind mount, including those of single files, such as the `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` that Docker bind-mounts and may rewrite. `RUNCVM_VIRTIOFSD_CACHE`'s policy then applies to the root filesystem alone. Unset, the mounts take `RUNCVM_VIRTIOFSD_CACHE`'s policy too.
+
+This lets the image's own files, which nothing outside the VM normally changes, be cached as with `always`, while volumes and bind mounts, which the host or other containers may change, keep `auto`'s 1-second timeouts and rereading of file contents on each open: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always --env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto`. Mounts are told apart by `virtiofsd` itself: RunCVM builds `virtiofsd` with patches (`patches/virtiofsd/`) that add its `--submount-cache` option, to be dropped once a `virtiofsd` release has it.
+
+With `always` for the root filesystem, the VM may still go on seeing, for up to a day, the old version of a root filesystem file changed from outside it, e.g. with `docker cp` into the running container.
+
+### RUNCVM_VIRTIOFSD_CACHE_PATHS
+
+**`RUNCVM_VIRTIOFSD_CACHE_PATHS=<path>=<policy>[;<path>=<policy>...]`**
+
+**[EXPERIMENTAL]** Specifies a cache policy, as for [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache) (`auto`, `always`, `metadata` or `none`), for the volumes and bind mounts at or below each `<path>`: e.g. `--env='RUNCVM_VIRTIOFSD_CACHE_PATHS=/data=none;/srv/static=always'`. Each mount takes the policy of the longest `<path>` that is its destination or a directory above it (`/data` covers `/data` and `/data/db`, but not `/database`); a mount no `<path>` covers takes [`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE`](#runcvm_virtiofsd_submount_cache)'s policy, if set, and otherwise `RUNCVM_VIRTIOFSD_CACHE`'s.
+
+Each `<path>` is a path in the container, absolute, other than `/`, without `..`, and need not exist: a mount at or below it is matched when the VM first reaches it. It applies to mounts only: a directory of the root filesystem takes `RUNCVM_VIRTIOFSD_CACHE`'s policy, whatever `<path>` covers it. A `<path>` is matched against mount destinations as the kernel records them, so one leading through a symbolic link matches nothing: give the path with links resolved. A `<path>` may contain `=` (the last `=` in each entry separates it from its policy), but not `;`.
+
+This suits a Container/VM with mounts that need different trade-offs: e.g. `none` for a volume that other containers write to, for which the VM must see each change at once, and `always` for a bind mount of files that do not change while it runs.
+
+### RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT
+
+**`RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=<seconds>`** (default `1`)
+
+How long, in seconds (fractions allowed, from `0` to `86400`), the VM may remember that a file it looked for over virtiofs does not exist, under the `auto` and `always` cache policies ([`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)); `0` disables it, as do the `metadata` and `none` policies. It is capped at the policy's own timeout for files that do exist (1 second under `auto`).
+
+Workloads look for many files that do not exist: a shell searching `PATH` for each command, the dynamic loader searching its library path, Python or Node.js probing for modules. Without this, each such lookup is a request to `virtiofsd`, however often it is repeated.
+
+A file the VM creates is visible to it at once, whether or not it looked for it before. A file created outside the VM (on the host in a bind mount, by another container in a shared volume, or with `docker cp`) under a name the VM has just looked for becomes visible to it after at most this long, as other changes made outside the VM already do under `auto`. A workload that waits for another container to create a file, and needs to see it at once, should use `none` for that mount.
+
+Under `always`, longer values suit a Container/VM whose root filesystem nothing outside the VM changes while it runs, as `always` already assumes for files that do exist: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always --env=RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600`. A file missing when the VM looked for it is then not looked for again for up to an hour, which helps workloads that repeat the same failed lookups seconds or minutes apart (a shell starting commands, a service starting worker processes), not only in quick succession. A file added from outside under such a name, e.g. with `docker cp`, stays invisible to the VM for as long. The value is capped at each mount's own cache policy, so with [`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE`](#runcvm_virtiofsd_submount_cache) or [`RUNCVM_VIRTIOFSD_CACHE_PATHS`](#runcvm_virtiofsd_cache_paths) giving volumes and bind mounts `auto`, they forget missing files within a second, however long the value, and those given `none` never remember them: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always --env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto --env=RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600`. Without those, volumes and bind mounts share the root filesystem's policy, so a long value does not suit a Container/VM whose mounts are changed from outside it.
+
+### RUNCVM_VIRTIOFSD_KILLPRIV
+
+**`RUNCVM_VIRTIOFSD_KILLPRIV=<0|1>`**
+
+**[EXPERIMENTAL]** With `1`, `virtiofsd` clears a file's setuid and setgid bits and file capabilities (`security.capability`) when the VM modifies it, as a local file system would (FUSE's `KILLPRIV_V2`). By default (`0`), the VM's kernel does so, at the cost of a request to `virtiofsd`, to check for file capabilities, before each `write()` to a file over virtiofs: with `1`, a workload making many small writes makes about half as many requests.
+
+It comes with these restrictions:
+
+- Volumes and bind mounts on NFS, or other network file systems, are unsupported: there, setuid and setgid bits may survive a write by a process that should clear them.
+- `fallocate()` clears the bits for every caller, where a local file system keeps them for a caller with `CAP_FSETID` (e.g. root). (RunCVM's `virtiofsd` patches make `copy_file_range()`, used by `cp`, keep or clear them as a local file system would.)
+- A setgid bit without group-execute (a legacy marker, not a privilege) is kept or cleared by a write according to `virtiofsd`'s own group membership (group `root` alone), not the writer's: so it is cleared from files of other groups even when the writer is in the file's group, and kept on files of group `root` even when the writer is not.
+
 ### RUNCVM_CGROUPFS
 
 **`RUNCVM_CGROUPFS=<value>`**
@@ -1187,6 +1231,8 @@ To upgrade, follow this procedure:
 2. Rerun the installation command, which installs the latest release, or the release named in `REPO` (see [Installation](#installation)), and runs that release's own installer.
 3. Start any RunCVM containers.
 
+The installer reports the version it installed. To see the version installed later, run `cat /opt/runcvm/VERSION`, which gives the release's tag and commit, e.g. `v1.8.0 (2211e3e)`; for a build of other commits, see [Building](#building). Releases up to v1.8.0 install no `VERSION` file.
+
 ## Building
 
 Building RunCVM requires Docker. To build RunCVM, first clone the repo, then run the build script, as follows:
@@ -1197,6 +1243,8 @@ cd runcvm
 ```
 
 The build script creates a Docker image named `newsnowlabs/runcvm:latest`. To tag it otherwise, give `--tag <tag>`, once or more, e.g. `--tag dev` for a development build, or `--tag v1.2.3 --tag latest` for a release. Arguments after `--` are passed to `docker build`.
+
+The build records its version and the commit it was built from: in the image's `org.opencontainers.image.version` and `org.opencontainers.image.revision` labels (the commit's full ID), and in `/opt/runcvm/VERSION`, which the installer reports and installs, as `<version> (<short commit ID>)`, e.g. `v1.8.0-2-ge77f189 (e77f189)` for a build two commits after `v1.8.0`. The version is the nearest tag, as `git describe --tags --dirty` gives it, with `-dirty` added for a build with uncommitted changes, or `untagged` where no tag is reachable, as in a shallow clone. To record another version, e.g. for a build from a source tree without git's history, set `RUNCVM_VERSION`: `RUNCVM_VERSION=my-build ./build/build.sh`. A build outside a git checkout records the commit as `unknown`, and `/opt/runcvm/VERSION` then gives the version alone; without `RUNCVM_VERSION`, it records version `unknown` too, as does `docker build` run alone.
 
 To publish the build, add `--push`, which after a successful build pushes each tag to Docker Hub (`newsnowlabs/runcvm:<tag>`), then copies it to GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`) with `docker buildx imagetools create`, giving the copy's index the image's `org.opencontainers.image.*` labels (its source repository, description and licence) as annotations, which GitHub uses to link the package on ghcr.io to this repository; `--push=dockerhub` pushes to Docker Hub only. Both need `docker login` to the registries concerned, and `--push` (with `all`) needs Docker's [containerd image store](https://docs.docker.com/engine/storage/containerd/) (the default for new installations of Docker Engine 29 and later): with Docker's classic store, the copy on ghcr.io would be a Docker manifest list, which cannot carry annotations, so the script stops before building. `./build/build.sh --help` lists the options.
 

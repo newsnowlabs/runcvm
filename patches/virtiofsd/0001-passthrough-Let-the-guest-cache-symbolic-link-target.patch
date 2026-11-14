@@ -1,0 +1,55 @@
+From d75eb0493fbbabba8abc1e767cd00ac32aebc325 Mon Sep 17 00:00:00 2001
+From: Struan Bartlett <struan.bartlett@NewsNow.co.uk>
+Date: Sat, 14 Nov 2026 02:22:15 +0000
+Subject: [PATCH 1/5] passthrough: Let the guest cache symbolic link targets
+
+Negotiate FUSE_CACHE_SYMLINKS unless --cache=never is in effect.
+Without it, the guest kernel sends a FUSE_READLINK request every time
+a path walk passes through a symbolic link, even with --cache=always,
+because FUSE caches link targets in the page cache only when the
+server opts in.
+
+This is common on distributions built on BusyBox, where /bin/true,
+/bin/sh, /bin/ls and so on are all symbolic links to /bin/busybox:
+every exec() of one of them costs a READLINK round trip, as does
+every lstat()-and-readlink() pair from `ls -l`.
+
+Caching is safe: a symbolic link's target cannot be changed in place;
+replacing it creates a new inode, which the guest sees through the
+usual entry and attribute revalidation for the cache mode in use.
+virtiofsd holds an O_PATH descriptor (or file handle) for every inode
+the guest knows, so the host cannot reuse the inode number for a new
+link while the guest still has the old target cached.
+
+With --cache=never the behaviour is unchanged, so that mode still
+caches nothing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/passthrough/mod.rs | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/passthrough/mod.rs b/src/passthrough/mod.rs
+index 38f49db..d0712d3 100644
+--- a/src/passthrough/mod.rs
++++ b/src/passthrough/mod.rs
+@@ -1520,6 +1520,16 @@ impl FileSystem for PassthroughFs {
+         } else {
+             FsOptions::empty()
+         };
++        // A symbolic link's target cannot change without the link being replaced by a new
++        // inode, and we hold a reference to every inode the guest knows about, so the host
++        // cannot reuse it either.  So unless the guest is told not to cache anything, let it
++        // keep link targets in its page cache instead of sending READLINK on every path walk
++        // through a symbolic link.
++        if !matches!(self.cfg.cache_policy, CachePolicy::Never)
++            && capable.contains(FsOptions::CACHE_SYMLINKS)
++        {
++            opts |= FsOptions::CACHE_SYMLINKS;
++        }
+         if self.cfg.writeback && capable.contains(FsOptions::WRITEBACK_CACHE) {
+             opts |= FsOptions::WRITEBACK_CACHE;
+             self.writeback.store(true, Ordering::Relaxed);
+-- 
+2.43.0
+
