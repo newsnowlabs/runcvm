@@ -1175,9 +1175,9 @@ It comes with these restrictions:
 
 Polling uses CPU on the host, up to one core per Container/VM while its VM is issuing requests over virtiofs, so it suits hosts with spare cores. On hosts whose cores are all busy, including laptops on battery, it can slow the VM down, as polling competes for CPU with the VM itself.
 
-The same holds within a Container/VM's own CPU limit (`docker run --cpus`), which `virtiofsd` shares with the VM's CPUs. Polling needs the CPU headroom that [`RUNCVM_CPU_HEADROOM`](#runcvm_cpu_headroom) gives by default: with `RUNCVM_CPU_HEADROOM=0`, polling throttles the whole Container/VM, and can make starting programs up to 40% slower.
+Polling can likewise slow the VM down within a Container/VM's own CPU limit (`docker run --cpus`), which `virtiofsd` shares with the VM's CPUs. Polling needs the CPU headroom that [`RUNCVM_CPU_HEADROOM`](#runcvm_cpu_headroom) gives by default: with `RUNCVM_CPU_HEADROOM=0`, polling throttles the whole Container/VM, and can make starting programs up to 40% slower.
 
-`adaptive` spends no more CPU than `none` when requests are not in quick succession, where `fixed` spends CPU polling for requests that do not come, and at its default maximum of 50 microseconds it gains as much as longer windows do, for less CPU: e.g. `--env=RUNCVM_VIRTIOFSD_POLL=adaptive`.
+`adaptive` spends no more CPU than `none` when requests are not in quick succession, where `fixed` spends CPU polling for requests that do not come, and at its default maximum of 50 microseconds it gains as much as with a maximum of 200, for less CPU: e.g. `--env=RUNCVM_VIRTIOFSD_POLL=adaptive`.
 
 ### RUNCVM_CGROUPFS
 
