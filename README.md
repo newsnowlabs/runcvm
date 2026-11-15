@@ -241,6 +241,13 @@ Running RunCVM on macOS is experimental, as is arm64 support. On macOS, Docker r
 
 Check that `/dev/kvm` exists inside the VM (e.g. `limactl shell <vm> ls -l /dev/kvm`) before installing RunCVM there. The VM may also lack `/dev/vhost-net` (needed by `RUNCVM_QEMU_NET_VHOST=1`) and hugepages (needed by `RUNCVM_HUGETLB=1`); both options are off by default.
 
+Under nested virtualisation, a Container/VM starts slowly with RunCVM's defaults: on an M3 Mac, `docker run --rm --runtime=runcvm alpine true` takes about 21 seconds. While arm64 support is experimental, two settings make most of the difference there:
+
+- **Hugepages.** By default, the Container/VM's memory is a file in the container's `/dev/shm`, whose pages are allocated as the Container/VM first uses them, which is slow under nested virtualisation. With `--env=RUNCVM_HUGETLB=1` (see [`RUNCVM_HUGETLB`](#runcvm_hugetlb)), the Container/VM's memory comes instead from the Linux VM's pool of 2 MB hugepages, which cuts the start time to about 5 seconds. Reserve the pool in advance, inside the Linux VM, large enough for the memory of every Container/VM running with `RUNCVM_HUGETLB=1` at once (each Container/VM's memory is 512 MB, i.e. 256 pages, unless `--memory` sets otherwise): e.g. `limactl shell <vm> sudo sysctl -w vm.nr_hugepages=512` for two Container/VMs of the default size. The pool's memory is set aside for hugepages alone, used or not, and a Container/VM whose memory the pool cannot supply fails to start. To keep the pool across restarts of the Linux VM, set `vm.nr_hugepages` in a file in its `/etc/sysctl.d/`, e.g. `/etc/sysctl.d/99-hugepages.conf`.
+- **Caching.** RunCVM's default cache policy, `RUNCVM_VIRTIOFSD_CACHE=auto`, has the Container/VM read each program afresh from the container's filesystem every time it runs it, and reads over virtiofs are slow there. `--env=RUNCVM_VIRTIOFSD_CACHE=always` keeps files' contents cached in the Container/VM: alone, it cuts the start time to about 14 seconds; with hugepages, to about 4 seconds. Do not use `always` for a Container/VM with volumes or bind mounts whose files change outside the VM, e.g. files edited on the host, as the Container/VM may not see those changes for up to a day; keep the default for those, or use `none` for volumes shared with other Container/VMs (see [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)).
+
+Fewer vCPUs also start faster there: with the default settings, `--cpus=1` saves about 2.5 seconds.
+
 ## Installation
 
 Run:
@@ -1105,9 +1112,31 @@ Default is `off`, but `on` may deliver improved performance in some scenarios at
 
 ### RUNCVM_VIRTIOFSD_CACHE
 
-**`RUNCVM_VIRTIOFSD_CACHE=<auto|none|always>`**
+**`RUNCVM_VIRTIOFSD_CACHE=<auto|always|metadata|none>[,writeback]`**
 
-Specifies the cache policy passed to `virtiofsd` via `--cache=<value>`, with `none` passed as `never`; `virtiofsd`'s other policies, such as `metadata`, are also accepted. The default policy is `auto`. Use `none` to avoid caching issues when multiple RunCVM instances need to share access to a volume or bind-mount on the host.
+Sets how the VM caches the files it reads over virtiofs: their names, their attributes (such as size, ownership and modification time) and their contents. The container's root filesystem, its volumes and its bind mounts are all served by one `virtiofsd`, so one policy applies to all of them. The policy is passed to `virtiofsd` as `--cache=<value>`; `none` is passed as `never`, which is also accepted. The default is `auto`.
+
+| Policy | Names and attributes | File contents | Suits |
+|---|---|---|---|
+| `auto` (default) | cached for 1 second | cached while a file is open, and dropped each time it is opened | most uses, including files that change outside the VM, such as a bind mount edited on the host |
+| `always` | cached for up to a day | cached across opens | Container/VMs whose files nothing outside the VM changes, e.g. build or CI workloads without shared volumes or bind mounts; the fastest policy |
+| `metadata` | cached for up to a day | not cached | the same restriction as `always`, with slower reads; rarely useful |
+| `none` | not cached | not cached | volumes or bind mounts through which several Container/VMs, or a Container/VM and the host, exchange files and must see each other's changes; the slowest policy |
+
+Without `writeback`, the VM's writes reach the host's filesystem as each write is made, so the policy affects only how soon the VM sees changes made outside it: by the host, by other containers sharing a volume, by `docker cp`, or by Docker itself, which can rewrite files such as `/etc/hosts`. Under `always` and `metadata`, the VM may go on seeing a file's old name, attributes or contents for up to a day after it changes, and a program that acts on them can overwrite the newer version.
+
+For volumes that several Container/VMs share, use `none`. Under `auto`, files that one Container/VM writes to a shared volume can stay invisible to the others for many seconds, far longer than its 1-second timeouts suggest; `tests/50-http-docker-swarm`, whose nodes exchange files through a shared volume, uses `none` for this reason. Where the files exchanged are few and small, as there, `none` costs little.
+
+Reads under `always` can be several times faster than under `none`: e.g. rereading a Debian image's `/usr`, about 230 MB, takes roughly a quarter of the time. Choose a faster policy only where its restriction holds for every file the Container/VM can see.
+
+Adding `writeback` to `auto` or `always`, e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always,writeback`, launches `virtiofsd` with `--writeback`. The VM then holds writes in its own memory and passes them on to the host in batches: whenever a file is closed or synced (`fsync`), and otherwise within seconds. This makes many small writes faster, e.g. writing a file 512 bytes at a time can take as little as half as long, but makes large copies little faster. It comes with these restrictions, so use it only where nothing outside the VM reads or writes the Container/VM's files while it runs, such as a build whose output is collected after it finishes:
+
+- Until a file is closed or synced, the host and other containers may see old contents, size or modification time for it.
+- Appending (`>>`, `O_APPEND`) is done by the VM at the end of the file as the VM knows it, so data appended at the same time from outside the VM can be overwritten.
+- If the Container/VM is killed (e.g. `docker kill`, or `docker stop` timing out), writes not yet passed on are lost, as they would be on a machine that loses power. A clean stop passes them all on.
+- `virtiofsd` opens files the VM opens write-only for reading as well, so a file `virtiofsd` cannot read, e.g. on a network filesystem that denies root, cannot be written.
+
+`writeback` cannot be combined with `metadata` or `none`, which do not cache file contents, and RunCVM refuses to create the Container/VM if it is.
 
 ### RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT
 

@@ -18,6 +18,19 @@ console_pm=/sys/class/tty/$(cat /.runcvm/console)/device/power/control
 # 'errors=remount-ro', which virtiofs rejects, halting the VM as this script runs with 'bash -e').
 mount -i --options-source=disable -o remount,rw /
 
+# Read ahead up to 1 MiB in files over virtiofs, the most one virtiofs request carries (256 pages,
+# as virtiofsd offers with QEMU's queue size of 1024), not the kernel's default of 128 KiB: reading
+# a large file then takes an eighth as many requests, each a round trip to virtiofsd. A virtiofs
+# mount's backing device is named by its device number in /proc/self/mountinfo. Its submounts
+# (volumes and bind mounts) have device numbers of their own, but share its backing device, which
+# has none under theirs: setting the root's covers them, and the -w test passes over them.
+while read -r _ _ dev _ _ rest
+do
+  [[ " $rest " == *" - virtiofs "* ]] || continue
+  read_ahead=/sys/class/bdi/$dev/read_ahead_kb
+  [ -w "$read_ahead" ] && echo 1024 >"$read_ahead" || true
+done </proc/self/mountinfo
+
 # FIXME: Something is making /.runcvm ro, so remount it rw
 # until such time as exit code handling and dropbear key creation
 # obviate the need for this.
