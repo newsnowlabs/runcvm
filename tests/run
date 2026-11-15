@@ -29,6 +29,12 @@ Results files (results.tap, junit.xml, results.json, summary.txt, status) are
 rewritten before and after each test, so they always show the run's progress:
 until the run ends, results.json has "complete": false and status reads
 'running', and while a test runs, summary.txt and results.json name it.
+results.tap, junit.xml, results.json and summary.txt record the version of the
+RunCVM package installed at /opt/runcvm, from its VERSION file ('unknown'
+without one, 'not installed' without a package).
+
+The tests run from a source checkout, or from the installed package's copy in
+/opt/runcvm/tests, which matches the package: /opt/runcvm/tests/run.
 
 Optional per-test metadata files, in each test directory:
   tier      'core' (default) or 'extended'
@@ -176,9 +182,26 @@ def warn(msg):
     print("%s: Warning: %s" % (os.path.basename(sys.argv[0]), msg), file=sys.stderr, flush=True)
 
 
+PACKAGE_DIR = "/opt/runcvm"
+
+
+def package_version():
+    """The RunCVM package installed at /opt/runcvm, as its VERSION file gives it (e.g.
+    'v1.8.0 (2211e3e)'); 'unknown' for a package without one; 'not installed' where there is none."""
+    if not os.path.isdir(os.path.join(PACKAGE_DIR, "scripts")):
+        return "not installed"
+    try:
+        with open(os.path.join(PACKAGE_DIR, "VERSION")) as f:
+            return f.read().strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
 class Environment:
     def __init__(self, runtime, mock, run_id, use_docker, accel=None, tcg_cases=False, pull=False):
         self.runtime = runtime
+        # The RunCVM package installed on this host, recorded with the results
+        self.package = package_version()
         self.pull = pull
         self.mock = mock
         self.accel = accel
@@ -367,6 +390,9 @@ def run_test(test, env, logs_dir, kill_after, verbose=False):
         "RUNCVM_TEST_NAME": test.name,
         "RUNCVM_TEST_CHECKS": checks_path,
         "RUNCVM_TEST_PARAMS": params_path,
+        # Tests run from the installed package as well as from a checkout, and must leave the
+        # package as installed: no __pycache__ of framework.py in /opt/runcvm/tests.
+        "PYTHONDONTWRITEBYTECODE": "1",
     })
 
     start = time.time()
@@ -486,7 +512,7 @@ def write_junit(path, results, env, logs_dir):
     for r in results:
         suite = ET.SubElement(root, "testsuite", name=r.test.name, time=str(r.duration))
         props = ET.SubElement(suite, "properties")
-        for k, v in [("runtime", env.runtime), ("mock", "1" if env.mock else "0"),
+        for k, v in [("runtime", env.runtime), ("package", env.package), ("mock", "1" if env.mock else "0"),
                      ("accel", env.accel or ""), ("tcg_cases", "1" if env.tcg_cases else "0"),
                      ("pull", "1" if env.pull else "0"), ("tier", r.test.tier), ("requires", " ".join(r.test.requires))] + r.params:
             ET.SubElement(props, "property", name=k, value=v)
@@ -510,7 +536,7 @@ def write_junit(path, results, env, logs_dir):
 
 def write_json(path, results, env, tier, status_code, running):
     data = {
-        "run_id": env.run_id, "runtime": env.runtime, "mock": env.mock, "accel": env.accel,
+        "run_id": env.run_id, "runtime": env.runtime, "package": env.package, "mock": env.mock, "accel": env.accel,
         "tcg_cases": env.tcg_cases, "pull": env.pull, "tier": tier,
         "complete": status_code is not None, "running": running, "status": status_code,
         "tests": [{
@@ -530,11 +556,12 @@ def write_results(results_dir, logs_dir, results, env, args, selected, status_co
     progress, with the test named by 'running' (if any) under way. Each file is written to a
     temporary name and renamed into place, so that a reader never sees a partly written file."""
     counts = {s: sum(1 for r in results if r.status == s) for s in ("pass", "fail", "timeout", "skip")}
-    header = "run id: %s; runtime: %s; mock: %d; accel: %s; tcg cases: %d; pull: %d; tier: %s" % (
-        env.run_id, env.runtime, int(args.mock), args.accel or "default", int(env.tcg_cases), int(env.pull),
-        args.tier)
+    header = "run id: %s; runtime: %s; package: %s; mock: %d; accel: %s; tcg cases: %d; pull: %d; tier: %s" % (
+        env.run_id, env.runtime, env.package, int(args.mock), args.accel or "default", int(env.tcg_cases),
+        int(env.pull), args.tier)
 
-    lines = ["%-8s %-32s %5ss  %s" % (r.status.upper(), r.test.name, r.duration, r.reason) for r in results]
+    lines = ["RunCVM package: %s" % env.package, ""]
+    lines += ["%-8s %-32s %5ss  %s" % (r.status.upper(), r.test.name, r.duration, r.reason) for r in results]
     if running:
         lines.append("%-8s %s" % ("RUNNING", running))
     lines += ["", "passed: %d  failed: %d  timed out: %d  skipped: %d  (of %d selected)"
@@ -693,6 +720,7 @@ def main(argv):
     say("Running RunCVM integration tests")
     say("  run id:   %s" % run_id)
     say("  runtime:  %s%s" % (runtime, " (stand-in mode)" if args.mock else ""))
+    say("  package:  %s (%s)" % (env.package, PACKAGE_DIR))
     say("  accel:    %s" % (args.accel or "(RunCVM default)"))
     say("  tcg:      %s" % ("cases run" if env.tcg_cases else "cases skipped (--tcg-cases to run them)"))
     say("  pull:     %s" % ("images refreshed" if env.pull else "host's copies used (--pull to refresh)"))

@@ -41,6 +41,10 @@ TCG_CASES = (os.environ["RUNCVM_TEST_TCG_CASES"] == "1" if os.environ.get("RUNCV
 # re-pointed (see tests/run --pull)
 PULL = os.environ.get("RUNCVM_TEST_PULL") == "1"
 
+# The tests directory: in a source checkout, beside runcvm-scripts; in the installed package,
+# /opt/runcvm/tests, beside the package's scripts.
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+
 errors = 0
 _cleanups = []
 
@@ -69,6 +73,18 @@ def labels():
 def vm_opts():
     """'docker run' options for RunCVM Container/VMs selected by the runner (QEMU acceleration)."""
     return ["--env=RUNCVM_QEMU_ACCEL=%s" % ACCEL] if ACCEL else []
+
+
+def source_tree():
+    """Whether the tests run from a source checkout (the repository's root holding runcvm-scripts
+    beside the tests directory), rather than from the installed package's /opt/runcvm/tests."""
+    return os.path.isdir(os.path.join(TESTS_DIR, "..", "runcvm-scripts"))
+
+
+def scripts_dir():
+    """RunCVM's scripts, for tests that run or read them without a Container/VM: the checkout's
+    runcvm-scripts, from a source tree, or else the package's scripts, beside its tests."""
+    return os.path.realpath(os.path.join(TESTS_DIR, "..", "runcvm-scripts" if source_tree() else "scripts"))
 
 
 def docker(*args, check=False, timeout=None, capture=True, input=None):
