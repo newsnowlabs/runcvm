@@ -1138,6 +1138,28 @@ Adding `writeback` to `auto` or `always`, e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=alw
 
 `writeback` cannot be combined with `metadata` or `none`, which do not cache file contents, and RunCVM refuses to create the Container/VM if it is.
 
+With [`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE`](#runcvm_virtiofsd_submount_cache) or [`RUNCVM_VIRTIOFSD_CACHE_PATHS`](#runcvm_virtiofsd_cache_paths), `writeback` applies, with these restrictions, to every mount whose policy is `auto` or `always`, and not to those given `metadata` or `none`, whose files the VM writes straight to the host. So a Container/VM whose own files nothing outside it touches, but whose volumes or bind mounts the host or other containers may write to, can still use `writeback`, by giving those mounts `none`: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always,writeback --env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=none`.
+
+### RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE
+
+**`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=<auto|always|metadata|none>`**
+
+**[EXPERIMENTAL]** Specifies the cache policy, as for [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache), for the mounts within the VM's root filesystem: every volume and bind mount, including those of single files, such as the `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` that Docker bind-mounts and may rewrite. `RUNCVM_VIRTIOFSD_CACHE`'s policy then applies to the root filesystem alone. Unset, the mounts take `RUNCVM_VIRTIOFSD_CACHE`'s policy too.
+
+This lets the image's own files, which nothing outside the VM normally changes, be cached as with `always`, while volumes and bind mounts, which the host or other containers may change, keep `auto`'s 1-second timeouts and rereading of file contents on each open: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always --env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto`. With `writeback` in `RUNCVM_VIRTIOFSD_CACHE`, mounts given `auto` or `always` here take its restrictions too, including appends from outside the VM being overwritten; give them `none` or `metadata` to keep them out of it ([`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)). Mounts are told apart by `virtiofsd` itself: RunCVM builds `virtiofsd` with patches (`patches/virtiofsd/`) that add its `--submount-cache` option, to be dropped once a `virtiofsd` release has it.
+
+With `always` for the root filesystem, the VM may still go on seeing, for up to a day, the old version of a root filesystem file changed from outside it, e.g. with `docker cp` into the running container.
+
+### RUNCVM_VIRTIOFSD_CACHE_PATHS
+
+**`RUNCVM_VIRTIOFSD_CACHE_PATHS=<path>=<policy>[;<path>=<policy>...]`**
+
+**[EXPERIMENTAL]** Specifies a cache policy, as for [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache) (`auto`, `always`, `metadata` or `none`), for the volumes and bind mounts at or below each `<path>`: e.g. `--env='RUNCVM_VIRTIOFSD_CACHE_PATHS=/data=none;/srv/static=always'`. Each mount takes the policy of the longest `<path>` that is its destination or a directory above it (`/data` covers `/data` and `/data/db`, but not `/database`); a mount no `<path>` covers takes [`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE`](#runcvm_virtiofsd_submount_cache)'s policy, if set, and otherwise `RUNCVM_VIRTIOFSD_CACHE`'s.
+
+Each `<path>` is a path in the container, absolute, other than `/`, without `..`, and need not exist: a mount at or below it is matched when the VM first reaches it. It applies to mounts only: a directory of the root filesystem takes `RUNCVM_VIRTIOFSD_CACHE`'s policy, whatever `<path>` covers it. A `<path>` is matched against mount destinations as the kernel records them, so one leading through a symbolic link matches nothing: give the path with links resolved. A `<path>` may contain `=` (the last `=` in each entry separates it from its policy), but not `;`.
+
+This suits a Container/VM with mounts that need different trade-offs: e.g. `none` for a volume that other containers write to, for which the VM must see each change at once, and `always` for a bind mount of files that do not change while it runs. With `writeback` in `RUNCVM_VIRTIOFSD_CACHE`, a `<path>` given `auto` or `always` takes writeback's restrictions too; one given `none` or `metadata` does not.
+
 ### RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT
 
 **`RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=<seconds>`** (default `1`)
@@ -1146,9 +1168,9 @@ How long, in seconds (fractions allowed, from `0` to `86400`), the VM may rememb
 
 Workloads look for many files that do not exist: a shell searching `PATH` for each command, the dynamic loader searching its library path, Python or Node.js probing for modules. Without this, each such lookup is a request to `virtiofsd`, however often it is repeated.
 
-A file the VM creates is visible to it at once, whether or not it looked for it before. A file created outside the VM (on the host in a bind mount, by another container in a shared volume, or with `docker cp`) under a name the VM has just looked for becomes visible to it after at most this long, as other changes made outside the VM already do under `auto`. A Container/VM whose workload waits for another container to create a file, and needs to see it at once, should use `none` ([`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)), or set `RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=0`.
+A file the VM creates is visible to it at once, whether or not it looked for it before. A file created outside the VM (on the host in a bind mount, by another container in a shared volume, or with `docker cp`) under a name the VM has just looked for becomes visible to it after at most this long, as other changes made outside the VM already do under `auto`. A workload that waits for another container to create a file, and needs to see it at once, should use `none` for that mount ([`RUNCVM_VIRTIOFSD_CACHE_PATHS`](#runcvm_virtiofsd_cache_paths) or [`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE`](#runcvm_virtiofsd_submount_cache)), or for the whole Container/VM ([`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)), or set `RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=0`.
 
-Under `always`, longer values suit a Container/VM whose root filesystem nothing outside the VM changes while it runs, as `always` already assumes for files that do exist: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always --env=RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600`. A file missing when the VM looked for it is then not looked for again for up to an hour, which helps workloads that repeat the same failed lookups seconds or minutes apart (a shell starting commands, a service starting worker processes), not only in quick succession. A file added from outside under such a name, e.g. with `docker cp`, stays invisible to the VM for as long. The value applies to volumes and bind mounts too, which share the root filesystem's cache policy, so a long one does not suit a Container/VM whose mounts are changed from outside it.
+Under `always`, longer values suit a Container/VM whose root filesystem nothing outside the VM changes while it runs, as `always` already assumes for files that do exist: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always --env=RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600`. A file missing when the VM looked for it is then not looked for again for up to an hour, which helps workloads that repeat the same failed lookups seconds or minutes apart (a shell starting commands, a service starting worker processes), not only in quick succession. A file added from outside under such a name, e.g. with `docker cp`, stays invisible to the VM for as long. The value is capped at each mount's own cache policy, so with [`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE`](#runcvm_virtiofsd_submount_cache) or [`RUNCVM_VIRTIOFSD_CACHE_PATHS`](#runcvm_virtiofsd_cache_paths) giving volumes and bind mounts `auto`, they forget missing files within a second, however long the value, and those given `none` never remember them: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always --env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto --env=RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600`. Without those, volumes and bind mounts share the root filesystem's policy, so a long value does not suit a Container/VM whose mounts are changed from outside it.
 
 ### RUNCVM_VIRTIOFSD_KILLPRIV
 

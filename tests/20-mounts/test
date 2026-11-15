@@ -13,10 +13,6 @@ container over virtiofs:
   options.
 - Two Container/VMs sharing a volume with RUNCVM_VIRTIOFSD_CACHE=none see
   each other's writes at once.
-- By default, virtiofsd runs with --negative-timeout=1, and with
-  RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=0 without it. A file the VM looked for
-  in a volume and did not find is visible in the VM as soon as the VM
-  creates it, and, created from another container instead, within 3 s.
 - With RUNCVM_VIRTIOFSD_POLL=fixed or adaptive, virtiofsd runs with
   --queue-poll set accordingly, and the VM boots and creates, reads and
   deletes 500 files in a volume, which then holds what the VM wrote.
@@ -25,6 +21,31 @@ container over virtiofs:
   appends ('>>') extend a file rather than overwrite it, and data written
   to a file the VM still holds open reaches the host by the time a
   'docker stop' completes.
+- With RUNCVM_VIRTIOFSD_CACHE=always and RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto,
+  virtiofsd runs with --submount-cache=auto: a bind-mounted host file and a
+  file in a volume, rewritten from outside the VM after the VM has read
+  them, are read afresh in the VM; a file in the root filesystem, replaced
+  with 'docker cp' after the VM has read it, is still read as before.
+- With RUNCVM_VIRTIOFSD_CACHE=always and RUNCVM_VIRTIOFSD_CACHE_PATHS
+  giving 'auto' for one volume's destination, virtiofsd runs with
+  --cache-path for it: a file in that volume, rewritten from another
+  container after the VM has read it, is read afresh, while a file in a
+  second volume that no path covers keeps the root's 'always' and is still
+  read as before.
+- By default, virtiofsd runs with --negative-timeout=1, and with
+  RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=0 without it. A file the VM looked for
+  in a volume and did not find is visible in the VM as soon as the VM
+  creates it, and, created from another container instead, within 3 s.
+- With RUNCVM_VIRTIOFSD_CACHE=always, RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto
+  and RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600, files the VM looked for and
+  did not find, then created outside it, are found within 3 s in a volume
+  (capped at auto's 1 second), and not in the root filesystem.
+- With RUNCVM_VIRTIOFSD_CACHE=always,writeback and
+  RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=none, virtiofsd runs with --writeback and
+  --submount-cache=never, and a volume is out of writeback's reach: data
+  appended to a file in it from another container between two appends in
+  the VM is kept, and data the VM writes to a file there is on the host
+  while the VM still holds the file open.
 
 The expected values describe current behaviour. A change to it must update
 them deliberately.
@@ -108,6 +129,136 @@ def case_shared_volume():
     return results
 
 
+def case_writeback():
+    volume = t.unique("writeback")
+    t.volume_create(volume)
+    name = start("writeback", "-v", volume + ":/vol", "--env=RUNCVM_VIRTIOFSD_CACHE=always,writeback")
+    if not name:
+        return [("writeback: Container/VM started", True, False)]
+    top = t.docker("top", name).stdout
+    ex(name, "sh", "-c", "echo closed >/vol/closed && echo a >>/vol/appended && echo b >>/vol/appended")
+    closed = t.volume_read(volume, "closed")
+    appended = t.volume_read(volume, "appended")
+    # The background shell keeps /vol/open open until the Container/VM stops.
+    ex(name, "sh", "-c", "(exec 3>/vol/open; echo held-open >&3; exec sleep 600) >/dev/null 2>&1 &")
+    stopped = t.docker("stop", name).returncode == 0
+    return [
+        ("writeback: virtiofsd runs with --writeback", True,
+         any("virtiofsd" in line and "--writeback" in line for line in top.splitlines())),
+        ("writeback: file written and closed in the VM is on the host", "closed\n", closed),
+        ("writeback: appends extend the file", "a\nb\n", appended),
+        ("writeback: 'docker stop' succeeded", True, stopped),
+        ("writeback: data in a file held open is on the host after 'docker stop'", "held-open\n",
+         t.volume_read(volume, "open")),
+    ]
+
+
+def case_submount_cache():
+    volume = t.unique("submount")
+    t.volume_create(volume)
+    host = tempfile.mkdtemp(prefix="runcvm-test-")
+    os.chmod(host, 0o755)
+    with open(os.path.join(host, "f"), "w") as f:
+        f.write("host-old\n")
+    try:
+        t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v",
+                 volume + ":/v", "alpine", "sh", "-c", "echo vol-old >/v/f")
+        name = start("submount", "-v", host + ":/bind", "-v", volume + ":/vol",
+                     "--env=RUNCVM_VIRTIOFSD_CACHE=always",
+                     "--env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto")
+        if not name:
+            return [("submount cache: Container/VM started", True, False)]
+        top = t.docker("top", name).stdout
+        ex(name, "sh", "-c", "echo root-old >/root-file")
+        before = ex(name, "cat", "/bind/f", "/vol/f", "/root-file").stdout
+        # Rewrite each file from outside the VM: the bind-mounted file on the host, in place; the
+        # volume's from another (runc) container; the root filesystem's with 'docker cp'.
+        with open(os.path.join(host, "f"), "w") as f:
+            f.write("host-new\n")
+        vol_new = t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v",
+                           volume + ":/v", "alpine", "sh", "-c", "echo vol-new >/v/f")
+        src = os.path.join(host, "root-file")
+        with open(src, "w") as f:
+            f.write("root-new\n")
+        cp = t.docker("cp", src, name + ":/root-file")
+        # Wait past the 1-second timeouts of 'auto' before reading again: a fixed wait, as polling
+        # for the new contents would read the files in the meantime.
+        t.docker("exec", name, "sleep", "3")
+        return [
+            ("submount cache: virtiofsd runs with --submount-cache=auto", True,
+             any("virtiofsd" in line and "--submount-cache=auto" in line for line in top.splitlines())),
+            ("submount cache: files read in the VM before", "host-old\nvol-old\nroot-old\n", before),
+            ("submount cache: volume file rewritten from another container", 0, vol_new.returncode),
+            ("submount cache: root file replaced with 'docker cp'", 0, cp.returncode),
+            ("submount cache (auto): bind-mounted file rewritten on the host is read afresh",
+             "host-new", ex(name, "cat", "/bind/f").stdout.strip()),
+            ("submount cache (auto): volume file rewritten from another container is read afresh",
+             "vol-new", ex(name, "cat", "/vol/f").stdout.strip()),
+            ("root cache (always): root file replaced with 'docker cp' is read as before",
+             "root-old", ex(name, "cat", "/root-file").stdout.strip()),
+        ]
+    finally:
+        shutil.rmtree(host, ignore_errors=True)
+
+
+def case_cache_paths():
+    fresh, stale = t.unique("cachepath-a"), t.unique("cachepath-b")
+    for volume in (fresh, stale):
+        t.volume_create(volume)
+        t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v",
+                 volume + ":/v", "alpine", "sh", "-c", "echo old >/v/f")
+    name = start("cachepath", "-v", fresh + ":/data/a", "-v", stale + ":/srv/b",
+                 "--env=RUNCVM_VIRTIOFSD_CACHE=always",
+                 "--env=RUNCVM_VIRTIOFSD_CACHE_PATHS=/data=auto")
+    if not name:
+        return [("cache paths: Container/VM started", True, False)]
+    top = t.docker("top", name).stdout
+    before = ex(name, "cat", "/data/a/f", "/srv/b/f").stdout
+    rewritten = [t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v",
+                          volume + ":/v", "alpine", "sh", "-c", "echo new >/v/f").returncode
+                 for volume in (fresh, stale)]
+    # Wait past the 1-second timeouts of 'auto' before reading again: a fixed wait, as polling
+    # for the new contents would read the files in the meantime.
+    t.docker("exec", name, "sleep", "3")
+    return [
+        ("cache paths: virtiofsd runs with --cache-path=/data=auto", True,
+         any("virtiofsd" in line and "--cache-path=/data=auto" in line for line in top.splitlines())),
+        ("cache paths: files read in the VM before", "old\nold\n", before),
+        ("cache paths: both volumes' files rewritten from another container", [0, 0], rewritten),
+        ("cache paths (/data=auto): volume file at /data/a rewritten from outside is read afresh",
+         "new", ex(name, "cat", "/data/a/f").stdout.strip()),
+        ("cache paths (uncovered, always): volume file at /srv/b rewritten from outside is read as before",
+         "old", ex(name, "cat", "/srv/b/f").stdout.strip()),
+    ]
+
+
+def case_writeback_submount_none():
+    volume = t.unique("wbnone")
+    t.volume_create(volume)
+    name = start("wbnone", "-v", volume + ":/vol", "--env=RUNCVM_VIRTIOFSD_CACHE=always,writeback",
+                 "--env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=none")
+    if not name:
+        return [("writeback, submounts none: Container/VM started", True, False)]
+    top = t.docker("top", name).stdout
+    ex(name, "sh", "-c", "echo a >>/vol/appended")
+    outside = t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v",
+                       volume + ":/v", "alpine", "sh", "-c", "echo b >>/v/appended").returncode
+    ex(name, "sh", "-c", "echo c >>/vol/appended")
+    # The background shell keeps /vol/open open; under writeback, its data could stay in the VM.
+    ex(name, "sh", "-c", "(exec 3>/vol/open; echo held-open >&3; exec sleep 600) >/dev/null 2>&1 &")
+    held = t.wait_for("held-open data in %s on the host" % volume, 30,
+                      lambda: t.volume_read(volume, "open") == "held-open\n")
+    return [
+        ("writeback, submounts none: virtiofsd runs with --writeback and --submount-cache=never", True,
+         any("virtiofsd" in line and "--writeback" in line and "--submount-cache=never" in line
+             for line in top.splitlines())),
+        ("writeback, submounts none: append from another container", 0, outside),
+        ("writeback, submounts none: appends from the VM and from outside are all kept", "a\nb\nc\n",
+         t.volume_read(volume, "appended")),
+        ("writeback, submounts none: data in a file the VM holds open is on the host", True, held),
+    ]
+
+
 def case_negative_timeout():
     volume = t.unique("negative")
     t.volume_create(volume)
@@ -168,32 +319,41 @@ def case_queue_poll():
     return results
 
 
-def case_writeback():
-    volume = t.unique("writeback")
+def case_negative_timeout_per_mount():
+    volume = t.unique("negcap")
     t.volume_create(volume)
-    name = start("writeback", "-v", volume + ":/vol", "--env=RUNCVM_VIRTIOFSD_CACHE=always,writeback")
+    name = start("negcap", "-v", volume + ":/vol", "--env=RUNCVM_VIRTIOFSD_CACHE=always",
+                 "--env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto",
+                 "--env=RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600")
     if not name:
-        return [("writeback: Container/VM started", True, False)]
-    top = t.docker("top", name).stdout
-    ex(name, "sh", "-c", "echo closed >/vol/closed && echo a >>/vol/appended && echo b >>/vol/appended")
-    closed = t.volume_read(volume, "closed")
-    appended = t.volume_read(volume, "appended")
-    # The background shell keeps /vol/open open until the Container/VM stops.
-    ex(name, "sh", "-c", "(exec 3>/vol/open; echo held-open >&3; exec sleep 600) >/dev/null 2>&1 &")
-    stopped = t.docker("stop", name).returncode == 0
+        return [("negative timeout per mount: Container/VM started", True, False)]
+    looked = ex(name, "sh", "-c", "[ -e /vol/added ] || echo absent; [ -e /added ] || echo absent").stdout.split()
+    created = t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v",
+                       volume + ":/v", "alpine", "touch", "/v/added").returncode
+    host = tempfile.mkdtemp(prefix="runcvm-test-")
+    try:
+        src = os.path.join(host, "added")
+        open(src, "w").close()
+        copied = t.docker("cp", src, name + ":/added").returncode
+    finally:
+        shutil.rmtree(host, ignore_errors=True)
+    # Wait past auto's 1-second cap before looking again (see case_negative_timeout).
+    t.docker("exec", name, "sleep", "3")
     return [
-        ("writeback: virtiofsd runs with --writeback", True,
-         any("virtiofsd" in line and "--writeback" in line for line in top.splitlines())),
-        ("writeback: file written and closed in the VM is on the host", "closed\n", closed),
-        ("writeback: appends extend the file", "a\nb\n", appended),
-        ("writeback: 'docker stop' succeeded", True, stopped),
-        ("writeback: data in a file held open is on the host after 'docker stop'", "held-open\n",
-         t.volume_read(volume, "open")),
+        ("negative timeout per mount: files not found in the VM", ["absent", "absent"], looked),
+        ("negative timeout per mount: files created outside the VM", [0, 0], [created, copied]),
+        ("negative timeout per mount (volume, auto): found within 3 s", 0,
+         ex(name, "test", "-e", "/vol/added").returncode),
+        ("negative timeout per mount (root, always, 3600 s): still not found", 1,
+         ex(name, "test", "-e", "/added").returncode),
     ]
 
 
-for results in t.parallel(lambda f: f(), [case_volume_and_binds, case_shared_volume,
-                                          case_negative_timeout, case_queue_poll, case_writeback], jobs=5):
+for results in t.parallel(lambda f: f(), [case_volume_and_binds, case_shared_volume, case_writeback,
+                                          case_submount_cache, case_cache_paths,
+                                          case_negative_timeout, case_negative_timeout_per_mount,
+                                          case_writeback_submount_none, case_queue_poll],
+                          jobs=8):
     for desc, expected, actual in results:
         t.check(desc, expected, actual)
 
