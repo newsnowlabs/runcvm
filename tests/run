@@ -39,6 +39,10 @@ Optional per-test metadata files, in each test directory:
               kvm   VMs use KVM acceleration: /dev/kvm present on this host,
                     and not in stand-in mode or with --accel tcg
               ipv6  dockerd can create an IPv6-enabled network
+              runcvm-package
+                    RunCVM's package is installed at /opt/runcvm (for tests
+                    that run its scripts and tools without a VM, in runc
+                    containers, so in stand-in mode too)
               docker>=<major>.<minor>
                     dockerd's version is at least <major>.<minor>, e.g.
                     docker>=29.0
@@ -98,7 +102,7 @@ import xml.etree.ElementTree as ET
 
 SKIP_CODE = 77
 TIERS = ("core", "extended")
-KNOWN_REQUIREMENTS = ("vm", "kvm", "ipv6")
+KNOWN_REQUIREMENTS = ("vm", "kvm", "ipv6", "runcvm-package")
 DOCKER_VERSION_REQUIREMENT = re.compile(r"^docker>=(\d+)\.(\d+)$")
 ACCELS = ("kvm", "auto", "tcg")
 DEFAULT_TIMEOUT = 1800
@@ -211,6 +215,11 @@ class Environment:
             return not self.mock
         if req == "kvm":
             return not self.mock and self.accel != "tcg" and os.path.exists("/dev/kvm")
+        if req == "runcvm-package":
+            if os.path.exists("/opt/runcvm/bin/bash"):
+                return True
+            self._probe_notes[req] = "not installed at /opt/runcvm"
+            return False
         if req == "ipv6":
             if not self.use_docker:
                 return False

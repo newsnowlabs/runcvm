@@ -18,11 +18,22 @@
 
 BUSYBOX=$RUNCVM_GUEST/bin/busybox
 
-# The disks' own mounts: each entry of /.runcvm/fstab mounting a disk by its UUID, and the root
-# filesystem if it is a whole-root disk.
+# The mountpoints of /.runcvm/fstab's entries, in the order they are mounted (dsts), held mounts
+# included, whether as '#runcvm-held <id> <path>' or as binds from /.runcvm/submounts/<id>; and of
+# the disks' own mounts among them, each mounting a disk by its UUID (disks), with the root
+# filesystem if it is a whole-root disk. Each path is written with fstab's octal escapes (see
+# path_encode in runcvm-ctr-qemu), which printf's %b decodes.
+dsts=()
 disks=()
 if [ -f /.runcvm/fstab ]; then
-  mapfile -t disks < <($BUSYBOX awk '$1 ~ /^UUID=/ { print $2 }' /.runcvm/fstab)
+  while read -r src dst path _
+  do
+    [ "$src" = "#runcvm-held" ] && dst="$path"
+    [[ -n "$dst" && ( "$src" != \#* || "$src" = "#runcvm-held" ) ]] || continue
+    printf -v dst '%b' "$dst"
+    dsts+=("$dst")
+    [[ "$src" != UUID=* ]] || disks+=("$dst")
+  done </.runcvm/fstab
 fi
 [ -f /.runcvm/rootdisk ] && disks+=(/)
 
@@ -78,14 +89,11 @@ sync_disks
 # unmounted is remounted read-only: a disk with layout 'subdirs' is mounted at /.runcvm/disks/<n>,
 # its own entry, where remounting it read-only applies to the whole filesystem, whatever is still
 # mounted from it.
-if [ -f /.runcvm/fstab ]; then
-  mapfile -t dsts < <($BUSYBOX awk '$1 !~ /^#/ && NF >= 2 { print $2 }' /.runcvm/fstab)
-  for ((i = ${#dsts[@]} - 1; i >= 0; i--))
-  do
-    $BUSYBOX umount "${dsts[$i]}" 2>/dev/null || \
-      $BUSYBOX mount -o remount,ro "${dsts[$i]}" 2>/dev/null
-  done
-fi
+for ((i = ${#dsts[@]} - 1; i >= 0; i--))
+do
+  $BUSYBOX umount "${dsts[$i]}" 2>/dev/null || \
+    $BUSYBOX mount -o remount,ro "${dsts[$i]}" 2>/dev/null
+done
 
 # A whole-root disk is the VM's root filesystem, which can only be remounted read-only.
 if [ -f /.runcvm/rootdisk ]; then

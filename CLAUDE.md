@@ -66,7 +66,7 @@ the runtime or the scripts.
 - A test is a directory under `tests/` holding an executable `test` file, in bash or Python:
   exit 0 to pass, 77 to skip (after logging `SKIP: <reason>`), anything else to fail. Optional
   files `tier` (`core` or `extended`), `timeout` (seconds) and `requires` (`vm`, `kvm`,
-  `ipv6`, `docker>=<major>.<minor>`) describe it to the runner. Numbering follows the tier:
+  `ipv6`, `docker>=<major>.<minor>`, `runcvm-package`) describe it to the runner. Numbering follows the tier:
   `1x` core, `5x` extended.
 - Use the helpers in `tests/framework.sh` or `tests/framework.py` (same names in both):
   `unique` for every Docker object name and `labels` on every object created, so that runs can

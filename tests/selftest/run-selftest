@@ -291,6 +291,22 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(r.json()["runtime"], "runc")
                 self.assertTrue(r.json()["mock"])
 
+    def test_runcvm_package_requirement(self):
+        ft = FakeTests()
+        try:
+            ft.add("v-requires-package", "#!/bin/bash\nexit 0\n", requires="runcvm-package")
+            for args in ([], ["--mock"]):
+                with self.subTest(args=args):
+                    r = ft.run("v-requires-package", *args)
+                    if os.path.exists("/opt/runcvm/bin/bash"):
+                        self.assertEqual(r.status("v-requires-package"), "pass", r.out)
+                    else:
+                        self.assertEqual(r.status("v-requires-package"), "skip", r.out)
+                        self.assertEqual(r.test("v-requires-package")["reason"],
+                                         "requires runcvm-package (not installed at /opt/runcvm)")
+        finally:
+            ft.cleanup()
+
     def test_mock_mode_seen_by_tests(self):
         ft = FakeTests()
         try:
