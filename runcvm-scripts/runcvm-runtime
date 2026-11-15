@@ -450,8 +450,8 @@ if [ "$COMMAND" = "create" ]; then
   # QEMU's own threads and virtiofsd run in the container alongside the vCPUs and share its CPU
   # quota: a quota of exactly the vCPUs' CPUs throttles the whole container, vCPUs included,
   # whenever those threads need CPU while the vCPUs are busy. RUNCVM_CPU_HEADROOM (default 1; 0
-  # keeps Docker's quota as it is) adds that many CPUs to a quota, for them; without a quota, it
-  # does nothing.
+  # keeps Docker's quota as it is) adds that many CPUs to a quota, for them; without a quota,
+  # nothing is added, though the value is still checked.
   RUNCVM_CPU_HEADROOM=$(get_config_env "RUNCVM_CPU_HEADROOM" 1)
   if ! [[ "$RUNCVM_CPU_HEADROOM" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]] || ! awk -v h="$RUNCVM_CPU_HEADROOM" 'BEGIN { exit !(h <= 64) }'; then
     error "RUNCVM_CPU_HEADROOM '$RUNCVM_CPU_HEADROOM' invalid (should be a number of CPUs from 0 to 64, e.g. 1 or 0.5)"
