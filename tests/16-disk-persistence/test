@@ -73,7 +73,7 @@ def run(case):
     return "payload" in r.stdout, r.stdout
 
 
-results = t.parallel(run, CASES)
+results = t.parallel(run, CASES, remove=True)
 
 for (name, init, command, ending, expected), (survived, output) in zip(CASES, results):
     desc = "%s, %s: file survives" % (name, "--init" if init else "no --init")

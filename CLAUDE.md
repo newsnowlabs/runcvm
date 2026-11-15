@@ -74,8 +74,14 @@ the runtime or the scripts.
   Container/VM; `check`, `check_cmd` and `expect_exit` for results; `wait_for` and
   `wait_for_exec` for every wait, so nothing waits without a deadline; `log_detail` for
   step-by-step progress (e.g. each of many requests' outcomes), which goes to the test's log,
-  and to the terminal only with `tests/run --verbose`; `parallel` (Python) to
-  run independent cases at once; `skip` and `finish` to end.
+  and to the terminal only with `tests/run --verbose`; `parallel` (Python) to run independent
+  cases at once, with `remove=True` where each case's Container/VMs and volumes are done with
+  when it returns, so that no more than `RUNCVM_TEST_JOBS` of them run at once; `skip` and
+  `finish` to end.
+- Pass `vm_opts` before a test's own `docker run` options, so that a test's own `--env`,
+  `--cpus` or `--memory` overrides the runner's (`tests/run --vm-env`, `--vm-cpus`,
+  `--vm-memory`); a test that checks the VM's size against its defaults uses
+  `vm_opts(size=False)` (`vm_opts --no-size` in bash).
 - Tests must not download anything at run time beyond pulling images: containers on Docker
   networks may have no outbound access in sandboxed or CI environments.
 - Where behaviour should be the same with and without `--init`, test both, recording the mode

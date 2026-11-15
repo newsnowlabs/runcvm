@@ -38,8 +38,8 @@ def run(case):
     name, opts, _, _ = case
     container = t.unique(name)
     t.cleanup_container(container)
-    r = t.docker("run", "-d", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
-                 *opts, "alpine", "sleep", "600")
+    r = t.docker("run", "-d", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME,
+                 *t.vm_opts(size=False), *opts, "alpine", "sleep", "600")
     if r.returncode != 0 or not t.wait_for_exec(container, BOOT_TIMEOUT):
         return None
     cpus = t.docker("exec", container, "nproc").stdout.strip()
@@ -48,7 +48,7 @@ def run(case):
     return int(cpus) if cpus.isdigit() else cpus, int(meminfo[1]) // 1024 if len(meminfo) > 1 else 0, cmdline
 
 
-for (name, opts, cpus, memory), result in zip(CASES, t.parallel(run, CASES)):
+for (name, opts, cpus, memory), result in zip(CASES, t.parallel(run, CASES, remove=True)):
     if result is None:
         t.check("%s: Container/VM started" % name, True, False)
         continue
