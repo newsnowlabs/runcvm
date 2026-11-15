@@ -12,6 +12,9 @@
   (125), with the error from runcvm-runtime.
 - RUNCVM_VIRTIOFSD_POLL_US other than a whole number from 0 to 1000:
   creation fails (125), with the error from runcvm-runtime.
+- RUNCVM_VIRTIOFSD_CACHE asking for writeback caching with a policy that
+  does not cache file contents ('none,writeback'): Container/VM creation
+  fails (exit status 125), with the error from runcvm-runtime.
 - A RUNCVM_DISKS spec missing its fields: the Container/VM exits with
   status 1 before the VM starts, with the error from the entrypoint.
 """
@@ -36,6 +39,8 @@ CASES = [
      "RunCVM: Error: RUNCVM_VIRTIOFSD_POLL 'busy' invalid (should be none, fixed or adaptive)"),
     ("virtiofsd-poll", ["--env=RUNCVM_VIRTIOFSD_POLL_US=1001"], 125,
      "RunCVM: Error: RUNCVM_VIRTIOFSD_POLL_US '1001' invalid (should be a whole number of microseconds from 0 to 1000)"),
+    ("virtiofsd-cache", ["--env=RUNCVM_VIRTIOFSD_CACHE=none,writeback"], 125,
+     "RunCVM: Error: RUNCVM_VIRTIOFSD_CACHE 'none,writeback' invalid"),
     ("disks", ["--env=RUNCVM_DISKS=/disks/disk1"], 1,
      "disk spec '/disks/disk1' invalid: src, dst and fs must all be specified"),
 ]
