@@ -447,6 +447,26 @@ if [ "$COMMAND" = "create" ]; then
   set_config_env "RUNCVM_CPUS" "$RUNCVM_CPUS"
   log "RUNCVM_CPUS=$RUNCVM_CPUS"
 
+  # QEMU's own threads and virtiofsd run in the container alongside the vCPUs and share its CPU
+  # quota: a quota of exactly the vCPUs' CPUs throttles the whole container, vCPUs included,
+  # whenever those threads need CPU while the vCPUs are busy. RUNCVM_CPU_HEADROOM (default 1; 0
+  # keeps Docker's quota as it is) adds that many CPUs to a quota, for them; 'max' removes
+  # the quota, leaving --cpus to set the vCPUs alone. Without a quota, nothing changes, though the
+  # value is still checked.
+  RUNCVM_CPU_HEADROOM=$(get_config_env "RUNCVM_CPU_HEADROOM" 1)
+  if [ "$RUNCVM_CPU_HEADROOM" != "max" ] && { ! [[ "$RUNCVM_CPU_HEADROOM" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]] || ! awk -v h="$RUNCVM_CPU_HEADROOM" 'BEGIN { exit !(h <= 64) }'; }; then
+    error "RUNCVM_CPU_HEADROOM '$RUNCVM_CPU_HEADROOM' invalid (should be a number of CPUs from 0 to 64, e.g. 1 or 0.5, or 'max')"
+  fi
+  if [ "$RUNCVM_CPUS" -gt 0 ]; then
+    if [ "$RUNCVM_CPU_HEADROOM" = "max" ]; then
+      jq_set "$CFG" '.linux.resources.cpu.quota = -1'
+    else
+      jq_set "$CFG" --argjson h "$RUNCVM_CPU_HEADROOM" \
+        '.linux.resources.cpu |= (.quota = ((.quota + $h * (.period // 100000)) | floor))'
+    fi
+    log "CPU quota: $(jq_get "$CFG" '.linux.resources.cpu | "\(.quota) per \(.period // 100000)"') (RUNCVM_CPU_HEADROOM=$RUNCVM_CPU_HEADROOM)"
+  fi
+
   # CONFIGURE CONSOLE
   # RUNCVM_TTY: 1 if the container has a terminal ('docker run -t'), else 0. The workload's input
   # and output pass through the VM's console either way; without a terminal, runcvm-vm-start puts
