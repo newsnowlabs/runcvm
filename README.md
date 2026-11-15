@@ -1106,7 +1106,7 @@ How many CPUs, from `0` to `64` (fractions allowed), to add to the CPU quota tha
 
 `0` keeps Docker's quota exactly, so that the container never uses more than `--cpus` CPUs. `max` removes the quota, so that `--cpus` sets only the number of VM CPUs. `docker update --cpus` sets the quota without headroom.
 
-With `--cpus` equal to the host's CPU count (or more), the quota can never be reached, so the Container/VM behaves as without `--cpus`; to leave CPU for QEMU and `virtiofsd` when the VM keeps all its CPUs busy, give it fewer CPUs than the host has.
+With `--cpus` equal to the host's CPU count (or more), and any headroom but `0`, the quota can never be reached, so the Container/VM behaves as without `--cpus`; to leave CPU for QEMU and `virtiofsd` when the VM keeps all its CPUs busy, give it fewer CPUs than the host has.
 
 ### RUNCVM_HUGETLB
 
