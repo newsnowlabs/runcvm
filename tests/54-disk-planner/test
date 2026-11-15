@@ -68,13 +68,13 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import framework as t  # noqa: E402
 
-REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
-SCRIPTS = os.path.realpath(os.path.join(REPO, "runcvm-scripts"))
+SCRIPTS = t.scripts_dir()
 GUEST = "/opt/runcvm"
 
-# Runs in each case's container, with RunCVM's package at /.runcvm/guest, this repository's scripts
-# at /t, and the case at /h/case: sets up the case, runs the planning phases in a subshell (an
-# error ends it), and prints the plan and its manifests, then whether /disks is unchanged.
+# Runs in each case's container, with RunCVM's package at /.runcvm/guest, the scripts under test
+# (t.scripts_dir: a checkout's, or the installed package's) at /t, and the case at /h/case: sets
+# up the case, runs the planning phases in a subshell (an error ends it), and prints the plan and
+# its manifests, then whether /disks is unchanged.
 HARNESS = r'''
 RUNCVM_GUEST=/.runcvm/guest
 . /t/runcvm-ctr-defaults
@@ -548,7 +548,7 @@ def run_planner(seed):
     path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "planner-%s-%d" % (t.RUN_ID, seed))
     with open(path, "w") as f:
         f.write("".join(x + "\0" for x in fields))
-    r = subprocess.run(["bash", "-c", PLANNER, "planner", os.path.join(REPO, "runcvm-scripts", "runcvm-ctr-qemu"), path],
+    r = subprocess.run(["bash", "-c", PLANNER, "planner", os.path.join(SCRIPTS, "runcvm-ctr-qemu"), path],
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
     os.unlink(path)
     return r.returncode, r.stdout.splitlines(), planner_expected(cmounts, disks, dests, tmpfs, backing)
