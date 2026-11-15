@@ -7,9 +7,18 @@ if [ "$RUNCVM_SYS_ADMIN" = "1" ]; then
   OPTS+=(--modcaps=+sys_admin)
 fi
 
-# RUNCVM_VIRTIOFSD_CACHE takes virtiofsd's --cache values, and 'none' as a name for 'never'
-VIRTIOFSD_CACHE=${RUNCVM_VIRTIOFSD_CACHE:-auto}
-[ "$VIRTIOFSD_CACHE" = "none" ] && VIRTIOFSD_CACHE=never
+# RUNCVM_VIRTIOFSD_CACHE, which runcvm-runtime validates, is a comma-separated list of a cache
+# policy (one of virtiofsd's --cache values, or 'none' as a name for 'never'; by default 'auto')
+# and 'writeback', in any order.
+VIRTIOFSD_CACHE=auto
+IFS=',' read -r -a VIRTIOFSD_CACHE_ITEMS <<<"$RUNCVM_VIRTIOFSD_CACHE"
+for item in "${VIRTIOFSD_CACHE_ITEMS[@]}"; do
+  case "$item" in
+    writeback) OPTS+=(--writeback) ;;
+    none) VIRTIOFSD_CACHE=never ;;
+    *) VIRTIOFSD_CACHE="$item" ;;
+  esac
+done
 OPTS+=(--cache="$VIRTIOFSD_CACHE")
 
 # --inode-file-handles=never keeps virtiofsd from requiring CAP_DAC_READ_SEARCH, which containers

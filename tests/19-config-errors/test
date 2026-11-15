@@ -6,6 +6,9 @@
   the error from runcvm-runtime.
 - RUNCVM_HUGETLB other than 0, 1 or auto: creation fails (125), with the
   error from runcvm-runtime.
+- RUNCVM_VIRTIOFSD_CACHE asking for writeback caching with a policy that
+  does not cache file contents ('none,writeback'): Container/VM creation
+  fails (exit status 125), with the error from runcvm-runtime.
 - A RUNCVM_DISKS spec missing its fields: the Container/VM exits with
   status 1 before the VM starts, with the error from the entrypoint.
 """
@@ -24,6 +27,8 @@ CASES = [
      "RunCVM: Error: Kernel 'Not/A/Kernel' invalid"),
     ("hugetlb", ["--env=RUNCVM_HUGETLB=on"], 125,
      "RunCVM: Error: RUNCVM_HUGETLB 'on' invalid (should be 0, 1 or auto)"),
+    ("virtiofsd-cache", ["--env=RUNCVM_VIRTIOFSD_CACHE=none,writeback"], 125,
+     "RunCVM: Error: RUNCVM_VIRTIOFSD_CACHE 'none,writeback' invalid"),
     ("disks", ["--env=RUNCVM_DISKS=/disks/disk1"], 1,
      "disk spec '/disks/disk1' invalid: src, dst and fs must all be specified"),
 ]
