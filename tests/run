@@ -68,11 +68,11 @@ RUNCVM_VIRTIOFSD_CACHE=always, for every RunCVM Container/VM the tests launch,
 so that the suite can run with settings other than RunCVM's defaults. VM size
 (--vm-cpus N and --vm-memory SIZE, or RUNCVM_TEST_CPUS and RUNCVM_TEST_MEMORY)
 is passed to those Container/VMs as --cpus and --memory, e.g. to keep the VMs
-that run at once within a small host's CPUs and memory. Tests receive all
-three in those variables, and pass them on with framework helper vm_opts,
-before their own options, so that a test that sets the same variable or option
-keeps its own value; tests that check the VM's size against its defaults leave
-out the size. Fewer Container/VMs at once (RUNCVM_TEST_JOBS) also lightens the
+that run at once within a small host's CPUs and memory. Tests receive these
+settings as RUNCVM_TEST_VM_ENV, RUNCVM_TEST_CPUS and RUNCVM_TEST_MEMORY, and
+pass them on with framework helper vm_opts, before their own options, so that
+a test that sets the same variable or option keeps its own value; tests that
+check the VM's size against its defaults leave out the size. Fewer Container/VMs at once (RUNCVM_TEST_JOBS) also lightens the
 load on a small host.
 
 Image refresh (--pull, or RUNCVM_TEST_PULL=1): tests pull the images they boot
