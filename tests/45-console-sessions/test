@@ -12,7 +12,8 @@ For each kernel:
 - With almalinux/9-init, whose entrypoint is systemd, which gives up the
   controlling terminal as it starts: 'docker exec' works once the VM has
   booted; systemd reaches 'running' (or 'degraded', if some unit of the
-  image's own fails in a VM); and the QEMU guest agent is still running.
+  image's own fails in a VM) within the boot timeout; and the QEMU guest
+  agent is still running.
 - With '-t', with and without --init: the workload's controlling terminal
   is the console, which is also its standard input, so that e.g. Ctrl-C
   reaches it.
@@ -45,9 +46,17 @@ def run_systemd(kernel):
         return False, r.stdout, None, None
     if not t.wait_for_exec(container, TIMEOUT):
         return False, t.docker("logs", container).stdout, None, None
-    state = t.docker("exec", container, "timeout", str(TIMEOUT), "systemctl", "is-system-running", "--wait")
+    # 'systemctl is-system-running --wait' fails at once, rather than waiting, while systemd's
+    # bus is not yet up, so poll it
+    state = {}
+
+    def settled():
+        state["value"] = t.docker("exec", container, "systemctl", "is-system-running").stdout.strip()
+        return state["value"] in ("running", "degraded")
+
+    t.wait_for("systemd running in %s" % container, TIMEOUT, settled, interval=2)
     agent = t.docker("exec", container, "sh", "-c", "grep -qx qemu-ga /proc/[0-9]*/comm")
-    return True, "", state.stdout.strip(), agent.returncode == 0
+    return True, "", state["value"], agent.returncode == 0
 
 
 def run_tty(case):
@@ -60,7 +69,7 @@ def run_tty(case):
 
 
 TTY_CASES = [(kernel, init) for kernel in KERNELS for init in (False, True)]
-systemd_results = t.parallel(run_systemd, KERNELS)
+systemd_results = t.parallel(run_systemd, KERNELS, remove=True)
 tty_results = t.parallel(run_tty, TTY_CASES)
 
 for kernel, (booted, output, state, agent) in zip(KERNELS, systemd_results):
