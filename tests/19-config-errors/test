@@ -4,6 +4,9 @@
 - RUNCVM_KERNEL naming a kernel that is not installed, or not of the form
   <dist>[/<version>]: Container/VM creation fails (exit status 125), with
   the error from runcvm-runtime.
+- RUNCVM_VIRTIOFSD_CACHE asking for writeback caching with a policy that
+  does not cache file contents ('none,writeback'): Container/VM creation
+  fails (exit status 125), with the error from runcvm-runtime.
 - A RUNCVM_DISKS spec missing its fields: the Container/VM exits with
   status 1 before the VM starts, with the error from the entrypoint.
 """
@@ -20,6 +23,8 @@ CASES = [
      "RunCVM: Error: Kernel 'nosuchdist/1.0' not found"),
     ("kernel-format", ["--env=RUNCVM_KERNEL=Not/A/Kernel"], 125,
      "RunCVM: Error: Kernel 'Not/A/Kernel' invalid"),
+    ("virtiofsd-cache", ["--env=RUNCVM_VIRTIOFSD_CACHE=none,writeback"], 125,
+     "RunCVM: Error: RUNCVM_VIRTIOFSD_CACHE 'none,writeback' invalid"),
     ("disks", ["--env=RUNCVM_DISKS=/disks/disk1"], 1,
      "disk spec '/disks/disk1' invalid: src, dst and fs must all be specified"),
 ]
