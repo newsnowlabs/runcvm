@@ -4,8 +4,8 @@
 - RUNCVM_KERNEL naming a kernel that is not installed, or not of the form
   <dist>[/<version>]: Container/VM creation fails (exit status 125), with
   the error from runcvm-runtime.
-- RUNCVM_CPU_HEADROOM other than a number of CPUs from 0 to 64: creation
-  fails (125), with the error from runcvm-runtime.
+- RUNCVM_CPU_HEADROOM other than a number of CPUs from 0 to 64 or
+  'unlimited': creation fails (125), with the error from runcvm-runtime.
 - RUNCVM_VIRTIOFSD_CACHE asking for writeback caching with a policy that
   does not cache file contents ('none,writeback'): Container/VM creation
   fails (exit status 125), with the error from runcvm-runtime.

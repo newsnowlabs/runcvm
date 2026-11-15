@@ -7,7 +7,8 @@
   --cpus, the VM has as many CPUs as the container can use.
 - The container's CPU quota is --cpus plus RUNCVM_CPU_HEADROOM's CPUs
   (default 1), for QEMU and virtiofsd; with RUNCVM_CPU_HEADROOM=0, exactly
-  --cpus. Without --cpus, there is no quota. (Checked where the host uses
+  --cpus; with RUNCVM_CPU_HEADROOM=unlimited, none, while the VM keeps
+  --cpus's CPU count. Without --cpus, there is no quota. (Checked where the host uses
   cgroup v2.)
 - RUNCVM_KERNEL_APPEND is appended to the VM kernel's command line.
 
@@ -35,6 +36,8 @@ CASES = [
     ("cpus-1.5", ["--cpus=1.5"], min(2, host_cpus), 512, "250000 100000"),
     ("cpus-0.5", ["--cpus=0.5"], 1, 512, "150000 100000"),
     ("cpus-2-headroom-0", ["--cpus=2", "--env=RUNCVM_CPU_HEADROOM=0"], min(2, host_cpus), 512, "200000 100000"),
+    ("cpus-2-headroom-unlimited", ["--cpus=2", "--env=RUNCVM_CPU_HEADROOM=unlimited"], min(2, host_cpus), 512,
+     "max 100000"),
     ("kernel-append", ["--env=RUNCVM_KERNEL_APPEND=runcvm.test=marker"], host_cpus, 512, "max 100000"),
 ]
 
