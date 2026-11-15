@@ -1173,7 +1173,11 @@ It comes with these restrictions:
 - `fixed`: `virtiofsd` polls for `RUNCVM_VIRTIOFSD_POLL_US` microseconds (`1` to `1000`) each time. `RUNCVM_VIRTIOFSD_POLL_US` alone, without `RUNCVM_VIRTIOFSD_POLL`, also selects `fixed`, and `0` alone selects `none`.
 - `adaptive`: `virtiofsd` polls for a window that adapts to how closely the VM's requests follow one another, of at most `RUNCVM_VIRTIOFSD_POLL_US` microseconds. The window starts at nothing; it grows (to 4 microseconds, then doubling) each time a request arrives after polling has given up but within the maximum, and halves (to nothing below 4) each time one takes longer than the maximum. So a VM issuing requests in quick succession is polled for, while an idle VM, or one whose requests are far apart, costs no polling.
 
-Polling uses CPU on the host, up to one core per Container/VM while its VM is issuing requests over virtiofs, so it suits hosts with spare cores. On hosts whose cores are all busy, including laptops on battery, it can slow the VM down, as polling competes for CPU with the VM itself. `adaptive` spends no more CPU than `none` when requests are not in quick succession, where `fixed` spends CPU polling for requests that do not come: e.g. `--env=RUNCVM_VIRTIOFSD_POLL=adaptive --env=RUNCVM_VIRTIOFSD_POLL_US=200`.
+Polling uses CPU on the host, up to one core per Container/VM while its VM is issuing requests over virtiofs, so it suits hosts with spare cores. On hosts whose cores are all busy, including laptops on battery, it can slow the VM down, as polling competes for CPU with the VM itself.
+
+The same holds within a Container/VM's own CPU limit (`docker run --cpus`), which `virtiofsd` shares with the VM's CPUs. Polling needs the CPU headroom that [`RUNCVM_CPU_HEADROOM`](#runcvm_cpu_headroom) gives by default: with `RUNCVM_CPU_HEADROOM=0`, polling throttles the whole Container/VM, and can make starting programs up to 40% slower.
+
+`adaptive` spends no more CPU than `none` when requests are not in quick succession, where `fixed` spends CPU polling for requests that do not come, and at its default maximum of 50 microseconds it gains as much as longer windows do, for less CPU: e.g. `--env=RUNCVM_VIRTIOFSD_POLL=adaptive`.
 
 ### RUNCVM_CGROUPFS
 
