@@ -8,12 +8,7 @@ With KILLPRIV_V2, virtiofsd clears the setuid and setgid bits of a
 file that the guest modifies, but the guest is not told: a WRITE reply
 carries no attributes, and the guest's FUSE client marks only size,
 times and blocks as stale after a write, fallocate or copy_file_range,
-never the mode. So the guest keeps the bits in its attribute cache
-until the attributes time out (a second with --cache=auto, a day with
-always): a mode-only statx shows them, and with writeback caching,
-where size and times are not refetched either, exec applies them. A
-user able to write to a setuid-root file could then run it as root
-after modifying it.
+never the mode.
 
 With KILLPRIV_V2, give the attributes of regular files with a setuid
 or setgid bit a timeout of zero, in lookup and getattr replies, so the
