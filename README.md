@@ -1138,13 +1138,15 @@ Adding `writeback` to `auto` or `always`, e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=alw
 
 `writeback` cannot be combined with `metadata` or `none`, which do not cache file contents, and RunCVM refuses to create the Container/VM if it is.
 
+With [`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE`](#runcvm_virtiofsd_submount_cache) or [`RUNCVM_VIRTIOFSD_CACHE_PATHS`](#runcvm_virtiofsd_cache_paths), `writeback` applies, with these restrictions, to every mount whose policy is `auto` or `always`, and not to those given `metadata` or `none`, whose files the VM writes straight to the host. So a Container/VM whose own files nothing outside it touches, but whose volumes or bind mounts the host or other containers may write to, can still use `writeback`, by giving those mounts `none`: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always,writeback --env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=none`.
+
 ### RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE
 
 **`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=<auto|always|metadata|none>`**
 
 **[EXPERIMENTAL]** Specifies the cache policy, as for [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache), for the mounts within the VM's root filesystem: every volume and bind mount, including those of single files, such as the `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` that Docker bind-mounts and may rewrite. `RUNCVM_VIRTIOFSD_CACHE`'s policy then applies to the root filesystem alone. Unset, the mounts take `RUNCVM_VIRTIOFSD_CACHE`'s policy too.
 
-This lets the image's own files, which nothing outside the VM normally changes, be cached as with `always`, while volumes and bind mounts, which the host or other containers may change, keep `auto`'s 1-second timeouts and rereading of file contents on each open: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always --env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto`. Mounts are told apart by `virtiofsd` itself: RunCVM builds `virtiofsd` with patches (`patches/virtiofsd/`) that add its `--submount-cache` option, to be dropped once a `virtiofsd` release has it.
+This lets the image's own files, which nothing outside the VM normally changes, be cached as with `always`, while volumes and bind mounts, which the host or other containers may change, keep `auto`'s 1-second timeouts and rereading of file contents on each open: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always --env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto`. With `writeback` in `RUNCVM_VIRTIOFSD_CACHE`, mounts given `auto` or `always` here take its restrictions too, including appends from outside the VM being overwritten; give them `none` or `metadata` to keep them out of it ([`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)). Mounts are told apart by `virtiofsd` itself: RunCVM builds `virtiofsd` with patches (`patches/virtiofsd/`) that add its `--submount-cache` option, to be dropped once a `virtiofsd` release has it.
 
 With `always` for the root filesystem, the VM may still go on seeing, for up to a day, the old version of a root filesystem file changed from outside it, e.g. with `docker cp` into the running container.
 
@@ -1156,7 +1158,7 @@ With `always` for the root filesystem, the VM may still go on seeing, for up to 
 
 Each `<path>` is a path in the container, absolute, other than `/`, without `..`, and need not exist: a mount at or below it is matched when the VM first reaches it. It applies to mounts only: a directory of the root filesystem takes `RUNCVM_VIRTIOFSD_CACHE`'s policy, whatever `<path>` covers it. A `<path>` is matched against mount destinations as the kernel records them, so one leading through a symbolic link matches nothing: give the path with links resolved. A `<path>` may contain `=` (the last `=` in each entry separates it from its policy), but not `;`.
 
-This suits a Container/VM with mounts that need different trade-offs: e.g. `none` for a volume that other containers write to, for which the VM must see each change at once, and `always` for a bind mount of files that do not change while it runs.
+This suits a Container/VM with mounts that need different trade-offs: e.g. `none` for a volume that other containers write to, for which the VM must see each change at once, and `always` for a bind mount of files that do not change while it runs. With `writeback` in `RUNCVM_VIRTIOFSD_CACHE`, a `<path>` given `auto` or `always` takes writeback's restrictions too; one given `none` or `metadata` does not.
 
 ### RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT
 

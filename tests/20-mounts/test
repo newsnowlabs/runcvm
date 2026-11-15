@@ -37,6 +37,12 @@ container over virtiofs:
   and RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600, files the VM looked for and
   did not find, then created outside it, are found within 3 s in a volume
   (capped at auto's 1 second), and not in the root filesystem.
+- With RUNCVM_VIRTIOFSD_CACHE=always,writeback and
+  RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=none, virtiofsd runs with --writeback and
+  --submount-cache=never, and a volume is out of writeback's reach: data
+  appended to a file in it from another container between two appends in
+  the VM is kept, and a file the VM writes there is on the host at once,
+  although the VM still holds it open.
 
 The expected values describe current behaviour. A change to it must update
 them deliberately.
@@ -223,6 +229,33 @@ def case_cache_paths():
     ]
 
 
+def case_writeback_submount_none():
+    volume = t.unique("wbnone")
+    t.volume_create(volume)
+    name = start("wbnone", "-v", volume + ":/vol", "--env=RUNCVM_VIRTIOFSD_CACHE=always,writeback",
+                 "--env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=none")
+    if not name:
+        return [("writeback, submounts none: Container/VM started", True, False)]
+    top = t.docker("top", name).stdout
+    ex(name, "sh", "-c", "echo a >>/vol/appended")
+    outside = t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v",
+                       volume + ":/v", "alpine", "sh", "-c", "echo b >>/v/appended").returncode
+    ex(name, "sh", "-c", "echo c >>/vol/appended")
+    # The background shell keeps /vol/open open; under writeback, its data could stay in the VM.
+    ex(name, "sh", "-c", "(exec 3>/vol/open; echo held-open >&3; exec sleep 600) >/dev/null 2>&1 &")
+    t.docker("exec", name, "sleep", "1")
+    return [
+        ("writeback, submounts none: virtiofsd runs with --writeback and --submount-cache=never", True,
+         any("virtiofsd" in line and "--writeback" in line and "--submount-cache=never" in line
+             for line in top.splitlines())),
+        ("writeback, submounts none: append from another container", 0, outside),
+        ("writeback, submounts none: appends from the VM and from outside are all kept", "a\nb\nc\n",
+         t.volume_read(volume, "appended")),
+        ("writeback, submounts none: data in a file the VM holds open is on the host", "held-open\n",
+         t.volume_read(volume, "open")),
+    ]
+
+
 def case_negative_timeout():
     volume = t.unique("negative")
     t.volume_create(volume)
@@ -289,7 +322,8 @@ def case_negative_timeout_per_mount():
 
 for results in t.parallel(lambda f: f(), [case_volume_and_binds, case_shared_volume, case_writeback,
                                           case_submount_cache, case_cache_paths,
-                                          case_negative_timeout, case_negative_timeout_per_mount],
+                                          case_negative_timeout, case_negative_timeout_per_mount,
+                                          case_writeback_submount_none],
                           jobs=7):
     for desc, expected, actual in results:
         t.check(desc, expected, actual)
