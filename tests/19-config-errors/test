@@ -6,6 +6,8 @@
   the error from runcvm-runtime.
 - RUNCVM_CPU_HEADROOM other than a number of CPUs from 0 to 64 or
   'max': creation fails (125), with the error from runcvm-runtime.
+- RUNCVM_HUGETLB other than 0, 1 or auto: creation fails (125), with the
+  error from runcvm-runtime.
 - RUNCVM_VIRTIOFSD_CACHE asking for writeback caching with a policy that
   does not cache file contents ('none,writeback'): Container/VM creation
   fails (exit status 125), with the error from runcvm-runtime.
@@ -40,6 +42,8 @@ CASES = [
      "RunCVM: Error: Kernel 'Not/A/Kernel' invalid"),
     ("cpu-headroom", ["--cpus=1", "--env=RUNCVM_CPU_HEADROOM=-1"], 125,
      "RunCVM: Error: RUNCVM_CPU_HEADROOM '-1' invalid"),
+    ("hugetlb", ["--env=RUNCVM_HUGETLB=on"], 125,
+     "RunCVM: Error: RUNCVM_HUGETLB 'on' invalid (should be 0, 1 or auto)"),
     ("virtiofsd-cache", ["--env=RUNCVM_VIRTIOFSD_CACHE=none,writeback"], 125,
      "RunCVM: Error: RUNCVM_VIRTIOFSD_CACHE 'none,writeback' invalid"),
     ("virtiofsd-cache-paths-path", ["--env=RUNCVM_VIRTIOFSD_CACHE_PATHS=data=auto"], 125,
