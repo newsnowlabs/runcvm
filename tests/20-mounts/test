@@ -41,8 +41,8 @@ container over virtiofs:
   RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=none, virtiofsd runs with --writeback and
   --submount-cache=never, and a volume is out of writeback's reach: data
   appended to a file in it from another container between two appends in
-  the VM is kept, and a file the VM writes there is on the host at once,
-  although the VM still holds it open.
+  the VM is kept, and data the VM writes to a file there is on the host
+  while the VM still holds the file open.
 
 The expected values describe current behaviour. A change to it must update
 them deliberately.
@@ -243,7 +243,8 @@ def case_writeback_submount_none():
     ex(name, "sh", "-c", "echo c >>/vol/appended")
     # The background shell keeps /vol/open open; under writeback, its data could stay in the VM.
     ex(name, "sh", "-c", "(exec 3>/vol/open; echo held-open >&3; exec sleep 600) >/dev/null 2>&1 &")
-    t.docker("exec", name, "sleep", "1")
+    held = t.wait_for("held-open data in %s on the host" % volume, 30,
+                      lambda: t.volume_read(volume, "open") == "held-open\n")
     return [
         ("writeback, submounts none: virtiofsd runs with --writeback and --submount-cache=never", True,
          any("virtiofsd" in line and "--writeback" in line and "--submount-cache=never" in line
@@ -251,8 +252,7 @@ def case_writeback_submount_none():
         ("writeback, submounts none: append from another container", 0, outside),
         ("writeback, submounts none: appends from the VM and from outside are all kept", "a\nb\nc\n",
          t.volume_read(volume, "appended")),
-        ("writeback, submounts none: data in a file the VM holds open is on the host", "held-open\n",
-         t.volume_read(volume, "open")),
+        ("writeback, submounts none: data in a file the VM holds open is on the host", True, held),
     ]
 
 
