@@ -54,7 +54,7 @@ RUN apk update && apk add --no-cache alpine-sdk coreutils && \
       --branch ${ALPINE_VERSION}-stable \
       "$APORTS_URL" ~/aports && \
     cd ~/aports/ && \
-    git sparse-checkout set main/seabios main/dnsmasq main/dropbear
+    git sparse-checkout set main/seabios main/dnsmasq main/dropbear community/virtiofsd
 
 # --- BUILD STAGE ---
 # Build base alpine-sdk image, at ALPINE_KERNEL_VERSION, for the patched mkinitfs's build stage
@@ -111,6 +111,23 @@ set -e
 cd /root/aports/main/dnsmasq
 echo 'sha512sums="${sha512sums}$(sha512sum remove-passwd-requirement.patch)"' >>APKBUILD
 echo 'source="${source}remove-passwd-requirement.patch"' >>APKBUILD
+abuild -rFf
+EOF
+
+# --- BUILD STAGE ---
+# Build patched virtiofsd: Alpine's own package, built with patches/virtiofsd/*.patch, a series
+# against the virtiofsd version that Alpine ships, each patch in a file of its own, applied in order
+# (see patches/virtiofsd/README.md for each one's origin, and when to drop it).
+FROM alpine-sdk as alpine-virtiofsd
+
+ADD patches/virtiofsd/ /root/aports/community/virtiofsd/
+
+RUN <<EOF
+set -e
+cd /root/aports/community/virtiofsd
+# Add the patches, in order, to the package's sources and checksums, which default_prepare applies.
+printf 'sha512sums="${sha512sums}%s\n"\n' "$(sha512sum *.patch)" >>APKBUILD
+printf 'source="${source} %s"\n' "$(echo *.patch)" >>APKBUILD
 abuild -rFf
 EOF
 
@@ -227,6 +244,11 @@ COPY --from=alpine-dnsmasq /root/packages/main /tmp/dnsmasq-pkgs/
 RUN ALPINE_ARCH=$(uname -m) && \
     apk add --allow-untrusted /tmp/dnsmasq-pkgs/$ALPINE_ARCH/dnsmasq-2*.apk \
                               /tmp/dnsmasq-pkgs/$ALPINE_ARCH/dnsmasq-common*.apk
+
+# Install patched virtiofsd
+COPY --from=alpine-virtiofsd /root/packages/community /tmp/virtiofsd-pkgs/
+RUN ALPINE_ARCH=$(uname -m) && \
+    apk add --allow-untrusted /tmp/virtiofsd-pkgs/$ALPINE_ARCH/virtiofsd-1*.apk
 
 # Install patched mke2fs
 COPY --from=e2fsprogs /usr/local/sbin/mke2fs /sbin/mke2fs
@@ -506,10 +528,14 @@ ADD runcvm-scripts /opt/runcvm/scripts/
 ADD runcvm-etc /opt/runcvm/etc/
 COPY LICENSE NOTICE /opt/runcvm/
 
+# The integration tests, which run from the package as /opt/runcvm/tests/run, so that a host can
+# test the package installed on it with the tests that match it.
+ADD tests /opt/runcvm/tests/
+
 # Files copied from the build context keep the checkout's permissions, which follow the umask of
 # whoever checked it out (e.g. group-writable under Ubuntu's default umask for users, 002), so give
 # them the package's own (see the check below).
-RUN chmod -R a+rX,go-w /opt/runcvm/scripts /opt/runcvm/etc /opt/runcvm/LICENSE /opt/runcvm/NOTICE
+RUN chmod -R a+rX,go-w /opt/runcvm/scripts /opt/runcvm/etc /opt/runcvm/tests /opt/runcvm/LICENSE /opt/runcvm/NOTICE
 
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]
