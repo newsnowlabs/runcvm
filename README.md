@@ -512,7 +512,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [-] Stdout and Stderr sent very soon after VM launch might be corrupted due to serial console issues
       - [-] Stdout and Stderr sent immediately before VM shutdown might not always be fully flushed
    - Resource allocation and limits
-      - [+] `--cpus` is supported: it sets the container's CPU quota, as usual, and also the number of VM CPUs, rounded up to a whole number (e.g. `--cpus=0.5` gives one CPU, limited to half a CPU's time)
+      - [+] `--cpus` is supported: it sets the number of VM CPUs, rounded up to a whole number, and the container's CPU quota, with [`RUNCVM_CPU_HEADROOM`](#runcvm_cpu_headroom)'s CPUs more (one by default) for QEMU and `virtiofsd`: e.g. `--cpus=2` gives two CPUs and a quota of three; `--cpus=0.5` gives one CPU and a quota of one and a half
       - [+] `--memory` (or `-m`) is supported to specify VM memory (and limit container memory to this value plus a 256Mb contingency)
       - [-] Other container resource limit options such as (`--cpu-*`), block IO (`--blkio-*`), kernel memory (`--kernel-memory`) are unsupported or untested
    - Exit code
@@ -1095,6 +1095,18 @@ Enable logging the exit code from QEMU and OOM statistics.
 Enable breakpoints (falling to bash shell) during the RunCVM Container/VM boot process.
 
 `<values>` must be a comma-separated list of: `prenet`, `postnet`, `preqemu`.
+
+### RUNCVM_CPU_HEADROOM
+
+**`RUNCVM_CPU_HEADROOM=<cpus|max>`** (default `1`)
+
+How many CPUs, from `0` to `64` (fractions allowed), to add to the CPU quota that `docker run --cpus` sets, for the Container/VM's own processes: QEMU's threads and `virtiofsd`, which run in the container alongside the VM's CPUs and share its quota. Without `--cpus`, the container has no quota, and nothing is added, though an invalid value still fails creation.
+
+`--cpus=N` gives the VM N CPUs (rounded up), each of which can keep a host CPU busy. With a quota of exactly N, QEMU and `virtiofsd` then have no time of their own: whenever they need CPU while the VM's CPUs are busy, Linux stops every thread in the container, the VM's CPUs included, until the next 100 ms period. With `--cpus=1` and no headroom, a Container/VM can take about 60% longer to create 2,000 small files or copy a directory tree of about 1,400 files, and a third longer to run a small program 300 times, than with one CPU of headroom, under which it is not throttled.
+
+`0` keeps Docker's quota exactly, so that the container never uses more than `--cpus` CPUs. `max` removes the quota, so that `--cpus` sets only the number of VM CPUs. `docker update --cpus` sets the quota without headroom.
+
+With `--cpus` equal to the host's CPU count (or more), and any headroom but `0`, the quota can never be reached, so the Container/VM behaves as without `--cpus`; to leave CPU for QEMU and `virtiofsd` when the VM keeps all its CPUs busy, give it fewer CPUs than the host has.
 
 ### RUNCVM_HUGETLB
 
