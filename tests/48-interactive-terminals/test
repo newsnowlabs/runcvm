@@ -161,7 +161,7 @@ runtimes = [t.RUNTIME] if t.RUNTIME == "runc" else [t.RUNTIME, "runc"]
 CASES = [(runtime, mode, init) for runtime in runtimes for mode in ("run", "exec") for init in (False, True)]
 t.param("init", "no, yes")
 
-for (runtime, mode, init), result in zip(CASES, t.parallel(run, CASES)):
+for (runtime, mode, init), result in zip(CASES, t.parallel(run, CASES, remove=True)):
     desc = "%s, docker %s -it, %s" % (runtime, mode, "--init" if init else "no --init")
     # The known limitation of a Container/VM's console (see above).
     console = runtime != "runc" and mode == "run"
