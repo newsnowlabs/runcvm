@@ -76,6 +76,14 @@ echo "$RUNCVM_GUEST/scripts/runcvm-vm-modprobe" >/proc/sys/kernel/modprobe
 
 # Reports error $1 on the console device, which the container's output is connected to, and powers
 # the VM off with exit status 1.
+# Writes warning $1 to the console, and carries on.
+vm_init_warn() {
+  local console
+
+  read -r console </.runcvm/console
+  echo "RunCVM: Warning: $1" >"/dev/$console"
+}
+
 vm_init_error() {
   local console
 
@@ -517,11 +525,16 @@ if [ -f /.runcvm/fstab ]; then
   fi
 
   # Mount our fstab over the image's /etc/fstab, where the image has one. An image without one
-  # (e.g. busybox, or a static binary's) is left without one, unless RUNCVM_FSTAB=all, for which an
-  # empty /etc/fstab is created to mount it over, so that systemd and 'mount -a' find the held
-  # mounts' entries.
+  # (e.g. busybox, a static binary's, or almalinux/9-init) is left without one, unless
+  # RUNCVM_FSTAB=all, for which an empty /etc/fstab is created to mount it over, so that systemd and
+  # 'mount -a' find the held mounts' entries. Without a whole-root disk, that file is in the
+  # container's own filesystem: the one file RunCVM writes there, and only at RUNCVM_FSTAB=all's
+  # request. Where it cannot be created (e.g. on a read-only root), the VM boots without our fstab,
+  # with a warning.
   if [[ ! -e /etc/fstab && "${RUNCVM_FSTAB:-disks}" = "all" ]]; then
-    { mkdir -p /etc && touch /etc/fstab; } || vm_init_error "RUNCVM_FSTAB=all: /etc/fstab cannot be created"
+    if ! { [ -d /etc ] && touch /etc/fstab; } 2>/dev/null; then
+      vm_init_warn "RUNCVM_FSTAB=all: /etc/fstab cannot be created; booting without RunCVM's fstab, so 'mount -a' and systemd cannot mount the held volumes again"
+    fi
   fi
   if [ -e /etc/fstab ]; then
     mount -i --options-source=disable --bind /.runcvm/fstab /etc/fstab || vm_init_error "/.runcvm/fstab cannot be mounted over /etc/fstab"
