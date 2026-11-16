@@ -49,6 +49,11 @@ the runtime or the scripts.
   are rewritten before and after each test, so they show a run's progress, and a run survives
   its terminal going away (SIGHUP is ignored); SIGINT or SIGTERM stops it, writing the results
   so far.
+- The package ships the tests, as `/opt/runcvm/tests` (`/opt/runcvm/tests/run`), so a host can
+  run those matching its installed RunCVM; the runner records the installed package's
+  `VERSION` in its results. A test that runs or reads RunCVM's scripts without a VM finds them
+  with the framework helper `scripts_dir`, which works from a checkout and from the package
+  alike; nothing a test does may write into its own directory.
 - `tests/run --mock` (stand-in mode) runs the tests with `runc` in place of RunCVM, skipping
   those that require real VMs. Use it to develop tests and the runner where RunCVM can't run.
 - `tests/run --accel tcg` runs real RunCVM Container/VMs under software emulation where KVM is
@@ -74,8 +79,14 @@ the runtime or the scripts.
   Container/VM; `check`, `check_cmd` and `expect_exit` for results; `wait_for` and
   `wait_for_exec` for every wait, so nothing waits without a deadline; `log_detail` for
   step-by-step progress (e.g. each of many requests' outcomes), which goes to the test's log,
-  and to the terminal only with `tests/run --verbose`; `parallel` (Python) to
-  run independent cases at once; `skip` and `finish` to end.
+  and to the terminal only with `tests/run --verbose`; `parallel` (Python) to run independent
+  cases at once, with `remove=True` to remove each case's Container/VMs and volumes as soon as
+  its call returns, so that no more than `RUNCVM_TEST_JOBS` cases' VMs run at once; `skip` and
+  `finish` to end.
+- Pass `vm_opts` before a test's own `docker run` options, so that a test's own `--env`,
+  `--cpus` or `--memory` overrides the runner's (`tests/run --vm-env`, `--vm-cpus`,
+  `--vm-memory`); a test that checks the VM's size against its defaults uses
+  `vm_opts(size=False)` (`vm_opts --no-size` in bash).
 - Tests must not download anything at run time beyond pulling images: containers on Docker
   networks may have no outbound access in sandboxed or CI environments.
 - Where behaviour should be the same with and without `--init`, test both, recording the mode

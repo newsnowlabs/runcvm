@@ -93,7 +93,7 @@ def run(item):
 items = [(fs, prealloc) for fs in FILESYSTEMS for prealloc in ("on", "off")]
 t.param("fs", ", ".join(FILESYSTEMS))
 t.param("prealloc", "on, off")
-for (fs, prealloc), results in zip(items, t.parallel(run, items)):
+for (fs, prealloc), results in zip(items, t.parallel(run, items, remove=True)):
     mode = "%s, prealloc=%s" % (fs, prealloc)
     size = SIZES[fs]
 

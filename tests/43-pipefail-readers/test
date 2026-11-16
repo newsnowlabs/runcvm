@@ -8,8 +8,12 @@ to it to be killed by SIGPIPE, failing the pipeline at random even when
 the reader succeeded. In a script that also runs under errexit, or tests
 the pipeline's status, that turns a match into a failure.
 
-The test reads every file in the repository that turns on pipefail (a shell
-script's 'set -o pipefail', or a Dockerfile's SHELL with '-o pipefail') and
+The test reads every file that turns on pipefail (a shell script's
+'set -o pipefail', or a Dockerfile's SHELL with '-o pipefail'). From a source
+checkout, it searches the whole repository. From the installed package, it
+searches the package's scripts/, etc/ and tests/ directories, which hold
+RunCVM's own files as they are in the repository, and not the package's
+binaries, libraries and kernels. It
 fails on each pipeline in it with such a reader after any of its pipes: a
 reader that exits early fails the pipeline wherever it stands in it. It first
 checks that it finds each kind of reader in a sample, so that a fault in the
@@ -23,8 +27,10 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import framework as t  # noqa: E402
 
-REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-SKIP_DIRS = {".git"}
+# The directory reported paths are relative to, and the directories searched within it.
+ROOT = os.path.abspath(os.path.join(t.TESTS_DIR, ".."))
+SEARCH = [ROOT] if t.source_tree() else [os.path.join(ROOT, d) for d in ("scripts", "etc", "tests")]
+SKIP_DIRS = {".git", "__pycache__"}
 
 # A pipe (not '||') followed by a reader that can exit early.
 READER = re.compile(
@@ -71,20 +77,21 @@ def code_lines(path):
 
 
 def files():
-    for root, dirs, names in os.walk(REPO):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-        for name in names:
-            path = os.path.join(root, name)
-            if os.path.islink(path) or not os.path.isfile(path):
-                continue
-            try:
-                with open(path, "rb") as f:
-                    head = f.read(4096)
-            except OSError:
-                continue
-            if b"\0" in head:
-                continue
-            yield path
+    for top in SEARCH:
+        for root, dirs, names in os.walk(top):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            for name in names:
+                path = os.path.join(root, name)
+                if os.path.islink(path) or not os.path.isfile(path):
+                    continue
+                try:
+                    with open(path, "rb") as f:
+                        head = f.read(4096)
+                except OSError:
+                    continue
+                if b"\0" in head:
+                    continue
+                yield path
 
 
 wrong = [line for line, expected in SAMPLE if bool(READER.search(line)) != expected]
@@ -96,7 +103,7 @@ for path in files():
     lines = list(code_lines(path))
     if not any(PIPEFAIL.search(text) for _, text in lines):
         continue
-    rel = os.path.relpath(path, REPO)
+    rel = os.path.relpath(path, ROOT)
     checked.append(rel)
     for number, text in lines:
         if READER.search(text):
