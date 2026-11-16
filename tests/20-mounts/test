@@ -13,6 +13,9 @@ container over virtiofs:
   options.
 - Two Container/VMs sharing a volume with RUNCVM_VIRTIOFSD_CACHE=none see
   each other's writes at once.
+- With RUNCVM_VIRTIOFSD_POLL=fixed or adaptive, virtiofsd runs with
+  --queue-poll set accordingly, and the VM boots and creates, reads and
+  deletes 500 files in a volume, which then holds what the VM wrote.
 - With RUNCVM_VIRTIOFSD_CACHE=always,writeback, virtiofsd runs with
   --writeback; a file written and closed in the VM is on the host at once,
   appends ('>>') extend a file rather than overwrite it, and data written
@@ -297,6 +300,32 @@ def case_negative_timeout():
     ]
 
 
+def case_queue_poll():
+    results = []
+
+    def one(mode):
+        volume = t.unique("poll-" + mode)
+        t.volume_create(volume)
+        name = start("poll-" + mode, "-v", volume + ":/vol", "--env=RUNCVM_VIRTIOFSD_POLL=" + mode)
+        if not name:
+            return [("queue poll %s: Container/VM started" % mode, True, False)]
+        args = [line for line in t.docker("top", name, "-o", "pid,args").stdout.splitlines() if "virtiofsd" in line]
+        work = ex(name, "sh", "-c", "cd /vol && for i in $(seq 500); do echo $i >f$i; done && "
+                  "cat f* | wc -l && rm f[0-9]* && echo kept >last && ls | wc -l")
+        return [
+            ("queue poll %s: virtiofsd runs with --queue-poll=%s" % (mode, mode), True,
+             any("--queue-poll=" + mode in line for line in args)),
+            ("queue poll %s: 500 files created, read and deleted in the VM" % mode, ["500", "1"],
+             work.stdout.split()),
+            ("queue poll %s: the volume holds what the VM wrote" % mode, "kept\n",
+             t.volume_read(volume, "last")),
+        ]
+
+    for r in t.parallel(one, ["fixed", "adaptive"], jobs=2):
+        results.extend(r)
+    return results
+
+
 def case_negative_timeout_per_mount():
     volume = t.unique("negcap")
     t.volume_create(volume)
@@ -331,8 +360,8 @@ def case_negative_timeout_per_mount():
 for results in t.parallel(lambda f: f(), [case_volume_and_binds, case_shared_volume, case_writeback,
                                           case_submount_cache, case_cache_paths,
                                           case_negative_timeout, case_negative_timeout_per_mount,
-                                          case_writeback_submount_none],
-                          jobs=7):
+                                          case_writeback_submount_none, case_queue_poll],
+                          jobs=8):
     for desc, expected, actual in results:
         t.check(desc, expected, actual)
 

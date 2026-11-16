@@ -62,6 +62,17 @@ if [ "$RUNCVM_VIRTIOFSD_KILLPRIV" = "1" ]; then
   OPTS+=(--killpriv-v2)
 fi
 
+# RUNCVM_VIRTIOFSD_POLL=<none|fixed|adaptive> and RUNCVM_VIRTIOFSD_POLL_US=<microseconds>, which
+# runcvm-runtime validates, set how virtiofsd polls the VM's request queue after it runs dry, before
+# waiting to be notified (RunCVM's virtiofsd patches 0013 and 0014): RUNCVM_VIRTIOFSD_POLL_US is
+# fixed's window, or adaptive's largest (virtiofsd's default 50 if unset), and alone means fixed.
+if [ -n "$RUNCVM_VIRTIOFSD_POLL" ]; then
+  OPTS+=(--queue-poll="$RUNCVM_VIRTIOFSD_POLL")
+fi
+if [ "${RUNCVM_VIRTIOFSD_POLL_US:-0}" -gt 0 ]; then
+  OPTS+=(--queue-poll-us="$RUNCVM_VIRTIOFSD_POLL_US")
+fi
+
 # --inode-file-handles=never keeps virtiofsd from requiring CAP_DAC_READ_SEARCH, which containers
 # lack by default (virtiofsd's default, 'prefer', needs it).
 # Send logs to /run in container (not in VM)
