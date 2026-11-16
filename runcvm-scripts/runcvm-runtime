@@ -63,6 +63,15 @@ debug() {
   [ -n "$RUNCVM_DEBUG" ] && true || false
 }
 
+# Debug logs, and copies of the configuration the runtime is given and returns, go in this root-only
+# directory (see RUNCVM_RUNTIME_DEBUG).
+RUNCVM_DEBUG_DIR=/run/runcvm
+
+enable_debug() {
+  RUNCVM_DEBUG="1"
+  busybox mkdir -p "$RUNCVM_DEBUG_DIR" && busybox chmod 700 "$RUNCVM_DEBUG_DIR"
+}
+
 # runcvm-runtime runs on the host, and uses only bash's builtins and RunCVM's own tools (busybox and
 # jq, each run with RunCVM's loader), never the host's, so that it behaves alike whatever the host
 # provides. The one exception is runc, which it wraps: find_runc resolves it in the PATH the runtime
@@ -84,7 +93,7 @@ command_not_found_handle() {
 }
 
 log() {
-  debug && echo "$(busybox date '+%Y-%m-%d %H:%M:%S.%6N'): $$: $@" >>/tmp/runcvm-$$.log
+  debug && echo "$(busybox date '+%Y-%m-%d %H:%M:%S.%6N'): $$: $@" >>"$RUNCVM_DEBUG_DIR/runtime-$$.log"
 }
 
 # Reports error $1: on stderr, in the debug log, and in the runtime log file the caller requested.
@@ -239,15 +248,19 @@ jq() {
   HOME=$RUNCVM $RUNCVM_LD $RUNCVM_JQ "$@"
 }
 
+# jq_set <file> <jq arguments...>
+# Replaces <file> with jq's output. The output is written beside <file>, in the same directory (the
+# bundle containerd gives the runtime), and renamed over it, so that the file is replaced whole.
 jq_set() {
   local file="$1"
   shift
   
-  local tmp="/tmp/config.json.$$"
+  local tmp="$file.runcvm-tmp.$$"
 
-  if jq "$@" $file >$tmp; then
-    busybox mv $tmp $file
+  if jq "$@" "$file" >"$tmp"; then
+    busybox mv "$tmp" "$file"
   else
+    busybox rm -f "$tmp"
     echo "Failed to update ${file##*/}; aborting!" 2>&1
     exit 1
   fi
@@ -398,7 +411,7 @@ if [ "$COMMAND" = "create" ]; then
 
   # Allow user to enable debug logging
   if [ "$(get_config_env RUNCVM_RUNTIME_DEBUG)" = "1" ]; then
-    RUNCVM_DEBUG="1"
+    enable_debug
   fi
 
   if debug; then
@@ -406,7 +419,7 @@ if [ "$COMMAND" = "create" ]; then
     log "Command: create bundle=$BUNDLE id=$ID root=$ROOT"
     
     # Save formatted config.json
-    jq -r . <$CFG >/tmp/config.json-$$-1
+    jq -r . <$CFG >"$RUNCVM_DEBUG_DIR/config.json-$$-1"
     
   fi
   
@@ -937,7 +950,7 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
       .process.args = [.process.args[0], ($env[0] | length | tostring)] + $env[0] + .process.args[1:]
       | .process.env |= runcvm_env($path)'
 
-  debug && busybox cp -a $CFG /tmp/config.json-$$-2
+  debug && busybox cp -a $CFG "$RUNCVM_DEBUG_DIR/config.json-$$-2"
   
 elif [ "$COMMAND" = "exec" ]; then
 
@@ -975,7 +988,7 @@ elif [ "$COMMAND" = "exec" ]; then
 
   # Allow user to enable debug logging
   if [ "$(get_process_env "$PROCESS" 'RUNCVM_RUNTIME_DEBUG' '0')" = "1" ]; then
-    RUNCVM_DEBUG="1"
+    enable_debug
   fi
 
   if debug; then
@@ -983,7 +996,7 @@ elif [ "$COMMAND" = "exec" ]; then
     log "Command: exec process=$PROCESS"
     
     # Save formatted process.json
-    jq -r . <$PROCESS >/tmp/process.json-$$-1
+    jq -r . <$PROCESS >"$RUNCVM_DEBUG_DIR/process.json-$$-1"
   fi
 
   ARG1=$(jq_get "$PROCESS" '.args[0]')
@@ -1015,7 +1028,7 @@ elif [ "$COMMAND" = "exec" ]; then
     jq_set "$PROCESS" '.user = {"uid":0, "gid":0} | .cwd="/"'
   fi
   
-  debug && busybox cp -a $PROCESS /tmp/process.json-$$-2
+  debug && busybox cp -a $PROCESS "$RUNCVM_DEBUG_DIR/process.json-$$-2"
 fi
 
 debug && log "--- LOG ENDS ---"
