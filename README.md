@@ -512,7 +512,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [-] Stdout and Stderr sent very soon after VM launch might be corrupted due to serial console issues
       - [-] Stdout and Stderr sent immediately before VM shutdown might not always be fully flushed
    - Resource allocation and limits
-      - [+] `--cpus` is supported: it sets the container's CPU quota, as usual, and also the number of VM CPUs, rounded up to a whole number (e.g. `--cpus=0.5` gives one CPU, limited to half a CPU's time)
+      - [+] `--cpus` is supported: it sets the number of VM CPUs, rounded up to a whole number, and the container's CPU quota, with [`RUNCVM_CPU_HEADROOM`](#runcvm_cpu_headroom)'s CPUs more (one by default) for QEMU and `virtiofsd`: e.g. `--cpus=2` gives two CPUs and a quota of three; `--cpus=0.5` gives one CPU and a quota of one and a half
       - [+] `--memory` (or `-m`) is supported to specify VM memory (and limit container memory to this value plus a 256Mb contingency)
       - [-] Other container resource limit options such as (`--cpu-*`), block IO (`--blkio-*`), kernel memory (`--kernel-memory`) are unsupported or untested
    - Exit code
@@ -1096,6 +1096,18 @@ Enable breakpoints (falling to bash shell) during the RunCVM Container/VM boot p
 
 `<values>` must be a comma-separated list of: `prenet`, `postnet`, `preqemu`.
 
+### RUNCVM_CPU_HEADROOM
+
+**`RUNCVM_CPU_HEADROOM=<cpus|max>`** (default `1`)
+
+How many CPUs, from `0` to `64` (fractions allowed), to add to the CPU quota that `docker run --cpus` sets, for the Container/VM's own processes: QEMU's threads and `virtiofsd`, which run in the container alongside the VM's CPUs and share its quota. Without `--cpus`, the container has no quota, and nothing is added, though an invalid value still fails creation.
+
+`--cpus=N` gives the VM N CPUs (rounded up), each of which can keep a host CPU busy. With a quota of exactly N, QEMU and `virtiofsd` then have no time of their own: whenever they need CPU while the VM's CPUs are busy, Linux stops every thread in the container, the VM's CPUs included, until the next 100 ms period. With `--cpus=1` and no headroom, a Container/VM can take about 60% longer to create 2,000 small files or copy a directory tree of about 1,400 files, and a third longer to run a small program 300 times, than with one CPU of headroom, under which it is not throttled.
+
+`0` keeps Docker's quota exactly, so that the container never uses more than `--cpus` CPUs. `max` removes the quota, so that `--cpus` sets only the number of VM CPUs. `docker update --cpus` sets the quota without headroom.
+
+With `--cpus` equal to the host's CPU count (or more), and any headroom but `0`, the quota can never be reached, so the Container/VM behaves as without `--cpus`; to leave CPU for QEMU and `virtiofsd` when the VM keeps all its CPUs busy, give it fewer CPUs than the host has.
+
 ### RUNCVM_HUGETLB
 
 **`RUNCVM_HUGETLB=<0|1|auto>`**
@@ -1328,7 +1340,7 @@ docker exec -it -u runcvm runcvm-l1 bash
 
 Launch it without `--init`, so that systemd is the VM's PID 1. `docker exec runcvm-l1 runcvm-l1-check` checks that it is working.
 
-The image preinstalls the RunCVM release named by its `RUNCVM_IMAGE` build argument. To run the integration tests below inside it, preinstall the RunCVM they were written for, e.g. one built by `./build/build.sh`: `docker build -t runcvm-l1 --build-arg RUNCVM_IMAGE=newsnowlabs/runcvm:latest tests/env`.
+The image preinstalls the RunCVM release named by its `RUNCVM_IMAGE` build argument. To run the integration tests below inside it, preinstall the RunCVM they were written for, e.g. one built by `./build/build.sh`: `docker build -t runcvm-l1 --build-arg RUNCVM_IMAGE=newsnowlabs/runcvm:latest tests/env`; the package's own tests, in `/opt/runcvm/tests`, always match it.
 
 To test RunCVM's installer, run `runcvm-scripts/runcvm-install-runtime.sh` from a clone of this repository inside it.
 
@@ -1347,11 +1359,13 @@ tests/run --list               # list tests with their tier, timeout and require
 
 Tests are numbered by tier: `1x` core, `5x` extended.
 
-`tests/run` (Python 3, standard library only) exits `0` if every selected test passed or was skipped, `1` if any failed or timed out, and `2` on a harness error (for example, no tests selected, an unknown requirement, or the Docker daemon or runtime not available). It writes per-test logs, `results.tap`, `junit.xml`, `results.json`, `summary.txt` and `status` to a results directory (`--results DIR`, default `${TMPDIR:-/tmp}/runcvm-tests/<run-id>`), and removes any containers, networks and volumes a test leaves behind that carry the test's labels. Use `--runtime NAME` (or `RUNTIME`) to test a runtime other than `runcvm`.
+The RunCVM package ships the integration tests that match it, in `/opt/runcvm/tests`, so a host can test the RunCVM installed on it without a clone of this repository, e.g. `/opt/runcvm/tests/run --tier core`. Run from a clone, the tests are those of the clone's checkout, which may differ from those of the installed package.
+
+`tests/run` (Python 3, standard library only) exits `0` if every selected test passed or was skipped, `1` if any failed or timed out, and `2` on a harness error (for example, no tests selected, an unknown requirement, or the Docker daemon or runtime not available). It writes per-test logs, `results.tap`, `junit.xml`, `results.json`, `summary.txt` and `status` to a results directory (`--results DIR`, default `${TMPDIR:-/tmp}/runcvm-tests/<run-id>`), each recording the version of the RunCVM package installed at `/opt/runcvm` (from its `VERSION` file), and removes any containers, networks and volumes a test leaves behind that carry the test's labels. Use `--runtime NAME` (or `RUNTIME`) to test a runtime other than `runcvm`.
 
 Each test is a directory under `tests/` containing an executable `test` file, in any language, which exits `0` to pass, `77` to skip (logging `SKIP: <reason>`), and any other code to fail. Optional files in the directory set its `tier` (`core`, the default, or `extended`), `timeout` (seconds; default 1800) and `requires` (any of `vm`, `kvm`, `ipv6` and `docker>=<major>.<minor>`; a test whose requirements are not met is skipped without running; `kvm` means VMs actually use KVM acceleration, and `docker>=29.0`, for example, that dockerd's version is at least 29.0).
 
-Helpers for tests are in `tests/framework.sh` (bash) and `tests/framework.py` (Python), with the same names: unique per-run names (`unique`), labels that let the runner remove leftovers (`labels`), options for RunCVM Container/VMs (`vm_opts`), recorded checks (`check`, `check_cmd`, `expect_exit`), parameters (`param`), polling with deadlines (`wait_for`, `wait_for_exec`), results volumes (`volume_create`, `volume_read`), `skip` and `finish`.
+Helpers for tests are in `tests/framework.sh` (bash) and `tests/framework.py` (Python), with the same names: unique per-run names (`unique`), labels that let the runner remove leftovers (`labels`), options for RunCVM Container/VMs (`vm_opts`), recorded checks (`check`, `check_cmd`, `expect_exit`), parameters (`param`), polling with deadlines (`wait_for`, `wait_for_exec`), results volumes (`volume_create`, `volume_read`), the location of RunCVM's scripts in a clone or the installed package (`scripts_dir`, `source_tree`), `skip` and `finish`.
 
 `--accel kvm|auto|tcg` (or `RUNCVM_TEST_ACCEL`) selects QEMU acceleration for the tests' RunCVM Container/VMs, which tests pass on as `RUNCVM_QEMU_ACCEL` using the `vm_opts` helper (where the RunCVM version under test supports it). With `--accel tcg`, real RunCVM Container/VMs run under software emulation where KVM is unavailable: slow, but it exercises RunCVM itself; tests that require `kvm` are skipped.
 
