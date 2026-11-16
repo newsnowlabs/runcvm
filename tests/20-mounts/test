@@ -64,7 +64,8 @@ VM = ["--runtime=" + t.RUNTIME, *t.vm_opts()]
 # RunCVM's defaults for virtiofsd's settings (an empty value is the default). A case that checks
 # virtiofsd's options or caching passes them before its own, so that settings the runner gives
 # every Container/VM do not change what it checks.
-VIRTIOFSD_DEFAULTS = ["--env=RUNCVM_VIRTIOFSD_%s=" % s for s in ("CACHE", "NEGATIVE_TIMEOUT")]
+VIRTIOFSD_DEFAULTS = ["--env=RUNCVM_VIRTIOFSD_%s=" % s
+                      for s in ("CACHE", "CACHE_PATHS", "NEGATIVE_TIMEOUT", "SUBMOUNT_CACHE")]
 
 
 def start(label, *opts, image=("alpine", "sleep", "600")):
@@ -136,7 +137,8 @@ def case_shared_volume():
 def case_writeback():
     volume = t.unique("writeback")
     t.volume_create(volume)
-    name = start("writeback", "-v", volume + ":/vol", "--env=RUNCVM_VIRTIOFSD_CACHE=always,writeback")
+    name = start("writeback", *VIRTIOFSD_DEFAULTS, "-v", volume + ":/vol",
+                 "--env=RUNCVM_VIRTIOFSD_CACHE=always,writeback")
     if not name:
         return [("writeback: Container/VM started", True, False)]
     top = t.docker("top", name).stdout
@@ -167,7 +169,7 @@ def case_submount_cache():
     try:
         t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v",
                  volume + ":/v", "alpine", "sh", "-c", "echo vol-old >/v/f")
-        name = start("submount", "-v", host + ":/bind", "-v", volume + ":/vol",
+        name = start("submount", *VIRTIOFSD_DEFAULTS, "-v", host + ":/bind", "-v", volume + ":/vol",
                      "--env=RUNCVM_VIRTIOFSD_CACHE=always",
                      "--env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto")
         if not name:
@@ -211,7 +213,7 @@ def case_cache_paths():
         t.volume_create(volume)
         t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v",
                  volume + ":/v", "alpine", "sh", "-c", "echo old >/v/f")
-    name = start("cachepath", "-v", fresh + ":/data/a", "-v", stale + ":/srv/b",
+    name = start("cachepath", *VIRTIOFSD_DEFAULTS, "-v", fresh + ":/data/a", "-v", stale + ":/srv/b",
                  "--env=RUNCVM_VIRTIOFSD_CACHE=always",
                  "--env=RUNCVM_VIRTIOFSD_CACHE_PATHS=/data=auto")
     if not name:
@@ -239,7 +241,8 @@ def case_cache_paths():
 def case_writeback_submount_none():
     volume = t.unique("wbnone")
     t.volume_create(volume)
-    name = start("wbnone", "-v", volume + ":/vol", "--env=RUNCVM_VIRTIOFSD_CACHE=always,writeback",
+    name = start("wbnone", *VIRTIOFSD_DEFAULTS, "-v", volume + ":/vol",
+                 "--env=RUNCVM_VIRTIOFSD_CACHE=always,writeback",
                  "--env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=none")
     if not name:
         return [("writeback, submounts none: Container/VM started", True, False)]
@@ -326,7 +329,8 @@ def case_queue_poll():
 def case_negative_timeout_per_mount():
     volume = t.unique("negcap")
     t.volume_create(volume)
-    name = start("negcap", "-v", volume + ":/vol", "--env=RUNCVM_VIRTIOFSD_CACHE=always",
+    name = start("negcap", *VIRTIOFSD_DEFAULTS, "-v", volume + ":/vol",
+                 "--env=RUNCVM_VIRTIOFSD_CACHE=always",
                  "--env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto",
                  "--env=RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600")
     if not name:
