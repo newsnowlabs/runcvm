@@ -85,6 +85,38 @@ RUNCVM_TEST_NAME="${RUNCVM_TEST_NAME:-$(basename "$PWD")}"
 
 ERRORS=${ERRORS:-0}
 
+# The deadline, in seconds, for each 'docker exec', and each 'docker run' not detached (-d), that a
+# test runs: RUNCVM_TEST_EXEC_TIMEOUT, or 300 (1200 under TCG). A hung command then fails (exit
+# status 124, after logging the timeout on standard error), rather than holding the test until the
+# runner's time limit.
+if [ -z "$RUNCVM_TEST_EXEC_TIMEOUT" ]; then
+  if [ "$RUNCVM_TEST_ACCEL" = "tcg" ]; then RUNCVM_TEST_EXEC_TIMEOUT=1200; else RUNCVM_TEST_EXEC_TIMEOUT=300; fi
+fi
+
+# docker ...
+# The docker CLI, giving 'docker exec', and 'docker run' not detached, the deadline
+# RUNCVM_TEST_EXEC_TIMEOUT. --foreground keeps the command in the terminal's process group, so that
+# 'docker exec -t' and 'docker run -t' can use the terminal.
+docker() {
+  local arg rc=0 deadline=0
+  case "$1" in
+    exec) deadline=1 ;;
+    run)
+      deadline=1
+      for arg in "${@:2}"; do
+        case "$arg" in -d|--detach|--detach=*) deadline=0; break ;; esac
+      done
+      ;;
+  esac
+  if [ "$deadline" = 0 ]; then
+    command docker "$@"
+    return
+  fi
+  timeout --foreground -k 10 "$RUNCVM_TEST_EXEC_TIMEOUT" docker "$@" || rc=$?
+  [ "$rc" -eq 124 ] && echo "> Timed out after ${RUNCVM_TEST_EXEC_TIMEOUT}s: docker $*" >&2
+  return "$rc"
+}
+
 # unique NAME
 # Print a Docker object name that is unique to this run, so that runs (and
 # tests) can proceed concurrently without name clashes.

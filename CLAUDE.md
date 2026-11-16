@@ -77,7 +77,10 @@ the runtime or the scripts.
   `unique` for every Docker object name and `labels` on every object created, so that runs can
   proceed concurrently and the runner can remove leftovers; `vm_opts` on every RunCVM
   Container/VM; `check`, `check_cmd` and `expect_exit` for results; `wait_for` and
-  `wait_for_exec` for every wait, so nothing waits without a deadline; `log_detail` for
+  `wait_for_exec` for every wait, so nothing waits without a deadline (the helpers, and bash's
+  `docker` once `framework.sh` is sourced, give each `docker exec`, and each `docker run` not
+  detached, the deadline `RUNCVM_TEST_EXEC_TIMEOUT`; a test that runs docker through `subprocess`
+  itself passes a timeout); `log_detail` for
   step-by-step progress (e.g. each of many requests' outcomes), which goes to the test's log,
   and to the terminal only with `tests/run --verbose`; `parallel` (Python) to run independent
   cases at once, with `remove=True` to remove each case's Container/VMs and volumes as soon as
