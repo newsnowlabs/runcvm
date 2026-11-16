@@ -5,6 +5,11 @@
   equals it (no swap).
 - The VM's CPU count is --cpus rounded up to a whole number. Without
   --cpus, the VM has as many CPUs as the container can use.
+- The container's CPU quota is --cpus plus RUNCVM_CPU_HEADROOM's CPUs
+  (default 1), for QEMU and virtiofsd; with RUNCVM_CPU_HEADROOM=0, exactly
+  --cpus; with RUNCVM_CPU_HEADROOM=max, none, while the VM keeps
+  --cpus's CPU count. Without --cpus, there is no quota. (Checked where the host uses
+  cgroup v2.)
 - RUNCVM_KERNEL_APPEND is appended to the VM kernel's command line.
 
 The expected values describe current behaviour. A change to it must update
@@ -23,19 +28,34 @@ BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
 host_cpus = int(t.docker("run", "--rm", "--runtime=runc", *t.labels(), "alpine", "nproc").stdout.strip() or 0)
 t.log("CPUs available to a container on this host: %d" % host_cpus)
 
-# (name, docker run options, expected VM CPUs, expected VM memory (MiB))
+# (name, docker run options, expected VM CPUs, expected VM memory (MiB), expected cgroup cpu.max)
 CASES = [
-    ("defaults", [], host_cpus, 512),
-    ("cpus-2-memory-768m", ["--cpus=2", "--memory=768m"], min(2, host_cpus), 768),
-    ("memory-768m-swap-768m", ["--memory=768m", "--memory-swap=768m"], host_cpus, 768),
-    ("cpus-1.5", ["--cpus=1.5"], min(2, host_cpus), 512),
-    ("cpus-0.5", ["--cpus=0.5"], 1, 512),
-    ("kernel-append", ["--env=RUNCVM_KERNEL_APPEND=runcvm.test=marker"], host_cpus, 512),
+    ("defaults", [], host_cpus, 512, "max 100000"),
+    ("cpus-2-memory-768m", ["--cpus=2", "--memory=768m"], min(2, host_cpus), 768, "300000 100000"),
+    ("memory-768m-swap-768m", ["--memory=768m", "--memory-swap=768m"], host_cpus, 768, "max 100000"),
+    ("cpus-1.5", ["--cpus=1.5"], min(2, host_cpus), 512, "250000 100000"),
+    ("cpus-0.5", ["--cpus=0.5"], 1, 512, "150000 100000"),
+    ("cpus-2-headroom-0", ["--cpus=2", "--env=RUNCVM_CPU_HEADROOM=0"], min(2, host_cpus), 512, "200000 100000"),
+    ("cpus-2-headroom-max", ["--cpus=2", "--env=RUNCVM_CPU_HEADROOM=max"], min(2, host_cpus), 512,
+     "max 100000"),
+    ("kernel-append", ["--env=RUNCVM_KERNEL_APPEND=runcvm.test=marker"], host_cpus, 512, "max 100000"),
 ]
 
 
+def cpu_max(container):
+    """The container's cgroup v2 cpu.max ('<quota> <period>'), read on the host; None without cgroup v2."""
+    pid = t.docker("inspect", "-f", "{{.State.Pid}}", container).stdout.strip()
+    try:
+        with open("/proc/%s/cgroup" % pid) as f:
+            path = [line.split(":", 2)[2] for line in f.read().splitlines() if line.startswith("0::")][0]
+        with open("/sys/fs/cgroup%s/cpu.max" % path) as f:
+            return " ".join(f.read().split())
+    except (OSError, IndexError):
+        return None
+
+
 def run(case):
-    name, opts, _, _ = case
+    name, opts, _, _, _ = case
     container = t.unique(name)
     t.cleanup_container(container)
     r = t.docker("run", "-d", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME,
@@ -45,15 +65,20 @@ def run(case):
     cpus = t.docker("exec", container, "nproc").stdout.strip()
     meminfo = t.docker("exec", container, "grep", "MemTotal", "/proc/meminfo").stdout.split()
     cmdline = t.docker("exec", container, "cat", "/proc/cmdline").stdout
-    return int(cpus) if cpus.isdigit() else cpus, int(meminfo[1]) // 1024 if len(meminfo) > 1 else 0, cmdline
+    return (int(cpus) if cpus.isdigit() else cpus, int(meminfo[1]) // 1024 if len(meminfo) > 1 else 0, cmdline,
+            cpu_max(container))
 
 
-for (name, opts, cpus, memory), result in zip(CASES, t.parallel(run, CASES, remove=True)):
+for (name, opts, cpus, memory, quota), result in zip(CASES, t.parallel(run, CASES, remove=True)):
     if result is None:
         t.check("%s: Container/VM started" % name, True, False)
         continue
-    got_cpus, got_mem, cmdline = result
+    got_cpus, got_mem, cmdline, got_quota = result
     t.check("%s: VM CPUs" % name, cpus, got_cpus)
+    if got_quota is None:
+        t.log("%s: container's cpu.max not readable (cgroup v1?); CPU quota not checked" % name)
+    else:
+        t.check("%s: container's CPU quota (cpu.max)" % name, quota, got_quota)
     # MemTotal excludes memory reserved by the kernel: allow up to 12% less than the VM's memory
     # (16% on arm64, whose kernels reserve more).
     t.check("%s: VM memory about %dM (MemTotal %dM)" % (name, memory, got_mem), True,
