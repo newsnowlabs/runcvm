@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import framework as t  # noqa: E402
 
 BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+LISTEN_TIMEOUT = 300 if t.ACCEL == "tcg" else 60
 SSHD_PORT = 22222
 LISTEN = "while true; do echo open | nc -l -p 8080; done"
 
@@ -43,7 +44,15 @@ def run(init):
 
     address = t.docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
                        name).stdout.strip()
-    results["workload-port"] = t.docker("exec", peer, "nc", "-w", "5", address, "8080").stdout.strip()
+    # With --init, 'docker exec' can work before the workload is listening
+    reply = {}
+
+    def workload_answers():
+        reply["text"] = t.docker("exec", peer, "nc", "-w", "5", address, "8080").stdout.strip()
+        return reply["text"] == "open"
+
+    t.wait_for("%s's workload listening on port 8080" % name, LISTEN_TIMEOUT, workload_answers)
+    results["workload-port"] = reply["text"]
     results["dropbear-port"] = t.docker("exec", peer, "nc", "-z", "-w", "5", address,
                                         str(SSHD_PORT)).returncode
     results["exec"] = t.docker("exec", name, "echo", "exec-ok").stdout.strip()
@@ -51,7 +60,7 @@ def run(init):
 
 
 t.param("init", "no, yes")
-for init, results in zip((False, True), t.parallel(run, (False, True))):
+for init, results in zip((False, True), t.parallel(run, (False, True), remove=True)):
     mode = "--init" if init else "no --init"
     if "error" in results:
         t.check("%s: Container/VM started" % mode, True, False)

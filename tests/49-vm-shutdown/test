@@ -149,7 +149,7 @@ def run(c):
     return result
 
 
-for c, result in zip(CASES, t.parallel(run, CASES)):
+for c, result in zip(CASES, t.parallel(run, CASES, remove=True)):
     name = c["name"]
     if "error" in result:
         t.check("%s: Container/VM started" % name, True, False)

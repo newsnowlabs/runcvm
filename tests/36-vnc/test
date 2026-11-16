@@ -53,7 +53,7 @@ def case(args):
 
 
 cases = [(net, display, init) for net, display in ((None, 0), (network, 1)) for init in (False, True)]
-for results in t.parallel(case, cases):
+for results in t.parallel(case, cases, remove=True):
     for desc, expected, actual in results:
         t.check(desc, expected, actual)
 

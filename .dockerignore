@@ -1,3 +1,4 @@
 # Ignore files matching the following patterns within docker build
 **/*~
+**/__pycache__
 depot.json
