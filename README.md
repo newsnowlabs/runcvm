@@ -1360,7 +1360,7 @@ On a small or nested host, such as a Linux VM on macOS with a few CPUs, run the 
 RUNCVM_TEST_JOBS=2 tests/run --tier core --vm-cpus 2 --vm-env RUNCVM_HUGETLB=auto
 ```
 
-Without `--vm-cpus`, each Container/VM has as many CPUs as the host, and several at once overcommit the host's CPUs, so that boots and `docker exec` time out. With these options, the core tier takes about 30 minutes in a Lima VM with 6 CPUs on an Apple M-series Mac. `--vm-cpus` and `--vm-env` are described below.
+Without `--vm-cpus`, each Container/VM has as many CPUs as the host, and several at once overcommit the host's CPUs; boots and `docker exec` then time out. With these options, the core tier takes about 30 minutes in a Lima VM with 6 CPUs on an Apple M-series Mac. `--vm-cpus` and `--vm-env` are described below.
 
 `tests/run` (Python 3, standard library only) exits `0` if every selected test passed or was skipped, `1` if any failed or timed out, and `2` on a harness error (for example, no tests selected, an unknown requirement, or the Docker daemon or runtime not available). It writes per-test logs, `results.tap`, `junit.xml`, `results.json`, `summary.txt` and `status` to a results directory (`--results DIR`, default `${TMPDIR:-/tmp}/runcvm-tests/<run-id>`), and removes any containers, networks and volumes a test leaves behind that carry the test's labels. Use `--runtime NAME` (or `RUNTIME`) to test a runtime other than `runcvm`.
 

@@ -214,7 +214,7 @@ fi
 
 # In a Linux VM run by Apple's Virtualization framework (e.g. Lima's on macOS), Container/VMs start
 # much faster with their memory in hugepages (see README.md, "macOS on Apple Silicon"). Where no
-# pool is reserved, suggest one of about a third of this VM's memory; reserving it is left to the
+# pool is reserved, suggest a pool of about a third of this VM's memory; reserving it is left to the
 # administrator, since the pool's memory is lost to everything else.
 if grep -qs '^Apple' /sys/class/dmi/id/sys_vendor && grep -qs 'Virtualization' /sys/class/dmi/id/product_name &&
    [ "$(awk '/^HugePages_Total:/ { print $2 }' /proc/meminfo)" = "0" ]; then
