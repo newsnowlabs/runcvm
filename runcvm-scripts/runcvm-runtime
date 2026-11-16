@@ -786,19 +786,43 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   # The cache policies for the mounts at or below given paths (see runcvm-ctr-virtiofsd): a
   # ';'-separated list of <path>=<policy>, each path absolute, other than '/', and without a '..'
   # component. A path's last '=' separates it from its policy, so a path may contain '='.
+  # Entries are checked as virtiofsd does: each path is normalised (empty and '.' components
+  # dropped), and may not be the root, nor be given twice with different policies. Whitespace around
+  # an entry, such as the newline that ends a YAML block scalar, is ignored, as runcvm-ctr-virtiofsd
+  # ignores it.
   RUNCVM_VIRTIOFSD_CACHE_PATHS="$(get_config_env 'RUNCVM_VIRTIOFSD_CACHE_PATHS')"
   if [ -n "$RUNCVM_VIRTIOFSD_CACHE_PATHS" ]; then
-    IFS=';' read -r -a cache_paths <<<"$RUNCVM_VIRTIOFSD_CACHE_PATHS"
+    cache_paths=() cache_path_components=()
+    declare -A cache_path_policies=()
+    mapfile -d ';' -t cache_paths < <(printf '%s' "$RUNCVM_VIRTIOFSD_CACHE_PATHS")
     for cache_path_entry in "${cache_paths[@]}"
     do
+      cache_path_entry="${cache_path_entry#"${cache_path_entry%%[![:space:]]*}"}"
+      cache_path_entry="${cache_path_entry%"${cache_path_entry##*[![:space:]]}"}"
+      [ -n "$cache_path_entry" ] || continue
       cache_path="${cache_path_entry%=*}"
-      if [[ "$cache_path_entry" != *=* || "$cache_path" != /* || "$cache_path" =~ ^/+$ || "/$cache_path/" == */../* ]]; then
+      if [[ "$cache_path_entry" != *=* || "$cache_path" != /* || "/$cache_path/" == */../* ]]; then
         error "RUNCVM_VIRTIOFSD_CACHE_PATHS entry '$cache_path_entry' invalid (should be <path>=<policy>, with <path> absolute, other than '/', and without '..')"
       fi
-      case "${cache_path_entry##*=}" in
-        auto|always|metadata|none|never) ;;
+      cache_policy="${cache_path_entry##*=}"
+      case "$cache_policy" in
+        auto|always|metadata|never) ;;
+        none) cache_policy=never ;;
         *) error "RUNCVM_VIRTIOFSD_CACHE_PATHS entry '$cache_path_entry' invalid (its policy should be one of the cache policies auto, always, metadata and none (or never))" ;;
       esac
+      normalised=""
+      IFS='/' read -r -a cache_path_components <<<"$cache_path"
+      for component in "${cache_path_components[@]}"
+      do
+        [[ -z "$component" || "$component" = "." ]] || normalised+="/$component"
+      done
+      if [ -z "$normalised" ]; then
+        error "RUNCVM_VIRTIOFSD_CACHE_PATHS entry '$cache_path_entry' invalid (its path is '/', whose policy RUNCVM_VIRTIOFSD_CACHE sets)"
+      fi
+      if [ -n "${cache_path_policies[$normalised]}" ] && [ "${cache_path_policies[$normalised]}" != "$cache_policy" ]; then
+        error "RUNCVM_VIRTIOFSD_CACHE_PATHS gives '$normalised' two cache policies"
+      fi
+      cache_path_policies[$normalised]="$cache_policy"
     done
   fi
 

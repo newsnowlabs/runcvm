@@ -37,9 +37,13 @@ esac
 # RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE. virtiofsd shares the container's root filesystem, so its paths
 # are the container's.
 if [ -n "$RUNCVM_VIRTIOFSD_CACHE_PATHS" ]; then
-  IFS=';' read -r -a cache_paths <<<"$RUNCVM_VIRTIOFSD_CACHE_PATHS"
+  mapfile -d ';' -t cache_paths < <(printf '%s' "$RUNCVM_VIRTIOFSD_CACHE_PATHS")
   for cache_path_entry in "${cache_paths[@]}"
   do
+    # Whitespace around an entry is ignored, as runcvm-runtime ignores it.
+    cache_path_entry="${cache_path_entry#"${cache_path_entry%%[![:space:]]*}"}"
+    cache_path_entry="${cache_path_entry%"${cache_path_entry##*[![:space:]]}"}"
+    [ -n "$cache_path_entry" ] || continue
     cache_policy="${cache_path_entry##*=}"
     [ "$cache_policy" = "none" ] && cache_policy=never
     OPTS+=(--cache-path="${cache_path_entry%=*}=$cache_policy")

@@ -836,7 +836,7 @@ Kernel modules to load into the VM's kernel when it boots, before the workload s
 
 Automatically create, format, prepopulate and mount backing files as virtual disks on the VM.
 
-Each `<diskN>` is a comma-separated list of fields, in either of two forms:
+Each `<diskN>` is a comma-separated list of fields, in either of two forms. Whitespace around each `<diskN>`, such as the newlines of a YAML block scalar (e.g. one `<diskN>;` per line), is ignored:
 
 - positional: `<src>,<dst>[:<dst2>:...],<filesystem>[,<size>][,layout=subdirs|root][,prealloc=on|off]`
 - keyed: `src=<src>,dst=<dst>[,dst=<dst2>...],fs=<filesystem>[,size=<size>][,layout=subdirs|root][,prealloc=on|off]`, with the fields in any order, recognised by its first field beginning with one of these keys and `=`; as in Docker's `--mount`, `source` may be given for `src`, and `target` or `destination` for `dst`
@@ -1202,7 +1202,7 @@ With `always` for the root filesystem, the VM may still go on seeing, for up to 
 
 **[EXPERIMENTAL]** Specifies a cache policy, as for [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache) (`auto`, `always`, `metadata` or `none`), for the volumes and bind mounts at or below each `<path>`: e.g. `--env='RUNCVM_VIRTIOFSD_CACHE_PATHS=/data=none;/srv/static=always'`. Each mount takes the policy of the longest `<path>` that is its destination or a directory above it (`/data` covers `/data` and `/data/db`, but not `/database`); a mount no `<path>` covers takes [`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE`](#runcvm_virtiofsd_submount_cache)'s policy, if set, and otherwise `RUNCVM_VIRTIOFSD_CACHE`'s.
 
-Each `<path>` is a path in the container, absolute, other than `/`, without `..`, and need not exist: a mount at or below it is matched when the VM first reaches it. It applies to mounts only: a directory of the root filesystem takes `RUNCVM_VIRTIOFSD_CACHE`'s policy, whatever `<path>` covers it. A `<path>` is matched against mount destinations as the kernel records them, so one leading through a symbolic link matches nothing: give the path with links resolved. A `<path>` may contain `=` (the last `=` in each entry separates it from its policy), but not `;`.
+Whitespace around each `<path>=<policy>` is ignored, such as the newlines of a YAML block scalar. Each `<path>` is a path in the container, absolute, other than `/` (however written, e.g. `/./`), without `..`, and need not exist; written differently, e.g. `/data` and `/data/`, it is the same path, which may not be given two policies: a mount at or below it is matched when the VM first reaches it. It applies to mounts only: a directory of the root filesystem takes `RUNCVM_VIRTIOFSD_CACHE`'s policy, whatever `<path>` covers it. A `<path>` is matched against mount destinations as the kernel records them, so one leading through a symbolic link matches nothing: give the path with links resolved. A `<path>` may contain `=` (the last `=` in each entry separates it from its policy), but not `;`.
 
 This suits a Container/VM with mounts that need different trade-offs: e.g. `none` for a volume that other containers write to, for which the VM must see each change at once, and `always` for a bind mount of files that do not change while it runs. With `writeback` in `RUNCVM_VIRTIOFSD_CACHE`, a `<path>` given `auto` or `always` takes writeback's restrictions too; one given `none` or `metadata` does not.
 

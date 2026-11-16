@@ -813,13 +813,20 @@ disk_parse() {
 # Parses each disk spec in $1, RUNCVM_DISKS, e.g. /disk1,/home,ext4,5G;/disk2,/var,ext4,1G (see
 # disk_parse), split with mapfile, not read, which would stop at a newline.
 disks_parse() {
-  local i
+  local spec n=0
   local -a specs=()
 
   [ -z "$1" ] || mapfile -d ';' -t specs < <(printf '%s' "$1")
-  for i in "${!specs[@]}"
+  for spec in "${specs[@]}"
   do
-    disk_parse "${specs[$i]}" "$i"
+    # Whitespace around a spec, such as the newline that ends a YAML block scalar, is ignored, and
+    # a spec of whitespace alone is skipped: a backing file path is absolute, and no field may
+    # begin or end with whitespace.
+    spec="${spec#"${spec%%[![:space:]]*}"}"
+    spec="${spec%"${spec##*[![:space:]]}"}"
+    [ -n "$spec" ] || continue
+    disk_parse "$spec" "$n"
+    n=$((n+1))
   done
 }
 
