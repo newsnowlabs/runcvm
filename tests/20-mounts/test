@@ -40,6 +40,10 @@ import framework as t  # noqa: E402
 
 BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
 VM = ["--runtime=" + t.RUNTIME, *t.vm_opts()]
+# RunCVM's defaults for virtiofsd's settings (an empty value is the default). A case that checks
+# virtiofsd's options or caching passes them before its own, so that settings the runner gives
+# every Container/VM do not change what it checks.
+VIRTIOFSD_DEFAULTS = ["--env=RUNCVM_VIRTIOFSD_%s=" % s for s in ("CACHE", "NEGATIVE_TIMEOUT")]
 
 
 def start(label, *opts, image=("alpine", "sleep", "600")):
@@ -112,8 +116,8 @@ def case_negative_timeout():
     volume = t.unique("negative")
     t.volume_create(volume)
     names = t.parallel(lambda opts: start(*opts),
-                       [("negative", "-v", volume + ":/vol"),
-                        ("negative-off", "--env=RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=0")], jobs=2)
+                       [("negative", *VIRTIOFSD_DEFAULTS, "-v", volume + ":/vol"),
+                        ("negative-off", *VIRTIOFSD_DEFAULTS, "--env=RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=0")], jobs=2)
     if not all(names):
         return [("negative timeout: both Container/VMs started", True, False)]
     name, off = names
