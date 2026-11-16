@@ -1591,8 +1591,9 @@ MEM_OBJECT_HUGETLB="memory-backend-memfd,id=mem,size=$RUNCVM_MEM_SIZE,share=on,p
 # HugePages_Rsvd): a QEMU using hugepages reserves all of its memory's pages when it maps it, but
 # they leave HugePages_Free only as its VM first uses them. Should other Container/VMs take the
 # available pages between this check and QEMU mapping its memory, QEMU fails to start, as with
-# RUNCVM_HUGETLB=1. A helper that reserved the pages itself (an MFD_HUGETLB memfd, mmap'd shared)
-# and exec'd QEMU on /proc/self/fd/<n>, or on /dev/shm should that fail, would close that window.
+# RUNCVM_HUGETLB=1. The check and QEMU's reservation are separate steps: a helper that reserved the
+# pages itself (mmap'ing an MFD_HUGETLB memfd shared), then exec'd QEMU on /proc/self/fd/<n>, or
+# on /dev/shm where the reservation failed, would make them one.
 case "$RUNCVM_HUGETLB" in
   1)
     MEM_OBJECT="$MEM_OBJECT_HUGETLB"
