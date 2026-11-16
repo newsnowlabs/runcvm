@@ -99,7 +99,12 @@ def describe(root):
             if stat.S_ISLNK(st.st_mode):
                 e["target"] = os.readlink(p)
             else:
-                e["xattrs"] = {k: os.getxattr(p, k).hex() for k in sorted(os.listxattr(p))}
+                names = os.listxattr(p)
+                if rel == ".":
+                    # mkfs.xfs records filesystem properties (e.g. trusted.xfs:autofsck) on the
+                    # root directory; like lost+found, they belong to the filesystem, not the tree.
+                    names = [k for k in names if not k.startswith("trusted.xfs:")]
+                e["xattrs"] = {k: os.getxattr(p, k).hex() for k in sorted(names)}
             entries.append(e)
     return entries
 
