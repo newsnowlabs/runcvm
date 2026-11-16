@@ -47,6 +47,10 @@ VM_ENV = (os.environ.get("RUNCVM_TEST_VM_ENV") or "").split()
 CPUS = os.environ.get("RUNCVM_TEST_CPUS") or None
 MEMORY = os.environ.get("RUNCVM_TEST_MEMORY") or None
 
+# The tests directory: in a source checkout, beside runcvm-scripts; in the installed package,
+# /opt/runcvm/tests, beside the package's scripts.
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+
 errors = 0
 _cleanups = []
 # The cleanups registered by the current thread's call in parallel(..., remove=True)
@@ -90,6 +94,18 @@ def vm_opts(size=True):
     if size and MEMORY:
         opts.append("--memory=%s" % MEMORY)
     return opts
+
+
+def source_tree():
+    """Whether the tests run from a source checkout (the repository's root holding runcvm-scripts
+    beside the tests directory), rather than from the installed package's /opt/runcvm/tests."""
+    return os.path.isdir(os.path.join(TESTS_DIR, "..", "runcvm-scripts"))
+
+
+def scripts_dir():
+    """RunCVM's scripts, for tests that run or read them without a Container/VM: the checkout's
+    runcvm-scripts, from a source tree, or else the package's scripts, beside its tests."""
+    return os.path.realpath(os.path.join(TESTS_DIR, "..", "runcvm-scripts" if source_tree() else "scripts"))
 
 
 def docker(*args, check=False, timeout=None, capture=True, input=None):

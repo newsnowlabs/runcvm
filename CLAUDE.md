@@ -49,6 +49,11 @@ the runtime or the scripts.
   are rewritten before and after each test, so they show a run's progress, and a run survives
   its terminal going away (SIGHUP is ignored); SIGINT or SIGTERM stops it, writing the results
   so far.
+- The package ships the tests, as `/opt/runcvm/tests` (`/opt/runcvm/tests/run`), so a host can
+  run those matching its installed RunCVM; the runner records the installed package's
+  `VERSION` in its results. A test that runs or reads RunCVM's scripts without a VM finds them
+  with the framework helper `scripts_dir`, which works from a checkout and from the package
+  alike; nothing a test does may write into its own directory.
 - `tests/run --mock` (stand-in mode) runs the tests with `runc` in place of RunCVM, skipping
   those that require real VMs. Use it to develop tests and the runner where RunCVM can't run.
 - `tests/run --accel tcg` runs real RunCVM Container/VMs under software emulation where KVM is
