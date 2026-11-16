@@ -1336,7 +1336,7 @@ docker exec -it -u runcvm runcvm-l1 bash
 
 Launch it without `--init`, so that systemd is the VM's PID 1. `docker exec runcvm-l1 runcvm-l1-check` checks that it is working.
 
-The image preinstalls the RunCVM release named by its `RUNCVM_IMAGE` build argument. To run the integration tests below inside it, preinstall the RunCVM they were written for, e.g. one built by `./build/build.sh`: `docker build -t runcvm-l1 --build-arg RUNCVM_IMAGE=newsnowlabs/runcvm:latest tests/env`.
+The image preinstalls the RunCVM release named by its `RUNCVM_IMAGE` build argument. To run the integration tests below inside it, preinstall the RunCVM they were written for, e.g. one built by `./build/build.sh`: `docker build -t runcvm-l1 --build-arg RUNCVM_IMAGE=newsnowlabs/runcvm:latest tests/env`; the package's own tests, in `/opt/runcvm/tests`, always match it.
 
 To test RunCVM's installer, run `runcvm-scripts/runcvm-install-runtime.sh` from a clone of this repository inside it.
 
@@ -1355,11 +1355,13 @@ tests/run --list               # list tests with their tier, timeout and require
 
 Tests are numbered by tier: `1x` core, `5x` extended.
 
-`tests/run` (Python 3, standard library only) exits `0` if every selected test passed or was skipped, `1` if any failed or timed out, and `2` on a harness error (for example, no tests selected, an unknown requirement, or the Docker daemon or runtime not available). It writes per-test logs, `results.tap`, `junit.xml`, `results.json`, `summary.txt` and `status` to a results directory (`--results DIR`, default `${TMPDIR:-/tmp}/runcvm-tests/<run-id>`), and removes any containers, networks and volumes a test leaves behind that carry the test's labels. Use `--runtime NAME` (or `RUNTIME`) to test a runtime other than `runcvm`.
+The RunCVM package ships the integration tests that match it, in `/opt/runcvm/tests`, so a host can test the RunCVM installed on it without a clone of this repository, e.g. `/opt/runcvm/tests/run --tier core`. Run from a clone, the tests are those of the clone's checkout, which may differ from those of the installed package.
+
+`tests/run` (Python 3, standard library only) exits `0` if every selected test passed or was skipped, `1` if any failed or timed out, and `2` on a harness error (for example, no tests selected, an unknown requirement, or the Docker daemon or runtime not available). It writes per-test logs, `results.tap`, `junit.xml`, `results.json`, `summary.txt` and `status` to a results directory (`--results DIR`, default `${TMPDIR:-/tmp}/runcvm-tests/<run-id>`), each recording the version of the RunCVM package installed at `/opt/runcvm` (from its `VERSION` file), and removes any containers, networks and volumes a test leaves behind that carry the test's labels. Use `--runtime NAME` (or `RUNTIME`) to test a runtime other than `runcvm`.
 
 Each test is a directory under `tests/` containing an executable `test` file, in any language, which exits `0` to pass, `77` to skip (logging `SKIP: <reason>`), and any other code to fail. Optional files in the directory set its `tier` (`core`, the default, or `extended`), `timeout` (seconds; default 1800) and `requires` (any of `vm`, `kvm`, `ipv6` and `docker>=<major>.<minor>`; a test whose requirements are not met is skipped without running; `kvm` means VMs actually use KVM acceleration, and `docker>=29.0`, for example, that dockerd's version is at least 29.0).
 
-Helpers for tests are in `tests/framework.sh` (bash) and `tests/framework.py` (Python), with the same names: unique per-run names (`unique`), labels that let the runner remove leftovers (`labels`), options for RunCVM Container/VMs (`vm_opts`), recorded checks (`check`, `check_cmd`, `expect_exit`), parameters (`param`), polling with deadlines (`wait_for`, `wait_for_exec`), results volumes (`volume_create`, `volume_read`), `skip` and `finish`.
+Helpers for tests are in `tests/framework.sh` (bash) and `tests/framework.py` (Python), with the same names: unique per-run names (`unique`), labels that let the runner remove leftovers (`labels`), options for RunCVM Container/VMs (`vm_opts`), recorded checks (`check`, `check_cmd`, `expect_exit`), parameters (`param`), polling with deadlines (`wait_for`, `wait_for_exec`), results volumes (`volume_create`, `volume_read`), the location of RunCVM's scripts in a clone or the installed package (`scripts_dir`, `source_tree`), `skip` and `finish`.
 
 `--accel kvm|auto|tcg` (or `RUNCVM_TEST_ACCEL`) selects QEMU acceleration for the tests' RunCVM Container/VMs, which tests pass on as `RUNCVM_QEMU_ACCEL` using the `vm_opts` helper (where the RunCVM version under test supports it). With `--accel tcg`, real RunCVM Container/VMs run under software emulation where KVM is unavailable: slow, but it exercises RunCVM itself; tests that require `kvm` are skipped.
 

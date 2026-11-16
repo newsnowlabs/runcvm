@@ -123,6 +123,30 @@ tcg_cases() {
   [ "$RUNCVM_TEST_ACCEL" = "tcg" ] || [ ! -e /dev/kvm ]
 }
 
+# The tests directory: in a source checkout, beside runcvm-scripts; in the installed package,
+# /opt/runcvm/tests, beside the package's scripts.
+TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# source_tree
+# Succeed if the tests run from a source checkout (the repository's root holding
+# runcvm-scripts beside the tests directory), rather than from the installed
+# package's /opt/runcvm/tests.
+source_tree() {
+  [ -d "$TESTS_DIR/../runcvm-scripts" ]
+}
+
+# scripts_dir
+# Print the directory of RunCVM's scripts, for tests that run or read them without
+# a Container/VM: the checkout's runcvm-scripts, from a source tree, or else the
+# package's scripts, beside its tests.
+scripts_dir() {
+  if source_tree; then
+    (cd "$TESTS_DIR/../runcvm-scripts" && pwd -P)
+  else
+    (cd "$TESTS_DIR/../scripts" && pwd -P)
+  fi
+}
+
 # record_result STATUS DESCRIPTION
 # Record a sub-result (PASS, FAIL or SKIP) for inclusion in the runner's
 # TAP and JUnit output.
