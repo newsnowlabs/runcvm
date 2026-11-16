@@ -66,8 +66,9 @@ debug() {
 # runcvm-runtime runs on the host, and uses only bash's builtins and RunCVM's own tools (busybox and
 # jq, each run with RunCVM's loader), never the host's, so that it behaves alike whatever the host
 # provides. The one exception is runc, which it wraps: find_runc resolves it in the PATH the runtime
-# is given (HOST_PATH), and runc runs with that PATH. PATH itself names no directory, so that any
-# other command, not being a function or builtin, fails the operation (command_not_found_handle).
+# is given (HOST_PATH), and runc runs with that PATH. PATH itself names no existing directory, so
+# that any other command, not being a function or builtin, fails the operation
+# (command_not_found_handle).
 HOST_PATH="$PATH"
 PATH=/nonexistent
 
