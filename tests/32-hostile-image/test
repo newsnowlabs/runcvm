@@ -152,7 +152,7 @@ def case(init):
 
 # Each check names its mode.
 t.param("init", "no, yes")
-for results in t.parallel(case, (False, True), jobs=2):
+for results in t.parallel(case, (False, True), jobs=2, remove=True):
     for desc, expected, actual in results:
         t.check(desc, expected, actual)
 

@@ -100,14 +100,26 @@ labels() {
   echo "--label runcvm-test.run=$RUNCVM_TEST_RUN_ID --label runcvm-test.test=$RUNCVM_TEST_NAME"
 }
 
-# vm_opts
-# Print 'docker run' options for RunCVM Container/VMs selected by the runner,
-# currently the QEMU acceleration (--accel kvm|auto|tcg, as RUNCVM_QEMU_ACCEL).
+# vm_opts [--no-size]
+# Print 'docker run' options for RunCVM Container/VMs selected by the runner: RunCVM settings
+# (tests/run --vm-env, as RUNCVM_TEST_VM_ENV), the QEMU acceleration (--accel kvm|auto|tcg, as
+# RUNCVM_QEMU_ACCEL) and, without --no-size, the VM's size (--vm-cpus and --vm-memory, as
+# --cpus and --memory). They go before the test's own options, so that a test that sets the
+# same variable or option keeps its own value: Docker takes the last --env given for a
+# variable, and the last --cpus or --memory. Tests that check the VM's size against its
+# defaults pass --no-size.
 # Usage: docker run $(labels) $(vm_opts) --runtime=$RUNTIME ...
 vm_opts() {
-  if [ -n "$RUNCVM_TEST_ACCEL" ]; then
-    echo "--env=RUNCVM_QEMU_ACCEL=$RUNCVM_TEST_ACCEL"
+  local e env opts=()
+  read -r -a env <<<"$RUNCVM_TEST_VM_ENV"
+  for e in "${env[@]}"; do opts+=("--env=$e"); done
+  [ -n "$RUNCVM_TEST_ACCEL" ] && opts+=("--env=RUNCVM_QEMU_ACCEL=$RUNCVM_TEST_ACCEL")
+  if [ "$1" != "--no-size" ]; then
+    [ -n "$RUNCVM_TEST_CPUS" ] && opts+=("--cpus=$RUNCVM_TEST_CPUS")
+    [ -n "$RUNCVM_TEST_MEMORY" ] && opts+=("--memory=$RUNCVM_TEST_MEMORY")
   fi
+  [ ${#opts[@]} -gt 0 ] && echo "${opts[*]}"
+  return 0
 }
 
 # tcg_cases
