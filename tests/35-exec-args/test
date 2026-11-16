@@ -80,7 +80,7 @@ EXPECTED = {
 runtimes = [t.RUNTIME] if t.RUNTIME == "runc" else [t.RUNTIME, "runc"]
 items = [(runtime, init) for runtime in runtimes for init in (False, True)]
 t.param("init", "no, yes")
-for mode, results in t.parallel(case, items, jobs=4, remove=True):
+for mode, results in t.parallel(case, items, remove=True):
     if results is None:
         t.check("%s: Container/VM boots and 'docker exec' works" % mode, True, False)
         continue
