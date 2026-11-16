@@ -662,7 +662,7 @@ def parse_args(argv):
         epilog="Environment: RUNTIME, RUNCVM_TEST_MOCK, RUNCVM_TEST_ACCEL, RUNCVM_TEST_TCG_CASES, "
                "RUNCVM_TEST_PULL, RUNCVM_TEST_VM_ENV, RUNCVM_TEST_CPUS, RUNCVM_TEST_MEMORY, "
                "RUNCVM_TEST_EXEC_TIMEOUT (seconds each 'docker exec', and 'docker run' not detached, may "
-               "take in a test; default 300, or 1200 with --accel tcg), "
+               "take in a test; default 60, or 300 with --accel tcg), "
                "RUNCVM_TEST_RUN_ID, RUNCVM_TEST_RESULTS, "
                "RUNCVM_TEST_KILL_AFTER (seconds between SIGTERM and SIGKILL on timeout; "
                "default %d), RUNCVM_TEST_JOBS (Container/VMs a test may run at once; default 3). See the comment at the top of this file for details." % DEFAULT_KILL_AFTER)

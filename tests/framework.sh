@@ -86,11 +86,11 @@ RUNCVM_TEST_NAME="${RUNCVM_TEST_NAME:-$(basename "$PWD")}"
 ERRORS=${ERRORS:-0}
 
 # The deadline, in seconds, for each 'docker exec', and each 'docker run' not detached (-d), that a
-# test runs: RUNCVM_TEST_EXEC_TIMEOUT, or 300 (1200 under TCG). A hung command then fails (exit
+# test runs: RUNCVM_TEST_EXEC_TIMEOUT, or 60 (300 under TCG). A hung command then fails (exit
 # status 124, after logging the timeout on standard error), rather than holding the test until the
 # runner's time limit.
 if [ -z "$RUNCVM_TEST_EXEC_TIMEOUT" ]; then
-  if [ "$RUNCVM_TEST_ACCEL" = "tcg" ]; then RUNCVM_TEST_EXEC_TIMEOUT=1200; else RUNCVM_TEST_EXEC_TIMEOUT=300; fi
+  if [ "$RUNCVM_TEST_ACCEL" = "tcg" ]; then RUNCVM_TEST_EXEC_TIMEOUT=300; else RUNCVM_TEST_EXEC_TIMEOUT=60; fi
 fi
 
 # docker ...

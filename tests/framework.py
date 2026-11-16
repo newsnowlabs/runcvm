@@ -46,9 +46,9 @@ PULL = os.environ.get("RUNCVM_TEST_PULL") == "1"
 VM_ENV = (os.environ.get("RUNCVM_TEST_VM_ENV") or "").split()
 # The deadline, in seconds, for each 'docker exec', and each 'docker run' not detached (-d), that a
 # test runs through these helpers (docker(), check_cmd, expect_exit, wait_for):
-# RUNCVM_TEST_EXEC_TIMEOUT, or 300 (1200 under TCG). A hung command then fails its check, rather
+# RUNCVM_TEST_EXEC_TIMEOUT, or 60 (300 under TCG). A hung command then fails its check, rather
 # than holding the test until the runner's time limit.
-EXEC_TIMEOUT = int(os.environ.get("RUNCVM_TEST_EXEC_TIMEOUT") or (1200 if ACCEL == "tcg" else 300))
+EXEC_TIMEOUT = int(os.environ.get("RUNCVM_TEST_EXEC_TIMEOUT") or (300 if ACCEL == "tcg" else 60))
 # Such a command taking at least this many seconds is logged, with its time, as a detail line.
 SLOW_COMMAND = 10
 CPUS = os.environ.get("RUNCVM_TEST_CPUS") or None
