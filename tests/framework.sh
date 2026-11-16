@@ -112,8 +112,14 @@ docker() {
     command docker "$@"
     return
   fi
+  local start=$SECONDS
   timeout --foreground -k 10 "$RUNCVM_TEST_EXEC_TIMEOUT" docker "$@" || rc=$?
-  [ "$rc" -eq 124 ] && echo "> Timed out after ${RUNCVM_TEST_EXEC_TIMEOUT}s: docker $*" >&2
+  if [ "$rc" -eq 124 ]; then
+    echo "> Timed out after ${RUNCVM_TEST_EXEC_TIMEOUT}s: docker $*" >&2
+  elif [ $((SECONDS - start)) -ge 10 ]; then
+    # A command taking 10s or more is logged, with its time, as a detail line.
+    log_detail "Took $((SECONDS - start))s: docker $*" >&2
+  fi
   return "$rc"
 }
 

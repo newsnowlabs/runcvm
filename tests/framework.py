@@ -49,6 +49,8 @@ VM_ENV = (os.environ.get("RUNCVM_TEST_VM_ENV") or "").split()
 # RUNCVM_TEST_EXEC_TIMEOUT, or 300 (1200 under TCG). A hung command then fails its check, rather
 # than holding the test until the runner's time limit.
 EXEC_TIMEOUT = int(os.environ.get("RUNCVM_TEST_EXEC_TIMEOUT") or (1200 if ACCEL == "tcg" else 300))
+# Such a command taking at least this many seconds is logged, with its time, as a detail line.
+SLOW_COMMAND = 10
 CPUS = os.environ.get("RUNCVM_TEST_CPUS") or None
 MEMORY = os.environ.get("RUNCVM_TEST_MEMORY") or None
 
@@ -152,8 +154,12 @@ def _run(cmd, timeout=None, **kwargs):
     if not _has_deadline(cmd):
         return subprocess.run(cmd, timeout=timeout, **kwargs)
     timeout = EXEC_TIMEOUT if timeout is None else timeout
+    start = time.time()
     try:
-        return subprocess.run(cmd, timeout=timeout, **kwargs)
+        r = subprocess.run(cmd, timeout=timeout, **kwargs)
+        if time.time() - start >= SLOW_COMMAND:
+            log_detail("Took %.0fs: %s" % (time.time() - start, " ".join(cmd)))
+        return r
     except subprocess.TimeoutExpired as e:
         log("Timed out after %ds: %s" % (timeout, " ".join(cmd)))
         out = e.stdout
