@@ -166,7 +166,7 @@ def compare(desc, source, disk):
 items = [(fs, init) for fs in FILESYSTEMS for init in (False, True)]
 t.param("fs", ", ".join(FILESYSTEMS))
 t.param("init", "no, yes")
-for (fs, init), results in zip(items, t.parallel(run, items)):
+for (fs, init), results in zip(items, t.parallel(run, items, remove=True)):
     mode = "%s, %s" % (fs, "--init" if init else "no --init")
 
     source = results["source"]
