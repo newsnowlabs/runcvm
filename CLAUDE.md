@@ -10,6 +10,10 @@ the runtime or the scripts.
   run inside the VM. Both run under the RunCVM package's own bash and tools in
   `/.runcvm/guest` (a read-only bind of `/opt/runcvm`), never the image's.
   `runcvm-ctr-defaults`, sourced by both, defines shared defaults and wraps the tools they use.
+- `runcvm-runtime` runs on the host, but uses only bash's builtins and RunCVM's own tools (its
+  `jq` and `busybox` functions, which run them with RunCVM's loader), and the host's `runc`,
+  which it wraps. Its `PATH` names no existing directory, so that any other command fails the operation
+  (`command_not_found_handle`).
 - `runcvm-runtime` reports errors with `error()`, which writes them to the log file the caller
   passes with `--log`: containerd shows users only what is written there, not the runtime's
   stderr.
@@ -49,6 +53,11 @@ the runtime or the scripts.
   are rewritten before and after each test, so they show a run's progress, and a run survives
   its terminal going away (SIGHUP is ignored); SIGINT or SIGTERM stops it, writing the results
   so far.
+- The package ships the tests, as `/opt/runcvm/tests` (`/opt/runcvm/tests/run`), so a host can
+  run those matching its installed RunCVM; the runner records the installed package's
+  `VERSION` in its results. A test that runs or reads RunCVM's scripts without a VM finds them
+  with the framework helper `scripts_dir`, which works from a checkout and from the package
+  alike; nothing a test does may write into its own directory.
 - `tests/run --mock` (stand-in mode) runs the tests with `runc` in place of RunCVM, skipping
   those that require real VMs. Use it to develop tests and the runner where RunCVM can't run.
 - `tests/run --accel tcg` runs real RunCVM Container/VMs under software emulation where KVM is
@@ -66,16 +75,26 @@ the runtime or the scripts.
 - A test is a directory under `tests/` holding an executable `test` file, in bash or Python:
   exit 0 to pass, 77 to skip (after logging `SKIP: <reason>`), anything else to fail. Optional
   files `tier` (`core` or `extended`), `timeout` (seconds) and `requires` (`vm`, `kvm`,
-  `ipv6`, `docker>=<major>.<minor>`) describe it to the runner. Numbering follows the tier:
+  `ipv6`, `docker>=<major>.<minor>`, `runcvm-package`) describe it to the runner. Numbering follows the tier:
   `1x` core, `5x` extended.
 - Use the helpers in `tests/framework.sh` or `tests/framework.py` (same names in both):
   `unique` for every Docker object name and `labels` on every object created, so that runs can
   proceed concurrently and the runner can remove leftovers; `vm_opts` on every RunCVM
   Container/VM; `check`, `check_cmd` and `expect_exit` for results; `wait_for` and
-  `wait_for_exec` for every wait, so nothing waits without a deadline; `log_detail` for
+  `wait_for_exec` for every wait, so nothing waits without a deadline (the helpers, and bash's
+  `docker` once `framework.sh` is sourced, give each `docker exec`, and each `docker run` not
+  detached, the deadline `RUNCVM_TEST_EXEC_TIMEOUT`; a test that runs docker through `subprocess`
+  itself passes a timeout); `log_detail` for
   step-by-step progress (e.g. each of many requests' outcomes), which goes to the test's log,
-  and to the terminal only with `tests/run --verbose`; `parallel` (Python) to
-  run independent cases at once; `skip` and `finish` to end.
+  and to the terminal only with `tests/run --verbose`; `parallel` (Python) to run independent
+  cases at once, with `remove=True` to remove each case's Container/VMs and volumes as soon as
+  its call returns, so that no more than `RUNCVM_TEST_JOBS` cases' VMs run at once (leave `jobs`
+  to `RUNCVM_TEST_JOBS`, except where a case's VMs must run together); `skip` and `finish` to
+  end.
+- Pass `vm_opts` before a test's own `docker run` options, so that a test's own `--env`,
+  `--cpus` or `--memory` overrides the runner's (`tests/run --vm-env`, `--vm-cpus`,
+  `--vm-memory`); a test that checks the VM's size against its defaults uses
+  `vm_opts(size=False)` (`vm_opts --no-size` in bash).
 - Tests must not download anything at run time beyond pulling images: containers on Docker
   networks may have no outbound access in sandboxed or CI environments.
 - Where behaviour should be the same with and without `--init`, test both, recording the mode

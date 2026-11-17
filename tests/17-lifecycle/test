@@ -121,7 +121,7 @@ def case_restart_policy():
 
 CASES = [case_rm, case_running, case_restart, case_restart_policy]
 
-for results in t.parallel(lambda f: f(), CASES, jobs=len(CASES)):
+for results in t.parallel(lambda f: f(), CASES):
     for desc, expected, actual in results:
         t.check(desc, expected, actual)
 

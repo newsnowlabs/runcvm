@@ -67,7 +67,7 @@ def host_mounts_of(ids):
         return [l.strip() for l in f if any(i in l for i in ids)]
 
 
-results = t.parallel(run, ENDINGS)
+results = t.parallel(run, ENDINGS, remove=True)
 for ending, result in zip(ENDINGS, results):
     t.check("%s: Container/VM ran" % ending, True, bool(result))
     if result:
