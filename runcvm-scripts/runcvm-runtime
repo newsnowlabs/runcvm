@@ -63,11 +63,32 @@ debug() {
   [ -n "$RUNCVM_DEBUG" ] && true || false
 }
 
-log() {
-  debug && echo "$(date '+%Y-%m-%d %H:%M:%S.%6N'): $$: $@" >>/tmp/runcvm-$$.log
+# runcvm-runtime runs on the host, and uses only bash's builtins and RunCVM's own tools (busybox and
+# jq, each run with RunCVM's loader), never the host's, so that it behaves alike whatever the host
+# provides. The one exception is runc, which it wraps: find_runc resolves it in the PATH the runtime
+# is given (HOST_PATH), and runc runs with that PATH. PATH itself names no existing directory, so
+# that any other command, not being a function or builtin, fails the operation
+# (command_not_found_handle).
+HOST_PATH="$PATH"
+PATH=/nonexistent
+
+busybox() {
+  "$RUNCVM_LD" "$RUNCVM/bin/busybox" "$@"
 }
 
-error() {
+# bash runs this in a separate execution environment, in which error()'s exit would end only that
+# environment: so, having reported the error, it ends the runtime itself.
+command_not_found_handle() {
+  report_error "internal error: '$1' is not one of RunCVM's own tools, which alone runcvm-runtime runs"
+  kill -s KILL $$
+}
+
+log() {
+  debug && echo "$(busybox date '+%Y-%m-%d %H:%M:%S.%6N'): $$: $@" >>/tmp/runcvm-$$.log
+}
+
+# Reports error $1: on stderr, in the debug log, and in the runtime log file the caller requested.
+report_error() {
 
   # Skip past any docker error ending in CR
   (echo; echo) >&2
@@ -82,13 +103,16 @@ error() {
   # which errors are reported to the user (e.g. by 'docker run'): stderr is not relayed.
   if [ -n "$RUNC_LOG" ]; then
     if [ "$RUNC_LOG_FORMAT" = "json" ]; then
-      jq -cn --arg msg "RunCVM: Error: $1" --arg time "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+      jq -cn --arg msg "RunCVM: Error: $1" --arg time "$(busybox date -u '+%Y-%m-%dT%H:%M:%SZ')" \
         '{level: "error", msg: $msg, time: $time}' >>"$RUNC_LOG" 2>/dev/null
     else
       echo "RunCVM: Error: $1" >>"$RUNC_LOG" 2>/dev/null
     fi
   fi
+}
 
+error() {
+  report_error "$1"
   exit -1
 }
 
@@ -112,7 +136,7 @@ image_resolve_path() {
     if [ -L "$ROOT$resolved/$comp" ]; then
       links=$((links+1))
       [ "$links" -le 40 ] || return 1
-      target=$(readlink "$ROOT$resolved/$comp") || return 1
+      target=$(busybox readlink "$ROOT$resolved/$comp") || return 1
       [[ "$target" = /* ]] && resolved=""
       rest="${target#/}${rest:+/$rest}"
     else
@@ -172,7 +196,7 @@ kernel_for_distro() {
 find_runc() {
   local dir
 
-  RUNC=$(type -P runc) && return 0
+  RUNC=$(PATH="$HOST_PATH" type -P runc) && return 0
 
   for dir in /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /bin /sbin
   do
@@ -201,7 +225,8 @@ load_env_from_file() {
     
     if [ "$name" != "$LINE" ] && [ "$value" != "$LINE" ] && [ "$name" = "$var" ]; then
       # We found variable $name: return it, removing any leading/trailing double quotes
-      echo "$value" | sed 's/^"//;s/"$//'
+      value="${value#\"}"
+      echo "${value%\"}"
       return 0
     fi
   done <"$file"
@@ -221,9 +246,9 @@ jq_set() {
   local tmp="/tmp/config.json.$$"
 
   if jq "$@" $file >$tmp; then
-    mv $tmp $file
+    busybox mv $tmp $file
   else
-    echo "Failed to update $(basename $file); aborting!" 2>&1
+    echo "Failed to update ${file##*/}; aborting!" 2>&1
     exit 1
   fi
 }
@@ -454,7 +479,7 @@ if [ "$COMMAND" = "create" ]; then
   # the quota, leaving --cpus to set the vCPUs alone. Without a quota, nothing changes, though the
   # value is still checked.
   RUNCVM_CPU_HEADROOM=$(get_config_env "RUNCVM_CPU_HEADROOM" 1)
-  if [ "$RUNCVM_CPU_HEADROOM" != "max" ] && { ! [[ "$RUNCVM_CPU_HEADROOM" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]] || ! awk -v h="$RUNCVM_CPU_HEADROOM" 'BEGIN { exit !(h <= 64) }'; }; then
+  if [ "$RUNCVM_CPU_HEADROOM" != "max" ] && { ! [[ "$RUNCVM_CPU_HEADROOM" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]] || ! jq -en --argjson h "$RUNCVM_CPU_HEADROOM" '$h <= 64' >/dev/null; }; then
     error "RUNCVM_CPU_HEADROOM '$RUNCVM_CPU_HEADROOM' invalid (should be a number of CPUs from 0 to 64, e.g. 1 or 0.5, or 'max')"
   fi
   if [ "$RUNCVM_CPUS" -gt 0 ]; then
@@ -579,7 +604,7 @@ if [ "$COMMAND" = "create" ]; then
       RUNCVM_KERNEL_IDVER="$RUNCVM_KERNEL"
     fi  
 
-    RUNCVM_KERNEL_ID=$(dirname "$RUNCVM_KERNEL_IDVER") # Returns e.g. alpine, debian, ubuntu
+    RUNCVM_KERNEL_ID="${RUNCVM_KERNEL_IDVER%%/*}" # e.g. alpine, debian, ubuntu
 
   else
     # If not found, look for ID and ID_LIKE in the container image's os-release
@@ -650,7 +675,8 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     # If RUNCVM_KERNEL was specified, or we didn't find a kernel and initramfs at the expected paths in the container image,
     # select the latest RUNCVM kernel version and arrange to mount it.
 
-    RUNCVM_KERNEL_VERSION=$(basename $(readlink -f "$RUNCVM_KERNELS/$RUNCVM_KERNEL_IDVER")) # Returns e.g. 5.15.53-0-virt
+    RUNCVM_KERNEL_VERSION=$(busybox readlink -f "$RUNCVM_KERNELS/$RUNCVM_KERNEL_IDVER")
+    RUNCVM_KERNEL_VERSION="${RUNCVM_KERNEL_VERSION##*/}" # e.g. 5.15.53-0-virt
 
     RUNCVM_KERNEL_MOUNT_LIB_MODULES=$(get_config_env 'RUNCVM_KERNEL_MOUNT_LIB_MODULES')
     if [ -n "$RUNCVM_KERNEL_MOUNT_LIB_MODULES" ]; then
@@ -683,7 +709,7 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   set_config_env "RUNCVM_KERNEL_ROOT" "$RUNCVM_KERNEL_ROOT"
 
   # Auto-detect host architecture; respect user-supplied RUNCVM_QEMU_ARCH if set
-  case "$(uname -m)" in
+  case "$(busybox uname -m)" in
     aarch64) RUNCVM_QEMU_ARCH_DEFAULT="arm64" ;;
     x86_64)  RUNCVM_QEMU_ARCH_DEFAULT="x86_64" ;;
     *)       RUNCVM_QEMU_ARCH_DEFAULT="x86_64" ;;
@@ -911,7 +937,7 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
       .process.args = [.process.args[0], ($env[0] | length | tostring)] + $env[0] + .process.args[1:]
       | .process.env |= runcvm_env($path)'
 
-  debug && cp -a $CFG /tmp/config.json-$$-2
+  debug && busybox cp -a $CFG /tmp/config.json-$$-2
   
 elif [ "$COMMAND" = "exec" ]; then
 
@@ -989,9 +1015,9 @@ elif [ "$COMMAND" = "exec" ]; then
     jq_set "$PROCESS" '.user = {"uid":0, "gid":0} | .cwd="/"'
   fi
   
-  debug && cp -a $PROCESS /tmp/process.json-$$-2
+  debug && busybox cp -a $PROCESS /tmp/process.json-$$-2
 fi
 
 debug && log "--- LOG ENDS ---"
 
-exec "$RUNC" "${COMMAND_LINE[@]}"
+PATH="$HOST_PATH" exec "$RUNC" "${COMMAND_LINE[@]}"

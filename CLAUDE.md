@@ -10,6 +10,10 @@ the runtime or the scripts.
   run inside the VM. Both run under the RunCVM package's own bash and tools in
   `/.runcvm/guest` (a read-only bind of `/opt/runcvm`), never the image's.
   `runcvm-ctr-defaults`, sourced by both, defines shared defaults and wraps the tools they use.
+- `runcvm-runtime` runs on the host, but uses only bash's builtins and RunCVM's own tools (its
+  `jq` and `busybox` functions, which run them with RunCVM's loader), and the host's `runc`,
+  which it wraps. Its `PATH` names no existing directory, so that any other command fails the operation
+  (`command_not_found_handle`).
 - `runcvm-runtime` reports errors with `error()`, which writes them to the log file the caller
   passes with `--log`: containerd shows users only what is written there, not the runtime's
   stderr.
