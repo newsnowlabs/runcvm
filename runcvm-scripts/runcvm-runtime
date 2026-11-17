@@ -375,7 +375,7 @@ done
 COMMAND="$1"
 shift
 
-find_runc || error "runc not found in PATH ($PATH) or in /usr/bin, /usr/sbin, /usr/local/bin, /usr/local/sbin, /bin or /sbin"
+find_runc || error "runc not found in PATH ($HOST_PATH) or in /usr/bin, /usr/sbin, /usr/local/bin, /usr/local/sbin, /bin or /sbin"
 
 if [ "$COMMAND" = "create" ]; then
 
