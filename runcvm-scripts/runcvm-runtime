@@ -209,6 +209,40 @@ load_env_from_file() {
   return 1
 }
 
+# split_list <array> <separator> <string>
+# Sets <array> to the entries of <string> between <separator>s, each without the whitespace around
+# it (such as the newline that ends a YAML block scalar), and skips entries of whitespace alone.
+# <string> is split with mapfile, not read, which would stop at a newline. runcvm-ctr-defaults has its own copy.
+split_list() {
+  local -n __split_list="$1"
+  local __item
+  local -a __items=()
+
+  mapfile -d "$2" -t __items < <(printf '%s' "$3")
+  __split_list=()
+  for __item in "${__items[@]}"
+  do
+    __item="${__item#"${__item%%[![:space:]]*}"}"
+    __item="${__item%"${__item##*[![:space:]]}"}"
+    [ -z "$__item" ] || __split_list+=("$__item")
+  done
+}
+
+# normalise_path <variable>
+# Removes the empty and '.' components of the absolute path in <variable>, leaving '' for '/'.
+normalise_path() {
+  local -n __path="$1"
+  local __component __normalised=""
+  local -a __components
+
+  IFS='/' read -r -a __components <<<"$__path"
+  for __component in "${__components[@]}"
+  do
+    [[ -z "$__component" || "$__component" = "." ]] || __normalised+="/$__component"
+  done
+  __path="$__normalised"
+}
+
 # HOME=$RUNCVM keeps jq from loading the invoking user's ~/.jq.
 jq() {
   HOME=$RUNCVM $RUNCVM_LD $RUNCVM_JQ "$@"
@@ -285,6 +319,42 @@ valid_virtiofsd_cache() {
     esac
   done
   [ "$writeback" = 0 ] || [[ "${policy:-auto}" =~ ^(auto|always)$ ]]
+}
+
+# check_virtiofsd_cache_paths <value>
+# Checks <value>, RUNCVM_VIRTIOFSD_CACHE_PATHS (see runcvm-ctr-virtiofsd): a ';'-separated list of
+# <path>=<policy>, each path absolute, other than '/', and without a '..' component. A path's last
+# '=' separates it from its policy, so a path may contain '='. Entries are checked as virtiofsd
+# does: each path is normalised (empty and '.' components dropped), and may not be the root, nor be
+# given twice with different policies. Whitespace around an entry is ignored (see split_list), as
+# runcvm-ctr-virtiofsd ignores it. Reports an invalid entry with error().
+check_virtiofsd_cache_paths() {
+  local entry path policy
+  local -a entries
+  local -A policies=()
+
+  split_list entries ';' "$1"
+  for entry in "${entries[@]}"
+  do
+    path="${entry%=*}"
+    if [[ "$entry" != *=* || "$path" != /* || "/$path/" == */../* ]]; then
+      error "RUNCVM_VIRTIOFSD_CACHE_PATHS entry '$entry' invalid (should be <path>=<policy>, with <path> absolute, other than '/', and without '..')"
+    fi
+    policy="${entry##*=}"
+    case "$policy" in
+      auto|always|metadata|never) ;;
+      none) policy=never ;;
+      *) error "RUNCVM_VIRTIOFSD_CACHE_PATHS entry '$entry' invalid (its policy should be one of the cache policies auto, always, metadata and none (or never))" ;;
+    esac
+    normalise_path path
+    if [ -z "$path" ]; then
+      error "RUNCVM_VIRTIOFSD_CACHE_PATHS entry '$entry' invalid (its path is '/', whose policy RUNCVM_VIRTIOFSD_CACHE sets)"
+    fi
+    if [ -n "${policies[$path]}" ] && [ "${policies[$path]}" != "$policy" ]; then
+      error "RUNCVM_VIRTIOFSD_CACHE_PATHS gives '$path' two cache policies"
+    fi
+    policies[$path]="$policy"
+  done
 }
 
 get_config_env() {
@@ -783,48 +853,9 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     *) error "RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE '$RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE' invalid (should be one of the cache policies auto, always, metadata and none (or never))" ;;
   esac
 
-  # The cache policies for the mounts at or below given paths (see runcvm-ctr-virtiofsd): a
-  # ';'-separated list of <path>=<policy>, each path absolute, other than '/', and without a '..'
-  # component. A path's last '=' separates it from its policy, so a path may contain '='.
-  # Entries are checked as virtiofsd does: each path is normalised (empty and '.' components
-  # dropped), and may not be the root, nor be given twice with different policies. Whitespace around
-  # an entry, such as the newline that ends a YAML block scalar, is ignored, as runcvm-ctr-virtiofsd
-  # ignores it.
+  # The cache policies for the mounts at or below given paths (see check_virtiofsd_cache_paths).
   RUNCVM_VIRTIOFSD_CACHE_PATHS="$(get_config_env 'RUNCVM_VIRTIOFSD_CACHE_PATHS')"
-  if [ -n "$RUNCVM_VIRTIOFSD_CACHE_PATHS" ]; then
-    cache_paths=() cache_path_components=()
-    declare -A cache_path_policies=()
-    mapfile -d ';' -t cache_paths < <(printf '%s' "$RUNCVM_VIRTIOFSD_CACHE_PATHS")
-    for cache_path_entry in "${cache_paths[@]}"
-    do
-      cache_path_entry="${cache_path_entry#"${cache_path_entry%%[![:space:]]*}"}"
-      cache_path_entry="${cache_path_entry%"${cache_path_entry##*[![:space:]]}"}"
-      [ -n "$cache_path_entry" ] || continue
-      cache_path="${cache_path_entry%=*}"
-      if [[ "$cache_path_entry" != *=* || "$cache_path" != /* || "/$cache_path/" == */../* ]]; then
-        error "RUNCVM_VIRTIOFSD_CACHE_PATHS entry '$cache_path_entry' invalid (should be <path>=<policy>, with <path> absolute, other than '/', and without '..')"
-      fi
-      cache_policy="${cache_path_entry##*=}"
-      case "$cache_policy" in
-        auto|always|metadata|never) ;;
-        none) cache_policy=never ;;
-        *) error "RUNCVM_VIRTIOFSD_CACHE_PATHS entry '$cache_path_entry' invalid (its policy should be one of the cache policies auto, always, metadata and none (or never))" ;;
-      esac
-      normalised=""
-      IFS='/' read -r -a cache_path_components <<<"$cache_path"
-      for component in "${cache_path_components[@]}"
-      do
-        [[ -z "$component" || "$component" = "." ]] || normalised+="/$component"
-      done
-      if [ -z "$normalised" ]; then
-        error "RUNCVM_VIRTIOFSD_CACHE_PATHS entry '$cache_path_entry' invalid (its path is '/', whose policy RUNCVM_VIRTIOFSD_CACHE sets)"
-      fi
-      if [ -n "${cache_path_policies[$normalised]}" ] && [ "${cache_path_policies[$normalised]}" != "$cache_policy" ]; then
-        error "RUNCVM_VIRTIOFSD_CACHE_PATHS gives '$normalised' two cache policies"
-      fi
-      cache_path_policies[$normalised]="$cache_policy"
-    done
-  fi
+  check_virtiofsd_cache_paths "$RUNCVM_VIRTIOFSD_CACHE_PATHS"
 
   # Under software emulation, QEMU keeps a cache of translated code, whose size is set by
   # RUNCVM_QEMU_TCG_TB_MEM_SIZE (Mb) and added to the container's memory limit (below), so

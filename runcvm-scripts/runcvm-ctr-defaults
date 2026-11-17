@@ -121,6 +121,25 @@ disk_fs_list() {
   awk -v f="$1" '$1 !~ /^#/ && NF { print $f }' "$RUNCVM_GUEST/etc/disk-filesystems"
 }
 
+# split_list <array> <separator> <string>
+# Sets <array> to the entries of <string> between <separator>s, each without the whitespace around
+# it (such as the newline that ends a YAML block scalar), and skips entries of whitespace alone.
+# <string> is split with mapfile, not read, which would stop at a newline. runcvm-runtime has its own copy.
+split_list() {
+  local -n __split_list="$1"
+  local __item
+  local -a __items=()
+
+  mapfile -d "$2" -t __items < <(printf '%s' "$3")
+  __split_list=()
+  for __item in "${__items[@]}"
+  do
+    __item="${__item#"${__item%%[![:space:]]*}"}"
+    __item="${__item%"${__item##*[![:space:]]}"}"
+    [ -z "$__item" ] || __split_list+=("$__item")
+  done
+}
+
 load_network() {
   local if="${1:-default}"
   [ -d /.runcvm/network/devices ] && [ -s /.runcvm/network/devices/$if ] || return 1
