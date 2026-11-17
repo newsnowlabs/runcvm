@@ -241,6 +241,20 @@ Running RunCVM on macOS is experimental, as is arm64 support. On macOS, Docker r
 
 Check that `/dev/kvm` exists inside the VM (e.g. `limactl shell <vm> ls -l /dev/kvm`) before installing RunCVM there. The VM may also lack `/dev/vhost-net` (needed by `RUNCVM_QEMU_NET_VHOST=1`) and hugepages (needed by `RUNCVM_HUGETLB=1`); both options are off by default.
 
+Under nested virtualisation, a Container/VM starts slowly with RunCVM's defaults: on an M3 Mac, `docker run --rm --runtime=runcvm alpine true` takes about 21 seconds. While arm64 support is experimental, two settings make most of the difference there:
+
+- **Hugepages.** By default, the Container/VM's memory is a file in the container's `/dev/shm`, whose pages are allocated as the Container/VM first uses them, which is slow under nested virtualisation. With `--env=RUNCVM_HUGETLB=auto` (see [`RUNCVM_HUGETLB`](#runcvm_hugetlb)), the Container/VM's memory comes instead from the Linux VM's pool of 2 MB hugepages, which cuts the start time to about 5 seconds, wherever the pool has enough pages available for it, and from `/dev/shm` otherwise. (`RUNCVM_HUGETLB=1` takes it from the pool alone, so a Container/VM whose memory the pool cannot supply fails to start.) A Container/VM reserves all its memory's pages from the pool when it starts, 256 pages for the default 512 MB, so that they are unavailable to others, though it allocates each only as it first uses it; it releases them all when it ends. The pool itself is set aside for hugepages alone, used or not, so its memory is lost to everything else in the Linux VM. To reserve a pool:
+  1. Choose its size: no more than about a third of the Linux VM's memory, e.g. 2048 pages (4 GB) in a Linux VM of 12 GB, or 640 pages (1.25 GB) in one of 4 GB.
+  2. Reserve it, keeping it across restarts of the Linux VM: `limactl shell <vm> sudo sh -c 'echo "vm.nr_hugepages = 2048" >/etc/sysctl.d/99-hugepages.conf && sysctl -p /etc/sysctl.d/99-hugepages.conf'`.
+  3. Check how many pages it holds: `limactl shell <vm> grep HugePages_Total /proc/meminfo`. If memory is fragmented, the pool can come out smaller than asked for; then free and compact memory, with `limactl shell <vm> sudo sh -c 'echo 3 >/proc/sys/vm/drop_caches; echo 1 >/proc/sys/vm/compact_memory'`, and reserve it again (step 2).
+
+  To release the pool, remove `/etc/sysctl.d/99-hugepages.conf` and run `sudo sysctl -w vm.nr_hugepages=0` in the Linux VM. When installed in a Linux VM run by Apple's Virtualization framework with no pool reserved, RunCVM's installer suggests a pool size.
+- **Caching.** RunCVM's default cache policy, `RUNCVM_VIRTIOFSD_CACHE=auto`, has the Container/VM read each program afresh from the container's filesystem every time it runs it, and reads over virtiofs are slow there. `--env=RUNCVM_VIRTIOFSD_CACHE=always` keeps files' contents cached in the Container/VM: alone, it cuts the start time to about 14 seconds; with hugepages, to about 4 seconds. Do not use `always` for a Container/VM with volumes or bind mounts whose files change outside the VM, e.g. files edited on the host, as the Container/VM may not see those changes for up to a day; keep the default for those, or use `none` for volumes shared with other Container/VMs (see [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)).
+
+Fewer vCPUs also start faster there: with the default settings, `--cpus=1` saves about 2.5 seconds.
+
+To run RunCVM's integration tests on such a host, see [Running the integration tests](#running-the-integration-tests).
+
 ## Installation
 
 Run:
@@ -472,6 +486,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
 - `docker run`
    - Mounts
       - [+] `--mount` (or `-v`) is supported for volume mounts, tmpfs mounts, and host file and directory bind-mounts (the `dst` mount path `/disks` is reserved)
+      - [-] A mount's destination may not contain an ASCII control character (a byte 0x01–0x1F or 0x7F, such as a tab or a newline), as given or once symbolic links in the image are resolved: RunCVM rejects such a Container/VM when it is created, showing the path in bash's `$'…'` notation. Every other character, including spaces and UTF-8 characters, is kept exactly.
       - [-] Bind-mounting host sockets or devices, and `--device` is unsupported
    - Networking
       - [+] The default bridge network is supported
@@ -505,7 +520,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [-] Stdout and Stderr sent very soon after VM launch might be corrupted due to serial console issues
       - [-] Stdout and Stderr sent immediately before VM shutdown might not always be fully flushed
    - Resource allocation and limits
-      - [+] `--cpus` is supported: it sets the container's CPU quota, as usual, and also the number of VM CPUs, rounded up to a whole number (e.g. `--cpus=0.5` gives one CPU, limited to half a CPU's time)
+      - [+] `--cpus` is supported: it sets the number of VM CPUs, rounded up to a whole number, and the container's CPU quota, with [`RUNCVM_CPU_HEADROOM`](#runcvm_cpu_headroom)'s CPUs more (one by default) for QEMU and `virtiofsd`: e.g. `--cpus=2` gives two CPUs and a quota of three; `--cpus=0.5` gives one CPU and a quota of one and a half
       - [+] `--memory` (or `-m`) is supported to specify VM memory (and limit container memory to this value plus a 256Mb contingency)
       - [-] Other container resource limit options such as (`--cpu-*`), block IO (`--blkio-*`), kernel memory (`--kernel-memory`) are unsupported or untested
    - Exit code
@@ -821,14 +836,14 @@ Kernel modules to load into the VM's kernel when it boots, before the workload s
 
 Automatically create, format, prepopulate and mount backing files as virtual disks on the VM.
 
-Each `<diskN>` is a comma-separated list of fields, in either of two forms:
+Each `<diskN>` is a comma-separated list of fields, in either of two forms. Whitespace around each `<diskN>`, such as the newlines of a YAML block scalar (e.g. one `<diskN>;` per line), is ignored:
 
 - positional: `<src>,<dst>[:<dst2>:...],<filesystem>[,<size>][,layout=subdirs|root][,prealloc=on|off]`
 - keyed: `src=<src>,dst=<dst>[,dst=<dst2>...],fs=<filesystem>[,size=<size>][,layout=subdirs|root][,prealloc=on|off]`, with the fields in any order, recognised by its first field beginning with one of these keys and `=`; as in Docker's `--mount`, `source` may be given for `src`, and `target` or `destination` for `dst`
 
 where:
 
-- `<src>` is the path _within the container_ where the virtual disk backing file should be located. This may be in the container's overlayfs or within a volume (mounted using `--mount=type=volume`).
+- `<src>` is the absolute path _within the container_ where the virtual disk backing file should be located, without `.` or `..` components. This may be in the container's overlayfs or within a volume (mounted using `--mount=type=volume`). A symbolic link there is followed, as creating the file would follow it.
 - `<dst>` is both (a) the path within the VM where the disk's files should appear; and (b) the location of the directory with which contents the disk should be prepopulated. Several destinations may share one disk: separated by `:` in the positional form, or each given by its own `dst=` in the keyed form, where a destination may also contain `:`.
 - `<filesystem>` is the filesystem with which the backing disk should be formatted when first created: by default, `ext4`, `xfs` or `btrfs` (see [Disk filesystems](#disk-filesystems) below).
 - `<size>` is the size of the backing file (in `truncate` format), and must be specified if `<src>` does not exist.
@@ -837,11 +852,23 @@ where:
 
 In the keyed form, each field is split at its first `=`, so values may contain `=`; only `dst` may be given more than once. In either form, no value may contain `,` or `;`, and an unknown or repeated option is rejected.
 
-When first created, the backing file will be created as a sparse file to the specified `<size>`, formatted with the specified `<filesystem>`, and prepopulated with any files preexisting at each `<dst>`, with their ownership, modes, timestamps, extended attributes and hard links. An `ext4` disk is formatted and prepopulated in the container, by `mke2fs`. A disk with another filesystem is formatted empty in the container, then prepopulated when the VM first boots with it, before anything is mounted over the destinations, by copying each `<dst>` with RunCVM's own `cp -a`. (`trusted.*` extended attributes are copied only if the container has `CAP_SYS_ADMIN`, e.g. with `--cap-add=SYS_ADMIN`, because `mke2fs` runs in the container. For a disk with another filesystem, they are copied only with `--env=RUNCVM_SYS_ADMIN=1` as well, as the VM reads the container's files through `virtiofsd`, which otherwise drops the capability.)
+Every destination, whatever the disk's layout, other than a whole-root disk's `/`, must be an absolute path other than `/`, without `.` or `..` components, whitespace or `\`. No destination or backing file path may contain an ASCII control character (a byte 0x01–0x1F or 0x7F), as given or once symbolic links are resolved, including links in the directories above a backing file; such a spec is rejected, shown in bash's `$'…'` notation. (Whitespace here means ASCII whitespace: UTF-8 characters, such as a non-breaking space, are allowed.) No two disks may have one backing file, whether named by one path, by another path leading to the same file, or as hard links to one file; nor may two existing disks have one filesystem UUID (as a copy of a disk's backing file does), by which the VM finds each disk. Every spec is checked, including each existing disk's filesystem, layout and UUID, and each new disk's size, before anything is created: an invalid spec anywhere in `RUNCVM_DISKS` creates no directory, backing file or filesystem. A new `ext4` disk, which RunCVM's `mke2fs` populates, can leave out at most 256 paths below its destinations, and with layout `subdirs` have at most 64 destinations; a spec beyond either limit is rejected likewise.
+
+When first created, the backing file will be created as a sparse file to the specified `<size>`, formatted with the specified `<filesystem>`, and prepopulated with any files preexisting at each `<dst>`, with their ownership, modes, timestamps, extended attributes and hard links. An `ext4` disk is formatted and prepopulated in the container, by `mke2fs`. A disk with another filesystem is formatted empty in the container, then prepopulated when the VM first boots with it, before anything is mounted over the destinations, by copying each `<dst>` with RunCVM's own `cp -a`, before the VM switches to any whole-root disk. (`trusted.*` extended attributes are copied only if the container has `CAP_SYS_ADMIN`, e.g. with `--cap-add=SYS_ADMIN`, because `mke2fs` runs in the container. For a disk with another filesystem, they are copied only with `--env=RUNCVM_SYS_ADMIN=1` as well, as the VM reads the container's files through `virtiofsd`, which otherwise drops the capability.)
+
+A new disk gets a copy of the image's files at each `<dst>`, with these exceptions:
+
+- **Volumes, bind mounts and tmpfs mounts.** If a volume, bind mount or tmpfs mount has its destination below a `<dst>` (for example, a volume at `/home/user/shared` and a disk at `/home`), RunCVM does not copy that mount's contents onto the disk. In the VM, RunCVM mounts the volume, bind mount or tmpfs mount over the disk at that destination, so the VM sees the mount's contents there, not the disk's. This applies even when the mount is on the same host filesystem as the image.
+- **Other disks.** If another disk's `<dst>` is below this disk's `<dst>` (for example, one disk at `/home/b` and another at `/home`), RunCVM does not copy the image's files at `/home/b` onto the `/home` disk. The `/home/b` disk holds those files, and RunCVM mounts it over that path.
+- **Backing files.** If the VM can see a disk's backing file below a `<dst>`, RunCVM does not copy that backing file onto the disk. This includes the disk's own backing file. For example, with one volume mounted at both `/disks` and `/data`, and the disk `/disks/data.img,/data,ext4,1G`, the VM sees the backing file at `/data/data.img`, so RunCVM does not copy it. A different file that only has the same name is copied as usual.
+
+On the new disk, RunCVM creates an empty directory at each excluded directory. RunCVM creates no file at an excluded file's path. When the VM boots, RunCVM creates an empty file at the path of each bind-mounted file, such as Docker's `/etc/hosts`, and mounts the bind-mounted file over it.
 
 RunCVM formats disks with its own bundled `mkfs` commands, and `ext4` disks with its own `mke2fs.conf`, ignoring any `/etc/mke2fs.conf` in the container's image, so a disk is formatted the same way whatever the image. For `ext4`, the configuration leaves out the `orphan_file` and `metadata_csum_seed` features, as Debian's and Ubuntu's do, so that the disk can also be checked, resized and tuned with older versions of e2fsprogs: `orphan_file` needs e2fsprogs 1.47 or later, and `metadata_csum_seed` 1.43 or later.
 
 When RunCVM creates a Container/VM, fstab entries will be drafted, identifying each disk by its filesystem's UUID. After the VM boots, the fstab entries will be mounted, in order. Typically, the first disk will be mounted as `/dev/vda`, the second as `/dev/vdb`, and so on. RunCVM finds each disk with its own bundled `blkid.conf`, which scans the VM's block devices and keeps no cache, ignoring any `/etc/blkid.conf` in the image.
+
+As in Docker, where a deeper mount is mounted over a shallower one, disks, volumes, bind mounts and tmpfs mounts (`--mount type=tmpfs`, `--tmpfs`) are mounted in the VM in order of the depth of their destinations, whatever the order of the disks in `RUNCVM_DISKS`, so each path is the deepest mount at or above it: e.g. with `--mount=type=volume,src=shared,dst=/home/user/shared` and a disk with destination `/home`, the VM's `/home` is on the disk, and `/home/user/shared` is the volume; with disks at `/home` and `/home/b`, or a tmpfs mount or volume at `/home` and a disk at `/home/b`, `/home/b` is that disk; and with a disk at `/home`, a volume at `/home/user/shared` and a disk at `/home/user/shared/db`, each is at its own destination. If the mount above lacks a mountpoint for a mount below it, RunCVM creates one. A disk may not share a destination with another disk or a tmpfs mount. A destination that does not exist in the image is created before any disk is, as a directory with mode `0755`, owned by `root`, as are any missing directories above it. A disk at a volume's or bind mount's destination is mounted over it, so is prepopulated from its contents when created: e.g. a disk at `/var/lib/docker`, where the `docker:dind` image declares a `VOLUME`; this holds too where that disk is itself below another disk or a tmpfs mount. Docker's volumes and bind mounts that a disk or tmpfs mount hides are held during boot and mounted again over it; how they appear in the VM's `/etc/fstab` is set by [`RUNCVM_FSTAB`](#runcvm_fstab). [docs/adr/0002-disk-mount-planning.md](docs/adr/0002-disk-mount-planning.md) records how RunCVM plans the disks, their population and the VM's mounts. A new disk leaves an empty directory at each other disk's `<dst>` below its own, whatever their order, as that disk is mounted there in the VM and holds its files.
 
 Data written to a disk stays in the VM's memory until the VM's kernel writes it out, so whether a disk's contents survive the VM ending depends on how the VM shuts down: see [Shutdown and disk data integrity](#shutdown-and-disk-data-integrity) below.
 
@@ -859,8 +886,7 @@ A disk with layout `subdirs`, the default, holds a top-level directory for each 
 
 Each directory is named after its destination: the path without its leading `/`, with each `%`, `-` and `=` encoded as `%25`, `%2D` and `%3D`, and then each `/` replaced by `-`. For example, `/var/lib/docker` is held in `var-lib-docker`, `/a/b` in `a-b`, and `/a-b` in `a%2Db`. The name depends only on the destination, so it is the same on every boot, and distinct destinations always have distinct names.
 
-The destinations of a disk with layout `subdirs`:
-- must be absolute paths other than `/`, without `.` or `..` components, whitespace or `\`;
+The destinations of a disk with layout `subdirs`, besides the rules for every destination above:
 - must not overlap: no destination may be the same as, or an ancestor of, another, once any symbolic links in the image are resolved (e.g. `/var/lib` and `/var/lib/docker` are rejected, as are `/var/run` and `/run` in an image where `/var/run` links to `/run`);
 - must not be `/lost+found`, whose directory name would clash with the `lost+found` that `mke2fs` creates in every filesystem's root (use `layout=root` for it).
 
@@ -894,7 +920,7 @@ docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=
 
 A whole-root disk must have `/` as its only destination, filesystem `ext4` and layout `root` (`layout=root` may be given, but need not be). Only one disk may have destination `/`; other disks in `RUNCVM_DISKS` are mounted onto it as usual.
 
-When first created, a whole-root disk is prepopulated with a copy of the container's filesystem: the image and any changes made to it in the container. The copy leaves out everything that must stay live, as it is mounted from the container: `/.runcvm`, volumes, bind mounts, the files Docker mounts such as `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf`, and the kernel modules. Each mountpoint that is a directory is left as an empty directory. The copy also leaves out every disk's backing file, so that a backing file in the container's own filesystem is not copied into the disk, and the image's files at other disks' destinations, which those disks hold instead, leaving an empty directory at each.
+When first created, a whole-root disk is prepopulated with a copy of the container's filesystem: the image and any changes made to it in the container. The copy leaves out everything that must stay live, as it is mounted from the container: `/.runcvm`, volumes, bind mounts, the files Docker mounts such as `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf`, and the kernel modules. Each mountpoint that is a directory is left as an empty directory. The copy also leaves out every disk's backing file that the VM sees, so that a backing file in the container's own filesystem is not copied into the disk, and the image's files at other disks' and tmpfs mounts' destinations, which those mounts hold instead, leaving an empty directory at each. A new `xfs` or `btrfs` disk alongside a whole-root disk is populated from the image before the VM switches to the whole-root disk.
 
 The VM still boots from the container's filesystem over virtiofs. Early in boot, before setting up the network, mounting the other disks or starting the entrypoint, `runcvm-vm-init` mounts the whole-root disk, binds everything that must stay live onto it, and switches to it as the root filesystem with `pivot_root`. Everything after that, including the entrypoint and `docker exec`, sees the disk as `/`.
 
@@ -959,6 +985,17 @@ docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=
 ```
 
 > N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints, these are *NOT* mounted into the VM but only into the container, and are therefore suitable for use for mounting VM disks from backing files that cannot be accessed within the VM's filesystem.
+
+### RUNCVM_FSTAB
+
+**`RUNCVM_FSTAB=disks|all`** (default `disks`)
+
+Sets what RunCVM's fstab lists of the volumes and bind mounts that a disk or tmpfs mount hides (see [`RUNCVM_DISKS`](#runcvm_disks)), which RunCVM holds during boot and mounts again over the disk or tmpfs mount. RunCVM's fstab lists every disk other than a whole-root disk (which `runcvm-vm-init` mounts itself, before anything else; see [Whole-root disks](#whole-root-disks)) and every tmpfs mount, in the order they are mounted, and is mounted over the image's `/etc/fstab`. Where there are no such mounts, as with a whole-root disk alone, RunCVM writes no fstab, and the image's `/etc/fstab` is left as it is.
+
+- `disks`: each such volume and bind mount appears only as a comment, `#runcvm-held <id> <path>`, in its place among the mounts, and the tmpfs that held it during boot is detached, leaving nothing of it in the VM. Unmounting the volume, or restarting a systemd mount unit above it (such as `home.mount` for a volume at `/home/user/shared` below a disk at `/home`), loses it until the Container/VM restarts. An image without an `/etc/fstab` is left without one.
+- `all`: each appears as a bind mount from where it is held, `/.runcvm/submounts/<id> <path> none bind 0 0`, and the tmpfs holding it stays mounted at `/.runcvm/submounts`, so that `mount -a` mounts it again, as systemd does when restarting the volume's own mount unit, or the unit of a mount above it (such as `home.mount`; systemd restarts the volume's unit in a job of its own, which `systemctl restart home.mount` does not wait for). An image without an `/etc/fstab`, such as `almalinux/9-init`, is given an empty one, for RunCVM's to be mounted over. Without a whole-root disk, that file is in the container's own filesystem, and is created there only at this setting's request. Where it cannot be created, as on a read-only root, the Container/VM boots without RunCVM's fstab, which means `mount -a` and systemd will not be able to mount the held volumes again; a console warning says so.
+
+Paths in RunCVM's fstab are written with fstab's octal escapes for space and `\` (`\040` and `\134`; and, as a safeguard, for tab and newline, which no mount path may contain), which `mount`, systemd and RunCVM decode.
 
 ### RUNCVM_DISPLAY_MODE
 
@@ -1073,7 +1110,7 @@ By default BIOS console output is hidden. Enable it with this option. With `--en
 **`RUNCVM_RUNTIME_DEBUG=1`**
 
 Enable debug logging for the runtime (the portion of RunCVM directly invoked by `docker run`, `docker exec` etc).
-Debug logs are written to files in `/tmp`.
+Debug logs, and copies of the configuration the runtime is given and returns, are written to files in the host's `/run/runcvm`, a directory only root can read: `runtime-<pid>.log`, `config.json-<pid>-1` and `-2` (for `docker run`), and `process.json-<pid>-1` and `-2` (for `docker exec`).
 
 ### RUNCVM_QEMU_DEBUG
 
@@ -1089,11 +1126,27 @@ Enable breakpoints (falling to bash shell) during the RunCVM Container/VM boot p
 
 `<values>` must be a comma-separated list of: `prenet`, `postnet`, `preqemu`.
 
+### RUNCVM_CPU_HEADROOM
+
+**`RUNCVM_CPU_HEADROOM=<cpus|max>`** (default `1`)
+
+How many CPUs, from `0` to `64` (fractions allowed), to add to the CPU quota that `docker run --cpus` sets, for the Container/VM's own processes: QEMU's threads and `virtiofsd`, which run in the container alongside the VM's CPUs and share its quota. Without `--cpus`, the container has no quota, and nothing is added, though an invalid value still fails creation.
+
+`--cpus=N` gives the VM N CPUs (rounded up), each of which can keep a host CPU busy. With a quota of exactly N, QEMU and `virtiofsd` then have no time of their own: whenever they need CPU while the VM's CPUs are busy, Linux stops every thread in the container, the VM's CPUs included, until the next 100 ms period. With `--cpus=1` and no headroom, a Container/VM can take about 60% longer to create 2,000 small files or copy a directory tree of about 1,400 files, and a third longer to run a small program 300 times, than with one CPU of headroom, under which it is not throttled.
+
+`0` keeps Docker's quota exactly, so that the container never uses more than `--cpus` CPUs. `max` removes the quota, so that `--cpus` sets only the number of VM CPUs. `docker update --cpus` sets the quota without headroom.
+
+With `--cpus` equal to the host's CPU count (or more), and any headroom but `0`, the quota can never be reached, so the Container/VM behaves as without `--cpus`; to leave CPU for QEMU and `virtiofsd` when the VM keeps all its CPUs busy, give it fewer CPUs than the host has.
+
 ### RUNCVM_HUGETLB
 
-**`RUNCVM_HUGETLB=1`**
+**`RUNCVM_HUGETLB=<0|1|auto>`**
 
-**[EXPERIMENTAL]** Enable use of preallocated hugetlb memory backend, which can improve performance in some scenarios.
+**[EXPERIMENTAL]** Specifies where the VM's memory comes from:
+
+- `0` (the default): a file in the container's `/dev/shm`, whose pages are allocated as the VM first uses them, unless preallocated (see [`RUNCVM_QEMU_MEM_PREALLOC`](#runcvm_qemu_mem_prealloc)).
+- `1`: the host's pool of hugepages (e.g. 2 MB each), which can improve performance in some scenarios, and makes the VM much faster to start under nested virtualisation, e.g. on macOS (see [macOS on Apple Silicon](#macos-on-apple-silicon)). The pool must be reserved in advance with the host's `vm.nr_hugepages` sysctl, and have enough pages available (free and not reserved by another Container/VM) for the VM's memory (512 MB by default, or as given by `--memory`), or the Container/VM fails to start. The pool's memory is set aside for hugepages alone, whether used or not.
+- `auto`: hugepages where the host's pool has enough pages available for the VM's memory (free and not reserved by another Container/VM), and `/dev/shm` otherwise, noting on the container's standard error where a pool exists but has too few pages available. Should other Container/VMs take the available pages between that check and QEMU starting, the Container/VM fails to start, as with `1`.
 
 ### RUNCVM_QEMU_MEM_PREALLOC
 
@@ -1105,9 +1158,94 @@ Default is `off`, but `on` may deliver improved performance in some scenarios at
 
 ### RUNCVM_VIRTIOFSD_CACHE
 
-**`RUNCVM_VIRTIOFSD_CACHE=<auto|none|always>`**
+**`RUNCVM_VIRTIOFSD_CACHE=<auto|always|metadata|none>[,writeback]`**
 
-Specifies the cache policy passed to `virtiofsd` via `--cache=<value>`, with `none` passed as `never`; `virtiofsd`'s other policies, such as `metadata`, are also accepted. The default policy is `auto`. Use `none` to avoid caching issues when multiple RunCVM instances need to share access to a volume or bind-mount on the host.
+Sets how the VM caches the files it reads over virtiofs: their names, their attributes (such as size, ownership and modification time) and their contents. The container's root filesystem, its volumes and its bind mounts are all served by one `virtiofsd`, so one policy applies to all of them. The policy is passed to `virtiofsd` as `--cache=<value>`; `none` is passed as `never`, which is also accepted. The default is `auto`.
+
+| Policy | Names and attributes | File contents | Suits |
+|---|---|---|---|
+| `auto` (default) | cached for 1 second | cached while a file is open, and dropped each time it is opened | most uses, including files that change outside the VM, such as a bind mount edited on the host |
+| `always` | cached for up to a day | cached across opens | Container/VMs whose files nothing outside the VM changes, e.g. build or CI workloads without shared volumes or bind mounts; the fastest policy |
+| `metadata` | cached for up to a day | not cached | the same restriction as `always`, with slower reads; rarely useful |
+| `none` | not cached | not cached | volumes or bind mounts through which several Container/VMs, or a Container/VM and the host, exchange files and must see each other's changes; the slowest policy |
+
+Without `writeback`, the VM's writes reach the host's filesystem as each write is made, so the policy affects only how soon the VM sees changes made outside it: by the host, by other containers sharing a volume, by `docker cp`, or by Docker itself, which can rewrite files such as `/etc/hosts`. Under `always` and `metadata`, the VM may go on seeing a file's old name, attributes or contents for up to a day after it changes, and a program that acts on them can overwrite the newer version.
+
+For volumes that several Container/VMs share, use `none`. Under `auto`, files that one Container/VM writes to a shared volume can stay invisible to the others for many seconds, far longer than its 1-second timeouts suggest; `tests/50-http-docker-swarm`, whose nodes exchange files through a shared volume, uses `none` for this reason. Where the files exchanged are few and small, as there, `none` costs little.
+
+Reads under `always` can be several times faster than under `none`: e.g. rereading a Debian image's `/usr`, about 230 MB, takes roughly a quarter of the time. Choose a faster policy only where its restriction holds for every file the Container/VM can see.
+
+Adding `writeback` to `auto` or `always`, e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always,writeback`, launches `virtiofsd` with `--writeback`. The VM then holds writes in its own memory and passes them on to the host in batches: whenever a file is closed or synced (`fsync`), and otherwise within seconds. This makes many small writes faster, e.g. writing a file 512 bytes at a time can take as little as half as long, but makes large copies little faster. It comes with these restrictions, so use it only where nothing outside the VM reads or writes the Container/VM's files while it runs, such as a build whose output is collected after it finishes:
+
+- Until a file is closed or synced, the host and other containers may see old contents, size or modification time for it.
+- Appending (`>>`, `O_APPEND`) is done by the VM at the end of the file as the VM knows it, so data appended at the same time from outside the VM can be overwritten.
+- If the Container/VM is killed (e.g. `docker kill`, or `docker stop` timing out), writes not yet passed on are lost, as they would be on a machine that loses power. A clean stop passes them all on.
+- `virtiofsd` opens files the VM opens write-only for reading as well, so a file `virtiofsd` cannot read, e.g. on a network filesystem that denies root, cannot be written.
+
+`writeback` cannot be combined with `metadata` or `none`, which do not cache file contents, and RunCVM refuses to create the Container/VM if it is.
+
+With [`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE`](#runcvm_virtiofsd_submount_cache) or [`RUNCVM_VIRTIOFSD_CACHE_PATHS`](#runcvm_virtiofsd_cache_paths), `writeback` applies, with these restrictions, to every mount whose policy is `auto` or `always`, and not to those given `metadata` or `none`, whose files the VM writes straight to the host. So a Container/VM whose own files nothing outside it touches, but whose volumes or bind mounts the host or other containers may write to, can still use `writeback`, by giving those mounts `none`: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always,writeback --env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=none`.
+
+### RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE
+
+**`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=<auto|always|metadata|none>`**
+
+**[EXPERIMENTAL]** Specifies the cache policy, as for [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache), for the mounts within the VM's root filesystem: every volume and bind mount, including those of single files, such as the `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` that Docker bind-mounts and may rewrite. `RUNCVM_VIRTIOFSD_CACHE`'s policy then applies to the root filesystem alone. Unset, the mounts take `RUNCVM_VIRTIOFSD_CACHE`'s policy too.
+
+This lets the image's own files, which nothing outside the VM normally changes, be cached as with `always`, while volumes and bind mounts, which the host or other containers may change, keep `auto`'s 1-second timeouts and rereading of file contents on each open: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always --env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto`. With `writeback` in `RUNCVM_VIRTIOFSD_CACHE`, mounts given `auto` or `always` here take its restrictions too, including appends from outside the VM being overwritten; give them `none` or `metadata` to keep them out of it ([`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)). Mounts are told apart by `virtiofsd` itself: RunCVM builds `virtiofsd` with patches (`patches/virtiofsd/`) that add its `--submount-cache` option, to be dropped once a `virtiofsd` release has it.
+
+With `always` for the root filesystem, the VM may still go on seeing, for up to a day, the old version of a root filesystem file changed from outside it, e.g. with `docker cp` into the running container.
+
+### RUNCVM_VIRTIOFSD_CACHE_PATHS
+
+**`RUNCVM_VIRTIOFSD_CACHE_PATHS=<path>=<policy>[;<path>=<policy>...]`**
+
+**[EXPERIMENTAL]** Specifies a cache policy, as for [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache) (`auto`, `always`, `metadata` or `none`), for the volumes and bind mounts at or below each `<path>`: e.g. `--env='RUNCVM_VIRTIOFSD_CACHE_PATHS=/data=none;/srv/static=always'`. Each mount takes the policy of the longest `<path>` that is its destination or a directory above it (`/data` covers `/data` and `/data/db`, but not `/database`); a mount no `<path>` covers takes [`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE`](#runcvm_virtiofsd_submount_cache)'s policy, if set, and otherwise `RUNCVM_VIRTIOFSD_CACHE`'s.
+
+Whitespace around each `<path>=<policy>` is ignored, such as the newlines of a YAML block scalar. Each `<path>` is a path in the container, absolute, other than `/` (however written, e.g. `/./`), without `..`, and need not exist. Two ways of writing one path, e.g. `/data` and `/data/`, name the same path, which may not be given two policies. A `<path>` applies as follows: a mount at or below it is matched when the VM first reaches it. It applies to mounts only: a directory of the root filesystem takes `RUNCVM_VIRTIOFSD_CACHE`'s policy, whatever `<path>` covers it. A `<path>` is matched against mount destinations as the kernel records them, so one leading through a symbolic link matches nothing: give the path with links resolved. A `<path>` may contain `=` (the last `=` in each entry separates it from its policy), but not `;`.
+
+This suits a Container/VM with mounts that need different trade-offs: e.g. `none` for a volume that other containers write to, for which the VM must see each change at once, and `always` for a bind mount of files that do not change while it runs. With `writeback` in `RUNCVM_VIRTIOFSD_CACHE`, a `<path>` given `auto` or `always` takes writeback's restrictions too; one given `none` or `metadata` does not.
+
+### RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT
+
+**`RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=<seconds>`** (default `1`)
+
+How long, in seconds (fractions allowed, from `0` to `86400`), the VM may remember that a file it looked for over virtiofs does not exist, under the `auto` and `always` cache policies ([`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)); `0` disables it, as do the `metadata` and `none` policies. It is capped at the policy's own timeout for files that do exist (1 second under `auto`).
+
+Workloads look for many files that do not exist: a shell searching `PATH` for each command, the dynamic loader searching its library path, Python or Node.js probing for modules. Without this, each such lookup is a request to `virtiofsd`, however often it is repeated.
+
+A file the VM creates is visible to it at once, whether or not it looked for it before. A file created outside the VM (on the host in a bind mount, by another container in a shared volume, or with `docker cp`) under a name the VM has just looked for becomes visible to it after at most this long, as other changes made outside the VM already do under `auto`. A workload that waits for another container to create a file, and needs to see it at once, should use `none` for that mount ([`RUNCVM_VIRTIOFSD_CACHE_PATHS`](#runcvm_virtiofsd_cache_paths) or [`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE`](#runcvm_virtiofsd_submount_cache)), or for the whole Container/VM ([`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)), or set `RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=0`.
+
+Under `always`, longer values suit a Container/VM whose root filesystem nothing outside the VM changes while it runs, as `always` already assumes for files that do exist: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always --env=RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600`. A file missing when the VM looked for it is then not looked for again for up to an hour, which helps workloads that repeat the same failed lookups seconds or minutes apart (a shell starting commands, a service starting worker processes), not only in quick succession. A file added from outside under such a name, e.g. with `docker cp`, stays invisible to the VM for as long. The value is capped at each mount's own cache policy, so with [`RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE`](#runcvm_virtiofsd_submount_cache) or [`RUNCVM_VIRTIOFSD_CACHE_PATHS`](#runcvm_virtiofsd_cache_paths) giving volumes and bind mounts `auto`, they forget missing files within a second, however long the value, and those given `none` never remember them: e.g. `--env=RUNCVM_VIRTIOFSD_CACHE=always --env=RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE=auto --env=RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT=3600`. Without those, volumes and bind mounts share the root filesystem's policy, so a long value does not suit a Container/VM whose mounts are changed from outside it.
+
+### RUNCVM_VIRTIOFSD_KILLPRIV
+
+**`RUNCVM_VIRTIOFSD_KILLPRIV=<0|1>`**
+
+**[EXPERIMENTAL]** With `1`, `virtiofsd` clears a file's setuid and setgid bits and file capabilities (`security.capability`) when the VM modifies it, as a local file system would (FUSE's `KILLPRIV_V2`). By default (`0`), the VM's kernel does so, at the cost of a request to `virtiofsd`, to check for file capabilities, before each `write()` to a file over virtiofs: with `1`, a workload making many small writes makes about half as many requests.
+
+It comes with these restrictions:
+
+- Volumes and bind mounts on NFS, or other network file systems, are unsupported: there, setuid and setgid bits may survive a write by a process that should clear them.
+- `fallocate()` clears the bits for every caller, where a local file system keeps them for a caller with `CAP_FSETID` (e.g. root). (RunCVM's `virtiofsd` patches make `copy_file_range()`, used by `cp`, keep or clear them as a local file system would.)
+- A setgid bit without group-execute (a legacy marker, not a privilege) is kept or cleared by a write according to `virtiofsd`'s own group membership (group `root` alone), not the writer's: so it is cleared from files of other groups even when the writer is in the file's group, and kept on files of group `root` even when the writer is not.
+
+### RUNCVM_VIRTIOFSD_POLL
+
+**`RUNCVM_VIRTIOFSD_POLL=<none|fixed|adaptive>`** (default `none`)<br>
+**`RUNCVM_VIRTIOFSD_POLL_US=<microseconds>`** (default `50` with `fixed` or `adaptive`)
+
+**[EXPERIMENTAL]** Sets whether, and for how long, `virtiofsd` keeps polling the VM's request queue after handling the last request, before waiting to be notified of the next. A request the VM makes while `virtiofsd` is polling costs neither a notification from the VM (a VM exit) nor waking `virtiofsd`, which shortens each request when one follows another closely: small writes, creating, copying and deleting files, and other metadata-heavy work. Reading large files gains little.
+
+- `none` (the default): `virtiofsd` waits to be notified at once, as it does without RunCVM's patches.
+- `fixed`: `virtiofsd` polls for `RUNCVM_VIRTIOFSD_POLL_US` microseconds (`1` to `1000`) each time. `RUNCVM_VIRTIOFSD_POLL_US` alone, without `RUNCVM_VIRTIOFSD_POLL`, also selects `fixed`, and `0` alone selects `none`.
+- `adaptive`: `virtiofsd` polls for a window that adapts to how closely the VM's requests follow one another, of at most `RUNCVM_VIRTIOFSD_POLL_US` microseconds. The window starts at nothing; it grows (to 4 microseconds, then doubling) each time a request arrives after polling has given up but within the maximum, and halves (to nothing below 4) each time one takes longer than the maximum. So a VM issuing requests in quick succession is polled for, while an idle VM, or one whose requests are far apart, costs no polling.
+
+Polling uses CPU on the host, up to one core per Container/VM while its VM is issuing requests over virtiofs, so it suits hosts with spare cores. On hosts whose cores are all busy, including laptops on battery, it can slow the VM down, as polling competes for CPU with the VM itself.
+
+Polling can likewise slow the VM down within a Container/VM's own CPU limit (`docker run --cpus`), which `virtiofsd` shares with the VM's CPUs. Polling needs the CPU headroom that [`RUNCVM_CPU_HEADROOM`](#runcvm_cpu_headroom) gives by default: with `RUNCVM_CPU_HEADROOM=0`, polling throttles the whole Container/VM, and can make starting programs up to 40% slower.
+
+`adaptive` spends no more CPU than `none` when requests are not in quick succession, where `fixed` spends CPU polling for requests that do not come, and at its default maximum of 50 microseconds it gains as much as with a maximum of 200, for less CPU: e.g. `--env=RUNCVM_VIRTIOFSD_POLL=adaptive`.
 
 ### RUNCVM_CGROUPFS
 
@@ -1165,6 +1303,8 @@ To upgrade, follow this procedure:
 2. Rerun the installation command, which installs the latest release, or the release named in `REPO` (see [Installation](#installation)), and runs that release's own installer.
 3. Start any RunCVM containers.
 
+The installer reports the version it installed. To see the version installed later, run `cat /opt/runcvm/VERSION`, which gives the release's tag and commit, e.g. `v1.8.0 (2211e3e)`; for a build of other commits, see [Building](#building). Releases up to v1.8.0 install no `VERSION` file.
+
 ## Building
 
 Building RunCVM requires Docker. To build RunCVM, first clone the repo, then run the build script, as follows:
@@ -1175,6 +1315,8 @@ cd runcvm
 ```
 
 The build script creates a Docker image named `newsnowlabs/runcvm:latest`. To tag it otherwise, give `--tag <tag>`, once or more, e.g. `--tag dev` for a development build, or `--tag v1.2.3 --tag latest` for a release. Arguments after `--` are passed to `docker build`.
+
+The build records its version and the commit it was built from: in the image's `org.opencontainers.image.version` and `org.opencontainers.image.revision` labels (the commit's full ID), and in `/opt/runcvm/VERSION`, which the installer reports and installs, as `<version> (<short commit ID>)`, e.g. `v1.8.0-2-ge77f189 (e77f189)` for a build two commits after `v1.8.0`. The version is the nearest tag, as `git describe --tags --dirty` gives it, with `-dirty` added for a build with uncommitted changes, or `untagged` where no tag is reachable, as in a shallow clone. To record another version, e.g. for a build from a source tree without git's history, set `RUNCVM_VERSION`: `RUNCVM_VERSION=my-build ./build/build.sh`. A build outside a git checkout records the commit as `unknown`, and `/opt/runcvm/VERSION` then gives the version alone; without `RUNCVM_VERSION`, it records version `unknown` too, as does `docker build` run alone.
 
 To publish the build, add `--push`, which after a successful build pushes each tag to Docker Hub (`newsnowlabs/runcvm:<tag>`), then copies it to GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`) with `docker buildx imagetools create`, giving the copy's index the image's `org.opencontainers.image.*` labels (its source repository, description and licence) as annotations, which GitHub uses to link the package on ghcr.io to this repository; `--push=dockerhub` pushes to Docker Hub only. Both need `docker login` to the registries concerned, and `--push` (with `all`) needs Docker's [containerd image store](https://docs.docker.com/engine/storage/containerd/) (the default for new installations of Docker Engine 29 and later): with Docker's classic store, the copy on ghcr.io would be a Docker manifest list, which cannot carry annotations, so the script stops before building. `./build/build.sh --help` lists the options.
 
@@ -1242,13 +1384,13 @@ The `runcvm-init` process:
 - Waits for its child (QEMU) to exit. When it does, execs `runcvm-ctr-exit` to retrieve any saved exit code (written by the application to `/.runcvm/exitcode`) and exit with this code.
 
 The `runcvm-ctr-qemu` script:
-- Prepares disk backing files as specified by `--env=RUNCVM_DISKS=<disks>`, populating a new whole-root disk last, so that it can leave out every other disk
+- Prepares disk backing files as specified by `--env=RUNCVM_DISKS=<disks>`: it checks every disk spec and plans every mount (the disks, the tmpfs mounts, and the volumes and bind mounts they hide) before creating anything, then creates each new disk, populating a new whole-root disk last, and writes the fstab the VM mounts
 - Prepares network configuration as saved from the container (modifying the MAC address of each container interface), and leaves IPv6 enabled in the VM's kernel only if a global IPv6 address was saved for any interface (or if forced with `--env=RUNCVM_IPV6=1`); otherwise it adds `ipv6.disable=1` to the kernel command line
 - Launches [QEMU](https://www.qemu.org/) with the required kernel, network interfaces, disks, display, and with a root filesystem mounted via virtiofs from the container and with `runcvm-vm-init` as the VM's init process.
 
 The `runcvm-vm-init` process:
 - Runs as PID1 within the VM.
-- Switches the root filesystem to a whole-root disk, if `RUNCVM_DISKS` defines one, with `pivot_root`, binding onto it the mounts that must stay live, before anything else uses the root
+- Populates each new `xfs` or `btrfs` disk from the image, then switches the root filesystem to a whole-root disk, if `RUNCVM_DISKS` defines one, with `pivot_root`, binding onto it the mounts that must stay live, before anything else uses the root
 - Retrieves the container configuration - network (IPv4, and IPv6 if present), environment, disk and tmpfs mounts - saved by `runcvm-ctr-entrypoint` to `/.runcvm`, and reproduces it within the VM
 - Launches the container's pre-existing entrypoint, in one of two ways.
    1. If `RUNCVM_INIT` is `1` (i.e. the container was originally intended to be launched with Docker's own init process) then it configures and execs busybox `init`, which becomes the VM's PID1, to supervise `dropbear`, run `runcvm-vm-start` and `poweroff` the VM if signalled to do so, first ending every other process and unmounting the disks (`runcvm-vm-shutdown`).
@@ -1291,7 +1433,7 @@ docker exec -it -u runcvm runcvm-l1 bash
 
 Launch it without `--init`, so that systemd is the VM's PID 1. `docker exec runcvm-l1 runcvm-l1-check` checks that it is working.
 
-The image preinstalls the RunCVM release named by its `RUNCVM_IMAGE` build argument. To run the integration tests below inside it, preinstall the RunCVM they were written for, e.g. one built by `./build/build.sh`: `docker build -t runcvm-l1 --build-arg RUNCVM_IMAGE=newsnowlabs/runcvm:latest tests/env`.
+The image preinstalls the RunCVM release named by its `RUNCVM_IMAGE` build argument. To run the integration tests below inside it, preinstall the RunCVM they were written for, e.g. one built by `./build/build.sh`: `docker build -t runcvm-l1 --build-arg RUNCVM_IMAGE=newsnowlabs/runcvm:latest tests/env`; the package's own tests, in `/opt/runcvm/tests`, always match it.
 
 To test RunCVM's installer, run `runcvm-scripts/runcvm-install-runtime.sh` from a clone of this repository inside it.
 
@@ -1310,13 +1452,27 @@ tests/run --list               # list tests with their tier, timeout and require
 
 Tests are numbered by tier: `1x` core, `5x` extended.
 
-`tests/run` (Python 3, standard library only) exits `0` if every selected test passed or was skipped, `1` if any failed or timed out, and `2` on a harness error (for example, no tests selected, an unknown requirement, or the Docker daemon or runtime not available). It writes per-test logs, `results.tap`, `junit.xml`, `results.json`, `summary.txt` and `status` to a results directory (`--results DIR`, default `${TMPDIR:-/tmp}/runcvm-tests/<run-id>`), and removes any containers, networks and volumes a test leaves behind that carry the test's labels. Use `--runtime NAME` (or `RUNTIME`) to test a runtime other than `runcvm`.
+The RunCVM package ships the integration tests that match it, in `/opt/runcvm/tests`, so a host can test the RunCVM installed on it without a clone of this repository, e.g. `/opt/runcvm/tests/run --tier core`. Run from a clone, the tests are those of the clone's checkout, which may differ from those of the installed package.
+
+On a small or nested host, such as a Linux VM on macOS with a few CPUs, run the tests with smaller Container/VMs, fewer at once, and, where a pool of hugepages is reserved (see [macOS on Apple Silicon](#macos-on-apple-silicon)), with hugepages:
+
+```sh
+RUNCVM_TEST_JOBS=2 tests/run --tier core --vm-cpus 2 --vm-env RUNCVM_HUGETLB=auto
+```
+
+Without `--vm-cpus`, each Container/VM has as many CPUs as the host, and several at once overcommit the host's CPUs; boots and `docker exec` then time out. With these options, the core tier takes about 30 minutes in a Lima VM with 6 CPUs on an Apple M-series Mac. `--vm-cpus` and `--vm-env` are described below.
+
+`tests/run` (Python 3, standard library only) exits `0` if every selected test passed or was skipped, `1` if any failed or timed out, and `2` on a harness error (for example, no tests selected, an unknown requirement, or the Docker daemon or runtime not available). It writes per-test logs, `results.tap`, `junit.xml`, `results.json`, `summary.txt` and `status` to a results directory (`--results DIR`, default `${TMPDIR:-/tmp}/runcvm-tests/<run-id>`), each recording the version of the RunCVM package installed at `/opt/runcvm` (from its `VERSION` file), and removes any containers, networks and volumes a test leaves behind that carry the test's labels. Use `--runtime NAME` (or `RUNTIME`) to test a runtime other than `runcvm`.
 
 Each test is a directory under `tests/` containing an executable `test` file, in any language, which exits `0` to pass, `77` to skip (logging `SKIP: <reason>`), and any other code to fail. Optional files in the directory set its `tier` (`core`, the default, or `extended`), `timeout` (seconds; default 1800) and `requires` (any of `vm`, `kvm`, `ipv6` and `docker>=<major>.<minor>`; a test whose requirements are not met is skipped without running; `kvm` means VMs actually use KVM acceleration, and `docker>=29.0`, for example, that dockerd's version is at least 29.0).
 
-Helpers for tests are in `tests/framework.sh` (bash) and `tests/framework.py` (Python), with the same names: unique per-run names (`unique`), labels that let the runner remove leftovers (`labels`), options for RunCVM Container/VMs (`vm_opts`), recorded checks (`check`, `check_cmd`, `expect_exit`), parameters (`param`), polling with deadlines (`wait_for`, `wait_for_exec`), results volumes (`volume_create`, `volume_read`), `skip` and `finish`.
+Each `docker exec`, and each `docker run` not detached, that a test runs through the helpers (or through `docker` in a bash test) has a deadline, `RUNCVM_TEST_EXEC_TIMEOUT` (default 60 seconds, or 300 with `--accel tcg`), after which it fails with exit status 124, so that a hung command fails its check instead of holding the test until its time limit.
+
+Helpers for tests are in `tests/framework.sh` (bash) and `tests/framework.py` (Python), with the same names: unique per-run names (`unique`), labels that let the runner remove leftovers (`labels`), options for RunCVM Container/VMs (`vm_opts`), recorded checks (`check`, `check_cmd`, `expect_exit`), parameters (`param`), polling with deadlines (`wait_for`, `wait_for_exec`), results volumes (`volume_create`, `volume_read`), the location of RunCVM's scripts in a clone or the installed package (`scripts_dir`, `source_tree`), `skip` and `finish`.
 
 `--accel kvm|auto|tcg` (or `RUNCVM_TEST_ACCEL`) selects QEMU acceleration for the tests' RunCVM Container/VMs, which tests pass on as `RUNCVM_QEMU_ACCEL` using the `vm_opts` helper (where the RunCVM version under test supports it). With `--accel tcg`, real RunCVM Container/VMs run under software emulation where KVM is unavailable: slow, but it exercises RunCVM itself; tests that require `kvm` are skipped.
+
+`--vm-env NAME=VALUE` (repeatable, adding to `RUNCVM_TEST_VM_ENV`, a whitespace-separated list) gives every RunCVM Container/VM the tests launch a RunCVM setting, so that the suite can run under settings other than the defaults, e.g. `--vm-env RUNCVM_VIRTIOFSD_CACHE=always`. `--vm-cpus N` and `--vm-memory SIZE` (or `RUNCVM_TEST_CPUS` and `RUNCVM_TEST_MEMORY`) give those Container/VMs `--cpus` and `--memory`, e.g. to keep the VMs that run at once within a small or nested host's CPUs and memory; without them, each VM has as many CPUs as the host and RunCVM's default memory. `vm_opts` passes all three before a test's own options, so a test that sets the same variable or option keeps its own value, and tests that check the VM's size against its defaults (`22-resources`) leave out the size. Tests made of many cases run up to `RUNCVM_TEST_JOBS` (default 3) of them at once, and most remove each case's Container/VMs as soon as the case finishes (`parallel(..., remove=True)`); a lower value also lightens the load on a small host.
 
 Checks that launch a Container/VM explicitly under software emulation, whatever `--accel` says (such as `13-qemu-accel`'s `tcg` cases), are slow on a host with KVM, so there they run only with `--tcg-cases` (or `RUNCVM_TEST_TCG_CASES=1`) and are otherwise recorded as skipped. With `--accel tcg`, or without `/dev/kvm`, they always run. Tests guard them with the `tcg_cases` helper (`TCG_CASES` in Python).
 
