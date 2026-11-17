@@ -811,15 +811,17 @@ disk_parse() {
 }
 
 # Parses each disk spec in $1, RUNCVM_DISKS, e.g. /disk1,/home,ext4,5G;/disk2,/var,ext4,1G (see
-# disk_parse), split with mapfile, not read, which would stop at a newline.
+# disk_parse). Whitespace around a spec is ignored (see split_list): a backing file path is
+# absolute, and no field may begin or end with whitespace.
 disks_parse() {
-  local i
-  local -a specs=()
+  local spec n=0
+  local -a specs
 
-  [ -z "$1" ] || mapfile -d ';' -t specs < <(printf '%s' "$1")
-  for i in "${!specs[@]}"
+  split_list specs ';' "$1"
+  for spec in "${specs[@]}"
   do
-    disk_parse "${specs[$i]}" "$i"
+    disk_parse "$spec" "$n"
+    n=$((n+1))
   done
 }
 
