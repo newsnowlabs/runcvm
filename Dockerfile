@@ -330,12 +330,8 @@ FROM alpine:$ALPINE_KERNEL_VERSION as alpine-kernel
 COPY --from=alpine-mkinitfs /root/packages/main /tmp/mkinitfs-pkgs/
 RUN apk add --allow-untrusted /tmp/mkinitfs-pkgs/$(uname -m)/*.apk
 RUN apk add --no-cache linux-virt
-# The initramfs's init loads the network and block device drivers by name, with the modules it
-# loads before nlplug-findfs runs ("Loading boot drivers"), so that every network interface and
-# disk exists when it hands over to runcvm-vm-init, however long nlplug-findfs's wait. The virtio
-# transport (virtio_pci) is built into the kernel, so each virtio device exists before the init
-# runs, and modprobe returns once its driver has bound to it. The build fails if the init's line
-# is not found.
+# Load virtio_net and virtio_blk before nlplug-findfs, so every NIC and disk exists at handover
+# however short its wait (virtio_pci is built in); fail the build if the init's line is not found.
 RUN (grep -qxF 'kernel/fs/fuse/virtiofs*' /etc/mkinitfs/features.d/virtio.modules || \
       echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules) && \
     sed -ri 's/\b(ata|nvme|raid|scsi|usb|cdrom|kms|mmc)\b//g; s/[ ]+/ /g' /etc/mkinitfs/mkinitfs.conf && \
