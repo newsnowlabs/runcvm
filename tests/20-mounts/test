@@ -361,7 +361,7 @@ for results in t.parallel(lambda f: f(), [case_volume_and_binds, case_shared_vol
                                           case_submount_cache, case_cache_paths,
                                           case_negative_timeout, case_negative_timeout_per_mount,
                                           case_writeback_submount_none, case_queue_poll],
-                          jobs=8):
+                          remove=True):
     for desc, expected, actual in results:
         t.check(desc, expected, actual)
 
