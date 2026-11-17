@@ -528,9 +528,8 @@ if [ -f /.runcvm/fstab ]; then
   # (e.g. busybox, a static binary's, or almalinux/9-init) is left without one, unless
   # RUNCVM_FSTAB=all, for which an empty /etc/fstab is created to mount it over, so that systemd and
   # 'mount -a' find the held mounts' entries. Without a whole-root disk, that file is in the
-  # container's own filesystem: the one file RunCVM writes there, and only at RUNCVM_FSTAB=all's
-  # request. Where it cannot be created (e.g. on a read-only root), the VM boots without our fstab,
-  # with a warning.
+  # container's own filesystem, and is created there only at RUNCVM_FSTAB=all's request. Where it
+  # cannot be created (e.g. on a read-only root), the VM boots without our fstab, with a warning.
   if [[ ! -e /etc/fstab && "${RUNCVM_FSTAB:-disks}" = "all" ]]; then
     if ! { [ -d /etc ] && touch /etc/fstab; } 2>/dev/null; then
       vm_init_warn "RUNCVM_FSTAB=all: /etc/fstab cannot be created; booting without RunCVM's fstab, so 'mount -a' and systemd cannot mount the held volumes again"
