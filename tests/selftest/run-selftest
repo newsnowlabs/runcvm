@@ -70,7 +70,7 @@ class FakeTests:
         e.pop("RUNCVM_TEST_ACCEL", None)
         e.pop("RUNCVM_TEST_TCG_CASES", None)
         e.pop("RUNCVM_TEST_PULL", None)
-        for var in ("RUNCVM_TEST_VM_ENV", "RUNCVM_TEST_CPUS", "RUNCVM_TEST_MEMORY"):
+        for var in ("RUNCVM_TEST_VM_ENV", "RUNCVM_TEST_CPUS", "RUNCVM_TEST_MEMORY", "RUNCVM_TEST_EXEC_TIMEOUT"):
             e.pop(var, None)
         if env:
             e.update(env)
@@ -428,6 +428,63 @@ class RunnerTests(unittest.TestCase):
             # The rest, at exit: containers, then networks, then volumes (removing again does no harm)
             self.assertEqual(rest, ["rm -fv c2", "rm -fv c1", "rm -fv whole-test", "network rm n2", "network rm n1",
                                     "volume rm -f v2", "volume rm -f v1"])
+        finally:
+            ft.cleanup()
+
+    def test_exec_deadline(self):
+        ft = FakeTests()
+        try:
+            # A stand-in docker CLI that hangs on 'exec' and on 'run' not detached
+            bindir = os.path.join(ft.root, "bin")
+            os.makedirs(bindir)
+            with open(os.path.join(bindir, "docker"), "w") as f:
+                f.write(textwrap.dedent("""\
+                    #!/bin/sh
+                    case "$1 $*" in
+                      "exec "*|"run "*) case " $* " in *" -d "*) echo started; exit 0 ;; esac
+                                        echo partial; exec sleep 60 ;;
+                    esac
+                    echo ok
+                    """))
+            os.chmod(os.path.join(bindir, "docker"), 0o755)
+            ft.add("x-deadline-python", PY_PREAMBLE + textwrap.dedent("""\
+                import time
+                t.check("EXEC_TIMEOUT", 2, t.EXEC_TIMEOUT)
+                start = time.time()
+                r = t.docker("exec", "c", "true")
+                t.check("exec stopped at its deadline", (124, "partial"), (r.returncode, r.stdout.strip()))
+                r = t.docker("run", "--rm", "alpine", "true")
+                t.check("foreground run stopped at its deadline", 124, r.returncode)
+                r = t.docker("run", "-d", "alpine", "sleep", "9")
+                t.check("detached run has no deadline", (0, "started"), (r.returncode, r.stdout.strip()))
+                t.check("other commands run as before", "ok", t.docker("ps").stdout.strip())
+                t.check("wait_for gives up at its own deadline", False, t.wait_for("never", 3, ["docker", "exec", "c", "true"]))
+                t.check("expect_exit sees 124", 124, t._run(["docker", "exec", "c", "true"]).returncode)
+                try:
+                    t.docker("exec", "c", "true", check=True)
+                    raised = False
+                except __import__("subprocess").CalledProcessError as e:
+                    raised = e.returncode == 124
+                t.check("check=True raises CalledProcessError(124)", True, raised)
+                t.check("all within the deadlines", True, time.time() - start < 20)
+                t.finish()
+                """))
+            ft.add("y-deadline-bash", """\
+                #!/bin/bash -e
+                . ../framework.sh
+                start=$(date +%s)
+                rc=0; out=$(docker exec c true) || rc=$?
+                check "exec stopped at its deadline" "124 partial" "$rc $out"
+                rc=0; docker run --rm alpine true >/dev/null || rc=$?
+                check "foreground run stopped at its deadline" 124 "$rc"
+                check "detached run has no deadline" started "$(docker run -d alpine sleep 9)"
+                check "other commands run as before" ok "$(docker ps)"
+                check "all within the deadlines" 1 "$(( $(date +%s) - start < 15 ))"
+                finish
+                """)
+            r = ft.run(env={"PATH": bindir + os.pathsep + os.environ["PATH"], "RUNCVM_TEST_EXEC_TIMEOUT": "2"})
+            self.assertEqual(r.rc, 0, r.out)
+            self.assertIn("Timed out after 2s: docker exec c true", r.out)
         finally:
             ft.cleanup()
 

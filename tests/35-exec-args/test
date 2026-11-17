@@ -49,7 +49,11 @@ def case(item):
 
     # Output is decoded leniently, so that corrupted text is reported as a failure.
     def ex(*args):
-        r = subprocess.run(["docker", "exec", *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        try:
+            r = subprocess.run(["docker", "exec", *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               timeout=t.EXEC_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return "timed out after %ds" % t.EXEC_TIMEOUT
         out = r.stdout.decode("utf-8", "backslashreplace")
         return out if r.returncode == 0 else "exit status %d: %s" % (r.returncode, out)
 
@@ -76,7 +80,7 @@ EXPECTED = {
 runtimes = [t.RUNTIME] if t.RUNTIME == "runc" else [t.RUNTIME, "runc"]
 items = [(runtime, init) for runtime in runtimes for init in (False, True)]
 t.param("init", "no, yes")
-for mode, results in t.parallel(case, items, jobs=4, remove=True):
+for mode, results in t.parallel(case, items, remove=True):
     if results is None:
         t.check("%s: Container/VM boots and 'docker exec' works" % mode, True, False)
         continue

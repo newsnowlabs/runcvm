@@ -44,6 +44,13 @@ PULL = os.environ.get("RUNCVM_TEST_PULL") == "1"
 # Options for every RunCVM Container/VM, chosen by the runner (see tests/run --vm-env, --vm-cpus
 # and --vm-memory): RunCVM settings, as NAME=VALUE, and the VM's size
 VM_ENV = (os.environ.get("RUNCVM_TEST_VM_ENV") or "").split()
+# The deadline, in seconds, for each 'docker exec', and each 'docker run' not detached (-d), that a
+# test runs through these helpers (docker(), check_cmd, expect_exit, wait_for):
+# RUNCVM_TEST_EXEC_TIMEOUT, or 60 (300 under TCG). A hung command then fails its check, rather
+# than holding the test until the runner's time limit.
+EXEC_TIMEOUT = int(os.environ.get("RUNCVM_TEST_EXEC_TIMEOUT") or (300 if ACCEL == "tcg" else 60))
+# Such a command taking at least this many seconds is logged, with its time, as a detail line.
+SLOW_COMMAND = 10
 CPUS = os.environ.get("RUNCVM_TEST_CPUS") or None
 MEMORY = os.environ.get("RUNCVM_TEST_MEMORY") or None
 
@@ -114,10 +121,52 @@ def docker(*args, check=False, timeout=None, capture=True, input=None):
     With check=True, raise subprocess.CalledProcessError on a non-zero exit.
     With capture=False, output goes straight to this test's output.
     With input, the text is passed on standard input (e.g. to 'docker run -i').
+    With timeout, raise subprocess.TimeoutExpired should the command take longer. Without it,
+    'docker exec', and 'docker run' not detached, have EXEC_TIMEOUT, after which the command is
+    stopped and its result has exit status 124 (raising subprocess.CalledProcessError with
+    check=True), with whatever it had written.
     """
+    cmd = ("docker",) + tuple(args)
     out = subprocess.PIPE if capture else None
-    return subprocess.run(("docker",) + tuple(args), stdout=out, stderr=subprocess.STDOUT if capture else None,
-                          universal_newlines=True, check=check, timeout=timeout, input=input)
+    if timeout is not None or not _has_deadline(cmd):
+        return subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT if capture else None,
+                              universal_newlines=True, check=check, timeout=timeout, input=input)
+    r = _run(cmd, stdout=out, stderr=subprocess.STDOUT if capture else None, universal_newlines=True,
+             input=input)
+    if check and r.returncode != 0:
+        raise subprocess.CalledProcessError(r.returncode, cmd, r.stdout)
+    return r
+
+
+def _has_deadline(cmd):
+    """Whether cmd, an argument list, is a 'docker exec', or a 'docker run' not detached."""
+    cmd = list(cmd)
+    if cmd[:2] == ["docker", "exec"]:
+        return True
+    return cmd[:2] == ["docker", "run"] and not any(a in ("-d", "--detach") or a.startswith("--detach=")
+                                                    for a in cmd[2:])
+
+
+def _run(cmd, timeout=None, **kwargs):
+    """subprocess.run(cmd, ...), where a 'docker exec', or a 'docker run' not detached, has a
+    deadline: timeout, or EXEC_TIMEOUT. Should it pass, the command is stopped, the timeout is
+    logged, and the result has exit status 124, with whatever the command had written."""
+    if not _has_deadline(cmd):
+        return subprocess.run(cmd, timeout=timeout, **kwargs)
+    timeout = EXEC_TIMEOUT if timeout is None else timeout
+    start = time.time()
+    try:
+        r = subprocess.run(cmd, timeout=timeout, **kwargs)
+        if time.time() - start >= SLOW_COMMAND:
+            log_detail("Took %.0fs: %s" % (time.time() - start, " ".join(cmd)))
+        return r
+    except subprocess.TimeoutExpired as e:
+        log("Timed out after %ds: %s" % (timeout, " ".join(cmd)))
+        out = e.stdout
+        if isinstance(out, bytes) and kwargs.get("universal_newlines"):
+            out = out.decode(errors="replace")
+        return subprocess.CompletedProcess(cmd, 124, out if out is not None else
+                                           ("" if kwargs.get("universal_newlines") else None))
 
 
 def parallel(func, items, jobs=None, remove=False):
@@ -199,7 +248,7 @@ def check_cmd(desc, cmd):
     if callable(cmd):
         ok = bool(cmd())
     else:
-        ok = subprocess.run(cmd).returncode == 0
+        ok = _run(cmd).returncode == 0
     log("%s - %s" % (desc, "PASS" if ok else "FAIL"))
     record_result("PASS" if ok else "FAIL", desc)
     if not ok:
@@ -209,7 +258,7 @@ def check_cmd(desc, cmd):
 
 def expect_exit(desc, expected, cmd):
     """Run cmd (an argument list, typically ['docker', 'run', ...]) and check its exit status."""
-    rc = subprocess.run(cmd).returncode
+    rc = _run(cmd).returncode
     return check("%s (exit status)" % desc, expected, rc)
 
 
@@ -220,7 +269,13 @@ def wait_for(desc, timeout, cmd, interval=1):
         if callable(cmd):
             ok = bool(cmd())
         else:
-            ok = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+            # Each attempt has the time left as its deadline (at least a second), at most EXEC_TIMEOUT
+            remaining = max(1, min(EXEC_TIMEOUT, deadline - time.time()))
+            try:
+                ok = _run(cmd, timeout=remaining, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
+            except subprocess.TimeoutExpired:
+                ok = False
         if ok:
             log("Ready: %s" % desc)
             return True
