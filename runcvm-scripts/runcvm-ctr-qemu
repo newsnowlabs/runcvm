@@ -551,10 +551,12 @@ do_root_disk() {
 # each remaining mode is tried in turn, by opening disk backing file $1 (the first disk's),
 # read-only and with O_DIRECT as for cache=none, in a QEMU with no machine.
 disk_choose_aio() {
-  local src="$1" disabled=0 seccomp qemu aio out reason="" modes=(io_uring native)
+  local src="$1" disabled=0 seccomp="" key value qemu aio out reason="" modes=(io_uring native)
 
   [ -r /proc/sys/kernel/io_uring_disabled ] && read -r disabled </proc/sys/kernel/io_uring_disabled
-  seccomp=$(awk '$1 == "Seccomp:" { print $2 }' /proc/self/status)
+  while read -r key value _; do
+    [ "$key" = "Seccomp:" ] && { seccomp="$value"; break; }
+  done </proc/self/status
 
   if [ "$disabled" = "2" ]; then
     modes=(native)
