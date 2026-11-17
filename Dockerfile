@@ -161,12 +161,8 @@ make install
 EOF
 
 # --- BUILD STAGE ---
-# Build patched mkinitfs/nlplug-findfs, with a shorter wait than upstream for device events (250ms,
-# not 5s), for faster boot. The initramfs's nlplug-findfs triggers an event for every device,
-# loading each one's driver, and exits once the device given as root= appears, or once no event
-# has arrived for this long. RunCVM's root (root=runcvmfs, a virtiofs tag) is not a device it can
-# find, so every boot waits this long after the last event; it never cuts short events still
-# arriving, or drivers still loading, and waits a further 1s once it loads the USB storage driver.
+# Build patched mkinitfs/nlplug-findfs, which exits 250ms (upstream: 5s) after the last device
+# event, as RunCVM's virtiofs root is never a device it finds; drivers still loading are waited for.
 FROM alpine-sdk-kernel as alpine-mkinitfs
 
 ADD patches/mkinitfs/nlplug-findfs.patch /root/aports/main/mkinitfs/nlplug-findfs.patch
