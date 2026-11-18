@@ -161,8 +161,8 @@ make install
 EOF
 
 # --- BUILD STAGE ---
-# Build patched mkinitfs/nlplug-findfs
-# with a shorter maximum device-event timeout than upstream (1s, not 5s), for faster boot
+# Build patched mkinitfs/nlplug-findfs, which exits 250ms (upstream: 5s) after the last device
+# event, as RunCVM's virtiofs root is never a device it finds; drivers still loading are waited for.
 FROM alpine-sdk-kernel as alpine-mkinitfs
 
 ADD patches/mkinitfs/nlplug-findfs.patch /root/aports/main/mkinitfs/nlplug-findfs.patch
@@ -326,10 +326,13 @@ FROM alpine:$ALPINE_KERNEL_VERSION as alpine-kernel
 COPY --from=alpine-mkinitfs /root/packages/main /tmp/mkinitfs-pkgs/
 RUN apk add --allow-untrusted /tmp/mkinitfs-pkgs/$(uname -m)/*.apk
 RUN apk add --no-cache linux-virt
+# Load virtio_net and virtio_blk before nlplug-findfs, so every NIC and disk exists at handover
+# however short its wait (virtio_pci is built in); fail the build if the init's line is not found.
 RUN (grep -qxF 'kernel/fs/fuse/virtiofs*' /etc/mkinitfs/features.d/virtio.modules || \
       echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules) && \
     sed -ri 's/\b(ata|nvme|raid|scsi|usb|cdrom|kms|mmc)\b//g; s/[ ]+/ /g' /etc/mkinitfs/mkinitfs.conf && \
-    sed -ri 's/(nlplug-findfs)/\1 --timeout=1000/' /usr/share/mkinitfs/initramfs-init && \
+    sed -ri 's/^(.*modprobe -a .* loop squashfs simpledrm)( 2> \/dev\/null)$/\1 virtio_net virtio_blk\2/' /usr/share/mkinitfs/initramfs-init && \
+    grep -q 'loop squashfs simpledrm virtio_net virtio_blk 2> /dev/null$' /usr/share/mkinitfs/initramfs-init && \
     mkinitfs $(basename $(ls -d /lib/modules/*))
 RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
     mkdir -p /opt/runcvm/kernels/alpine/$BASENAME && \
