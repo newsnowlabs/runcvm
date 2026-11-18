@@ -116,17 +116,22 @@ if [ "$NodeState" = "inactive" ] || [ "$NodeState" = "pending" ]; then
       log "Removing default ingress ..."
       echo y | docker network rm ingress
 
-      log "Waiting 3s for ingress removal ..."
-      sleep 3
-    
-      log "Creating new ingress with MTU $DOCKER_IF_MTU"
-      docker network create \
-        --driver=overlay \
-	--ingress \
-	--subnet=10.0.0.0/24 \
-	--gateway=10.0.0.1 \
-	--opt com.docker.network.driver.mtu=$DOCKER_IF_MTU \
-	ingress
+      # The swarm finishes removing the old ingress in the background, after 'docker network
+      # inspect' already reports it gone; until it has, creating the new one fails with "network
+      # with name ingress already exists". So retry the creation itself.
+      for i in $(seq 1 60 | sort -nr)
+      do
+        log "Creating new ingress with MTU $DOCKER_IF_MTU (#$i) ..."
+        docker network create \
+          --driver=overlay \
+          --ingress \
+          --subnet=10.0.0.0/24 \
+          --gateway=10.0.0.1 \
+          --opt com.docker.network.driver.mtu=$DOCKER_IF_MTU \
+          ingress && break
+        [ $i -eq 1 ] && log "Ingress creation FAILED!" && exit 1
+        sleep 0.5
+      done
     fi
 
     log "Writing swarm 'join token' to shared storage and waiting for other nodes ..."
