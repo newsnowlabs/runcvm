@@ -5,16 +5,17 @@ Three Container/VMs, each with a disk: one under the engine's default seccomp
 profile; one under that profile with RUNCVM_SYS_ADMIN=1; one launched with
 --security-opt seccomp=unconfined. For each:
 
-- QEMU and virtiofsd, in the container on the host, are seccomp-filtered
-  (Seccomp: 2 in their /proc/<pid>/status) under the default profile, and
-  not filtered (Seccomp: 0) when unconfined.
+- The container's init (runcvm-ctr-entrypoint) and QEMU, on the host, are
+  seccomp-filtered (Seccomp: 2 in their /proc/<pid>/status) under the
+  default profile, and not filtered (Seccomp: 0) when unconfined. virtiofsd,
+  which installs a seccomp filter of its own, is not a witness.
 - QEMU opens the disk with aio=io_uring, unless the host's
   kernel.io_uring_disabled turns io_uring off for QEMU: 2; or 1, except with
   RUNCVM_SYS_ADMIN=1, which gives QEMU CAP_SYS_ADMIN. Then aio=native.
 - The VM boots, and reads back a file written to the disk.
 
-QEMU's and virtiofsd's processes are found with docker top, and their
-status read from the host's /proc.
+The init's process is found with docker inspect, QEMU's with docker top, and
+their status read from the host's /proc.
 """
 
 import os
@@ -88,11 +89,11 @@ def run(case):
         results["error"] = r.stdout + t.docker("logs", name).stdout
         return results
 
+    results["init"] = seccomp_mode(t.docker("inspect", "-f", "{{.State.Pid}}", name).stdout.strip())
     for pid, args in processes(name).items():
-        if "qemu-system" in args and "qemu" not in results:
+        if "qemu-system" in args:
             results["qemu"] = (seccomp_mode(pid), args)
-        elif "virtiofsd" in args and "virtiofsd" not in results:
-            results["virtiofsd"] = (seccomp_mode(pid), args)
+            break
 
     r = t.docker("exec", name, "sh", "-c", "echo written >/srv/d/f && sync && cat /srv/d/f")
     results["disk"] = r.stdout.strip()
@@ -111,9 +112,8 @@ for case, results in zip(CASES, t.parallel(run, list(CASES), remove=True)):
 
     filtered = "0" if case == "unconfined" else "2"
     qemu_mode, qemu_args = results.get("qemu", (None, ""))
-    virtiofsd_mode, _ = results.get("virtiofsd", (None, ""))
+    t.check("%s: init's Seccomp mode" % case, filtered, results["init"])
     t.check("%s: QEMU's Seccomp mode" % case, filtered, qemu_mode)
-    t.check("%s: virtiofsd's Seccomp mode" % case, filtered, virtiofsd_mode)
     t.check("%s: QEMU's disk uses aio=%s" % (case, aio), True, ("aio=%s," % aio) in qemu_args)
     t.check("%s: disk reads back what was written" % case, "written", results["disk"])
     if aio == "io_uring":
