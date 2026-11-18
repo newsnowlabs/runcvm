@@ -532,7 +532,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
    - [+] `--user` (or `-u`), `--workdir` (or `-w`), `--env` (or `-e`), `--env-file`, `--detach` (or `-d`), `--interactive` (or `-i`) and `--tty` (or `-t`) are all supported
    - [+] Stdout and Stderr _are_ independently multiplexed so `docker exec <container> bash -c 'echo stdout; echo stderr >&2' >/tmp/stdout 2>/tmp/stderr` _does_ produce the expected result
 - Security
-   - [-] The container's seccomp filter is removed, so the processes RunCVM runs in the container on the host (QEMU, `virtiofsd` and `dnsmasq`) are not seccomp-filtered, as a standard container's processes are by Docker's default profile; a profile given with `--security-opt seccomp=…` is also ignored. The workload itself runs in the VM, behind the VM's kernel.
+   - [+] The processes RunCVM runs in the container on the host (QEMU, `virtiofsd` and `dnsmasq`) are seccomp-filtered by Docker's (or Podman's) default profile, as a standard container's are, with a few system calls QEMU needs also allowed: io_uring's (`io_uring_setup`, `io_uring_enter`, `io_uring_register`), for its disks, and the NUMA memory-policy calls (`get_mempolicy`, `set_mempolicy`, `mbind`), which the default profile allows only with `CAP_SYS_NICE`. `--security-opt seccomp=unconfined` (or `--privileged`) runs them unconfined. A profile of your own given with `--security-opt seccomp=<file>` is unsupported. The workload itself runs in the VM, behind the VM's kernel, not the container's seccomp filter.
    - The RunCVM software package at `/opt/runcvm` is mounted read-only within RunCVM containers. Container applications cannot compromise RunCVM, but they can execute binaries from within the RunCVM package. The set of binaries available to the VM may be reduced to a minimum in a later version.
 - Kernels
    - [+] Use any kernel, either one pre-packaged with RunCVM or roll your own
@@ -874,9 +874,9 @@ Data written to a disk stays in the VM's memory until the VM's kernel writes it 
 
 #### Disk I/O
 
-QEMU accesses each disk's backing file with direct I/O (`cache=none`), bypassing the host's page cache, and asynchronously through Linux io_uring (`aio=io_uring`). RunCVM chooses the asynchronous I/O mode from `/proc` alone, without starting QEMU, and logs a warning to the container's output (`docker logs`) whenever it does not use io_uring. Where a seccomp profile is applied to the container (as Docker's default profile is, once RunCVM restores one), its rules cannot be read from inside the container, so whether it permits io_uring's system calls — which Docker's default profile denies — is unknown; RunCVM then uses Linux AIO (`aio=native`), whose system calls that profile, and any profile permissive enough to run QEMU, allow. With no seccomp profile, RunCVM uses `io_uring`, unless `kernel.io_uring_disabled` turns it off (2 for every process, or 1 for a process without `CAP_SYS_ADMIN`), in which case `native`. Setting the `RUNCVM_DISK_AIO` environment variable to `io_uring`, `native` or `threads` (a pool of I/O threads, which works wherever the backing file does) forces that mode.
+QEMU accesses each disk's backing file with direct I/O (`cache=none`), bypassing the host's page cache, and asynchronously through Linux io_uring (`aio=io_uring`). RunCVM chooses the asynchronous I/O mode from `/proc` alone, without starting QEMU, and logs a warning to the container's output (`docker logs`) whenever it does not use io_uring. The container's seccomp profile allows io_uring's system calls (see [Security](#features-and-limitations)), so RunCVM uses `io_uring`, unless `kernel.io_uring_disabled` turns it off (2 for every process, or 1 for a process without `CAP_SYS_ADMIN`), in which case Linux AIO (`aio=native`). Setting the `RUNCVM_DISK_AIO` environment variable to `io_uring`, `native` or `threads` (a pool of I/O threads, which works wherever the backing file does) forces that mode.
 
-The host kernel must have io_uring compiled in (`CONFIG_IO_URING`), as every mainstream kernel since Linux 5.1 has. On a kernel built entirely without it, `kernel.io_uring_disabled` is absent and indistinguishable from a pre-6.6 kernel that supports io_uring, so with no seccomp profile RunCVM selects `io_uring` and QEMU fails to open the disk; set `RUNCVM_DISK_AIO=native` (or `threads`) on such a host.
+The host kernel must have io_uring compiled in (`CONFIG_IO_URING`), as every mainstream kernel since Linux 5.1 has. On a kernel built entirely without it, `kernel.io_uring_disabled` is absent and indistinguishable from a pre-6.6 kernel that supports io_uring, so RunCVM selects `io_uring` and QEMU fails to open the disk; set `RUNCVM_DISK_AIO=native` (or `threads`) on such a host.
 
 #### Preallocated disks
 
@@ -1367,7 +1367,7 @@ In more detail, the RunCVM runtime `create` process:
       - Add a bind mount to `/vm/lib/modules/<version>` for the kernel's modules
       - Set container env vars `RUNCVM_KERNEL_PATH`, `RUNCVM_KERNEL_INITRAMFS_PATH` and `RUNCVM_KERNEL_ROOT`
    - Add device mounts for `/dev/kvm` and `/dev/net/tun`.
-   - Set the seccomp profile to 'unconfined'.
+   - Add to the container's seccomp profile, if it has one, the system calls QEMU needs beyond Docker's default profile (io_uring's, and the NUMA memory-policy calls).
    - Set `/dev/shm` to the size desired for the VM's memory, set `RUNCVM_MEM_SIZE` env var accordingly, and set the container memory limit to the size plus 256Mb (a contingency for QEMU itself, along with virtiofsd, dnsmasq and other container contents)
    - Add necessary capabilities, if not already present (`NET_ADMIN`, `NET_RAW`, `MKNOD`, `AUDIT_WRITE`).
    - Only if requested by `--env=SYS_ADMIN=1`, add the `SYS_ADMIN` capability.
