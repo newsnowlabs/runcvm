@@ -241,14 +241,21 @@ Running RunCVM on macOS is experimental, as is arm64 support. On macOS, Docker r
 Quick start, on a Mac with an M3 or later chip and macOS 15 or later, where `<tag>` is a v2.0.0 pre-release's tag from the [Releases](https://github.com/newsnowlabs/runcvm/releases) page:
 
 ```console
-limactl start --name=runcvm --memory=8 --set='.nestedVirtualization=true' template://docker-rootful
+limactl start --name=runcvm --tty=false --cpus=4 --memory=8 --set='.nestedVirtualization=true' template://docker-rootful
 limactl shell runcvm ls -l /dev/kvm
 limactl shell runcvm sudo sh -c 'echo "vm.nr_hugepages = 1024" >/etc/sysctl.d/99-hugepages.conf && sysctl -p /etc/sysctl.d/99-hugepages.conf'
 limactl shell runcvm sh -c 'curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=newsnowlabs/runcvm:<tag> sh'
-limactl shell runcvm sudo docker run --rm -it --runtime=runcvm --env=RUNCVM_HUGETLB=auto --env=RUNCVM_VIRTIOFSD_CACHE=always alpine
+limactl shell runcvm docker run --rm -it --runtime=runcvm --env=RUNCVM_HUGETLB=auto --env=RUNCVM_VIRTIOFSD_CACHE=always alpine
 ```
 
-This makes a Linux VM of 8 GB with a pool of 1024 hugepages (2 GB), and launches an Alpine Container/VM with the two settings that make Container/VMs start quickly there, described below; keep `RUNCVM_VIRTIOFSD_CACHE` at its default for Container/VMs with volumes or bind mounts whose files change outside the VM.
+This makes a Linux VM with 4 CPUs and 8 GB, starting it without Lima's interactive prompts (`--tty=false`). It reserves a pool of 1024 hugepages (2 GB), and launches an Alpine Container/VM with the two settings that make Container/VMs start quickly there, described below; keep `RUNCVM_VIRTIOFSD_CACHE` at its default for Container/VMs with volumes or bind mounts whose files change outside the VM.
+
+Lima forwards the VM's Docker socket to the Mac, to a path of the VM's own (leaving the Mac's `/var/run/docker.sock` and its default Docker context unchanged), so the Mac's `docker` CLI can also reach the VM's Docker, through a Docker context named for each command:
+
+```console
+docker context create lima-runcvm --docker "host=$(limactl list runcvm --format 'unix://{{.Dir}}/sock/docker.sock')"
+docker --context=lima-runcvm run --rm -it --runtime=runcvm --env=RUNCVM_HUGETLB=auto --env=RUNCVM_VIRTIOFSD_CACHE=always alpine
+```
 
 - With Lima, enable nested virtualisation for the VM, e.g. `limactl start --set='.nestedVirtualization=true' template://docker-rootful` for a new VM, or `limactl stop <vm> && limactl edit <vm> --set '.nestedVirtualization=true' && limactl start <vm>` for an existing one.
 - [Podman Desktop](https://podman-desktop.io/)'s VM is untested: it provides Podman but not Docker, which RunCVM's build and installer need.
