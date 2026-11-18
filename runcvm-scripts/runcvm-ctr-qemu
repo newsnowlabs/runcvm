@@ -535,7 +535,7 @@ do_root_disk() {
   disk_add_device "$src" "$ROOT_DISK_ID" "$ROOT_DISK_PREALLOC"
 }
 
-# Sets DISK_AIO to QEMU's asynchronous I/O mode for disks, the first available of:
+# Sets DISK_AIO to QEMU's asynchronous I/O mode for disks:
 # - io_uring: Linux io_uring, with the lowest overhead;
 # - native: Linux AIO (libaio);
 # - threads: a pool of threads making ordinary system calls, which works wherever the file does.
@@ -543,20 +543,27 @@ do_root_disk() {
 # unavailable where the host kernel has it turned off, or where a seccomp filter on the container
 # denies io_uring_setup, io_uring_enter and io_uring_register (as Docker's default profile does).
 #
-# Whether the kernel permits this process io_uring follows from sysctl kernel.io_uring_disabled and,
-# where it is 1, the process's capabilities, both read without starting QEMU: 0 or absent (before
-# Linux 6.6), every process may; 2, none may; 1, only a process with CAP_SYS_ADMIN (CapEff bit 21
-# in /proc/self/status) may. Membership of kernel.io_uring_group also qualifies under 1, but is not
-# checked, so io_uring may be passed over for native on the rare host that sets that group.
+# RUNCVM_DISK_AIO, if set to one of the three modes, forces it. Otherwise the mode is chosen from
+# /proc alone, without starting QEMU:
+# - A seccomp filter (Seccomp non-zero in /proc/self/status): native. The filter's rules cannot be
+#   read from inside the container (that needs CAP_SYS_ADMIN), so whether it permits io_uring is
+#   unknown; native's system calls are allowed by Docker's default profile, and by any filter
+#   permissive enough to run QEMU and KVM.
+# - Otherwise io_uring, unless kernel.io_uring_disabled turns it off for this process: 2, for every
+#   process; 1, for a process without CAP_SYS_ADMIN (CapEff bit 21). Then native. Membership of
+#   kernel.io_uring_group also qualifies under 1, but is not checked, so io_uring may be passed over
+#   for native on the rare host that sets that group.
 #
-# With no seccomp filter (Seccomp 0 in /proc/self/status), the first mode the kernel permits opens
-# the file, so it is used without starting QEMU: io_uring, else native. With a filter in place its
-# rules cannot be read from inside the container (that needs CAP_SYS_ADMIN), so each kernel-permitted
-# mode is tried in turn, by opening disk backing file $1 (the first disk's) read-only and with
-# O_DIRECT as for cache=none, in a QEMU with no machine; the first that opens it is used, else
-# threads, which needs nothing of the kernel or the filter.
+# The host kernel must have io_uring compiled in (CONFIG_IO_URING), as every mainstream kernel since
+# Linux 5.1 has: where it is absent, kernel.io_uring_disabled is absent too and indistinguishable
+# from a pre-6.6 kernel that has io_uring, so with no seccomp filter io_uring is chosen and QEMU
+# fails to open the disk.
 disk_choose_aio() {
-  local src="$1" disabled=0 seccomp="" capeff=0 key value qemu aio out reason="" modes=(io_uring native)
+  local disabled=0 seccomp="" capeff=0 key value reason=""
+
+  case "$RUNCVM_DISK_AIO" in
+    io_uring|native|threads) DISK_AIO="$RUNCVM_DISK_AIO"; return ;;
+  esac
 
   [ -r /proc/sys/kernel/io_uring_disabled ] && read -r disabled </proc/sys/kernel/io_uring_disabled
   while read -r key value _; do
@@ -566,49 +573,21 @@ disk_choose_aio() {
     esac
   done </proc/self/status
 
-  # Drop io_uring from the candidates where the kernel will not let this process use it, so it is
-  # neither chosen directly nor tried in QEMU.
-  if [ "$disabled" = "2" ]; then
-    modes=(native)
+  if [ "$seccomp" != "0" ]; then
+    DISK_AIO="native"
+    reason="a seccomp filter is in place and may deny io_uring's system calls"
+  elif [ "$disabled" = "2" ]; then
+    DISK_AIO="native"
     reason="turned off in the host kernel: kernel.io_uring_disabled=2"
   elif [ "$disabled" = "1" ] && (( (0x$capeff & (1 << 21)) == 0 )); then
-    modes=(native)
+    DISK_AIO="native"
     reason="turned off in the host kernel for unprivileged processes: kernel.io_uring_disabled=1"
-  fi
-
-  if [ "$seccomp" = "0" ]; then
-    DISK_AIO="${modes[0]}"
   else
-    if [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
-      qemu="$(which qemu-system-aarch64)"
-    else
-      qemu="$(which qemu-system-x86_64)"
-    fi
-
-    for aio in "${modes[@]}"
-    do
-      # QEMU opens the file while processing its options, exiting with an error if it cannot, and
-      # otherwise quits on the monitor's 'quit'.
-      if out=$(busybox timeout 10 "$qemu" -nodefaults -machine none -display none -monitor stdio \
-            -blockdev "driver=file,node-name=probe,filename=$src,read-only=on,cache.direct=on,aio=$aio" \
-            <<<quit 2>&1 >/dev/null); then
-        DISK_AIO="$aio"
-        break
-      fi
-
-      # QEMU's message follows its option, e.g. "...,aio=io_uring: Unable to use io_uring: ...".
-      if [ -z "$reason" ]; then
-        reason="${out#*aio=$aio: }"
-        reason="QEMU: ${reason%%$'\n'*}"
-      fi
-    done
-
-    DISK_AIO="${DISK_AIO:-threads}"
+    DISK_AIO="io_uring"
   fi
 
-  if [ "$DISK_AIO" != "io_uring" ]; then
-    echo "RunCVM: Warning: io_uring is unavailable for disks (${reason:-unknown reason}); using aio=$DISK_AIO instead" >&2
-  fi
+  [ "$DISK_AIO" = "io_uring" ] || \
+    echo "RunCVM: Warning: io_uring is not used for disks ($reason); using aio=$DISK_AIO instead" >&2
 }
 
 # Adds disk backing file $1 to the QEMU command line, as disk number $2, with prealloc $3 ('on' or
@@ -616,7 +595,7 @@ disk_choose_aio() {
 disk_add_device() {
   local src="$1" id="$2" prealloc="$3" queues discard
 
-  [ -n "$DISK_AIO" ] || disk_choose_aio "$src"
+  [ -n "$DISK_AIO" ] || disk_choose_aio
 
   if [ "${RUNCVM_CPUS:-1}" -gt 8 ]; then
     queues=8
