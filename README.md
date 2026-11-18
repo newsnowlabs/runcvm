@@ -217,7 +217,7 @@ Under way:
 
 RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM. It is highly portable among Linux distributions and development platforms providing KVM, and can even be installed on [GitHub Codespaces](https://github.com/features/codespaces).
 
-Support for arm64 (aarch64) hosts is experimental. Stable releases publish images for amd64 only. v2.0.0 pre-releases, listed with their tags on the [Releases](https://github.com/newsnowlabs/runcvm/releases) page, publish images for both amd64 and arm64: to install one on either, pass the installer its tag, e.g. `REPO=newsnowlabs/runcvm:<tag>` (see [Installation](#installation)). Alternatively, build RunCVM on the arm64 host and install that build (see [Building](#building)). CI builds RunCVM for arm64 on GitHub's arm64 runners and runs the same tests there as on x86-64, under KVM; where a runner lacks KVM, it runs a smoke test under software emulation instead. RunCVM detects the host's architecture when it creates a Container/VM; `--env=RUNCVM_QEMU_ARCH=<x86_64|arm64>` overrides it.
+Support for arm64 (aarch64) hosts is experimental. Stable releases publish images for amd64 only. v2.0.0 pre-releases publish images for both amd64 and arm64. The image tag `next` is always the most recent of them: to install it on either, pass the installer `REPO=newsnowlabs/runcvm:next` (see [Installation](#installation)), and run the installer again to move to a newer pre-release. Each pre-release also has a tag of its own, `v2.0.0-pre<N>`, listed, with what it contains, on the [Releases](https://github.com/newsnowlabs/runcvm/releases) page. Alternatively, build RunCVM on the arm64 host and install that build (see [Building](#building)). CI builds RunCVM for arm64 on GitHub's arm64 runners, which lack KVM, and runs a smoke test of a few of its tests there under software emulation; where a runner has KVM, it runs the same tests as on x86-64. RunCVM detects the host's architecture when it creates a Container/VM; `--env=RUNCVM_QEMU_ARCH=<x86_64|arm64>` overrides it.
 
 RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and these features of the host's kernel, which the kernels of common distributions provide, built in or as modules that load on demand:
 - KVM: `kvm`, with `kvm_intel` or `kvm_amd` on x86_64 (on arm64, KVM is part of `kvm` itself);
@@ -230,7 +230,7 @@ RunCVM does not need the `br_netfilter` module; [docs/adr/0001-container-firewal
 
 RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
-RunCVM is tested on x86-64 hosts with KVM running Debian 12 (Bookworm) and Ubuntu 24.04 LTS (Noble Numbat), with Docker Engine, both Docker's own packages and Ubuntu's `docker.io`. v2.0.0 pre-releases are also tested on arm64 hosts with KVM: AWS Graviton instances, and Macs with Apple M3 or later chips in Lima's `docker-rootful` VM (see [macOS on Apple Silicon](#macos-on-apple-silicon)). The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
+RunCVM is tested on x86-64 hosts with KVM running Debian 12 (Bookworm) and Ubuntu 24.04 LTS (Noble Numbat), with Docker Engine, both Docker's own packages and Ubuntu's `docker.io`. arm64 support has also been tested with KVM on AWS Graviton instances, and on Macs with Apple M3 or later chips in Lima's `docker-rootful` VM (see [macOS on Apple Silicon](#macos-on-apple-silicon)), though less thoroughly than on x86-64. The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
 
 ## Installation
 
@@ -397,7 +397,7 @@ Running RunCVM on macOS is experimental, as is arm64 support. On macOS, Docker r
 
 **Macs with M1 or M2 chips are not supported.** Their Linux VMs have no `/dev/kvm`, so Container/VMs there run only under software emulation (`--env=RUNCVM_QEMU_ACCEL=auto` or `tcg`), which is much slower.
 
-Quick start, on a Mac with an M3 or later chip and macOS 15 or later, where `<tag>` is a v2.0.0 pre-release's tag from the [Releases](https://github.com/newsnowlabs/runcvm/releases) page:
+Quick start, on a Mac with an M3 or later chip and macOS 15 or later, installing the most recent v2.0.0 pre-release (`next`; see [System requirements](#system-requirements)):
 
 ```console
 # Make and start a Linux VM named runcvm, with Docker, 4 CPUs, 8 GB and nested virtualisation, without Lima's interactive prompts
@@ -406,8 +406,8 @@ limactl start --name=runcvm --tty=false --cpus=4 --memory=8 --set='.nestedVirtua
 limactl shell runcvm ls -l /dev/kvm
 # Reserve a pool of 1024 hugepages (2 GB) in the Linux VM, kept across its restarts
 limactl shell runcvm sudo sh -c 'echo "vm.nr_hugepages = 1024" >/etc/sysctl.d/99-hugepages.conf && sysctl -p /etc/sysctl.d/99-hugepages.conf'
-# Install RunCVM from a v2.0.0 pre-release in the Linux VM
-limactl shell runcvm sh -c 'curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=newsnowlabs/runcvm:<tag> sh'
+# Install RunCVM from the most recent v2.0.0 pre-release in the Linux VM
+limactl shell runcvm sh -c 'curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=newsnowlabs/runcvm:next sh'
 # Launch an Alpine Container/VM, with the settings, described below, that make it start quickly there
 limactl shell runcvm docker run --rm -it --runtime=runcvm --cpus=1 --memory=512M --env=RUNCVM_HUGETLB=auto --env=RUNCVM_VIRTIOFSD_CACHE=always alpine
 ```
@@ -1329,7 +1329,7 @@ cd runcvm
 ./build/build.sh
 ```
 
-The build script creates a Docker image named `newsnowlabs/runcvm:latest`. To tag it otherwise, give `--tag <tag>`, once or more, e.g. `--tag dev` for a development build, or `--tag v1.2.3 --tag latest` for a release. Arguments after `--` are passed to `docker build`.
+The build script creates a Docker image named `newsnowlabs/runcvm:latest`. To tag it otherwise, give `--tag <tag>`, once or more, e.g. `--tag dev` for a development build, `--tag v1.2.3 --tag latest` for a release, or `--tag v2.0.0-pre<N> --tag next` for a v2.0.0 pre-release. Arguments after `--` are passed to `docker build`.
 
 The build records its version and the commit it was built from: in the image's `org.opencontainers.image.version` and `org.opencontainers.image.revision` labels (the commit's full ID), and in `/opt/runcvm/VERSION`, which the installer reports and installs, as `<version> (<short commit ID>)`, e.g. `v1.8.0-2-ge77f189 (e77f189)` for a build two commits after `v1.8.0`. The version is the nearest tag, as `git describe --tags --dirty` gives it, with `-dirty` added for a build with uncommitted changes, or `untagged` where no tag is reachable, as in a shallow clone. To record another version, e.g. for a build from a source tree without git's history, set `RUNCVM_VERSION`: `RUNCVM_VERSION=my-build ./build/build.sh`. A build outside a git checkout records the commit as `unknown`, and `/opt/runcvm/VERSION` then gives the version alone; without `RUNCVM_VERSION`, it records version `unknown` too, as does `docker build` run alone.
 
