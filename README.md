@@ -234,9 +234,9 @@ RunCVM is tested on x86-64 hosts with KVM running Debian 12 (Bookworm) and Ubunt
 
 ### macOS on Apple Silicon
 
-Running RunCVM on macOS is experimental, as is arm64 support. On macOS, Docker runs inside an arm64 Linux VM, such as one that [Lima](https://lima-vm.io/) provides (e.g. with its `docker-rootful` template). RunCVM can run inside that VM, as on any arm64 host: install a v2.0.0 pre-release, whose images include arm64 (see [System requirements](#system-requirements)), or build RunCVM within the VM and install that build. For KVM acceleration, the VM needs nested virtualisation, so that `/dev/kvm` exists inside it; Apple's Virtualization framework offers it on M3 and later chips, with macOS 15 or later.
+Running RunCVM on macOS is experimental, as is arm64 support. On macOS, Docker runs in an arm64 Linux VM, such as one made from [Lima](https://lima-vm.io/)'s `docker-rootful` template, and RunCVM runs inside it as on any arm64 host: install a v2.0.0 pre-release, whose images include arm64 (see [System requirements](#system-requirements)), or build and install RunCVM within the VM. KVM acceleration needs nested virtualisation, so that the VM has `/dev/kvm`; Apple's Virtualization framework offers it on M3 and later chips, with macOS 15 or later.
 
-**Macs with M1 or M2 chips are not supported.** Their Linux VMs have no `/dev/kvm`, so a Container/VM there runs only under software emulation (`--env=RUNCVM_QEMU_ACCEL=auto` or `tcg`), which is much slower.
+**Macs with M1 or M2 chips are not supported.** Their Linux VMs have no `/dev/kvm`, so Container/VMs there run only under software emulation (`--env=RUNCVM_QEMU_ACCEL=auto` or `tcg`), which is much slower.
 
 Quick start, on a Mac with an M3 or later chip and macOS 15 or later, where `<tag>` is a v2.0.0 pre-release's tag from the [Releases](https://github.com/newsnowlabs/runcvm/releases) page:
 
@@ -248,31 +248,23 @@ limactl shell runcvm sh -c 'curl -s -o - https://raw.githubusercontent.com/newsn
 limactl shell runcvm docker run --rm -it --runtime=runcvm --env=RUNCVM_HUGETLB=auto --env=RUNCVM_VIRTIOFSD_CACHE=always alpine
 ```
 
-This makes a Linux VM with 4 CPUs and 8 GB, starting it without Lima's interactive prompts (`--tty=false`). It reserves a pool of 1024 hugepages (2 GB), and launches an Alpine Container/VM with the two settings that make Container/VMs start quickly there, described below; keep `RUNCVM_VIRTIOFSD_CACHE` at its default for Container/VMs with volumes or bind mounts whose files change outside the VM.
+This makes a Linux VM with 4 CPUs and 8 GB, without Lima's interactive prompts (`--tty=false`), reserves a pool of 1024 hugepages (2 GB) in it, and launches an Alpine Container/VM with the two settings, described below, that make Container/VMs start quickly there.
 
-Lima forwards the VM's Docker socket to the Mac, to a path of the VM's own (leaving the Mac's `/var/run/docker.sock` and its default Docker context unchanged), so the Mac's `docker` CLI can also reach the VM's Docker, through a Docker context named for each command:
+Lima also forwards the VM's Docker socket to a path of the VM's own on the Mac, leaving the Mac's `/var/run/docker.sock` and default Docker context unchanged, so the Mac's `docker` CLI can reach the VM's Docker through a context named per command:
 
 ```console
 docker context create lima-runcvm --docker "host=$(limactl list runcvm --format 'unix://{{.Dir}}/sock/docker.sock')"
-docker --context=lima-runcvm run --rm -it --runtime=runcvm --env=RUNCVM_HUGETLB=auto --env=RUNCVM_VIRTIOFSD_CACHE=always alpine
+docker --context=lima-runcvm run --rm -it --runtime=runcvm --cpus=1 --memory=512M --env=RUNCVM_HUGETLB=auto --env=RUNCVM_VIRTIOFSD_CACHE=always alpine
 ```
 
-- With Lima, enable nested virtualisation for the VM, e.g. `limactl start --set='.nestedVirtualization=true' template://docker-rootful` for a new VM, or `limactl stop <vm> && limactl edit <vm> --set '.nestedVirtualization=true' && limactl start <vm>` for an existing one.
-- [Podman Desktop](https://podman-desktop.io/)'s VM is untested: it provides Podman but not Docker, which RunCVM's build and installer need.
+The Linux VM may lack `/dev/vhost-net`, which `RUNCVM_QEMU_NET_VHOST=1` (off by default) needs.
 
-Check that `/dev/kvm` exists inside the VM (e.g. `limactl shell <vm> ls -l /dev/kvm`) before installing RunCVM there. The VM may also lack `/dev/vhost-net` (needed by `RUNCVM_QEMU_NET_VHOST=1`) and hugepages (needed by `RUNCVM_HUGETLB=1`); both options are off by default.
+With RunCVM's defaults, a Container/VM starts slowly under nested virtualisation: on an M3 Mac, `docker run --rm --runtime=runcvm alpine true` takes about 21 seconds. The quick start's two settings make most of the difference:
 
-Under nested virtualisation, a Container/VM starts slowly with RunCVM's defaults: on an M3 Mac, `docker run --rm --runtime=runcvm alpine true` takes about 21 seconds. While arm64 support is experimental, two settings make most of the difference there:
+- **Hugepages.** By default (`RUNCVM_HUGETLB=0`), the Container/VM's memory is a file in the container's `/dev/shm`, allocated page by page as it is first used, which is slow under nested virtualisation. `--env=RUNCVM_HUGETLB=auto` (see [`RUNCVM_HUGETLB`](#runcvm_hugetlb)) takes it instead from the Linux VM's pool of 2 MB hugepages, where the pool has enough pages available, and from `/dev/shm` otherwise, cutting the start time to about 5 seconds; `RUNCVM_HUGETLB=1` takes it from the pool alone, so the Container/VM fails to start if the pool falls short. A Container/VM reserves its memory's pages from the pool when it starts (256 pages for the default 512 MB) and releases them when it ends. The pool's memory, used or not, is unavailable to anything else in the Linux VM, so leave enough outside it for Docker, QEMU and the VM's other processes: up to about half of the Linux VM's memory suits most uses, e.g. the quick start's 1024 pages (2 GB) of 8 GB. RunCVM's installer, run in such a VM with no pool reserved, suggests about a third. If memory is fragmented, the pool can come out smaller than asked for, as `limactl shell runcvm grep HugePages_Total /proc/meminfo` shows; then free and compact memory with `limactl shell runcvm sudo sh -c 'echo 3 >/proc/sys/vm/drop_caches; echo 1 >/proc/sys/vm/compact_memory'`, and reserve it again. To release the pool, remove `/etc/sysctl.d/99-hugepages.conf` and run `sudo sysctl -w vm.nr_hugepages=0` in the Linux VM.
+- **Caching.** Under the default cache policy, `RUNCVM_VIRTIOFSD_CACHE=auto`, the Container/VM rereads a file's contents from the container's filesystem each time it opens the file, including every program and library it runs, and reads over virtiofs are slow there. `--env=RUNCVM_VIRTIOFSD_CACHE=always` keeps files' contents cached in the Container/VM, cutting the start time to about 14 seconds alone, or about 4 seconds with hugepages. Don't use `always` where a volume's or bind mount's files change outside the VM, e.g. files edited on the host, as the Container/VM may not see the changes for up to a day: keep the default for those, or use `none` for volumes shared with other Container/VMs (see [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)).
 
-- **Hugepages.** By default, the Container/VM's memory is a file in the container's `/dev/shm`, whose pages are allocated as the Container/VM first uses them, which is slow under nested virtualisation. With `--env=RUNCVM_HUGETLB=auto` (see [`RUNCVM_HUGETLB`](#runcvm_hugetlb)), the Container/VM's memory comes instead from the Linux VM's pool of 2 MB hugepages, which cuts the start time to about 5 seconds, wherever the pool has enough pages available for it, and from `/dev/shm` otherwise. (`RUNCVM_HUGETLB=1` takes it from the pool alone, so a Container/VM whose memory the pool cannot supply fails to start.) A Container/VM reserves all its memory's pages from the pool when it starts, 256 pages for the default 512 MB, so that they are unavailable to others, though it allocates each only as it first uses it; it releases them all when it ends. The pool itself is set aside for hugepages alone, used or not, so its memory is lost to everything else in the Linux VM. To reserve a pool:
-  1. Choose its size: no more than about a third of the Linux VM's memory, e.g. 2048 pages (4 GB) in a Linux VM of 12 GB, or 640 pages (1.25 GB) in one of 4 GB.
-  2. Reserve it, keeping it across restarts of the Linux VM: `limactl shell <vm> sudo sh -c 'echo "vm.nr_hugepages = 2048" >/etc/sysctl.d/99-hugepages.conf && sysctl -p /etc/sysctl.d/99-hugepages.conf'`.
-  3. Check how many pages it holds: `limactl shell <vm> grep HugePages_Total /proc/meminfo`. If memory is fragmented, the pool can come out smaller than asked for; then free and compact memory, with `limactl shell <vm> sudo sh -c 'echo 3 >/proc/sys/vm/drop_caches; echo 1 >/proc/sys/vm/compact_memory'`, and reserve it again (step 2).
-
-  To release the pool, remove `/etc/sysctl.d/99-hugepages.conf` and run `sudo sysctl -w vm.nr_hugepages=0` in the Linux VM. When installed in a Linux VM run by Apple's Virtualization framework with no pool reserved, RunCVM's installer suggests a pool size.
-- **Caching.** RunCVM's default cache policy, `RUNCVM_VIRTIOFSD_CACHE=auto`, has the Container/VM read each program afresh from the container's filesystem every time it runs it, and reads over virtiofs are slow there. `--env=RUNCVM_VIRTIOFSD_CACHE=always` keeps files' contents cached in the Container/VM: alone, it cuts the start time to about 14 seconds; with hugepages, to about 4 seconds. Do not use `always` for a Container/VM with volumes or bind mounts whose files change outside the VM, e.g. files edited on the host, as the Container/VM may not see those changes for up to a day; keep the default for those, or use `none` for volumes shared with other Container/VMs (see [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)).
-
-Fewer vCPUs also start faster there: with the default settings, `--cpus=1` saves about 2.5 seconds.
+Fewer vCPUs also start faster: with the default settings, `--cpus=1` saves about 2.5 seconds.
 
 To run RunCVM's integration tests on such a host, see [Running the integration tests](#running-the-integration-tests).
 
