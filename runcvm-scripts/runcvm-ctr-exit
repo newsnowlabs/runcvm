@@ -13,11 +13,36 @@
 # - resets terminal readline horizontal scroll
 # - exits with exit code
 
+# Prints the exit status of the VM's PID 1, where it exited, from the last panic it caused in the
+# kernel log (see runcvm-ctr-qemu): 'Attempted to kill init! exitcode=0x<wait status>'. As for a
+# container's process, a process ended by a signal has status 128 plus the signal's number.
+pid1_exit_status() {
+  local line status=""
+
+  [ -f /.runcvm/kernel.log ] || return 1
+  while IFS= read -r line
+  do
+    [[ "$line" =~ "Attempted to kill init! exitcode=0x"([0-9a-fA-F]+) ]] && status=$(( 16#${BASH_REMATCH[1]} ))
+  done </.runcvm/kernel.log
+  [ -n "$status" ] || return 1
+
+  if (( (status & 127) == 0 )); then
+    echo $(( (status >> 8) & 255 ))
+  else
+    echo $(( 128 + (status & 127) ))
+  fi
+}
+
+# The exit status is, in order of preference: the one the workload saved in /.runcvm/exitcode; the
+# exit status of the VM's PID 1, where it exited; or one the workload gave qemu-exit, which on x86
+# ends QEMU with status 1+2*<status> ($1).
 if [ -f /.runcvm/exitcode ]; then
   read CODE </.runcvm/exitcode
 
   # Convert negative codes to positive and ensure in acceptable range (0-255)
   CODE=$(( $CODE & 255 ))
+elif CODE=$(pid1_exit_status); then
+  :
 elif [ -n "$1" ]; then
   CODE=$(( ($1+1)/2 ))
 fi

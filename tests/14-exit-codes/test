@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """Exit status of 'docker run' for a RunCVM Container/VM.
 
-Records RunCVM's exit-code contract (README, "Features and limitations"): the
-entrypoint's own exit status is not passed through; a workload sets the
-Container/VM's exit status by writing it to /.runcvm/exitcode (reduced
-modulo 256) or by calling qemu-exit (0-127), and both need root, since
-/.runcvm is root-only. Each case runs with and without --init.
+Records RunCVM's exit-code contract (README, "Features and limitations"):
+without --init, the entrypoint's own exit status is passed through, as
+the exit status of the VM's PID 1; with --init, it is not. A workload
+sets the Container/VM's exit status in either case by writing it to
+/.runcvm/exitcode (reduced modulo 256) or by calling qemu-exit (0-127),
+and both need root, since /.runcvm is root-only. Each case runs with and
+without --init.
+
+The exit status without --init is read from the kernel's log console,
+which must leave /dev/console as the kernel would choose it itself: tty0
+on x86, the virt machine's UART (ttyAMA0) on arm64.
 
 The expected values describe current behaviour. A change to the contract
 must update them deliberately.
 """
 
 import os
+import platform
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -19,19 +26,21 @@ import framework as t  # noqa: E402
 
 QEMU_EXIT = "/.runcvm/guest/sbin/qemu-exit"
 
-# (name, docker run options, command, expected exit status)
+# (name, docker run options, command, expected exit status without --init, and with it)
 CASES = [
-    ("exit-0", [], "exit 0", 0),
-    ("exit-3", [], "exit 3", 0),
-    ("exitcode-file-5", [], "echo 5 >/.runcvm/exitcode; exit 3", 5),
-    ("exitcode-file-300", [], "echo 300 >/.runcvm/exitcode", 44),
-    ("exitcode-file-minus-1", [], "echo -1 >/.runcvm/exitcode", 255),
-    ("qemu-exit-7", [], QEMU_EXIT + " 7", 7),
-    ("qemu-exit-127", [], QEMU_EXIT + " 127", 127),
-    ("qemu-exit-0", [], QEMU_EXIT + " 0; exit 3", 0),
-    ("non-root-exit-3", ["--user=1000"], "exit 3", 0),
-    ("non-root-exitcode-file", ["--user=1000"], "echo 5 >/.runcvm/exitcode; exit 3", 0),
-    ("non-root-qemu-exit", ["--user=1000"], QEMU_EXIT + " 7; exit 3", 0),
+    ("exit-0", [], "exit 0", (0, 0)),
+    ("exit-3", [], "exit 3", (3, 0)),
+    ("exit-200", [], "exit 200", (200, 0)),
+    ("missing-entrypoint", [], None, (127, 0)),
+    ("exitcode-file-5", [], "echo 5 >/.runcvm/exitcode; exit 3", (5, 5)),
+    ("exitcode-file-300", [], "echo 300 >/.runcvm/exitcode", (44, 44)),
+    ("exitcode-file-minus-1", [], "echo -1 >/.runcvm/exitcode", (255, 255)),
+    ("qemu-exit-7", [], QEMU_EXIT + " 7", (7, 7)),
+    ("qemu-exit-127", [], QEMU_EXIT + " 127", (127, 127)),
+    ("qemu-exit-0", [], QEMU_EXIT + " 0; exit 3", (0, 0)),
+    ("non-root-exit-3", ["--user=1000"], "exit 3", (3, 0)),
+    ("non-root-exitcode-file", ["--user=1000"], "echo 5 >/.runcvm/exitcode; exit 3", (3, 0)),
+    ("non-root-qemu-exit", ["--user=1000"], QEMU_EXIT + " 7; exit 3", (3, 0)),
 ]
 
 RUNS = [(init, case) for init in (False, True) for case in CASES]
@@ -40,16 +49,27 @@ RUNS = [(init, case) for init in (False, True) for case in CASES]
 def run(item):
     init, (name, opts, command, _) = item
     container = t.unique("%s%s" % (name, "-init" if init else ""))
+    # A command of None runs an entrypoint that does not exist.
+    cmd = ["/nonexistent"] if command is None else ["sh", "-c", command]
     r = t.docker("run", "--rm", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
-                 *(["--init"] if init else []), *opts, "alpine", "sh", "-c", command)
+                 *(["--init"] if init else []), *opts, "alpine", *cmd)
     return r
 
 
 results = t.parallel(run, RUNS)
 
 for (init, (name, opts, command, expected)), r in zip(RUNS, results):
-    desc = "%s, %s: %s" % (name, "--init" if init else "no --init", command)
-    if not t.check(desc, expected, r.returncode):
+    desc = "%s, %s: %s" % (name, "--init" if init else "no --init", command or "/nonexistent")
+    if not t.check(desc, expected[init], r.returncode):
         t.log("output:\n%s" % r.stdout)
+
+# /proc/consoles lists each console, with flag C on /dev/console's
+r = t.docker("run", "--rm", "--name", t.unique("consoles"), *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+             "alpine", "cat", "/proc/consoles")
+consoles = {f[0]: f for f in (line.split() for line in r.stdout.splitlines()) if f}
+preferred = [name for name, f in consoles.items() if "C" in "".join(f[1:])]
+t.check("/dev/console is the kernel's own choice", ["ttyAMA0" if platform.machine() == "aarch64" else "tty0"],
+        preferred)
+t.check("the kernel log console is enabled", True, "hvc1" in consoles)
 
 t.finish()

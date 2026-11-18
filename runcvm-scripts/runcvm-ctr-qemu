@@ -1517,6 +1517,19 @@ esac
 # Save choice of console device
 echo "$CONSOLE_DEV" >/.runcvm/console
 
+# The kernel log: a further kernel console, a virtio console port whose output QEMU writes to
+# KERNEL_LOG, and which no one else sees. The kernel writes its messages there, as to every console
+# (at quiet's level, only errors and worse), among them the panic that a PID 1 exiting causes,
+# "Attempted to kill init! exitcode=0x<wait status>", from which runcvm-ctr-exit takes the
+# Container/VM's exit status. Being written to a file, it never blocks the VM. The port follows the
+# user's console (hvc0, in headless mode), so it is hvc1 in headless mode and hvc0 otherwise.
+KERNEL_LOG=/.runcvm/kernel.log
+CONSOLE+=(
+  -chardev file,id=kernellog0,path=$KERNEL_LOG
+  -device virtconsole,chardev=kernellog0,id=kernellog0
+)
+[ "$CONSOLE_DEV" = "hvc0" ] && KERNEL_LOG_DEV="hvc1" || KERNEL_LOG_DEV="hvc0"
+
 # Generate QEMU display options
 if [ -n "$RUNCVM_QEMU_DISPLAY" ]; then
   DISPLAY+=(-display $RUNCVM_QEMU_DISPLAY)
@@ -1661,10 +1674,16 @@ APPEND+=(scsi_mod.scan=none tsc=reliable no_timer_check rcupdate.rcu_expedited=1
 # - Override this by launching with --env='RUNCVM_KERNEL_APPEND=systemd.show_status=0'
 APPEND+=(systemd.show_status=1)
 
+# The kernel writes its messages to every console named, and /dev/console is the last: the user's
+# console with RUNCVM_KERNEL_DEBUG=1, and otherwise the consoles the kernel chooses itself where none
+# is named, so that /dev/console is unchanged: tty0 on x86; on arm64, tty0 and the virt machine's
+# UART (ttyAMA0, the device tree's stdout-path), which is /dev/console.
 if [ "$RUNCVM_KERNEL_DEBUG" = "1" ]; then
-  APPEND+=($EARLY_CONSOLE console=$CONSOLE_DEV)
+  APPEND+=($EARLY_CONSOLE console=$KERNEL_LOG_DEV console=$CONSOLE_DEV)
+elif [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
+  APPEND+=(quiet console=$KERNEL_LOG_DEV console=tty0 console=ttyAMA0)
 else
-  APPEND+=(quiet)
+  APPEND+=(quiet console=$KERNEL_LOG_DEV console=tty0)
 fi
 
 ARGS=(

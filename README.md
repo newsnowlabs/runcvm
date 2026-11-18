@@ -524,7 +524,8 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [+] `--memory` (or `-m`) is supported to specify VM memory (and limit container memory to this value plus a 256Mb contingency)
       - [-] Other container resource limit options such as (`--cpu-*`), block IO (`--blkio-*`), kernel memory (`--kernel-memory`) are unsupported or untested
    - Exit code
-      - [+] Returning an exit code is supported, but it currently requires application support, which must either write the exit code to `/.runcvm/exitcode` (supported exit codes 0-255) or call `/.runcvm/guest/sbin/qemu-exit <code>` (supported exit codes 0-127). Both require the application to run as root, as `/.runcvm` is accessible only to root. Automatic handling of exit codes from the entrypoint may be provided in a later release.
+      - [+] Without `--init`, the entrypoint's exit status is the Container/VM's, as for a container (e.g. 127 where the entrypoint does not exist, and 128 plus the signal's number where a signal ends it): the entrypoint is the VM's PID 1, and RunCVM reads its exit status from the kernel's panic when PID 1 exits ("Attempted to kill init! exitcode=…"), which the kernel writes to a console of its own that QEMU saves in `/.runcvm/kernel.log` in the container. With `--init`, the entrypoint's exit status is not passed through, and the Container/VM exits 0.
+      - [+] Either way, a workload may set the exit status itself, by writing it to `/.runcvm/exitcode` (supported exit codes 0-255) or calling `/.runcvm/guest/sbin/qemu-exit <code>` (supported exit codes 0-127), which takes precedence. Both require the application to run as root, as `/.runcvm` is accessible only to root.
    - Disk performance
       - [+] No mountpoints are required for basic operation for most applications. Volume or disk mountpoints may be needed for running `dockerd` or to improve disk performance
       - [-] `dockerd` needs a disk holding `/var/lib/docker` and `/var/lib/containerd`: see [Running Docker in a RunCVM Container/VM](#running-docker-in-a-runcvm-containervm)
@@ -1381,7 +1382,7 @@ The `runcvm-ctr-entrypoint`:
 The `runcvm-init` process:
 - Is RunCVM's custom init process, that takes over as PID1 within the container, supervising `runcvm-ctr-qemu` to launch the VM.
 - Waits for a stop signal: SIGTERM, SIGINT, SIGPWR, or SIGRTMIN+3 or SIGRTMIN+4, which images for systemd declare as their stop signal. On receiving one, it spawns `runcvm-ctr-shutdown`, which asks the VM to power off as [`RUNCVM_SHUTDOWN`](#runcvm_shutdown) specifies. It never passes these signals to QEMU, which would end it at once.
-- Waits for its child (QEMU) to exit. When it does, execs `runcvm-ctr-exit` to retrieve any saved exit code (written by the application to `/.runcvm/exitcode`) and exit with this code.
+- Waits for its child (QEMU) to exit. When it does, execs `runcvm-ctr-exit`, which exits with the exit code the application saved in `/.runcvm/exitcode`, if any; or else with the exit status of the VM's PID 1, from the kernel's panic when it exited, in `/.runcvm/kernel.log`; or else with the status the application gave `qemu-exit`.
 
 The `runcvm-ctr-qemu` script:
 - Prepares disk backing files as specified by `--env=RUNCVM_DISKS=<disks>`: it checks every disk spec and plans every mount (the disks, the tmpfs mounts, and the volumes and bind mounts they hide) before creating anything, then creates each new disk, populating a new whole-root disk last, and writes the fstab the VM mounts
