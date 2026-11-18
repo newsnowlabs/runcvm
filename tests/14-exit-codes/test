@@ -7,6 +7,10 @@ Container/VM's exit status by writing it to /.runcvm/exitcode (reduced
 modulo 256) or by calling qemu-exit (0-127), and both need root, since
 /.runcvm is root-only. Each case runs with and without --init.
 
+A Container/VM whose boot fails in runcvm-vm-init (here, with its network
+driver blacklisted, so that its network interface never appears) exits 1,
+with RunCVM's error naming the failure in its output.
+
 The expected values describe current behaviour. A change to the contract
 must update them deliberately.
 """
@@ -32,7 +36,11 @@ CASES = [
     ("non-root-exit-3", ["--user=1000"], "exit 3", 0),
     ("non-root-exitcode-file", ["--user=1000"], "echo 5 >/.runcvm/exitcode; exit 3", 0),
     ("non-root-qemu-exit", ["--user=1000"], QEMU_EXIT + " 7; exit 3", 0),
+    ("vm-init-failure", ["--env=RUNCVM_KERNEL_APPEND=module_blacklist=virtio_net"], "exit 0", 1),
 ]
+
+# The message runcvm-vm-init's failure gives
+VM_INIT_FAILED = "RunCVM: Error: runcvm-vm-init failed"
 
 RUNS = [(init, case) for init in (False, True) for case in CASES]
 
@@ -51,5 +59,8 @@ for (init, (name, opts, command, expected)), r in zip(RUNS, results):
     desc = "%s, %s: %s" % (name, "--init" if init else "no --init", command)
     if not t.check(desc, expected, r.returncode):
         t.log("output:\n%s" % r.stdout)
+    if name == "vm-init-failure":
+        t.check("%s, %s: output reports the failure" % (name, "--init" if init else "no --init"),
+                True, VM_INIT_FAILED in r.stdout)
 
 t.finish()
