@@ -269,7 +269,11 @@ This installs the latest release of RunCVM, the image `newsnowlabs/runcvm:latest
 curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=newsnowlabs/runcvm:v1.7.0 sh
 ```
 
-The [releases](https://github.com/newsnowlabs/runcvm/releases) are tagged `v<version>`, on Docker Hub (`newsnowlabs/runcvm:<tag>`) and on GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`).
+The [releases](https://github.com/newsnowlabs/runcvm/releases) are tagged `v<version>`, on Docker Hub (`newsnowlabs/runcvm:<tag>`) and on GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`). From v1.7.0, every tag, `latest` included, is on both. Where pulls from Docker Hub are rate-limited or blocked, as in some cloud development environments, CI systems and corporate networks, install from GitHub's container registry instead:
+
+```sh
+curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=ghcr.io/newsnowlabs/runcvm:latest sh
+```
 
 To build RunCVM from source and install that instead, see [Building](#building).
 
@@ -763,9 +767,11 @@ GitHub Actions' hosted Linux runners (e.g. `ubuntu-24.04`) provide KVM, so a wor
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-          curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
+          curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=ghcr.io/newsnowlabs/runcvm:latest sh
       - run: docker run --rm --runtime=runcvm alpine uname -a
 ```
+
+The workflow installs RunCVM from GitHub's container registry, which GitHub's runners reach without Docker Hub's pull limits.
 
 A hosted runner (4 vCPUs and 16 GB for public repositories) has room for a few Container/VMs at once, depending on their memory limits. On a self-hosted runner with RunCVM installed, a job's `container:` (and its `services:`) can run under RunCVM, with `options: --runtime=runcvm`, giving each a VM of its own: this suits projects that run untrusted pull requests' code on their own hardware.
 
