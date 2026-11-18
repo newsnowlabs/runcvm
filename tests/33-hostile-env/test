@@ -161,11 +161,11 @@ def parity(init):
 t.param("init", "both")
 
 items = [(case, init) for init in (False, True) for case in CASES]
-for results in t.parallel(hostile, items):
+for results in t.parallel(hostile, items, remove=True):
     for desc, expected, actual in results:
         t.check(desc, expected, actual)
 
-for results in t.parallel(parity, (False, True)):
+for results in t.parallel(parity, (False, True), remove=True):
     for desc, expected, actual in results:
         t.check(desc, expected, actual)
 

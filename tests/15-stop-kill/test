@@ -68,7 +68,7 @@ def run(case):
     return int(status) if status.isdigit() else status, elapsed, t.docker("logs", container).stdout
 
 
-results = t.parallel(run, CASES)
+results = t.parallel(run, CASES, remove=True)
 
 for (name, init, entrypoint, action, expected, prompt), (status, elapsed, output) in zip(CASES, results):
     desc = "%s, %s" % (name, "--init" if init else "no --init")

@@ -60,7 +60,7 @@ def run(item):
 runtimes = [t.RUNTIME] if t.RUNTIME == "runc" else [t.RUNTIME, "runc"]
 items = [(runtime, init, desc) for runtime in runtimes for init in (False, True) for desc in CASES]
 t.param("init", "no, yes")
-for (runtime, init, desc), out in t.parallel(run, items, jobs=4):
+for (runtime, init, desc), out in t.parallel(run, items):
     t.check("%s, %s: %s" % (runtime, "--init" if init else "no --init", desc), CASES[desc][1], out)
 
 t.finish()

@@ -54,7 +54,7 @@ RUN apk update && apk add --no-cache alpine-sdk coreutils && \
       --branch ${ALPINE_VERSION}-stable \
       "$APORTS_URL" ~/aports && \
     cd ~/aports/ && \
-    git sparse-checkout set main/seabios main/dnsmasq main/dropbear
+    git sparse-checkout set main/seabios main/dnsmasq main/dropbear community/virtiofsd
 
 # --- BUILD STAGE ---
 # Build base alpine-sdk image, at ALPINE_KERNEL_VERSION, for the patched mkinitfs's build stage
@@ -115,6 +115,23 @@ abuild -rFf
 EOF
 
 # --- BUILD STAGE ---
+# Build patched virtiofsd: Alpine's own package, built with patches/virtiofsd/*.patch, a series
+# against the virtiofsd version that Alpine ships, each patch in a file of its own, applied in order
+# (see patches/virtiofsd/README.md for each one's origin, and when to drop it).
+FROM alpine-sdk as alpine-virtiofsd
+
+ADD patches/virtiofsd/ /root/aports/community/virtiofsd/
+
+RUN <<EOF
+set -e
+cd /root/aports/community/virtiofsd
+# Add the patches, in order, to the package's sources and checksums, which default_prepare applies.
+printf 'sha512sums="${sha512sums}%s\n"\n' "$(sha512sum *.patch)" >>APKBUILD
+printf 'source="${source} %s"\n' "$(echo *.patch)" >>APKBUILD
+abuild -rFf
+EOF
+
+# --- BUILD STAGE ---
 # Build patched dropbear with epka plugin, which accepts only the plugin's keys
 # and runs commands with RunCVM's bash, without reading the image's /etc/passwd,
 # /etc/shadow, /etc/shells or authorized_keys
@@ -144,8 +161,8 @@ make install
 EOF
 
 # --- BUILD STAGE ---
-# Build patched mkinitfs/nlplug-findfs
-# with a shorter maximum device-event timeout than upstream (1s, not 5s), for faster boot
+# Build patched mkinitfs/nlplug-findfs, which exits 250ms (upstream: 5s) after the last device
+# event, as RunCVM's virtiofs root is never a device it finds; drivers still loading are waited for.
 FROM alpine-sdk-kernel as alpine-mkinitfs
 
 ADD patches/mkinitfs/nlplug-findfs.patch /root/aports/main/mkinitfs/nlplug-findfs.patch
@@ -228,6 +245,11 @@ RUN ALPINE_ARCH=$(uname -m) && \
     apk add --allow-untrusted /tmp/dnsmasq-pkgs/$ALPINE_ARCH/dnsmasq-2*.apk \
                               /tmp/dnsmasq-pkgs/$ALPINE_ARCH/dnsmasq-common*.apk
 
+# Install patched virtiofsd
+COPY --from=alpine-virtiofsd /root/packages/community /tmp/virtiofsd-pkgs/
+RUN ALPINE_ARCH=$(uname -m) && \
+    apk add --allow-untrusted /tmp/virtiofsd-pkgs/$ALPINE_ARCH/virtiofsd-1*.apk
+
 # Install patched mke2fs
 COPY --from=e2fsprogs /usr/local/sbin/mke2fs /sbin/mke2fs
 
@@ -304,10 +326,13 @@ FROM alpine:$ALPINE_KERNEL_VERSION as alpine-kernel
 COPY --from=alpine-mkinitfs /root/packages/main /tmp/mkinitfs-pkgs/
 RUN apk add --allow-untrusted /tmp/mkinitfs-pkgs/$(uname -m)/*.apk
 RUN apk add --no-cache linux-virt
+# Load virtio_net and virtio_blk before nlplug-findfs, so every NIC and disk exists at handover
+# however short its wait (virtio_pci is built in); fail the build if the init's line is not found.
 RUN (grep -qxF 'kernel/fs/fuse/virtiofs*' /etc/mkinitfs/features.d/virtio.modules || \
       echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules) && \
     sed -ri 's/\b(ata|nvme|raid|scsi|usb|cdrom|kms|mmc)\b//g; s/[ ]+/ /g' /etc/mkinitfs/mkinitfs.conf && \
-    sed -ri 's/(nlplug-findfs)/\1 --timeout=1000/' /usr/share/mkinitfs/initramfs-init && \
+    sed -ri 's/^(.*modprobe -a .* loop squashfs simpledrm)( 2> \/dev\/null)$/\1 virtio_net virtio_blk\2/' /usr/share/mkinitfs/initramfs-init && \
+    grep -q 'loop squashfs simpledrm virtio_net virtio_blk 2> /dev/null$' /usr/share/mkinitfs/initramfs-init && \
     mkinitfs $(basename $(ls -d /lib/modules/*))
 RUN BASENAME=$(basename $(ls -d /lib/modules/*)) && \
     mkdir -p /opt/runcvm/kernels/alpine/$BASENAME && \
@@ -506,10 +531,14 @@ ADD runcvm-scripts /opt/runcvm/scripts/
 ADD runcvm-etc /opt/runcvm/etc/
 COPY LICENSE NOTICE /opt/runcvm/
 
+# The integration tests, which run from the package as /opt/runcvm/tests/run, so that a host can
+# test the package installed on it with the tests that match it.
+ADD tests /opt/runcvm/tests/
+
 # Files copied from the build context keep the checkout's permissions, which follow the umask of
 # whoever checked it out (e.g. group-writable under Ubuntu's default umask for users, 002), so give
 # them the package's own (see the check below).
-RUN chmod -R a+rX,go-w /opt/runcvm/scripts /opt/runcvm/etc /opt/runcvm/LICENSE /opt/runcvm/NOTICE
+RUN chmod -R a+rX,go-w /opt/runcvm/scripts /opt/runcvm/etc /opt/runcvm/tests /opt/runcvm/LICENSE /opt/runcvm/NOTICE
 
 ADD build-utils/entrypoint-install.sh /
 ENTRYPOINT ["/entrypoint-install.sh"]
@@ -548,3 +577,20 @@ RUN for d in /opt/runcvm/kernels/*; do \
 RUN bad=$(find /opt/runcvm ! -type l \( ! -perm -o=r -o -type d ! -perm -o=x -o -perm /022 \)) || \
       { echo "Checking permissions in /opt/runcvm failed" >&2; exit 1; } && \
     [ -z "$bad" ] || { echo "Files with the wrong permissions in /opt/runcvm:" >&2; echo "$bad" | head -20 >&2; exit 1; }
+
+# Record the build's version and revision (the commit's full ID), as build/build.sh gives them (see
+# there), as labels and in the package as VERSION, '<version> (<short revision>)', or '<version>'
+# where the revision is 'unknown', as for a 'docker build' run without build/build.sh, which records
+# version 'unknown' too. Neither label is empty unless given empty as a build argument. This comes
+# last, so that a change of version rebuilds no other layer; the file is given the permissions the
+# check above requires.
+ARG RUNCVM_VERSION=unknown
+ARG RUNCVM_REVISION=unknown
+LABEL org.opencontainers.image.version="$RUNCVM_VERSION" \
+      org.opencontainers.image.revision="$RUNCVM_REVISION"
+RUN if [ "$RUNCVM_REVISION" != "unknown" ]; then \
+      echo "$RUNCVM_VERSION ($(echo "$RUNCVM_REVISION" | cut -c1-7))"; \
+    else \
+      echo "$RUNCVM_VERSION"; \
+    fi >/opt/runcvm/VERSION && \
+    chmod 644 /opt/runcvm/VERSION

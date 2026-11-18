@@ -8,19 +8,20 @@
 
 OPTS=(--retry-path --statedir /.runcvm --pidfile /.runcvm/qemu-ga.pid)
 
-if [ -f "/dev/virtio-ports/org.qemu.guest_agent.0" ]; then
-  DEV="/dev/virtio-ports/org.qemu.guest_agent.0"
-else
-  DEV=$(ls /dev/vport* | head -n 1)
-  
-  if [ -n "$DEV" ] && [ -c "$DEV" ]; then  
-    OPTS+=(-p "$DEV")
-  fi
-fi
+# Find the guest agent's virtio-serial port by the name runcvm-ctr-qemu gives it, in sysfs: the
+# /dev/virtio-ports/<name> links exist only where udev or mdev made them, and the agent's port is
+# not necessarily the first /dev/vport* device.
+DEV=
+for port in /sys/class/virtio-ports/*
+do
+  [ "$(cat "$port/name" 2>/dev/null)" = "org.qemu.guest_agent.0" ] && DEV="/dev/${port##*/}" && break
+done
 
-if [ -z "$DEV" ]; then
+if [ -z "$DEV" ] || ! [ -c "$DEV" ]; then
   exit 0
 fi
+
+OPTS+=(-p "$DEV")
 
 # qemu-ga reads its configuration from $QGA_CONF (default /etc/qemu/qemu-ga.conf, in the image).
 # RunCVM ships no such file, and qemu-ga silently uses its defaults when the file is missing.

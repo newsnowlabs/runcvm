@@ -212,7 +212,33 @@ if [ -n "$(which podman)" ]; then
 _EOE_
 fi
 
-log "- RunCVM installation/upgrade complete."
+# In a Linux VM run by Apple's Virtualization framework (e.g. Lima's on macOS), Container/VMs start
+# much faster with their memory in hugepages (see README.md, "macOS on Apple Silicon"). Where no
+# pool is reserved, suggest a pool of about a third of this VM's memory; reserving it is left to the
+# administrator, since the pool's memory is lost to everything else.
+if grep -qs '^Apple' /sys/class/dmi/id/sys_vendor && grep -qs 'Virtualization' /sys/class/dmi/id/product_name &&
+   [ "$(awk '/^HugePages_Total:/ { print $2 }' /proc/meminfo)" = "0" ]; then
+  HUGEPAGES=$(awk '/^MemTotal:/ { mem = $2 } /^Hugepagesize:/ { size = $2 } END { if (size) print int(mem / 3 / size) }' /proc/meminfo)
+  if [ -n "$HUGEPAGES" ] && [ "$HUGEPAGES" -gt 0 ]; then
+    log "- Detected Apple's Virtualization framework, with no hugepages reserved"
+    cat <<_EOE_
+  - Container/VMs start much faster with their memory in hugepages. To reserve a pool of
+    $HUGEPAGES pages (about a third of this VM's memory), kept across restarts, run:
+
+    echo "vm.nr_hugepages = $HUGEPAGES" | sudo tee /etc/sysctl.d/99-hugepages.conf && sudo sysctl -p /etc/sysctl.d/99-hugepages.conf
+
+    and launch Container/VMs with --env=RUNCVM_HUGETLB=auto. The pool's memory is set aside
+    for hugepages alone, used or not; to release it, remove /etc/sysctl.d/99-hugepages.conf
+    and run: sudo sysctl -w vm.nr_hugepages=0
+_EOE_
+  fi
+fi
+
+if [ -f "$RUNCVM/VERSION" ]; then
+  log "- RunCVM installation/upgrade complete: version $(cat "$RUNCVM/VERSION")."
+else
+  log "- RunCVM installation/upgrade complete."
+fi
 log
 log "RunCVM is copyright 2022-2026 NewsNow Publishing Limited, Struan Bartlett, and contributors,"
 log "and licensed under the Apache License, Version 2.0: see $RUNCVM/LICENSE and $RUNCVM/NOTICE."

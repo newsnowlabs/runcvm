@@ -91,7 +91,7 @@ def case_default_bridge():
 
 CASES = [case_custom_network, case_default_bridge]
 
-for results in t.parallel(lambda f: f(), CASES, jobs=len(CASES)):
+for results in t.parallel(lambda f: f(), CASES):
     for desc, expected, actual in results:
         t.check(desc, expected, actual)
 
