@@ -400,14 +400,17 @@ Running RunCVM on macOS is experimental, as is arm64 support. On macOS, Docker r
 Quick start, on a Mac with an M3 or later chip and macOS 15 or later, where `<tag>` is a v2.0.0 pre-release's tag from the [Releases](https://github.com/newsnowlabs/runcvm/releases) page:
 
 ```console
+# Make and start a Linux VM named runcvm, with Docker, 4 CPUs, 8 GB and nested virtualisation, without Lima's interactive prompts
 limactl start --name=runcvm --tty=false --cpus=4 --memory=8 --set='.nestedVirtualization=true' template://docker-rootful
+# Check that the Linux VM has KVM
 limactl shell runcvm ls -l /dev/kvm
+# Reserve a pool of 1024 hugepages (2 GB) in the Linux VM, kept across its restarts
 limactl shell runcvm sudo sh -c 'echo "vm.nr_hugepages = 1024" >/etc/sysctl.d/99-hugepages.conf && sysctl -p /etc/sysctl.d/99-hugepages.conf'
+# Install RunCVM from a v2.0.0 pre-release in the Linux VM
 limactl shell runcvm sh -c 'curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=newsnowlabs/runcvm:<tag> sh'
+# Launch an Alpine Container/VM, with the settings, described below, that make it start quickly there
 limactl shell runcvm docker run --rm -it --runtime=runcvm --env=RUNCVM_HUGETLB=auto --env=RUNCVM_VIRTIOFSD_CACHE=always alpine
 ```
-
-This makes a Linux VM with 4 CPUs and 8 GB, without Lima's interactive prompts (`--tty=false`), reserves a pool of 1024 hugepages (2 GB) in it, and launches an Alpine Container/VM with the two settings, described below, that make Container/VMs start quickly there.
 
 Lima also forwards the VM's Docker socket to a path of the VM's own on the Mac, leaving the Mac's `/var/run/docker.sock` and default Docker context unchanged, so the Mac's `docker` CLI can reach the VM's Docker through a context named per command:
 
@@ -418,12 +421,11 @@ docker --context=lima-runcvm run --rm -it --runtime=runcvm --cpus=1 --memory=512
 
 The Linux VM may lack `/dev/vhost-net`, which `RUNCVM_QEMU_NET_VHOST=1` (off by default) needs.
 
-With RunCVM's defaults, a Container/VM starts slowly under nested virtualisation: on an M3 Mac, `docker run --rm --runtime=runcvm alpine true` takes about 21 seconds. The quick start's two settings make most of the difference:
+With RunCVM's defaults, a Container/VM starts slowly under nested virtualisation: on an M3 Mac, `docker run --rm --runtime=runcvm alpine true` takes about 21 seconds. The examples' settings make most of the difference:
 
 - **Hugepages.** By default (`RUNCVM_HUGETLB=0`), the Container/VM's memory is a file in the container's `/dev/shm`, allocated page by page as it is first used, which is slow under nested virtualisation. `--env=RUNCVM_HUGETLB=auto` (see [`RUNCVM_HUGETLB`](#runcvm_hugetlb)) takes it instead from the Linux VM's pool of 2 MB hugepages, where the pool has enough pages available, and from `/dev/shm` otherwise, cutting the start time to about 5 seconds; `RUNCVM_HUGETLB=1` takes it from the pool alone, so the Container/VM fails to start if the pool falls short. A Container/VM reserves its memory's pages from the pool when it starts (256 pages for the default 512 MB) and releases them when it ends. The pool's memory, used or not, is unavailable to anything else in the Linux VM, so leave enough outside it for Docker, QEMU and the VM's other processes: up to about half of the Linux VM's memory suits most uses, e.g. the quick start's 1024 pages (2 GB) of 8 GB. RunCVM's installer, run in such a VM with no pool reserved, suggests about a third. If memory is fragmented, the pool can come out smaller than asked for, as `limactl shell runcvm grep HugePages_Total /proc/meminfo` shows; then free and compact memory with `limactl shell runcvm sudo sh -c 'echo 3 >/proc/sys/vm/drop_caches; echo 1 >/proc/sys/vm/compact_memory'`, and reserve it again. To release the pool, remove `/etc/sysctl.d/99-hugepages.conf` and run `sudo sysctl -w vm.nr_hugepages=0` in the Linux VM.
 - **Caching.** Under the default cache policy, `RUNCVM_VIRTIOFSD_CACHE=auto`, the Container/VM rereads a file's contents from the container's filesystem each time it opens the file, including every program and library it runs, and reads over virtiofs are slow there. `--env=RUNCVM_VIRTIOFSD_CACHE=always` keeps files' contents cached in the Container/VM, cutting the start time to about 14 seconds alone, or about 4 seconds with hugepages. Don't use `always` where a volume's or bind mount's files change outside the VM, e.g. files edited on the host, as the Container/VM may not see the changes for up to a day: keep the default for those, or use `none` for volumes shared with other Container/VMs (see [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)).
-
-Fewer vCPUs also start faster: with the default settings, `--cpus=1` saves about 2.5 seconds.
+- **vCPUs.** Without `--cpus`, a Container/VM has a vCPU for every CPU of the Linux VM (4 in the quick start's), and more vCPUs start more slowly there: `--cpus=1`, as in the Docker-context example, saves about 2.5 seconds with the default settings.
 
 To run RunCVM's integration tests on such a host, see [Running the integration tests](#running-the-integration-tests).
 
