@@ -63,7 +63,7 @@ for (init, (name, opts, command, expected)), r in zip(RUNS, results):
     if not t.check(desc, expected[init], r.returncode):
         t.log("output:\n%s" % r.stdout)
 
-# /proc/consoles lists each console, with flag C on /dev/console's
+# /proc/consoles lists each console, with flag C on /dev/console's entry
 r = t.docker("run", "--rm", "--name", t.unique("consoles"), *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
              "alpine", "cat", "/proc/consoles")
 consoles = {f[0]: f for f in (line.split() for line in r.stdout.splitlines()) if f}

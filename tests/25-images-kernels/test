@@ -44,8 +44,8 @@ import framework as t  # noqa: E402
 
 KERNELS_DIR = "/opt/runcvm/kernels"
 TIMEOUT = 600 if t.ACCEL == "tcg" else 120
-# Ends with true, so that a booted Container/VM exits 0 whether or not the image has modprobe or the
-# kernel the module.
+# Ends with true, so that a booted Container/VM exits 0 whether or not the image has modprobe, and
+# whether or not the kernel has the module.
 PROBE = 'echo "uname=$(uname -r)"; echo "id=$(id -u)"; echo "pwd=$(pwd)"; modprobe ip_vs 2>/dev/null && echo "modprobe=ok"; true'
 
 
