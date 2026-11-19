@@ -416,14 +416,16 @@ Quick start, on a Mac with an M3 or later chip and macOS 15 or later, installing
 # Make and start a Linux VM named runcvm, with Docker, 4 CPUs, 8 GB and nested virtualisation, without Lima's interactive prompts
 limactl start --name=runcvm --tty=false --cpus=4 --memory=8 --set='.nestedVirtualization=true' template://docker-rootful
 # Check that the Linux VM has KVM
-limactl shell runcvm ls -l /dev/kvm
+limactl shell runcvm ls -l /dev/kvm </dev/null
 # Reserve a pool of 1024 hugepages (2 GB) in the Linux VM, kept across its restarts
-limactl shell runcvm sudo sh -c 'echo "vm.nr_hugepages = 1024" >/etc/sysctl.d/99-hugepages.conf && sysctl -p /etc/sysctl.d/99-hugepages.conf'
+limactl shell runcvm sudo sh -c 'echo "vm.nr_hugepages = 1024" >/etc/sysctl.d/99-hugepages.conf && sysctl -p /etc/sysctl.d/99-hugepages.conf' </dev/null
 # Install RunCVM from the most recent v2.0.0 pre-release in the Linux VM
-limactl shell runcvm sh -c 'curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=newsnowlabs/runcvm:next sh'
+limactl shell runcvm sh -c 'curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=newsnowlabs/runcvm:next sh' </dev/null
 # Launch an Alpine Container/VM, with the settings, described below, that make it start quickly there
 limactl shell runcvm docker run --rm -it --runtime=runcvm --cpus=1 --memory=512M --env=RUNCVM_HUGETLB=auto --env=RUNCVM_VIRTIOFSD_CACHE=always alpine
 ```
+
+Like `ssh`, `limactl shell` passes the terminal's input to the command it runs, so the steps that need none take it from `/dev/null`, leaving the rest of the block, if pasted whole, to the Mac's shell.
 
 Lima also forwards the VM's Docker socket to a path of the VM's own on the Mac, leaving the Mac's `/var/run/docker.sock` and default Docker context unchanged, so the Mac's `docker` CLI can reach the VM's Docker through a context named per command:
 
