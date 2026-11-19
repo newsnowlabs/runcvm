@@ -67,6 +67,9 @@ Usage: sudo [REPO=<image>] $0 [--pull] [--register-only]
                 accept.
 
 e.g. sudo REPO=newsnowlabs/runcvm:v1.7.0 $0
+
+Images from v1.7.0 are also on GitHub's container registry, e.g. REPO=ghcr.io/newsnowlabs/runcvm:latest,
+for where pulls from Docker Hub are rate-limited or blocked.
 _EOE_
   exit 1
 }
