@@ -1,5 +1,8 @@
 #!/bin/bash -e
 
+# Load framework functions (vm_opts); the cleanup functions below replace its own
+. ../framework.sh
+
 NODE=51-mariadb
 
 nodes() {
@@ -71,9 +74,11 @@ echo "> ($h) Creating network $NODE-network ..."
 docker network rm $(networks) 2>/dev/null || true
 docker network create $NODE-network
 
-# Launch a mariadb VM using RunCVM
+# Launch a mariadb VM using RunCVM, with 1 CPU and 1G of memory unless the runner gives a size
+# (--vm-cpus, --vm-memory): vm_opts follows those defaults, so that Docker takes its values.
+# Nothing outside the VM changes its files, so it suits any cache policy the runner gives.
 echo "> ($h) Launch RunCVM mariadb server as $NODE-mysqld ..."
-docker run --runtime=${RUNTIME:-runcvm} ${RUNCVM_TEST_ACCEL:+--env=RUNCVM_QEMU_ACCEL=$RUNCVM_TEST_ACCEL} -d --rm --name=$NODE-mysqld --hostname=$NODE-mysqld --network=$NODE-network --cpus=1 --memory=1G --env=MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb
+docker run --runtime=${RUNTIME:-runcvm} --cpus=1 --memory=1G $(vm_opts) -d --rm --name=$NODE-mysqld --hostname=$NODE-mysqld --network=$NODE-network --env=MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb
 
 echo "> ($h) Monitoring mariadb logs ..."
 docker logs -f -t -n 0 $NODE-mysqld &
@@ -84,11 +89,20 @@ set +e
 # Seconds to wait for mariadb to accept connections: much longer under software emulation
 if [ "$RUNCVM_TEST_ACCEL" = "tcg" ]; then WAIT=600; else WAIT=40; fi
 
-# Launch standard runc container to test connecting to the mariadb VM
-echo "> ($h) Waiting for mariadb startup and running test queries in a standard container ..."
-# Use the mariadb image (which includes the mariadb client) so that the test does not
-# depend on installing a client from the internet at run time.
-docker run --rm --network=$NODE-network --name=$NODE-mysql --hostname=$NODE-mysql --env=host=$NODE-mysqld --env=wait=$WAIT mariadb bash -c 'for a in $(seq $wait -1 1); do if mariadb --skip-ssl-verify-server-cert -u root -h $host mysql -e ""; then echo "> $(hostname) Connected to mysqld ..."; break; else echo "> $(hostname) Waiting for mysqld (#$a) ..."; sleep 1; fi; done && mariadb --skip-ssl-verify-server-cert -u root -h $host mysql -e "select count(*) from user"'
+# Launch a standard runc container from which to connect to the mariadb VM. It uses the mariadb
+# image, which includes the mariadb client, so that the test does not depend on installing a
+# client from the internet at run time.
+echo "> ($h) Launching a standard container as client $NODE-mysql ..."
+docker run -d --rm --runtime=runc --network=$NODE-network --name=$NODE-mysql --hostname=$NODE-mysql --entrypoint=sleep mariadb infinity
+
+# Run the mariadb client in the client container against the mariadb VM, with the given arguments
+mariadb_client() {
+  docker exec $NODE-mysql mariadb --skip-ssl-verify-server-cert -u root -h $NODE-mysqld mysql "$@"
+}
+
+echo "> ($h) Waiting for mariadb startup and running test queries in the standard container ..."
+wait_for "mysqld on $NODE-mysqld to accept connections" $WAIT mariadb_client -e ""
+mariadb_client -e "select count(*) from user"
 ERRORS=$?
 
 echo "> ($h) Completed $NODE test with $ERRORS errors"
