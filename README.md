@@ -148,6 +148,11 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
 - **Installing**
   - [System requirements](#system-requirements)
   - [Installation](#installation)
+    - [Registering the runtime by hand](#registering-the-runtime-by-hand)
+    - [Install on Google Cloud](#install-on-google-cloud)
+    - [Install on AWS](#install-on-aws)
+    - [Install on Azure (Untested)](#install-on-azure-untested)
+    - [macOS on Apple Silicon](#macos-on-apple-silicon)
 - **Using RunCVM**
   - [Supported distributions](#supported-distributions)
   - [Kernel selection and auto-detection](#kernel-selection-and-auto-detection)
