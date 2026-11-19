@@ -836,7 +836,7 @@ To build the module in the VM instead, boot the `build` stage, which has the hea
 docker run --rm --runtime=runcvm mymodule-build sh -c 'make -C /lib/modules/$(uname -r)/build M=/src modules && insmod /src/mymodule.ko && <tests> && rmmod mymodule'
 ```
 
-`docker run` exits with each command's exit status, so that a CI step fails when the module does: the command is the VM's PID 1, whose exit status passes through, as it would not under `--init` (see [Features and limitations](#features-and-limitations)). Other distributions' images follow the same pattern, with their own headers packages: `linux-headers-cloud-amd64` (Debian), `kernel-devel-<version>` (Fedora, installed with `kernel-core` so that the two match) and `linux-virt-dev` (Alpine, with `musl-dev`).
+`docker run` exits with each command's exit status, so that a CI step fails when the module does (see [Features and limitations](#features-and-limitations)). Other distributions' images follow the same pattern, with their own headers packages: `linux-headers-cloud-amd64` (Debian), `kernel-devel-<version>` (Fedora, installed with `kernel-core` so that the two match) and `linux-virt-dev` (Alpine, with `musl-dev`).
 
 ### RunCVM in CI
 
