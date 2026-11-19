@@ -15,7 +15,7 @@
   the VM powers off, as for poweroff, and the Container/VM ends.
 - --init, with an entrypoint that exits by itself, leaving a process that
   ignores SIGTERM: the Container/VM ends without waiting for that process,
-  with the entrypoint's exit status.
+  with exit status 0.
 - In each case with a disk, a file written to the ext4 disk, and not
   synced, is intact afterwards, read by a new Container/VM, whose kernel
   needs no journal recovery to mount the disk.

@@ -14,6 +14,10 @@ The exit status without --init is read from the kernel's log console,
 which must leave /dev/console as the kernel would choose it itself: tty0
 on x86, the virt machine's UART (ttyAMA0) on arm64.
 
+A Container/VM whose boot fails in runcvm-vm-init (here, with its network
+driver blacklisted, so that its network interface never appears) exits 1,
+with RunCVM's error naming the failure in its output.
+
 The expected values describe current behaviour. A change to the contract
 must update them deliberately.
 """
@@ -42,7 +46,11 @@ CASES = [
     ("non-root-exit-3", ["--user=1000"], "exit 3", (3, 3)),
     ("non-root-exitcode-file", ["--user=1000"], "echo 5 >/.runcvm/exitcode; exit 3", (3, 3)),
     ("non-root-qemu-exit", ["--user=1000"], QEMU_EXIT + " 7; exit 3", (3, 3)),
+    ("vm-init-failure", ["--env=RUNCVM_KERNEL_APPEND=module_blacklist=virtio_net"], "echo RAN", (1, 1)),
 ]
+
+# The message runcvm-vm-init's failure gives
+VM_INIT_FAILED = "RunCVM: Error: runcvm-vm-init failed"
 
 RUNS = [(init, case) for init in (False, True) for case in CASES]
 
@@ -63,6 +71,9 @@ for (init, (name, opts, command, expected)), r in zip(RUNS, results):
     desc = "%s, %s: %s" % (name, "--init" if init else "no --init", command or "/nonexistent")
     if not t.check(desc, expected[init], r.returncode):
         t.log("output:\n%s" % r.stdout)
+    if name == "vm-init-failure":
+        t.check("%s, %s: output reports the failure" % (name, "--init" if init else "no --init"),
+                True, VM_INIT_FAILED in r.stdout)
 
 # /proc/consoles lists each console, with flag C on /dev/console's entry
 r = t.docker("run", "--rm", "--name", t.unique("consoles"), *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),

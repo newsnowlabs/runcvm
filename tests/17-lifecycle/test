@@ -9,7 +9,8 @@
 - 'docker top' lists RunCVM's processes in the container (QEMU and its
   helpers), not the workload's processes in the VM.
 - 'docker restart' boots the VM afresh.
-- Restart policies act on the exit status set via /.runcvm/exitcode.
+- Restart policies act on the Container/VM's exit status: here, its
+  entrypoint's, as the VM's PID 1.
 
 The expected values describe current behaviour. A change to it must update
 them deliberately.
@@ -109,7 +110,7 @@ def case_restart_policy():
     name = t.unique("on-failure")
     t.cleanup_container(name)
     t.docker("run", "-d", "--name", name, *t.labels(), *VM, "--restart=on-failure:2",
-             "alpine", "sh", "-c", "echo 1 >/.runcvm/exitcode")
+             "alpine", "sh", "-c", "exit 1")
 
     def state():
         return t.docker("inspect", "-f", "{{.RestartCount}} {{.State.Status}} {{.State.ExitCode}}", name).stdout.split()
