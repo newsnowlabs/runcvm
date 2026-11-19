@@ -230,7 +230,9 @@ RunCVM does not need the `br_netfilter` module; [docs/adr/0001-container-firewal
 
 RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
-RunCVM is tested on x86-64 hosts with KVM running Debian 12 (Bookworm) and Ubuntu 24.04 LTS (Noble Numbat), with Docker Engine, both Docker's own packages and Ubuntu's `docker.io`. arm64 support has also been tested with KVM on AWS Graviton instances, and on Macs with Apple M3 or later chips in Lima's `docker-rootful` VM (see [macOS on Apple Silicon](#macos-on-apple-silicon)), though less thoroughly than on x86-64. The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
+Stable RunCVM releases are continuously tested on x86-64 hosts with KVM running Ubuntu 24.04 LTS (Noble Numbat), with Docker's own packages (Docker Engine).
+
+Experimental arm64 support is periodically tested with KVM on AWS Graviton instances, and on Macs with Apple M3 or later chips in Lima's `docker-rootful` VM (see [macOS on Apple Silicon](#macos-on-apple-silicon)). The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
 
 ## Installation
 
