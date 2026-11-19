@@ -64,6 +64,28 @@ Important distinctions when evaluating replacements:
 - Preserve child signal dispositions/masks and descriptor inheritance correctly.
   Do not treat service readiness as equivalent to a successful fork.
 
+## Supporting daemons' input, output and terminal
+
+The guest's PID 1 cannot assume what its standard input and output are. The
+initramfs decides: Debian's leaves them on `/dev/console`, which never becomes a
+controlling terminal, while Alpine's, given `console=` on the kernel command
+line, reopens them on that console's own device (e.g. `/dev/ttyAMA0`) with
+`switch_root -c`, without making it PID 1's controlling terminal. A daemon
+started in a new session while holding such a terminal can be ended before it
+runs, silently. So:
+
+- Before starting anything, the guest init settles its own descriptors: it
+  chooses the user's console (the device RunCVM names in `/.runcvm/console`),
+  and reopens or closes any other terminal it inherited.
+- Each supervised process's input, output and terminal are configured, not
+  inherited: `/dev/null` by default for supporting daemons, or a log, or a named
+  terminal, with whether its session takes that terminal as its controlling
+  terminal. Only the primary workload, and services that serve the console, are
+  given a terminal.
+- A supporting daemon that exits, or never starts, is restarted or reported,
+  with its exit status or signal recorded, so that tests can tell a daemon that
+  died from one that was never started.
+
 ## Guest process structure: the workload in a child namespace
 
 The guest-side requirements converge on one RunCVM process as guest PID 1:
@@ -248,7 +270,9 @@ with an established tool may be simpler than unifying them.
    startup cost, binary/dependency footprint, and process-tree changes.
 4. Test primary completion, supporting-daemon crashes, rapid restart loops,
    stuck shutdown, console job control, exact status, output draining, and
-   native-init workloads. Inspect `docker diff`/commit results.
+   native-init workloads. Inspect `docker diff`/commit results. Run each test
+   with every bundled kernel's initramfs, with and without `console=` on the
+   kernel command line, on each architecture.
 5. Consider unification only after evidence identifies useful common machinery
    and acceptable role differences. Document any bespoke-code justification.
 
