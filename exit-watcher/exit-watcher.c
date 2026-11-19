@@ -9,8 +9,8 @@
 // Usage: runcvm-exit-watcher <pid file> <exit code file> <ready file> <done file>
 //
 // It subscribes to the connector, then forks: the parent creates the ready file and exits once the
-// child holds the subscribed socket, so that a workload started after it exits (as after busybox
-// init's 'sysinit' actions, which it is one of) cannot exit unseen. The child waits for the exit of the process whose ID the pid file holds (written by
+// child holds the subscribed socket. So a workload started after the parent exits cannot exit
+// unseen; busybox init starts the workload only after its 'sysinit' actions, of which this is one. The child waits for the exit of the process whose ID the pid file holds (written by
 // runcvm-vm-start just before it execs the workload, whose ID it keeps). It then creates the exit
 // code file, unless it exists already (as where the workload saved its own exit code), writing the
 // exit status as a container's would be (the exit code, or 128 plus the number of the signal that
