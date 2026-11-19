@@ -7,6 +7,11 @@
 . $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
 if [ -f /.runcvm/once ]; then
+  # The workload has exited. Where runcvm-exit-watcher runs (with --init), give it up to 5 seconds
+  # to save the workload's exit status before powering off.
+  if [ -f /.runcvm/exit-watcher.ready ]; then
+    for ((i = 0; i < 50; i++)); do [ -f /.runcvm/exit-watcher.done ] && break; busybox usleep 100000; done
+  fi
   poweroff
   exit 0
 else
@@ -27,6 +32,10 @@ mapfile -d '' -t env </.runcvm/env
 # the VM's console, this script's stdin, whose line discipline would echo input into the output and
 # turn each LF into CR LF. Raw mode, without echo, passes bytes through unchanged, as a pipe does.
 [ "$RUNCVM_TTY" = "1" ] || $RUNCVM_GUEST/bin/busybox stty raw -echo 2>/dev/null
+
+# Record this process's ID, which the workload keeps through the execs below, for
+# runcvm-exit-watcher (with --init)
+echo $$ >/.runcvm/workload.pid
 
 # Run the entrypoint with the workload's environment alone
 IFS=':' read -r uid gid additionalGids <<< "$RUNCVM_UIDGID"

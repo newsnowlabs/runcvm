@@ -612,7 +612,14 @@ read -r CONSOLE_DEVICE </.runcvm/console
 if [ "$RUNCVM_INIT" = "1" ]; then
   # If launched with '--init' (or --env=RUNCVM_INIT=1) then run our own init in place of Docker's/Podman's.
 
+  # runcvm-exit-watcher, a 'sysinit' action, which busybox init runs to completion before the
+  # 'respawn' actions, subscribes to the kernel's process exits before the workload starts, and
+  # saves the workload's exit status (see runcvm-vm-start), which busybox init, its parent,
+  # discards.
+  busybox rm -f /.runcvm/workload.pid /.runcvm/exit-watcher.ready /.runcvm/exit-watcher.done
+
   cat >/etc/inittab <<_EOE_
+null::sysinit:$RUNCVM_GUEST/sbin/runcvm-exit-watcher /.runcvm/workload.pid /.runcvm/exitcode /.runcvm/exit-watcher.ready /.runcvm/exit-watcher.done
 $CONSOLE_DEVICE::respawn:-$RUNCVM_GUEST/scripts/runcvm-vm-start-wrapper
 null::respawn:$RUNCVM_GUEST/scripts/runcvm-vm-qemu-ga
 null::respawn:$RUNCVM_GUEST/usr/sbin/dropbear -REF -j -k -p $SSHD_PORT -A $RUNCVM_GUEST/usr/lib/dropbear/libepka_file.so,/.runcvm/dropbear/epka.json -P /.runcvm/dropbear/dropbear.pid

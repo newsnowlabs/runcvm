@@ -318,6 +318,16 @@ ADD qemu-exit /root/qemu-exit
 RUN cd /root/qemu-exit && cc -o /root/qemu-exit/qemu-exit -std=gnu99 -static -s -Wall -Werror -O3 qemu-exit.c
 
 # --- BUILD STAGE ---
+# Build static runcvm-exit-watcher, which reads the kernel's process events (linux/cn_proc.h)
+FROM alpine:$ALPINE_VERSION as exit-watcher
+
+RUN apk update && \
+    apk add --no-cache gcc musl-dev linux-headers
+
+ADD exit-watcher /root/exit-watcher
+RUN cd /root/exit-watcher && cc -o /root/exit-watcher/runcvm-exit-watcher -std=gnu99 -static -s -Wall -Werror -O3 exit-watcher.c
+
+# --- BUILD STAGE ---
 # Build alpine kernel and initramfs with virtiofs module
 FROM alpine:$ALPINE_KERNEL_VERSION as alpine-kernel
 
@@ -524,6 +534,7 @@ FROM alpine:$ALPINE_VERSION as installer
 COPY --from=binaries /opt/runcvm /opt/runcvm
 COPY --from=runcvm-init /root/runcvm-init/runcvm-init /opt/runcvm/sbin/
 COPY --from=qemu-exit /root/qemu-exit/qemu-exit /opt/runcvm/sbin/
+COPY --from=exit-watcher /root/exit-watcher/runcvm-exit-watcher /opt/runcvm/sbin/
 
 RUN apk update && apk add --no-cache rsync
 
