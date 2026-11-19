@@ -10,28 +10,16 @@ OPTS=(--retry-path --statedir /.runcvm --pidfile /.runcvm/qemu-ga.pid)
 
 # Find the guest agent's virtio-serial port by the name runcvm-ctr-qemu gives it, in sysfs: the
 # /dev/virtio-ports/<name> links exist only where udev or mdev made them, and the agent's port is
-# not necessarily the first /dev/vport* device. The virtio-serial driver adds the ports, and
-# devtmpfs their device nodes, after the VM's PID 1 may have started this script, so wait for both
-# for up to 10 seconds: without --init, nothing starts this script again.
-find_dev() {
-  local port
-
-  for port in /sys/class/virtio-ports/*
-  do
-    [ "$(cat "$port/name" 2>/dev/null)" = "org.qemu.guest_agent.0" ] && [ -c "/dev/${port##*/}" ] &&
-      DEV="/dev/${port##*/}" && return 0
-  done
-  return 1
-}
-
+# not necessarily the first /dev/vport* device.
 DEV=
-for (( i = 0; i < 100; i++ ))
+for port in /sys/class/virtio-ports/*
 do
-  find_dev && break
-  busybox sleep 0.1
+  [ "$(cat "$port/name" 2>/dev/null)" = "org.qemu.guest_agent.0" ] && DEV="/dev/${port##*/}" && break
 done
 
-[ -n "$DEV" ] || exit 0
+if [ -z "$DEV" ] || ! [ -c "$DEV" ]; then
+  exit 0
+fi
 
 OPTS+=(-p "$DEV")
 
