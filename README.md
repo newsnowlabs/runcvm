@@ -827,16 +827,16 @@ COPY --from=build /src/mymodule.ko /opt/
 Built as `mymodule-test` (with `--target test`), it loads and tests the module in the VM:
 
 ```console
-docker run --rm --runtime=runcvm mymodule-test sh -c 'insmod /opt/mymodule.ko && <tests> && rmmod mymodule; echo $? >/.runcvm/exitcode'
+docker run --rm --runtime=runcvm mymodule-test sh -c 'insmod /opt/mymodule.ko && <tests> && rmmod mymodule'
 ```
 
 To build the module in the VM instead, boot the `build` stage, which has the headers, the compiler and the source, built as `mymodule-build` (with `--target build`):
 
 ```console
-docker run --rm --runtime=runcvm mymodule-build sh -c 'make -C /lib/modules/$(uname -r)/build M=/src modules && insmod /src/mymodule.ko && <tests> && rmmod mymodule; echo $? >/.runcvm/exitcode'
+docker run --rm --runtime=runcvm mymodule-build sh -c 'make -C /lib/modules/$(uname -r)/build M=/src modules && insmod /src/mymodule.ko && <tests> && rmmod mymodule'
 ```
 
-Each command writes its exit status to `/.runcvm/exitcode`, which `docker run` then exits with: a workload's own exit status does not otherwise pass through (see [Features and limitations](#features-and-limitations)), and a CI step needs it to fail when the module does. Other distributions' images follow the same pattern, with their own headers packages: `linux-headers-cloud-amd64` (Debian), `kernel-devel-<version>` (Fedora, installed with `kernel-core` so that the two match) and `linux-virt-dev` (Alpine, with `musl-dev`).
+`docker run` exits with each command's exit status, so that a CI step fails when the module does: the command is the VM's PID 1, whose exit status passes through, as it would not under `--init` (see [Features and limitations](#features-and-limitations)). Other distributions' images follow the same pattern, with their own headers packages: `linux-headers-cloud-amd64` (Debian), `kernel-devel-<version>` (Fedora, installed with `kernel-core` so that the two match) and `linux-virt-dev` (Alpine, with `musl-dev`).
 
 ### RunCVM in CI
 
