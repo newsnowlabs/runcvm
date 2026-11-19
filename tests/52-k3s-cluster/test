@@ -14,6 +14,12 @@ cluster, deploys manifest.yaml, and checks that:
 - a pod reaches the web Service by its name, through CoreDNS;
 - a container on the Docker network, run with runc, reaches the
   web-nodeport Service on each node's port 30080.
+
+Each node takes the runner's size (--vm-cpus, --vm-memory) in place of
+compose.yaml's, and the runner's RunCVM settings (--vm-env) other than those
+compose.yaml sets itself. Nothing outside a node changes its files (the images
+volume is filled before the nodes start, and mounted read-only), so any cache
+policy suits them.
 """
 
 import atexit
@@ -21,6 +27,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import framework as t  # noqa: E402
@@ -35,10 +42,33 @@ project = t.unique("k3s").lower().replace(".", "-")
 env = dict(os.environ, K3S_PROJECT=project, RUNCVM_TEST_NAME=t.TEST_NAME, RUNCVM_TEST_RUN_ID=t.RUN_ID,
            RUNCVM_QEMU_ACCEL=t.ACCEL or "kvm")
 
+# The variables compose.yaml's nodes set themselves, which keep their values whatever the runner gives.
+OWN_ENV = {"K3S_TOKEN", "RUNCVM_DISKS", "RUNCVM_KERNEL", "RUNCVM_QEMU_ACCEL"}
+
+
+def write_override():
+    """Writes a compose file (JSON, which compose reads as YAML) giving every node the runner's size
+    and RunCVM settings, and returns its path."""
+    node = {"environment": {}}
+    for setting in t.VM_ENV:
+        name, _, value = setting.partition("=")
+        if name not in OWN_ENV:
+            node["environment"][name] = value
+    if t.CPUS:
+        node["cpus"] = t.CPUS
+    if t.MEMORY:
+        node["mem_limit"] = t.MEMORY
+    with tempfile.NamedTemporaryFile("w", prefix="k3s-compose-", suffix=".json", delete=False) as f:
+        json.dump({"services": {name: node for name in NODES}}, f)
+    return f.name
+
+
+OVERRIDE = write_override()
+
 
 def compose(*args, check=False, timeout=None):
-    return subprocess.run(["docker", "compose", "-f", os.path.join(HERE, "compose.yaml"), *args], env=env,
-                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
+    return subprocess.run(["docker", "compose", "-f", os.path.join(HERE, "compose.yaml"), "-f", OVERRIDE, *args],
+                          env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
                           check=check, timeout=timeout)
 
 
@@ -53,6 +83,8 @@ def down():
         t.log("docker compose down: %s" % r.stdout)
 
 
+# Registered first, so that it runs after down, which still needs the file.
+atexit.register(os.remove, OVERRIDE)
 atexit.register(down)
 
 # Load the images into the images volume, as one archive that k3s imports as each node starts.
