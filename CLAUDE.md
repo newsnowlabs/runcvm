@@ -258,7 +258,8 @@ message from one still being worked on:
 
 - **Sending.** Give each message a first line that identifies it (e.g. "PR #171 spot test on
   arm64"), and ask the recipient to acknowledge receipt immediately, before acting on the rest
-  of the message.
+  of the message. This includes a message reporting results, so that its sender knows they
+  arrived; only an acknowledgement itself asks for none.
 - **Receiving.** When a message asks for an acknowledgement, send it first, before any other
   work on the message: name the message by its first line, and say whether you will act on it,
   and if not, why. Then do the work, and send the results as a separate message.
