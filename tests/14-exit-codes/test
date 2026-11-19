@@ -36,7 +36,7 @@ CASES = [
     ("non-root-exit-3", ["--user=1000"], "exit 3", 0),
     ("non-root-exitcode-file", ["--user=1000"], "echo 5 >/.runcvm/exitcode; exit 3", 0),
     ("non-root-qemu-exit", ["--user=1000"], QEMU_EXIT + " 7; exit 3", 0),
-    ("vm-init-failure", ["--env=RUNCVM_KERNEL_APPEND=module_blacklist=virtio_net"], "exit 0", 1),
+    ("vm-init-failure", ["--env=RUNCVM_KERNEL_APPEND=module_blacklist=virtio_net"], "echo RAN", 1),
 ]
 
 # The message runcvm-vm-init's failure gives

@@ -33,15 +33,19 @@ vm_init_error() {
 # its failure ends it: the kernel then panics, and the VM ends with no exit status recorded, which
 # the container would report as 0. Report any such exit as an error instead, so that the
 # Container/VM exits with status 1, naming the command that failed ($2, BASH_COMMAND, which in an
-# EXIT trap is the command that ended the script) and, where it failed within a function, the
-# function this script's top level called.
+# EXIT trap is the command that ended the script) and where in this script it failed: for a failure
+# within a function, the function this script's top level called, and the line it called it from
+# (BASH_LINENO); otherwise the failing command's line, which the ERR trap records (an ERR trap runs
+# only at the top level, as this script does not set errtrace).
 vm_init_exit() {
-  local n=${#FUNCNAME[@]} in=""
+  local n=${#FUNCNAME[@]} where="line $VM_INIT_FAILED_LINE"
 
-  # FUNCNAME lists this function, those the failed command ran within, innermost first, and main.
-  [ "$n" -gt 2 ] && in=", in ${FUNCNAME[n-2]}"
-  vm_init_error "runcvm-vm-init failed (status $1)$in: $2"
+  # FUNCNAME lists this function, those the failed command ran within, innermost first, and main;
+  # BASH_LINENO, the line each was called from.
+  [ "$n" -gt 2 ] && where="line ${BASH_LINENO[n-2]}, in ${FUNCNAME[n-2]}"
+  vm_init_error "runcvm-vm-init failed (status $1) at $where: $2"
 }
+trap 'VM_INIT_FAILED_LINE=$LINENO' ERR
 trap 'vm_init_exit $? "$BASH_COMMAND"' EXIT
 
 # Keep the console's device out of runtime power management, where it has it (e.g. the arm64 virt
