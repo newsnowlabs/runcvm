@@ -19,7 +19,7 @@ RunCVM:
 
 ## Quick start
 
-Install RunCVM, on an x86-64 Linux host with Docker and KVM (see [System requirements](#system-requirements) and [Installation](#installation), including on [Google Cloud](#install-on-google-cloud), [AWS](#install-on-aws) and [Azure](#install-on-azure-untested)):
+Install RunCVM, on an x86-64 Linux host with Docker and KVM (see [System requirements](#system-requirements) and [Installation](#installation), including on [Google Cloud](#install-on-google-cloud), [AWS](#install-on-aws) and [Azure](#install-on-azure-untested); or, with a v2.0.0 pre-release, on arm64 hosts and [Macs with M3 or later chips](#macos-on-apple-silicon)):
 
 ```sh
 curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
@@ -132,7 +132,7 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
 - **Very short-lived containers in large numbers.** Each Container/VM boots a kernel, taking a few seconds, and runs a VM of its own, sized by its memory and CPU limits.
 - **Workloads that rely on container features RunCVM does not provide**, such as adding networks to, or removing them from, a running Container/VM (`docker network connect` and `disconnect`): networks may be attached before a Container/VM starts, or while it is stopped. See [Features and limitations](#features-and-limitations).
 - **Hosts without KVM.** Without KVM, a Container/VM runs only under QEMU's software emulation, which is much slower, and only when allowed to (see [`RUNCVM_QEMU_ACCEL`](#runcvm_qemu_accel)).
-- **Podman, and arm64 hosts.** Podman support is experimental, and arm64 support is in development.
+- **Podman, arm64 hosts and macOS.** Podman support is experimental. arm64 hosts, including Macs with Apple M3 or later chips, are supported experimentally, by v2.0.0 pre-releases (see [System requirements](#system-requirements)); Macs with M1 or M2 chips are not supported.
 
 ## Contents
 
@@ -148,6 +148,11 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
 - **Installing**
   - [System requirements](#system-requirements)
   - [Installation](#installation)
+    - [Registering the runtime by hand](#registering-the-runtime-by-hand)
+    - [Install on Google Cloud](#install-on-google-cloud)
+    - [Install on AWS](#install-on-aws)
+    - [Install on Azure (Untested)](#install-on-azure-untested)
+    - [macOS on Apple Silicon](#macos-on-apple-silicon)
 - **Using RunCVM**
   - [Supported distributions](#supported-distributions)
   - [Kernel selection and auto-detection](#kernel-selection-and-auto-detection)
@@ -217,7 +222,7 @@ Under way:
 
 RunCVM should run on any amd64 (x86_64) hardware (or VM) running Linux Kernel >= 5.10, and that supports [KVM](https://www.linux-kvm.org/page/Main_Page) and [Docker](https://docker.com). So if your host can already run [KVM](https://www.linux-kvm.org/page/Main_Page) VMs and [Docker](https://docker.com) then it should run RunCVM. It is highly portable among Linux distributions and development platforms providing KVM, and can even be installed on [GitHub Codespaces](https://github.com/features/codespaces).
 
-Support for arm64 (aarch64) hosts is experimental. RunCVM's published images are for amd64 only, so on an arm64 host, build RunCVM there and install that build (see [Building](#building)). CI builds RunCVM for arm64 and runs a few of its tests on arm64 under software emulation, but none under KVM. RunCVM detects the host's architecture when it creates a Container/VM; `--env=RUNCVM_QEMU_ARCH=<x86_64|arm64>` overrides it.
+Support for arm64 (aarch64) hosts is experimental. Stable releases publish images for amd64 only. v2.0.0 pre-releases publish images for both amd64 and arm64. The image tag `next` is always the most recent of them: to install it on either, pass the installer `REPO=newsnowlabs/runcvm:next` (see [Installation](#installation)). To move to a newer pre-release, run the installer again with `--pull`, which pulls `next` afresh rather than reinstalling the copy already on the host: `curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=newsnowlabs/runcvm:next sh -s -- --pull`. Each pre-release also has a tag of its own, `v2.0.0-pre<N>`, listed, with what it contains, on the [Releases](https://github.com/newsnowlabs/runcvm/releases) page. Alternatively, build RunCVM on the arm64 host and install that build (see [Building](#building)). CI builds RunCVM for arm64 on GitHub's arm64 runners, which lack KVM, and runs a smoke test of a few of its tests there under software emulation; where a runner has KVM, it runs the same tests as on x86-64. RunCVM detects the host's architecture when it creates a Container/VM; `--env=RUNCVM_QEMU_ARCH=<x86_64|arm64>` overrides it.
 
 RunCVM has no other host dependencies, apart from Docker (or experimentally, Podman) and these features of the host's kernel, which the kernels of common distributions provide, built in or as modules that load on demand:
 - KVM: `kvm`, with `kvm_intel` or `kvm_amd` on x86_64 (on arm64, KVM is part of `kvm` itself);
@@ -230,30 +235,9 @@ RunCVM does not need the `br_netfilter` module; [docs/adr/0001-container-firewal
 
 RunCVM comes packaged with all binaries and libraries it needs to run (including its own QEMU binary).
 
-RunCVM is tested on x86-64 hosts with KVM running Debian 12 (Bookworm) and Ubuntu 24.04 LTS (Noble Numbat), with Docker Engine, both Docker's own packages and Ubuntu's `docker.io`. The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
+Stable RunCVM releases are continuously tested on x86-64 hosts with KVM running Ubuntu 24.04 LTS (Noble Numbat), with Docker's own packages (Docker Engine).
 
-### macOS on Apple Silicon
-
-Running RunCVM on macOS is experimental, as is arm64 support. On macOS, Docker runs inside an arm64 Linux VM, such as one that [Lima](https://lima-vm.io/) provides (e.g. with its `docker` template). RunCVM can run inside that VM, as on any arm64 host: build RunCVM within the VM, and install that build. For KVM acceleration, the VM needs nested virtualisation, so that `/dev/kvm` exists inside it; Apple's Virtualization framework offers it on M3 and later chips, with macOS 15 or later. Without `/dev/kvm`, launch Container/VMs with `--env=RUNCVM_QEMU_ACCEL=auto` or `tcg` for software emulation, which is much slower.
-
-- With Lima, enable nested virtualisation for the VM, e.g. `limactl start --set='.nestedVirtualization=true' template://docker` for a new VM, or `limactl stop <vm> && limactl edit <vm> --set '.nestedVirtualization=true' && limactl start <vm>` for an existing one.
-- [Podman Desktop](https://podman-desktop.io/)'s VM is untested: it provides Podman but not Docker, which RunCVM's build and installer need.
-
-Check that `/dev/kvm` exists inside the VM (e.g. `limactl shell <vm> ls -l /dev/kvm`) before installing RunCVM there. The VM may also lack `/dev/vhost-net` (needed by `RUNCVM_QEMU_NET_VHOST=1`) and hugepages (needed by `RUNCVM_HUGETLB=1`); both options are off by default.
-
-Under nested virtualisation, a Container/VM starts slowly with RunCVM's defaults: on an M3 Mac, `docker run --rm --runtime=runcvm alpine true` takes about 21 seconds. While arm64 support is experimental, two settings make most of the difference there:
-
-- **Hugepages.** By default, the Container/VM's memory is a file in the container's `/dev/shm`, whose pages are allocated as the Container/VM first uses them, which is slow under nested virtualisation. With `--env=RUNCVM_HUGETLB=auto` (see [`RUNCVM_HUGETLB`](#runcvm_hugetlb)), the Container/VM's memory comes instead from the Linux VM's pool of 2 MB hugepages, which cuts the start time to about 5 seconds, wherever the pool has enough pages available for it, and from `/dev/shm` otherwise. (`RUNCVM_HUGETLB=1` takes it from the pool alone, so a Container/VM whose memory the pool cannot supply fails to start.) A Container/VM reserves all its memory's pages from the pool when it starts, 256 pages for the default 512 MB, so that they are unavailable to others, though it allocates each only as it first uses it; it releases them all when it ends. The pool itself is set aside for hugepages alone, used or not, so its memory is lost to everything else in the Linux VM. To reserve a pool:
-  1. Choose its size: no more than about a third of the Linux VM's memory, e.g. 2048 pages (4 GB) in a Linux VM of 12 GB, or 640 pages (1.25 GB) in one of 4 GB.
-  2. Reserve it, keeping it across restarts of the Linux VM: `limactl shell <vm> sudo sh -c 'echo "vm.nr_hugepages = 2048" >/etc/sysctl.d/99-hugepages.conf && sysctl -p /etc/sysctl.d/99-hugepages.conf'`.
-  3. Check how many pages it holds: `limactl shell <vm> grep HugePages_Total /proc/meminfo`. If memory is fragmented, the pool can come out smaller than asked for; then free and compact memory, with `limactl shell <vm> sudo sh -c 'echo 3 >/proc/sys/vm/drop_caches; echo 1 >/proc/sys/vm/compact_memory'`, and reserve it again (step 2).
-
-  To release the pool, remove `/etc/sysctl.d/99-hugepages.conf` and run `sudo sysctl -w vm.nr_hugepages=0` in the Linux VM. When installed in a Linux VM run by Apple's Virtualization framework with no pool reserved, RunCVM's installer suggests a pool size.
-- **Caching.** RunCVM's default cache policy, `RUNCVM_VIRTIOFSD_CACHE=auto`, has the Container/VM read each program afresh from the container's filesystem every time it runs it, and reads over virtiofs are slow there. `--env=RUNCVM_VIRTIOFSD_CACHE=always` keeps files' contents cached in the Container/VM: alone, it cuts the start time to about 14 seconds; with hugepages, to about 4 seconds. Do not use `always` for a Container/VM with volumes or bind mounts whose files change outside the VM, e.g. files edited on the host, as the Container/VM may not see those changes for up to a day; keep the default for those, or use `none` for volumes shared with other Container/VMs (see [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)).
-
-Fewer vCPUs also start faster there: with the default settings, `--cpus=1` saves about 2.5 seconds.
-
-To run RunCVM's integration tests on such a host, see [Running the integration tests](#running-the-integration-tests).
+Experimental arm64 support is periodically tested with KVM on AWS Graviton instances, and on Macs with Apple M3 or later chips in Lima's `docker-rootful` VM (see [macOS on Apple Silicon](#macos-on-apple-silicon)). The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
 
 ## Installation
 
@@ -419,6 +403,46 @@ az vm create --resource-group runcvm-test --name runcvm-test --image Canonical:u
 Log in as `azureuser`, at the public IP address that `az vm create`'s output shows (`publicIpAddress`). When you have finished with the VM, `az group delete --name runcvm-test` deletes it, with everything else in the resource group.
 
 On either platform, once the first-boot script has finished (`cloud-init status --wait` waits for it), `ls -l /dev/kvm` shows the KVM device, and `sudo docker run --runtime=runcvm --rm hello-world` runs a Container/VM.
+
+### macOS on Apple Silicon
+
+Running RunCVM on macOS is experimental, as is arm64 support. On macOS, Docker runs in an arm64 Linux VM, such as one made from [Lima](https://lima-vm.io/)'s `docker-rootful` template, and RunCVM runs inside it as on any arm64 host: install a v2.0.0 pre-release, whose images include arm64 (see [System requirements](#system-requirements)), or build and install RunCVM within the VM. KVM acceleration needs nested virtualisation, so that the VM has `/dev/kvm`; Apple's Virtualization framework offers it on M3 and later chips, with macOS 15 or later.
+
+**Macs with M1 or M2 chips are not supported.** Their Linux VMs have no `/dev/kvm`, so Container/VMs there run only under software emulation (`--env=RUNCVM_QEMU_ACCEL=auto` or `tcg`), which is much slower.
+
+Quick start, on a Mac with an M3 or later chip and macOS 15 or later, installing the most recent v2.0.0 pre-release (`next`; see [System requirements](#system-requirements)):
+
+```console
+# Make and start a Linux VM named runcvm, with Docker, 4 CPUs, 8 GB and nested virtualisation, without Lima's interactive prompts
+limactl start --name=runcvm --tty=false --cpus=4 --memory=8 --set='.nestedVirtualization=true' template://docker-rootful
+# Check that the Linux VM has KVM
+limactl shell runcvm ls -l /dev/kvm </dev/null
+# Reserve a pool of 1024 hugepages (2 GB) in the Linux VM, kept across its restarts
+limactl shell runcvm sudo sh -c 'echo "vm.nr_hugepages = 1024" >/etc/sysctl.d/99-hugepages.conf && sysctl -p /etc/sysctl.d/99-hugepages.conf' </dev/null
+# Install RunCVM from the most recent v2.0.0 pre-release in the Linux VM
+limactl shell runcvm sh -c 'curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=newsnowlabs/runcvm:next sh' </dev/null
+# Launch an Alpine Container/VM, with the settings, described below, that make it start quickly there
+limactl shell runcvm docker run --rm -it --runtime=runcvm --cpus=1 --memory=512M --env=RUNCVM_HUGETLB=auto --env=RUNCVM_VIRTIOFSD_CACHE=always alpine
+```
+
+Like `ssh`, `limactl shell` passes the terminal's input to the command it runs, so the steps that need none take it from `/dev/null`, leaving the rest of the block, if pasted whole, to the Mac's shell.
+
+Lima also forwards the VM's Docker socket to a path of the VM's own on the Mac, leaving the Mac's `/var/run/docker.sock` and default Docker context unchanged, so the Mac's `docker` CLI can reach the VM's Docker through a context named per command:
+
+```console
+docker context create lima-runcvm --docker "host=$(limactl list runcvm --format 'unix://{{.Dir}}/sock/docker.sock')"
+docker --context=lima-runcvm run --rm -it --runtime=runcvm --cpus=1 --memory=512M --env=RUNCVM_HUGETLB=auto --env=RUNCVM_VIRTIOFSD_CACHE=always alpine
+```
+
+The Linux VM may lack `/dev/vhost-net`, which `RUNCVM_QEMU_NET_VHOST=1` (off by default) needs.
+
+With RunCVM's defaults, a Container/VM starts slowly under nested virtualisation: on an M3 Mac, `docker run --rm --runtime=runcvm alpine true` takes about 21 seconds. Three settings, all used in the quick start above, speed it up:
+
+- **Hugepages.** By default (`RUNCVM_HUGETLB=0`), the Container/VM's memory is a file in the container's `/dev/shm`, allocated page by page as it is first used, which is slow under nested virtualisation. `--env=RUNCVM_HUGETLB=auto` (see [`RUNCVM_HUGETLB`](#runcvm_hugetlb)) takes it instead from the Linux VM's pool of 2 MB hugepages, where the pool has enough pages available, and from `/dev/shm` otherwise, cutting the start time to about 5 seconds; `RUNCVM_HUGETLB=1` takes it from the pool alone, so the Container/VM fails to start if the pool falls short. A Container/VM reserves its memory's pages from the pool when it starts (256 pages for the default 512 MB) and releases them when it ends. The pool's memory, used or not, is unavailable to anything else in the Linux VM, so leave enough outside it for Docker, QEMU and the VM's other processes: up to about half of the Linux VM's memory suits most uses, e.g. the quick start's 1024 pages (2 GB) of 8 GB. RunCVM's installer, run in such a VM with no pool reserved, suggests about a third. If memory is fragmented, the pool can come out smaller than asked for, as `limactl shell runcvm grep HugePages_Total /proc/meminfo` shows; then free and compact memory with `limactl shell runcvm sudo sh -c 'echo 3 >/proc/sys/vm/drop_caches; echo 1 >/proc/sys/vm/compact_memory'`, and reserve it again. To release the pool, remove `/etc/sysctl.d/99-hugepages.conf` and run `sudo sysctl -w vm.nr_hugepages=0` in the Linux VM.
+- **Caching.** Under the default cache policy, `RUNCVM_VIRTIOFSD_CACHE=auto`, the Container/VM rereads a file's contents from the container's filesystem each time it opens the file, including every program and library it runs, and reads over virtiofs are slow there. `--env=RUNCVM_VIRTIOFSD_CACHE=always` keeps files' contents cached in the Container/VM, cutting the start time to about 14 seconds alone, or about 4 seconds with hugepages. Don't use `always` where a volume's or bind mount's files change outside the VM, e.g. files edited on the host, as the Container/VM may not see the changes for up to a day: keep the default for those, or use `none` for volumes shared with other Container/VMs (see [`RUNCVM_VIRTIOFSD_CACHE`](#runcvm_virtiofsd_cache)).
+- **vCPUs.** A `docker run` without `--cpus` launches a Container/VM with a vCPU count equal to that of the Lima Linux VM. Since a nested VM with more vCPUs is slower to start, use `docker run --cpus=<cpus>` to limit it to just the vCPUs you need.
+
+To run RunCVM's integration tests on such a host, see [Running the integration tests](#running-the-integration-tests).
 
 ## Supported distributions
 
@@ -1377,7 +1401,7 @@ cd runcvm
 ./build/build.sh
 ```
 
-The build script creates a Docker image named `newsnowlabs/runcvm:latest`. To tag it otherwise, give `--tag <tag>`, once or more, e.g. `--tag dev` for a development build, or `--tag v1.2.3 --tag latest` for a release. Arguments after `--` are passed to `docker build`.
+The build script creates a Docker image named `newsnowlabs/runcvm:latest`. To tag it otherwise, give `--tag <tag>`, once or more, e.g. `--tag dev` for a development build, `--tag v1.2.3 --tag latest` for a release, or `--tag v2.0.0-pre<N> --tag next` for a v2.0.0 pre-release. Arguments after `--` are passed to `docker build`.
 
 The build records its version and the commit it was built from: in the image's `org.opencontainers.image.version` and `org.opencontainers.image.revision` labels (the commit's full ID), and in `/opt/runcvm/VERSION`, which the installer reports and installs, as `<version> (<short commit ID>)`, e.g. `v1.8.0-2-ge77f189 (e77f189)` for a build two commits after `v1.8.0`. The version is the nearest tag, as `git describe --tags --dirty` gives it, with `-dirty` added for a build with uncommitted changes, or `untagged` where no tag is reachable, as in a shallow clone. To record another version, e.g. for a build from a source tree without git's history, set `RUNCVM_VERSION`: `RUNCVM_VERSION=my-build ./build/build.sh`. A build outside a git checkout records the commit as `unknown`, and `/opt/runcvm/VERSION` then gives the version alone; without `RUNCVM_VERSION`, it records version `unknown` too, as does `docker build` run alone.
 
