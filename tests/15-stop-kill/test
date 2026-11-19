@@ -6,8 +6,9 @@ default chooses: with --init, busybox 'poweroff'; without, where the
 entrypoint is not an init, ACPI, 'poweroff' and SIGTERM to the VM's
 PID 1 at once (see tests/49-vm-shutdown for the other methods):
 
-- With --init, busybox init powers the VM off cleanly: exit status 0,
-  well within the stop timeout.
+- With --init, busybox init powers the VM off cleanly, well within the
+  stop timeout, sending the entrypoint SIGTERM: an entrypoint that does
+  not handle it (e.g. 'sleep') ends with exit status 143, as with runc.
 - Without --init, the entrypoint is the VM's PID 1. An entrypoint that
   does not handle SIGTERM (e.g. 'sleep') is killed when the stop timeout
   expires: exit status 137.
@@ -39,7 +40,7 @@ TRAP = ["sh", "-c", "trap 'echo 9 >/.runcvm/exitcode; exit 0' TERM; while true; 
 # (name, --init?, entrypoint, action, expected exit status, must finish before the stop timeout?)
 CASES = [
     ("stop-sleep", False, SLEEP, "stop", 137, False),
-    ("stop-sleep", True, SLEEP, "stop", 0, True),
+    ("stop-sleep", True, SLEEP, "stop", 143, True),
     ("stop-trap", False, TRAP, "stop", 9, True),
     ("stop-trap", True, TRAP, "stop", 9, True),
     ("kill-sleep", False, SLEEP, "kill", 137, True),

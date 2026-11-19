@@ -10,18 +10,25 @@
 //
 // It subscribes to the connector, then forks: the parent creates the ready file and exits once the
 // child holds the subscribed socket. So a workload started after the parent exits cannot exit
-// unseen; busybox init starts the workload only after its 'sysinit' actions, of which this is one. The child waits for the exit of the process whose ID the pid file holds (written by
+// unseen; busybox init starts the workload only after its 'sysinit' actions, of which this is one.
+// The child waits for the exit of the process whose ID the pid file holds (written by
 // runcvm-vm-start just before it execs the workload, whose ID it keeps). It then creates the exit
 // code file, unless it exists already (as where the workload saved its own exit code), writing the
 // exit status as a container's would be (the exit code, or 128 plus the number of the signal that
 // ended it); creates the done file, which runcvm-vm-start waits for, where the ready file exists,
 // before powering the VM off; and exits.
+//
+// When the VM stops, runcvm-vm-shutdown sends SIGTERM to every process at once, this one included,
+// then waits for them all to exit. So that it still records the workload's exit, which the same
+// SIGTERM usually causes, SIGTERM leaves it running for up to TERM_GRACE seconds more, after which
+// SIGALRM ends it, so that a VM stopped before its workload starts is not held up.
 
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/cn_proc.h>
 #include <linux/connector.h>
 #include <linux/netlink.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,8 +38,16 @@
 
 #define PROGRAM "runcvm-exit-watcher"
 
+// Seconds this process outlives SIGTERM, to record the workload's exit
+#define TERM_GRACE 5
+
 // The size of a netlink message carrying a connector message with a payload of n bytes
 #define NL_CN_SIZE(n) (NLMSG_LENGTH(sizeof(struct cn_msg) + (n)))
+
+static void on_term(int signum) {
+    (void)signum;
+    alarm(TERM_GRACE);
+}
 
 static void die(const char *what) {
     fprintf(stderr, PROGRAM ": %s: %s\n", what, strerror(errno));
@@ -121,6 +136,14 @@ int main(int argc, char **argv) {
     }
     close(ready[0]);
     setsid();
+    {
+        // Without SA_RESTART, so that recv returns (EINTR) and the loop reads on
+        struct sigaction sa;
+
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = on_term;
+        sigaction(SIGTERM, &sa, NULL);
+    }
     if (write(ready[1], &c, 1) != 1)
         die("signalling readiness");
     close(ready[1]);
