@@ -55,9 +55,9 @@ If this is your first time installing RunCVM on this server/VM, then:
 
 1. Run the following to update /etc/docker/daemon.json and restart docker:
 
-  sudo /opt/runcvm/scripts/runcvm-install-runtime.sh --no-dockerd
+  sudo /opt/runcvm/scripts/runcvm-install-runtime.sh --register-only
 
-   (--no-dockerd registers the package already in /opt/runcvm; without it, the installer
+   (--register-only registers the package already in /opt/runcvm; without it, the installer
    installs the package from the image REPO=<image>, by default newsnowlabs/runcvm, pulling
    it first with --pull.)
 
