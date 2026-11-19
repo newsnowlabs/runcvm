@@ -2,9 +2,10 @@
 """Exit status of 'docker run' for a RunCVM Container/VM.
 
 Records RunCVM's exit-code contract (README, "Features and limitations"):
-without --init, the entrypoint's own exit status is passed through, as
-the exit status of the VM's PID 1; with --init, it is not. A workload
-sets the Container/VM's exit status in either case by writing it to
+the entrypoint's own exit status is passed through, as for a container,
+with and without --init: without --init, as the exit status of the VM's
+PID 1; with --init, as runcvm-exit-watcher records it. A workload may
+set the Container/VM's exit status itself by writing it to
 /.runcvm/exitcode (reduced modulo 256) or by calling qemu-exit (0-127),
 and both need root, since /.runcvm is root-only. Each case runs with and
 without --init.
@@ -29,18 +30,18 @@ QEMU_EXIT = "/.runcvm/guest/sbin/qemu-exit"
 # (name, docker run options, command, expected exit status without --init, and with it)
 CASES = [
     ("exit-0", [], "exit 0", (0, 0)),
-    ("exit-3", [], "exit 3", (3, 0)),
-    ("exit-200", [], "exit 200", (200, 0)),
-    ("missing-entrypoint", [], None, (127, 0)),
+    ("exit-3", [], "exit 3", (3, 3)),
+    ("exit-200", [], "exit 200", (200, 200)),
+    ("missing-entrypoint", [], None, (127, 127)),
     ("exitcode-file-5", [], "echo 5 >/.runcvm/exitcode; exit 3", (5, 5)),
     ("exitcode-file-300", [], "echo 300 >/.runcvm/exitcode", (44, 44)),
     ("exitcode-file-minus-1", [], "echo -1 >/.runcvm/exitcode", (255, 255)),
     ("qemu-exit-7", [], QEMU_EXIT + " 7", (7, 7)),
     ("qemu-exit-127", [], QEMU_EXIT + " 127", (127, 127)),
     ("qemu-exit-0", [], QEMU_EXIT + " 0; exit 3", (0, 0)),
-    ("non-root-exit-3", ["--user=1000"], "exit 3", (3, 0)),
-    ("non-root-exitcode-file", ["--user=1000"], "echo 5 >/.runcvm/exitcode; exit 3", (3, 0)),
-    ("non-root-qemu-exit", ["--user=1000"], QEMU_EXIT + " 7; exit 3", (3, 0)),
+    ("non-root-exit-3", ["--user=1000"], "exit 3", (3, 3)),
+    ("non-root-exitcode-file", ["--user=1000"], "echo 5 >/.runcvm/exitcode; exit 3", (3, 3)),
+    ("non-root-qemu-exit", ["--user=1000"], QEMU_EXIT + " 7; exit 3", (3, 3)),
 ]
 
 RUNS = [(init, case) for init in (False, True) for case in CASES]
