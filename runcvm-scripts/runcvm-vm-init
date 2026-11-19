@@ -34,15 +34,19 @@ vm_init_error() {
 # the container would report as 0. Report any such exit as an error instead, so that the
 # Container/VM exits with status 1, naming the command that failed ($2, BASH_COMMAND, which in an
 # EXIT trap is the command that ended the script) and where in this script it failed: for a failure
-# within a function, the function this script's top level called, and the line it called it from
-# (BASH_LINENO); otherwise the failing command's line, which the ERR trap records (an ERR trap runs
-# only at the top level, as this script does not set errtrace).
+# within a function, the line this script's top level called it from (BASH_LINENO), and the
+# function, where this script defines it rather than a script it sources (such as the 'ip' wrapper
+# that runcvm-ctr-defaults defines); otherwise the failing command's line, which the ERR trap
+# records (an ERR trap runs only at the top level, as this script does not set errtrace).
 vm_init_exit() {
   local n=${#FUNCNAME[@]} where="line $VM_INIT_FAILED_LINE"
 
   # FUNCNAME lists this function, those the failed command ran within, innermost first, and main;
-  # BASH_LINENO, the line each was called from.
-  [ "$n" -gt 2 ] && where="line ${BASH_LINENO[n-2]}, in ${FUNCNAME[n-2]}"
+  # BASH_LINENO, the line each was called from; BASH_SOURCE, the file defining each.
+  if [ "$n" -gt 2 ]; then
+    where="line ${BASH_LINENO[n-2]}"
+    [ "${BASH_SOURCE[n-2]}" = "${BASH_SOURCE[n-1]}" ] && where+=", in ${FUNCNAME[n-2]}"
+  fi
   vm_init_error "runcvm-vm-init failed (status $1) at $where: $2"
 }
 trap 'VM_INIT_FAILED_LINE=$LINENO' ERR
