@@ -108,7 +108,7 @@ NODES=3 MTU=9000 ./test
 - [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm): RunCVM, gVisor and Sysbox, each run by Docker inside a Container/VM
 - [Graphical workloads with VNC](#graphical-workloads-with-vnc), including an Ubuntu desktop
 - [OpenWrt](#openwrt), with its web UI
-- [Booting your own kernel](#booting-your-own-kernel), for kernel development and bug-hunting
+- [Booting your own kernel](#booting-your-own-kernel), for kernel development and bug-hunting, and for building and testing kernel modules
 - [RunCVM in CI](#runcvm-in-ci), on GitHub Actions' hosted runners
 
 ## Use cases
@@ -242,13 +242,19 @@ Run:
 curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
 ```
 
-This installs the latest release of RunCVM, the image `newsnowlabs/runcvm:latest`. To install another release, name its image in `REPO`, e.g. for v1.7.0:
+This installs the latest release of RunCVM, the image `newsnowlabs/runcvm:latest`, which is always the most recent stable release, never a prerelease. To install a particular release, name its image in `REPO`:
 
 ```sh
-curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=newsnowlabs/runcvm:v1.7.0 sh
+curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=newsnowlabs/runcvm:v<version> sh
 ```
 
-The [releases](https://github.com/newsnowlabs/runcvm/releases) are tagged `v<version>`, on Docker Hub (`newsnowlabs/runcvm:<tag>`) and on GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`).
+For CI workflows, cloud-init scripts and other automated or long-lived installations, name a release in this way rather than relying on `latest`, so that RunCVM changes version only when you choose.
+
+The [releases](https://github.com/newsnowlabs/runcvm/releases) are tagged `v<version>`, on Docker Hub (`newsnowlabs/runcvm:<tag>`) and on GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`). From v1.7.0, every tag, `latest` included, is on both. Where pulls from Docker Hub are rate-limited or blocked, as in some cloud development environments, CI systems and corporate networks, install from GitHub's container registry instead:
+
+```sh
+curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=ghcr.io/newsnowlabs/runcvm:latest sh
+```
 
 To build RunCVM from source and install that instead, see [Building](#building).
 
@@ -492,7 +498,7 @@ When creating a container, RunCVM will examine the image being launched to try t
 
 RunCVM reads `/etc/os-release`, or else `/usr/lib/os-release`, resolving any symbolic links within the image's own filesystem, never the host's.
 
-An in-image kernel's initramfs must include the `virtiofs` module (or the kernel must have it built in), as the VM's root filesystem is served over virtiofs: without it, the VM cannot mount its root filesystem, and halts. See [Booting your own kernel](#booting-your-own-kernel).
+An in-image kernel's initramfs must include the `virtiofs` and `virtio_net` modules, and `virtio_blk` where the Container/VM has disks (or the kernel must have them built in): without `virtiofs`, the VM cannot mount its root filesystem, and halts; without `virtio_net` or `virtio_blk`, its network interfaces or disks are missing when `runcvm-vm-init` configures them, and it fails to boot. See [Booting your own kernel](#booting-your-own-kernel).
 
 ## Features and limitations
 
@@ -753,7 +759,16 @@ docker run -it --rm --runtime=runcvm --name=openwrt --network=runcvm-openwrt --i
 
 RunCVM boots a kernel found in the image, at its distribution's usual location, in preference to its own (see [Kernel selection and auto-detection](#kernel-selection-and-auto-detection)). That makes it a quick way to run a patched kernel in a realistic machine environment: install the kernel in an image, with whatever userland, services and tools reproduce the problem, and launch it with `docker run`.
 
-For example, this image installs Ubuntu 24.04's own kernel package, standing in for a kernel of your own. The kernel's initramfs must include the `virtiofs` module, to mount the VM's root filesystem:
+The kernel's initramfs must include the drivers the VM needs before anything else loads drivers, unless the kernel has them built in: `virtiofs`, to mount the VM's root filesystem; `virtio_net`, for its network interfaces; and `virtio_blk`, for any disks (see [`RUNCVM_DISKS`](#runcvm_disks)). How to add them depends on the distribution's initramfs generator:
+
+| Distribution | Kernel package | Initramfs drivers |
+|---|---|---|
+| Debian | `linux-image-cloud-amd64` (or `linux-image-amd64`) | `echo virtiofs >>/etc/initramfs-tools/modules`, before installing the kernel; `initramfs-tools` includes the virtio drivers itself |
+| Ubuntu | `linux-image-virtual` | as Debian |
+| Fedora, AlmaLinux | `kernel-core` | `echo 'add_drivers+=" virtiofs virtio_net virtio_blk "' >/etc/dracut.conf.d/runcvm.conf`; then build the initramfs, and link the kernel and initramfs to `/boot/vmlinuz` and `/boot/initramfs` (see below) |
+| Alpine | `linux-virt` | `echo 'kernel/fs/fuse/virtiofs*' >>/etc/mkinitfs/features.d/virtio.modules`, before installing the kernel |
+
+For example, this image installs Ubuntu 24.04's own kernel package, standing in for a kernel of your own:
 
 ```console
 cat <<EOF | docker build --tag=ubuntu-own-kernel -
@@ -767,7 +782,53 @@ docker run --rm --runtime=runcvm ubuntu-own-kernel uname -r
 
 This prints the version of the image's kernel (e.g. `6.8.0-149-generic`), not that of RunCVM's Ubuntu kernel, and the VM loads modules from the image's own `/lib/modules`.
 
+Fedora's kernel package leaves the kernel in `/lib/modules/<version>`, and installs no initramfs in a container build, so the image builds one with `dracut` and links both where RunCVM looks for them:
+
+```dockerfile
+FROM fedora:44
+RUN mkdir -p /etc/dracut.conf.d && \
+    echo 'add_drivers+=" virtiofs virtio_net virtio_blk "' >/etc/dracut.conf.d/runcvm.conf && \
+    dnf -y install --setopt=install_weak_deps=False kernel-core dracut kmod && \
+    K=$(ls /lib/modules) && cp /lib/modules/$K/vmlinuz /boot/vmlinuz-$K && \
+    dracut --force --no-hostonly --kver $K /boot/initramfs-$K.img && \
+    ln -sf vmlinuz-$K /boot/vmlinuz && ln -sf initramfs-$K.img /boot/initramfs
+```
+
 To boot your own build, install its package instead (e.g. one made with `make bindeb-pkg`), checking that the kernel and its initramfs end up at the locations that [Kernel selection and auto-detection](#kernel-selection-and-auto-detection) gives for the image's distribution (for Ubuntu, `/boot/vmlinuz` and `/boot/initrd.img`). Each iteration on a patch is then a rebuild of the image and a fresh `docker run`; a change confined to modules can instead be rebuilt and reloaded in the running VM, with `rmmod` and `insmod`. With `--env=RUNCVM_KERNEL_DEBUG=1`, the Container/VM's output includes the kernel's console messages, such as its boot log and any oops.
+
+#### Building and testing kernel modules
+
+The same images make a test bed for a kernel module, such as an out-of-tree driver or a DKMS package, in development or in CI (see [RunCVM in CI](#runcvm-in-ci)), against each distribution's own kernel. The module may be built outside the VM, against the image kernel's headers, and only loaded and tested in the VM; or built in the VM, against the running kernel, and tested there.
+
+To build it outside the VM, build it in a stage of the image's own build, which has the kernel's headers, and copy only the module into the image that RunCVM boots:
+
+```dockerfile
+FROM ubuntu:noble AS kernel
+RUN mkdir -p /etc/initramfs-tools && echo virtiofs >>/etc/initramfs-tools/modules && \
+    apt-get update && apt-get -y install --no-install-recommends linux-image-virtual initramfs-tools kmod
+
+FROM kernel AS build
+RUN apt-get -y install --no-install-recommends linux-headers-virtual gcc make libc6-dev
+COPY src /src
+RUN make -C /lib/modules/$(ls /lib/modules)/build M=/src modules
+
+FROM kernel AS test
+COPY --from=build /src/mymodule.ko /opt/
+```
+
+Built as `mymodule-test` (with `--target test`), it loads and tests the module in the VM:
+
+```console
+docker run --rm --runtime=runcvm mymodule-test sh -c 'insmod /opt/mymodule.ko && <tests> && rmmod mymodule; echo $? >/.runcvm/exitcode'
+```
+
+To build the module in the VM instead, boot the `build` stage, which has the headers, the compiler and the source, built as `mymodule-build` (with `--target build`):
+
+```console
+docker run --rm --runtime=runcvm mymodule-build sh -c 'make -C /lib/modules/$(uname -r)/build M=/src modules && insmod /src/mymodule.ko && <tests> && rmmod mymodule; echo $? >/.runcvm/exitcode'
+```
+
+Each command writes its exit status to `/.runcvm/exitcode`, which `docker run` then exits with: a workload's own exit status does not otherwise pass through (see [Features and limitations](#features-and-limitations)), and a CI step needs it to fail when the module does. Other distributions' images follow the same pattern, with their own headers packages: `linux-headers-cloud-amd64` (Debian), `kernel-devel-<version>` (Fedora, installed with `kernel-core` so that the two match) and `linux-virt-dev` (Alpine, with `musl-dev`).
 
 ### RunCVM in CI
 
@@ -780,9 +841,11 @@ GitHub Actions' hosted Linux runners (e.g. `ubuntu-24.04`) provide KVM, so a wor
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-          curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo sh
+          curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo REPO=ghcr.io/newsnowlabs/runcvm:latest sh
       - run: docker run --rm --runtime=runcvm alpine uname -a
 ```
+
+The workflow installs RunCVM from GitHub's container registry, which GitHub's runners reach without Docker Hub's pull limits.
 
 A hosted runner (4 vCPUs and 16 GB for public repositories) has room for a few Container/VMs at once, depending on their memory limits. On a self-hosted runner with RunCVM installed, a job's `container:` (and its `services:`) can run under RunCVM, with `options: --runtime=runcvm`, giving each a VM of its own: this suits projects that run untrusted pull requests' code on their own hardware.
 
