@@ -19,11 +19,11 @@
 pid1_exit_status() {
   local line status=""
 
-  [ -f /.runcvm/kernel.log ] || return 1
+  [ -f /.runcvm/state/kernel.log ] || return 1
   while IFS= read -r line
   do
     [[ "$line" =~ "Attempted to kill init! exitcode=0x"([0-9a-fA-F]+) ]] && status=$(( 16#${BASH_REMATCH[1]} ))
-  done </.runcvm/kernel.log
+  done </.runcvm/state/kernel.log
   [ -n "$status" ] || return 1
 
   if (( (status & 127) == 0 )); then

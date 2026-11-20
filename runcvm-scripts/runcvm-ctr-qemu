@@ -1523,7 +1523,7 @@ echo "$CONSOLE_DEV" >/.runcvm/console
 # "Attempted to kill init! exitcode=0x<wait status>", from which runcvm-ctr-exit takes the
 # Container/VM's exit status. QEMU writes it to a file, so that it waits on no reader. The port follows the
 # user's console (hvc0, in headless mode), so it is hvc1 in headless mode and hvc0 otherwise.
-KERNEL_LOG=/.runcvm/kernel.log
+KERNEL_LOG=/.runcvm/state/kernel.log
 CONSOLE+=(
   -chardev file,id=kernellog0,path=$KERNEL_LOG
   -device virtconsole,chardev=kernellog0,id=kernellog0
