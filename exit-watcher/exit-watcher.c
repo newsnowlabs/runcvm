@@ -189,16 +189,20 @@ static int publish(const char *path, const char *text) {
     return 0;
 }
 
-// Reads the first process event in the netlink message in buf, of n bytes, into ev. Returns 0
-// where it holds one.
-static int read_event(const void *buf, ssize_t n, struct proc_event *ev) {
+// Reads the process event in the first netlink message of the datagram in buf, n bytes long (as
+// recv reports it with MSG_TRUNC, so that n exceeds size where the datagram was truncated to fit
+// buf, of size bytes), into ev. Returns 0 where it holds one, with every length consistent: the
+// process connector sends each event in a datagram of its own, and anything else is ignored.
+static int read_event(const void *buf, ssize_t n, size_t size, struct proc_event *ev) {
     const struct nlmsghdr *nl = buf;
     struct cn_msg cn;
 
-    if (n < (ssize_t)NL_CN_SIZE(sizeof(*ev)) || nl->nlmsg_len < NL_CN_SIZE(sizeof(*ev)))
+    if (n < (ssize_t)NL_CN_SIZE(sizeof(*ev)) || (size_t)n > size || nl->nlmsg_len > (size_t)n ||
+        nl->nlmsg_len < NL_CN_SIZE(sizeof(*ev)))
         return -1;
     memcpy(&cn, NLMSG_DATA(nl), sizeof(cn));
-    if (cn.id.idx != CN_IDX_PROC || cn.id.val != CN_VAL_PROC)
+    if (cn.id.idx != CN_IDX_PROC || cn.id.val != CN_VAL_PROC || cn.len < sizeof(*ev) ||
+        NL_CN_SIZE(cn.len) > nl->nlmsg_len)
         return -1;
     memcpy(ev, (const char *)NLMSG_DATA(nl) + sizeof(cn), sizeof(*ev));
     return 0;
@@ -268,13 +272,13 @@ int main(int argc, char **argv) {
             fprintf(stderr, PROGRAM ": the kernel did not acknowledge the subscription\n");
             return 1;
         }
-        n = recv(sock, &msg, sizeof(msg), 0);
+        n = recv(sock, &msg, sizeof(msg), MSG_TRUNC);
         if (n < 0) {
             if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS)
                 continue;
             die("recv");
         }
-        if (read_event(&msg, n, &ev) < 0 || ev.what != PROC_EVENT_NONE)
+        if (read_event(&msg, n, sizeof(msg), &ev) < 0 || ev.what != PROC_EVENT_NONE)
             continue;
         memcpy(&cn, NLMSG_DATA(&msg.nl), sizeof(cn));
         if (cn.ack != (unsigned int)getpid() + 1)
@@ -317,7 +321,7 @@ int main(int argc, char **argv) {
         pid_t pid;
         char text[16];
 
-        n = recv(sock, &msg, sizeof(msg), 0);
+        n = recv(sock, &msg, sizeof(msg), MSG_TRUNC);
         if (n < 0) {
             // A second with no events: after SIGTERM, end once no workload is present. The kernel
             // queues a process's exit event before the process can be reaped, so where the
@@ -333,7 +337,7 @@ int main(int argc, char **argv) {
                 continue;
             die("recv");
         }
-        if (read_event(&msg, n, &ev) < 0 || ev.what != PROC_EVENT_EXIT)
+        if (read_event(&msg, n, sizeof(msg), &ev) < 0 || ev.what != PROC_EVENT_EXIT)
             continue;
         pid = read_pid(pid_file);
         if (pid <= 0 || ev.event_data.exit.process_tgid != pid)
