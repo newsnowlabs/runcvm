@@ -16,19 +16,21 @@
 //
 // The child waits for the exit of the process whose ID the pid file holds (written by
 // runcvm-vm-start just before it execs the workload, whose ID it keeps). A process's threads each
-// report their exit, and the main thread may exit first, so the child records the exit of the
-// process's last thread to exit, whose status is the process's where one thread ended the whole
-// process (exit_group(), or a signal). It then creates the exit code file, unless it exists already
-// (as where the workload saved its own exit code), writing the exit status as a container's would
-// be (the exit code, or 128 plus the number of the signal that ended it), complete or not at all;
-// creates the done file, which runcvm-vm-start waits for, where the ready file exists, before
-// powering the VM off; and exits.
+// report their exit, and the main thread may exit first; where one thread ends the whole process
+// (exit_group(), or a signal), the threads still running all exit with the process's status. So
+// the child keeps the status of the latest exit of the workload's threads, and once none is left
+// running, reads on for DRAIN_MS for any exit not yet read, then records the latest. It creates
+// the exit code file, unless it exists already (as where the workload saved its own exit code),
+// writing the exit status as a container's would be (the exit code, or 128 plus the number of the
+// signal that ended it), complete or not at all; creates the done file, which runcvm-vm-start
+// waits for, where the ready file exists, before powering the VM off; and exits.
 //
 // When the VM stops, runcvm-vm-shutdown sends SIGTERM to every process at once, this one included,
 // then waits for them all to exit. So that it still records the workload's exit, which the same
 // SIGTERM usually causes however long the workload takes to exit, SIGTERM ends this program only
-// once no workload is present (none has started, or the one that did has been reaped) and no
-// events are left to read.
+// once no workload is present (none has started, or the one that did has been reaped), which it
+// checks every CHECK_MS whatever the events, and then only after reading on for LATE_MS, as the
+// kernel may queue a process's exit event after its parent has reaped it.
 
 #include <dirent.h>
 #include <errno.h>
@@ -37,20 +39,27 @@
 #include <linux/cn_proc.h>
 #include <linux/connector.h>
 #include <linux/netlink.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 
 #define PROGRAM "runcvm-exit-watcher"
 
-// Seconds to wait for the kernel to acknowledge the subscription
-#define SUBSCRIBE_TIMEOUT 5
+// Milliseconds to wait for the kernel to acknowledge the subscription
+#define SUBSCRIBE_MS 5000
+
+// Milliseconds to read on, once none of the workload's threads is left running, for their exits
+#define DRAIN_MS 200
+
+// After SIGTERM: milliseconds between checks for the workload, and to read on once it is gone
+#define CHECK_MS 1000
+#define LATE_MS 1000
 
 // The socket's receive buffer, in bytes: room for the events of many processes exiting at once
 #define RCVBUF (4 << 20)
@@ -63,6 +72,14 @@ static volatile sig_atomic_t terminating;
 static void on_term(int signum) {
     (void)signum;
     terminating = 1;
+}
+
+// Milliseconds on a clock that only moves forward
+static long long now_ms(void) {
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
 static void warn(const char *what) {
@@ -104,7 +121,8 @@ static int workload_present(const char *pid_file) {
     return pid > 0 && (kill(pid, 0) == 0 || errno == EPERM);
 }
 
-// Whether any thread of process pid, other than tid, has yet to exit
+// Whether any thread of process pid, other than tid, has yet to exit; or, where that cannot be
+// told, other than because the process has gone, 1
 static int other_threads_running(pid_t pid, pid_t tid) {
     char path[64], stat[512];
     struct dirent *e;
@@ -114,7 +132,7 @@ static int other_threads_running(pid_t pid, pid_t tid) {
     snprintf(path, sizeof(path), "/proc/%d/task", (int)pid);
     dir = opendir(path);
     if (!dir)
-        return 0;
+        return errno != ENOENT;
     while (!running && (e = readdir(dir))) {
         char *state;
         ssize_t n;
@@ -123,13 +141,20 @@ static int other_threads_running(pid_t pid, pid_t tid) {
         if (task <= 0 || task == tid)
             continue;
         snprintf(path, sizeof(path), "/proc/%d/task/%d/stat", (int)pid, task);
+        // A thread whose files have gone has exited
         fd = open(path, O_RDONLY | O_CLOEXEC);
-        if (fd < 0)
+        if (fd < 0) {
+            running = errno != ENOENT && errno != ESRCH;
             continue;
-        n = read(fd, stat, sizeof(stat) - 1);
+        }
+        do
+            n = read(fd, stat, sizeof(stat) - 1);
+        while (n < 0 && errno == EINTR);
         close(fd);
-        if (n <= 0)
+        if (n <= 0) {
+            running = n < 0 && errno != ESRCH;
             continue;
+        }
         stat[n] = '\0';
         // The state follows the last ')', which ends the thread's name
         state = strrchr(stat, ')');
@@ -158,18 +183,18 @@ static int write_all(int fd, const char *text) {
 }
 
 // Creates the file at path holding text, complete, unless the file exists: writes a temporary
-// file, then links it into place, which fails where the file exists. Returns 0 where the file
-// exists afterwards, however it got there.
+// file of a unique name, then links it into place, which fails where the file exists. Returns 0
+// where the file exists afterwards, however it got there.
 static int publish(const char *path, const char *text) {
     char tmp[PATH_MAX];
     int fd, err = 0;
 
-    if (snprintf(tmp, sizeof(tmp), "%s.%d", path, (int)getpid()) >= (int)sizeof(tmp)) {
+    if (snprintf(tmp, sizeof(tmp), "%s.XXXXXX", path) >= (int)sizeof(tmp)) {
         errno = ENAMETOOLONG;
         warn(path);
         return -1;
     }
-    fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    fd = mkostemp(tmp, O_CLOEXEC);
     if (fd < 0) {
         warn(tmp);
         return -1;
@@ -213,14 +238,14 @@ int main(int argc, char **argv) {
     struct sockaddr_nl addr = { .nl_family = AF_NETLINK, .nl_groups = CN_IDX_PROC };
     // Netlink messages are 4-byte aligned; the buffer is aligned for the headers read in place.
     union { struct nlmsghdr nl; char buf[4096]; } msg;
-    struct timeval tick = { .tv_sec = 1 };
+    struct pollfd pfd;
     struct proc_event ev;
     struct sigaction sa;
     struct cn_msg cn;
     enum proc_cn_mcast_op op = PROC_CN_MCAST_LISTEN;
-    int sock, ready[2], rcvbuf = RCVBUF;
+    int sock, ready[2], rcvbuf = RCVBUF, have_status = 0, status = 0;
+    long long deadline, next_check = 0, drain_until = 0, late_until = 0;
     sigset_t set;
-    time_t deadline;
     char c = 0;
     pid_t child;
 
@@ -240,9 +265,6 @@ int main(int argc, char **argv) {
     if (setsockopt(sock, SOL_SOCKET, SO_RCVBUFFORCE, &rcvbuf, sizeof(rcvbuf)) < 0 &&
         setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0)
         warn("setting the receive buffer size");
-    // recv returns at least once a second, so that the loops below can check their conditions
-    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tick, sizeof(tick)) < 0)
-        die("setting the receive timeout");
     addr.nl_pid = getpid();
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
         die("bind");
@@ -264,15 +286,20 @@ int main(int argc, char **argv) {
     // The kernel acknowledges the subscription with a PROC_EVENT_NONE event carrying its error, if
     // any, whose acknowledgement number is one more than the subscription's. Other events received
     // meanwhile are of processes other than the workload, which has yet to start.
-    deadline = time(NULL) + SUBSCRIBE_TIMEOUT;
+    pfd.fd = sock;
+    pfd.events = POLLIN;
+    deadline = now_ms() + SUBSCRIBE_MS;
     for (;;) {
+        long long left = deadline - now_ms();
         ssize_t n;
 
-        if (time(NULL) > deadline) {
+        if (left <= 0) {
             fprintf(stderr, PROGRAM ": the kernel did not acknowledge the subscription\n");
             return 1;
         }
-        n = recv(sock, &msg, sizeof(msg), MSG_TRUNC);
+        if (poll(&pfd, 1, (int)left) <= 0)
+            continue;
+        n = recv(sock, &msg, sizeof(msg), MSG_TRUNC | MSG_DONTWAIT);
         if (n < 0) {
             if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS)
                 continue;
@@ -305,7 +332,7 @@ int main(int argc, char **argv) {
     close(ready[0]);
     setsid();
 
-    // SIGTERM only sets a flag, which the loop checks whenever a second passes with no events
+    // SIGTERM only sets a flag, which the loop below checks
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = on_term;
     if (sigemptyset(&set) < 0 || sigaddset(&set, SIGTERM) < 0 || sigaction(SIGTERM, &sa, NULL) < 0 ||
@@ -316,24 +343,32 @@ int main(int argc, char **argv) {
     close(ready[1]);
 
     for (;;) {
+        long long now = now_ms(), wake = now + CHECK_MS;
         ssize_t n;
-        int status, code;
         pid_t pid;
-        char text[16];
 
-        n = recv(sock, &msg, sizeof(msg), MSG_TRUNC);
+        // After SIGTERM, check for the workload every CHECK_MS, whatever the events; once it is
+        // gone, read on for LATE_MS
+        if (terminating && !late_until && now >= next_check) {
+            next_check = now + CHECK_MS;
+            if (!workload_present(pid_file))
+                late_until = now + LATE_MS;
+        }
+        if ((drain_until && now >= drain_until) || (late_until && now >= late_until))
+            break;
+        if (terminating && !late_until && next_check < wake)
+            wake = next_check;
+        if (drain_until && drain_until < wake)
+            wake = drain_until;
+        if (late_until && late_until < wake)
+            wake = late_until;
+        if (poll(&pfd, 1, (int)(wake - now)) <= 0)
+            continue;
+        n = recv(sock, &msg, sizeof(msg), MSG_TRUNC | MSG_DONTWAIT);
         if (n < 0) {
-            // A second with no events: after SIGTERM, end once no workload is present. The kernel
-            // queues a process's exit event before the process can be reaped, so where the
-            // workload is gone, its exit would already have been read.
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                if (terminating && !workload_present(pid_file))
-                    return 0;
-                continue;
-            }
             // ENOBUFS: events were lost while this process was not scheduled. Read on: the
             // workload's exit, if among them, is lost, and its exit status not recorded.
-            if (errno == EINTR || errno == ENOBUFS)
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ENOBUFS)
                 continue;
             die("recv");
         }
@@ -342,16 +377,21 @@ int main(int argc, char **argv) {
         pid = read_pid(pid_file);
         if (pid <= 0 || ev.event_data.exit.process_tgid != pid)
             continue;
-        // The process has exited once its last thread has; that thread's status is the process's.
-        if (other_threads_running(pid, ev.event_data.exit.process_pid))
-            continue;
-
         // exit_code is a wait status
         status = (int)ev.event_data.exit.exit_code;
-        code = (status & 0x7f) ? 128 + (status & 0x7f) : (status >> 8) & 0xff;
+        have_status = 1;
+        if (!drain_until && !other_threads_running(pid, ev.event_data.exit.process_pid))
+            drain_until = now_ms() + DRAIN_MS;
+    }
+
+    if (have_status) {
+        char text[16];
+        int code = (status & 0x7f) ? 128 + (status & 0x7f) : (status >> 8) & 0xff;
+
         snprintf(text, sizeof(text), "%d\n", code);
         if (publish(exit_code_file, text) < 0)
             return 1;
         return publish(done_file, "") < 0;
     }
+    return 0;
 }
