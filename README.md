@@ -1,5 +1,7 @@
 # RunCVM Container Runtime
 
+> This README describes the `main` branch, from which v2.0.0 pre-releases are built. For the latest stable release, v1.8.0, which the installation commands below install by default, see [its README](https://github.com/newsnowlabs/runcvm/blob/v1.8.0/README.md).
+
 ## Introduction
 
 RunCVM (Run Container Virtual Machine) is an open-source Docker container runtime for Linux, created by Struan Bartlett at NewsNow Labs, that makes launching standard containerised workloads and system workloads (e.g. Systemd, Docker, even OpenWrt) in VMs as easy as launching a container.
