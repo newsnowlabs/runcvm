@@ -1517,19 +1517,16 @@ esac
 # Save choice of console device
 echo "$CONSOLE_DEV" >/.runcvm/console
 
-# The kernel log: a further kernel console, a virtio console port whose output QEMU writes to
-# KERNEL_LOG, and which no one else sees. The kernel writes its messages there, as to every console
-# (at quiet's level, only errors and worse), among them the panic that a PID 1 exiting causes,
-# "Attempted to kill init! exitcode=0x<wait status>", from which runcvm-ctr-exit takes the
-# Container/VM's exit status. QEMU writes it to a file, so that it waits on no reader. The port
-# follows the user's console (hvc0, in headless mode), so it is hvc1 in headless mode and hvc0
-# otherwise. The port has a name, as Alpine's initramfs (its mdev.conf) links each virtio port
-# by the name it reads from sysfs, and reports an error on the console for a port without one.
+# The kernel log: a further kernel console, a virtio console port that QEMU writes to the file
+# KERNEL_LOG, so it waits on no reader. It gets the kernel's messages at quiet's level (errors and
+# worse), among them PID 1's exit panic, from which runcvm-ctr-exit takes the exit status. It is
+# hvc1 in headless mode, after the user's console, and hvc0 otherwise. It is named, as Alpine's
+# initramfs (mdev.conf) links each virtio port by its name in sysfs, and reports an error on the
+# console for a port without one.
 #
-# With RUNCVM_KERNEL_DEBUG=1, there is no kernel log, and the kernel's messages go to the user's
-# console alone: the kernel uses only one virtio console port as a console, the first named, so
-# in headless mode the kernel log would take them from the user's console (hvc0); and the kernel
-# log, holding every message the kernel writes, could fill /.runcvm.
+# With RUNCVM_KERNEL_DEBUG=1 there is no kernel log: the kernel uses only the first virtio console
+# port named as a console, so in headless mode a kernel log port would take the messages from the
+# user's console (hvc0); and a log of every message could fill /.runcvm.
 KERNEL_LOG=/.runcvm/state/kernel.log
 if [ "$RUNCVM_KERNEL_DEBUG" != "1" ]; then
   CONSOLE+=(
@@ -1683,11 +1680,9 @@ APPEND+=(scsi_mod.scan=none tsc=reliable no_timer_check rcupdate.rcu_expedited=1
 # - Override this by launching with --env='RUNCVM_KERNEL_APPEND=systemd.show_status=0'
 APPEND+=(systemd.show_status=1)
 
-# The kernel writes its messages to every console named, and /dev/console is the last: the user's
-# console with RUNCVM_KERNEL_DEBUG=1; otherwise, named after the kernel log, the consoles the kernel
-# chooses itself where none is named, so that /dev/console is the one it would choose: tty0 on x86;
-# on arm64, tty0 and the virt machine's UART (ttyAMA0, the device tree's stdout-path), which is
-# /dev/console.
+# The kernel writes to every console named, and the last is /dev/console: the user's console with
+# RUNCVM_KERNEL_DEBUG=1; otherwise, after the kernel log, the consoles the kernel would choose
+# itself: tty0 on x86; tty0 and ttyAMA0 (the device tree's stdout-path) on arm64.
 if [ "$RUNCVM_KERNEL_DEBUG" = "1" ]; then
   APPEND+=($EARLY_CONSOLE console=$CONSOLE_DEV)
 elif [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
