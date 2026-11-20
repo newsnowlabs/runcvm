@@ -1455,10 +1455,6 @@ fi
 CONSOLE=()
 DISPLAY=()
 
-# The kernel log, from which runcvm-ctr-exit takes the Container/VM's exit status (see below).
-KERNEL_LOG=/.runcvm/state/kernel.log
-KERNEL_LOG_DEV=
-
 case "${RUNCVM_DISPLAY_MODE:-headless}" in
   headless) # virtconsole / hvc0
     RUNCVM_QEMU_DISPLAY="${RUNCVM_QEMU_DISPLAY:-none}"
@@ -1466,15 +1462,8 @@ case "${RUNCVM_DISPLAY_MODE:-headless}" in
 
     # Creates a stdio backend connected to the virtual console.
     # Use with /dev/hvc0
-    #
-    # With RUNCVM_KERNEL_DEBUG=1, the kernel log is this console's own output, which QEMU also
-    # writes to KERNEL_LOG (logfile): the kernel can use only one virtio console port as a
-    # console, the first named, so a further port for the kernel log would take the kernel's
-    # messages from this one.
-    CHAR0=stdio,id=char0,mux=off,signal=off
-    [ "$RUNCVM_KERNEL_DEBUG" = "1" ] && CHAR0+=",logfile=$KERNEL_LOG,logappend=off"
     CONSOLE+=(
-      -chardev $CHAR0
+      -chardev stdio,id=char0,mux=off,signal=off
       -device virtconsole,chardev=char0,id=console0
     )
 
@@ -1534,9 +1523,14 @@ echo "$CONSOLE_DEV" >/.runcvm/console
 # "Attempted to kill init! exitcode=0x<wait status>", from which runcvm-ctr-exit takes the
 # Container/VM's exit status. QEMU writes it to a file, so that it waits on no reader. The port
 # follows the user's console (hvc0, in headless mode), so it is hvc1 in headless mode and hvc0
-# otherwise. In headless mode with RUNCVM_KERNEL_DEBUG=1, the user's console is the kernel log
-# (see above), and there is no further port.
-if ! [[ "$CONSOLE_DEV" = "hvc0" && "$RUNCVM_KERNEL_DEBUG" = "1" ]]; then
+# otherwise.
+#
+# With RUNCVM_KERNEL_DEBUG=1, there is no kernel log, and the kernel's messages go to the user's
+# console alone: the kernel uses only one virtio console port as a console, the first named, so
+# in headless mode the kernel log would take them from the user's console (hvc0); and the kernel
+# log, holding every message the kernel writes, could fill /.runcvm.
+KERNEL_LOG=/.runcvm/state/kernel.log
+if [ "$RUNCVM_KERNEL_DEBUG" != "1" ]; then
   CONSOLE+=(
     -chardev file,id=kernellog0,path=$KERNEL_LOG
     -device virtconsole,chardev=kernellog0,id=kernellog0
@@ -1694,7 +1688,7 @@ APPEND+=(systemd.show_status=1)
 # on arm64, tty0 and the virt machine's UART (ttyAMA0, the device tree's stdout-path), which is
 # /dev/console.
 if [ "$RUNCVM_KERNEL_DEBUG" = "1" ]; then
-  APPEND+=($EARLY_CONSOLE ${KERNEL_LOG_DEV:+console=$KERNEL_LOG_DEV} console=$CONSOLE_DEV)
+  APPEND+=($EARLY_CONSOLE console=$CONSOLE_DEV)
 elif [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
   APPEND+=(quiet console=$KERNEL_LOG_DEV console=tty0 console=ttyAMA0)
 else
