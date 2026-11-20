@@ -14,6 +14,8 @@ PID 1 at once (see tests/49-vm-shutdown for the other methods):
   expires: exit status 137.
 - An entrypoint that traps SIGTERM can write its exit status to
   /.runcvm/exitcode and exit: that status is reported, in either mode.
+- An entrypoint that traps SIGTERM and exits 7 seconds later, with exit
+  status 42, reports 42 in either mode.
 
 'docker kill' ends the Container/VM at once: exit status 137.
 
@@ -36,6 +38,8 @@ BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
 
 SLEEP = ["sleep", "600"]
 TRAP = ["sh", "-c", "trap 'echo 9 >/.runcvm/exitcode; exit 0' TERM; while true; do sleep 1; done"]
+# Takes 7 seconds to exit after SIGTERM, with an exit status of its own
+SLOW_EXIT = ["sh", "-c", "trap 'sleep 7; exit 42' TERM; while true; do sleep 1; done"]
 
 # (name, --init?, entrypoint, action, expected exit status, must finish before the stop timeout?)
 CASES = [
@@ -43,6 +47,8 @@ CASES = [
     ("stop-sleep", True, SLEEP, "stop", 143, True),
     ("stop-trap", False, TRAP, "stop", 9, True),
     ("stop-trap", True, TRAP, "stop", 9, True),
+    ("stop-slow-exit", False, SLOW_EXIT, "stop", 42, True),
+    ("stop-slow-exit", True, SLOW_EXIT, "stop", 42, True),
     ("kill-sleep", False, SLEEP, "kill", 137, True),
     ("kill-sleep", True, SLEEP, "kill", 137, True),
 ]
