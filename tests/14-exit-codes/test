@@ -11,7 +11,10 @@ without --init.
 
 The exit status without --init is read from the kernel's log console,
 which must leave /dev/console as the kernel would choose it itself: tty0
-on x86, the virt machine's UART (ttyAMA0) on arm64.
+on x86, the virt machine's UART (ttyAMA0) on arm64. With
+RUNCVM_KERNEL_DEBUG=1 in headless mode, the user's console (hvc0) is
+/dev/console and the kernel log alike, so the kernel's messages, the
+panic among them, reach the Container/VM's output.
 
 A Container/VM whose boot fails in runcvm-vm-init (here, with its network
 driver blacklisted, so that its network interface never appears) exits 1,
@@ -45,6 +48,7 @@ CASES = [
     ("non-root-exit-3", ["--user=1000"], "exit 3", (3, 0)),
     ("non-root-exitcode-file", ["--user=1000"], "echo 5 >/.runcvm/exitcode; exit 3", (3, 0)),
     ("non-root-qemu-exit", ["--user=1000"], QEMU_EXIT + " 7; exit 3", (3, 0)),
+    ("kernel-debug-exit-3", ["--env=RUNCVM_KERNEL_DEBUG=1"], "exit 3", (3, 0)),
     ("vm-init-failure", ["--env=RUNCVM_KERNEL_APPEND=module_blacklist=virtio_net"], "echo RAN", (1, 1)),
 ]
 
@@ -82,5 +86,13 @@ preferred = [name for name, f in consoles.items() if "C" in "".join(f[1:])]
 t.check("/dev/console is the kernel's own choice", ["ttyAMA0" if platform.machine() == "aarch64" else "tty0"],
         preferred)
 t.check("the kernel log console is enabled", True, "hvc1" in consoles)
+
+# With RUNCVM_KERNEL_DEBUG=1, headless: hvc0 alone, /dev/console, showing the kernel's messages
+r = t.docker("run", "--rm", "--name", t.unique("consoles-debug"), *t.labels(), "--runtime=" + t.RUNTIME,
+             *t.vm_opts(), "--env=RUNCVM_KERNEL_DEBUG=1", "alpine", "cat", "/proc/consoles")
+consoles = {f[0]: f for f in (line.split() for line in r.stdout.splitlines()) if f and f[0].startswith(("hvc", "tty"))}
+preferred = [name for name, f in consoles.items() if "C" in "".join(f[1:])]
+t.check("RUNCVM_KERNEL_DEBUG=1: /dev/console is the user's console", ["hvc0"], preferred)
+t.check("RUNCVM_KERNEL_DEBUG=1: the output shows the kernel's panic", True, "Attempted to kill init!" in r.stdout)
 
 t.finish()
