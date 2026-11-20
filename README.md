@@ -556,7 +556,8 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [+] `--memory` (or `-m`) is supported to specify VM memory (and limit container memory to this value plus a 256Mb contingency)
       - [-] Other container resource limit options such as (`--cpu-*`), block IO (`--blkio-*`), kernel memory (`--kernel-memory`) are unsupported or untested
    - Exit code
-      - [+] Returning an exit code is supported, but it currently requires application support, which must either write the exit code to `/.runcvm/exitcode` (supported exit codes 0-255) or call `/.runcvm/guest/sbin/qemu-exit <code>` (supported exit codes 0-127). Both require the application to run as root, as `/.runcvm` is accessible only to root. Automatic handling of exit codes from the entrypoint may be provided in a later release.
+      - [+] Without `--init`, the entrypoint's exit status is the Container/VM's, as for a container (e.g. 127 where the entrypoint does not exist, and 128 plus the signal's number where a signal ends it): the entrypoint is the VM's PID 1, and RunCVM reads its exit status from the kernel's panic when PID 1 exits ("Attempted to kill init! exitcode=…"), which the kernel writes to a console of its own that QEMU saves in `/.runcvm/state/kernel.log` in the container. With [`RUNCVM_KERNEL_DEBUG=1`](#runcvm_kernel_debug), there is no such console, and the entrypoint's exit status is not passed through (the kernel's panic, with the status, is shown on the console). With `--init`, the entrypoint's exit status is not passed through, and the Container/VM exits 0. (Releases before v2.0.0 pass the entrypoint's exit status through in neither mode: there, a workload sets the exit status only as below.)
+      - [+] Either way, a workload may set the exit status itself, by writing it to `/.runcvm/exitcode` (supported exit codes 0-255) or calling `/.runcvm/guest/sbin/qemu-exit <code>` (supported exit codes 0-127), which takes precedence. Both require the application to run as root, as `/.runcvm` is accessible only to root.
    - Disk performance
       - [+] No mountpoints are required for basic operation for most applications. Volume or disk mountpoints may be needed for running `dockerd` or to improve disk performance
       - [-] `dockerd` needs a disk holding `/var/lib/docker` and `/var/lib/containerd`: see [Running Docker in a RunCVM Container/VM](#running-docker-in-a-runcvm-containervm)
@@ -828,16 +829,16 @@ COPY --from=build /src/mymodule.ko /opt/
 Built as `mymodule-test` (with `--target test`), it loads and tests the module in the VM:
 
 ```console
-docker run --rm --runtime=runcvm mymodule-test sh -c 'insmod /opt/mymodule.ko && <tests> && rmmod mymodule; echo $? >/.runcvm/exitcode'
+docker run --rm --runtime=runcvm mymodule-test sh -c 'insmod /opt/mymodule.ko && <tests> && rmmod mymodule'
 ```
 
 To build the module in the VM instead, boot the `build` stage, which has the headers, the compiler and the source, built as `mymodule-build` (with `--target build`):
 
 ```console
-docker run --rm --runtime=runcvm mymodule-build sh -c 'make -C /lib/modules/$(uname -r)/build M=/src modules && insmod /src/mymodule.ko && <tests> && rmmod mymodule; echo $? >/.runcvm/exitcode'
+docker run --rm --runtime=runcvm mymodule-build sh -c 'make -C /lib/modules/$(uname -r)/build M=/src modules && insmod /src/mymodule.ko && <tests> && rmmod mymodule'
 ```
 
-Each command writes its exit status to `/.runcvm/exitcode`, which `docker run` then exits with: a workload's own exit status does not otherwise pass through (see [Features and limitations](#features-and-limitations)), and a CI step needs it to fail when the module does. Other distributions' images follow the same pattern, with their own headers packages: `linux-headers-cloud-amd64` (Debian), `kernel-devel-<version>` (Fedora, installed with `kernel-core` so that the two match) and `linux-virt-dev` (Alpine, with `musl-dev`).
+`docker run` exits with each command's exit status, so that a CI step fails when the module does: the command is the VM's PID 1, whose exit status passes through, as it would not under `--init` (see [Features and limitations](#features-and-limitations)). Other distributions' images follow the same pattern, with their own headers packages: `linux-headers-cloud-amd64` (Debian), `kernel-devel-<version>` (Fedora, installed with `kernel-core` so that the two match) and `linux-virt-dev` (Alpine, with `musl-dev`).
 
 ### RunCVM in CI
 
@@ -912,6 +913,8 @@ docker run --rm --runtime=runcvm --env=RUNCVM_KERNEL=almalinux hello-world
 **`RUNCVM_KERNEL_APPEND=<option>[ <option>...]`**
 
 Options to append to the VM kernel's command line, separated by spaces, e.g. `--env='RUNCVM_KERNEL_APPEND=apparmor=0 systemd.unified_cgroup_hierarchy=0'`.
+
+RunCVM names the kernel's consoles itself (`console=`), and these options follow them, so a `console=` here is the last named, which the kernel makes `/dev/console`. In headless mode, however, where the user's console (`hvc0`) and RunCVM's kernel log (`hvc1`) are both virtio console ports, the kernel uses only the first of those named, the kernel log, so `console=hvc0` here does not show the kernel's messages on the user's console. Use [`RUNCVM_KERNEL_DEBUG=1`](#runcvm_kernel_debug) for that.
 
 ### RUNCVM_KERNEL_MODULES
 
@@ -1186,7 +1189,9 @@ If a RunCVM kernel (as opposed to an in-image kernel) is chosen to launch a VM, 
 
 **`RUNCVM_KERNEL_DEBUG=1`**
 
-Enable kernel logging (sets kernel `console=ttyS0`).
+Show the VM kernel's messages, from its boot onwards, on the Container/VM's console: the kernel's `console=` is the user's console (`hvc0` in headless mode, the serial port in serial mode, `tty0` in vnc mode), and on arm64 in headless mode, `earlycon` shows its early messages, before `hvc0` exists, on the container's stderr.
+
+Without `--init`, the entrypoint's exit status is then not passed through: RunCVM has no kernel log console from which to read the kernel's panic when the entrypoint exits (see [Features and limitations](#features-and-limitations)), and the Container/VM's exit status is as a workload sets it (`/.runcvm/exitcode` or `qemu-exit`), or 0.
 
 ### RUNCVM_BIOS_DEBUG
 
@@ -1470,7 +1475,7 @@ The `runcvm-ctr-entrypoint`:
 The `runcvm-init` process:
 - Is RunCVM's custom init process, that takes over as PID1 within the container, supervising `runcvm-ctr-qemu` to launch the VM.
 - Waits for a stop signal: SIGTERM, SIGINT, SIGPWR, or SIGRTMIN+3 or SIGRTMIN+4, which images for systemd declare as their stop signal. On receiving one, it spawns `runcvm-ctr-shutdown`, which asks the VM to power off as [`RUNCVM_SHUTDOWN`](#runcvm_shutdown) specifies. It never passes these signals to QEMU, which would end it at once.
-- Waits for its child (QEMU) to exit. When it does, execs `runcvm-ctr-exit` to retrieve any saved exit code (written by the application to `/.runcvm/exitcode`) and exit with this code.
+- Waits for its child (QEMU) to exit. When it does, execs `runcvm-ctr-exit`, which exits with the exit code the application saved in `/.runcvm/exitcode`, if any; or else with the exit status of the VM's PID 1, from the kernel's panic when it exited, in `/.runcvm/state/kernel.log`; or else with the status the application gave `qemu-exit`.
 
 The `runcvm-ctr-qemu` script:
 - Prepares disk backing files as specified by `--env=RUNCVM_DISKS=<disks>`: it checks every disk spec and plans every mount (the disks, the tmpfs mounts, and the volumes and bind mounts they hide) before creating anything, then creates each new disk, populating a new whole-root disk last, and writes the fstab the VM mounts
