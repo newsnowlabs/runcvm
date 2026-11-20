@@ -5,15 +5,15 @@ For each RUNCVM_DISPLAY_MODE (headless, serial, vnc), with RUNCVM_KERNEL_DEBUG o
 Container/VM without --init runs 'exit 3', and records its kernel command line and
 /proc/consoles in a volume. Each case checks:
 
-- the exit status, 3, which runcvm-ctr-exit reads from the kernel's panic when the VM's PID 1
-  exits, in the kernel log (/.runcvm/state/kernel.log);
+- the exit status: 3, which runcvm-ctr-exit reads from the kernel's panic when the VM's PID 1
+  exits, in the kernel log (/.runcvm/state/kernel.log); with debugging, when there is no kernel
+  log, 0;
 - /dev/console (flag C in /proc/consoles): with debugging, the user's console (hvc0 in headless
   mode; the serial port, ttyS0 on x86 and ttyAMA0 on arm64, in serial mode; tty0 in vnc mode);
   without it, the console the kernel would choose itself (tty0 on x86, ttyAMA0 on arm64);
-- the kernel log console: a further virtio console port (hvc1 in headless mode, hvc0 otherwise),
-  except in headless mode with debugging, where the user's console, hvc0, is the only virtio
-  console and the kernel log alike, as the kernel uses only one virtio console port as a
-  console;
+- the virtio console ports the kernel uses as consoles: without debugging, the kernel log (hvc1
+  in headless mode, hvc0 otherwise); with debugging, the user's console alone (hvc0 in headless
+  mode, none otherwise), as the kernel uses only one virtio console port as a console;
 - the Container/VM's output: with debugging, in headless and serial modes, the kernel's
   messages, the panic among them; without it, none (the kernel log is not shown);
 - on arm64, with debugging in headless mode, 'earlycon' on the kernel command line, by which
@@ -32,15 +32,15 @@ SERIAL = "ttyAMA0" if ARM64 else "ttyS0"
 DEFAULT = "ttyAMA0" if ARM64 else "tty0"
 PANIC = "Attempted to kill init! exitcode="
 
-# (display mode, kernel debugging, expected /dev/console, expected kernel log console or None,
-# whether the output shows the kernel's messages)
+# (display mode, kernel debugging, expected exit status, expected /dev/console, expected virtio
+# console ports used as consoles, whether the output shows the kernel's messages)
 CASES = [
-    ("headless", False, DEFAULT, "hvc1", False),
-    ("headless", True, "hvc0", None, True),
-    ("serial", False, DEFAULT, "hvc0", False),
-    ("serial", True, SERIAL, "hvc0", True),
-    ("vnc", False, DEFAULT, "hvc0", False),
-    ("vnc", True, "tty0", "hvc0", False),
+    ("headless", False, 3, DEFAULT, ["hvc1"], False),
+    ("headless", True, 0, "hvc0", ["hvc0"], True),
+    ("serial", False, 3, DEFAULT, ["hvc0"], False),
+    ("serial", True, 0, SERIAL, [], True),
+    ("vnc", False, 3, DEFAULT, ["hvc0"], False),
+    ("vnc", True, 0, "tty0", [], False),
 ]
 
 t.param("arch", platform.machine())
@@ -60,19 +60,17 @@ def run(case):
 
 results = t.parallel(run, CASES, remove=True)
 
-for (mode, debug, console, kernel_log, shown), (r, cmdline, consoles_text) in zip(CASES, results):
+for (mode, debug, status, console, hvcs_expected, shown), (r, cmdline, consoles_text) in zip(CASES, results):
     desc = "%s, kernel debugging %s" % (mode, "on" if debug else "off")
     consoles = {f[0]: f for f in (line.split() for line in consoles_text.splitlines()) if f}
     preferred = [n for n, f in consoles.items() if "C" in "".join(f[1:-1])]
     args = [a for a in cmdline.split() if a == "earlycon" or a.startswith("console=")]
     t.log_detail("%s: %s; consoles %s" % (desc, " ".join(args), " ".join(consoles)))
 
-    ok = t.check("%s: exit status" % desc, 3, r.returncode)
+    ok = t.check("%s: exit status" % desc, status, r.returncode)
     ok &= t.check("%s: /dev/console" % desc, [console], preferred)
     hvcs = sorted(n for n in consoles if n.startswith("hvc"))
-    # The virtio console ports the kernel uses as consoles: the kernel log, or hvc0 where the
-    # user's console is the kernel log.
-    ok &= t.check("%s: virtio consoles" % desc, [kernel_log or "hvc0"], hvcs)
+    ok &= t.check("%s: virtio consoles" % desc, hvcs_expected, hvcs)
     ok &= t.check("%s: kernel messages in the output" % desc, shown, PANIC in r.stdout)
     if ARM64 and mode == "headless" and debug:
         ok &= t.check("%s: earlycon" % desc, True, "earlycon" in args)
