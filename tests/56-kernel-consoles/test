@@ -19,8 +19,9 @@ terminal's screen) in a volume. Each case checks:
   messages, the panic among them; without it, none (the kernel log is not shown), except on
   arm64 in serial mode, where the serial port (ttyAMA0) is /dev/console, which shows the
   panic whatever the log level;
-- in vnc mode, the VNC display: with debugging, the kernel's messages (lines beginning with
-  the kernel's timestamp); without it, none; and either way, no error from the VM's boot
+- in vnc mode, the VNC display: with debugging, the kernel's messages (the kernel's
+  timestamps, e.g. '[    1.110837]', in the display's text, which has no line breaks);
+  without it, none; and either way, no error from the VM's boot
   (e.g. from Alpine's initramfs, which reads each virtio port's name);
 - on arm64, with debugging in headless mode, 'earlycon' on the kernel command line, by which
   the kernel's early messages reach the container's stderr before hvc0 exists.
