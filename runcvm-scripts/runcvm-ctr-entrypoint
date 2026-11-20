@@ -234,8 +234,14 @@ do
 
 done
 
-# FIXME: Bind-mount /etc/resolv.conf as well as /vm/etc/resolv.conf to prevent them showing in 'docker diff'
-cat /vm/etc/resolv.conf >/etc/resolv.conf
+# The container's DNS servers, as Docker's resolv.conf (mounted for the VM at /vm/etc/resolv.conf)
+# names them, read before the VM's copy is rewritten below: dnsmasq forwards to them, given them
+# directly (--no-resolv), so that RunCVM writes nothing to the container's own /etc/resolv.conf.
+DNSMASQ_SERVERS=()
+while read -r key value _
+do
+  [ "$key" = "nameserver" ] && [ -n "$value" ] && DNSMASQ_SERVERS+=("--server=$value")
+done </vm/etc/resolv.conf
 
 # Docker's embedded DNS server, 127.0.0.11, is reachable only in the container, so where it is the
 # container's DNS server, it is rewritten in the VM's resolv.conf to $RUNCVM_DNS_IP, which dnsmasq
@@ -326,9 +332,10 @@ fi
 
 # LAUNCH DNSMASQ
 # It will receive local DNS requests (within the container, on 127.0.0.1)
-# and the VM's requests for $RUNCVM_DNS_IP, redirected to it by the nat rules above.
+# and the VM's requests for $RUNCVM_DNS_IP, redirected to it by the nat rules above, and forwards
+# them to the container's DNS servers (DNSMASQ_SERVERS).
 # '-C /dev/null' keeps it from reading the image's /etc/dnsmasq.conf (and any conf-dir it names).
-dnsmasq -C /dev/null -u root --no-hosts
+dnsmasq -C /dev/null -u root --no-hosts --no-resolv "${DNSMASQ_SERVERS[@]}"
 
 # LAUNCH VIRTIOFSD
 $RUNCVM_GUEST/scripts/runcvm-ctr-virtiofsd &
