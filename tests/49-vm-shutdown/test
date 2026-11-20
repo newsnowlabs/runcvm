@@ -4,7 +4,8 @@
 - systemd as the entrypoint (almalinux/9-init, whose stop signal is
   SIGRTMIN+3): 'docker stop', and 'docker kill -s TERM', power the VM off
   well within the stop timeout, with exit status 0.
-- --init: 'docker stop', and 'docker kill -s INT', do likewise.
+- --init: 'docker stop', and 'docker kill -s INT', do likewise, sending
+  the entrypoint SIGTERM, which ends 'sleep' with exit status 143.
 - --init, with an entrypoint that takes 8 seconds to finish after SIGTERM:
   'docker stop -t 20' waits for it, and what it writes then is kept.
 - --init, with an entrypoint that ignores SIGTERM: 'docker stop -t 5'
@@ -66,9 +67,9 @@ CASES = [
     dict(name="systemd-term", image=SYSTEMD_IMAGE, end=("kill", "TERM"),
          status=0, mode="systemd", most=STOP_TIMEOUT),
     dict(name="init-stop", init=True, entrypoint=SLEEP, end=("stop", STOP_TIMEOUT), disk="write",
-         status=0, mode="busybox", most=STOP_TIMEOUT),
+         status=143, mode="busybox", most=STOP_TIMEOUT),
     dict(name="init-int", init=True, entrypoint=SLEEP, end=("kill", "INT"),
-         status=0, mode="busybox", most=STOP_TIMEOUT),
+         status=143, mode="busybox", most=STOP_TIMEOUT),
     dict(name="init-slow-term", init=True, entrypoint=SLOW_TERM, end=("stop", 20), disk="write",
          status=0, mode="busybox", least=8, most=20, late="late"),
     dict(name="init-ignore-term", init=True, entrypoint=IGNORE_TERM, end=("stop", 5),
