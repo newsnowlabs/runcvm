@@ -1,19 +1,20 @@
 # RunCVM's arm64 tests under KVM, on an AWS Graviton bare-metal host: GitHub's arm64 runners
-# have no /dev/kvm, and on EC2 only the .metal instances have it. A GitHub-hosted runner launches
-# the host (.github/arm64-metal/launch), which builds and installs RunCVM at the commit under
-# test; the runner then runs the tests on it over SSH, in 8 shards at once, gathers their
-# results, and terminates the host. .github/arm64-metal/README.md describes the AWS setup.
+# have no /dev/kvm, and EC2's .metal instances do. A GitHub-hosted runner launches the host
+# (.github/arm64-metal/launch), which builds and installs RunCVM at the commit under test; the
+# runner then runs the tests on it over SSH, in 8 shards at once, gathers their results, and
+# terminates the host. .github/arm64-metal/README.md describes the AWS setup.
 #
-# AWS access is by OpenID Connect: the job assumes the IAM role named by the repository variable
-# AWS_ARM64_METAL_ROLE, whose trust policy admits this repository's main branch and its pull
-# requests, and which may change only resources tagged as RunCVM CI's. No AWS secret is stored.
-# Without the variable (e.g. in a fork) the job is skipped.
+# AWS access is by OpenID Connect: the job assumes the IAM role whose ARN is the repository
+# secret AWS_ARM64_METAL_ROLE, whose trust policy admits this repository's main branch and its
+# pull requests, and which may change only resources tagged as RunCVM CI's. The ARN is a secret
+# so that the public log masks the account id in it; no AWS credential is stored. The job runs
+# only in newsnowlabs/runcvm (a job's if: cannot test a secret), and is skipped in forks.
 #
 # What runs, and when:
 # - Nightly: every tier, on main.
 # - Pull requests labelled ci:arm64, when labelled and at each push while labelled: the core
-#   tier, or the tier that ci:extended or ci:all selects, as for ci.yml's tests. Not for drafts, nor with ci:skip, nor
-#   for pull requests from forks, which GitHub gives no OIDC token.
+#   tier, or the tier that ci:extended or ci:all selects, as for ci.yml's tests. Not for drafts,
+#   nor with ci:skip, nor for pull requests from forks, which GitHub gives no OIDC token.
 # - By hand (workflow_dispatch, on main): the tests input gives tests/run's arguments.
 #
 # The host terminates itself after MAX_MINUTES, whatever happens to this job; the teardown
@@ -53,7 +54,7 @@ jobs:
     # Pull requests: labelled ci:arm64, not drafts, nor with ci:skip, nor from forks; for label
     # changes, only adding ci:arm64.
     if: >-
-      vars.AWS_ARM64_METAL_ROLE != '' && (
+      github.repository == 'newsnowlabs/runcvm' && (
         github.event_name != 'pull_request' || (
           contains(github.event.pull_request.labels.*.name, 'ci:arm64') &&
           !github.event.pull_request.draft &&
@@ -74,7 +75,7 @@ jobs:
       # A session long enough for the whole job; teardown refreshes it regardless.
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ARM64_METAL_ROLE }}
+          role-to-assume: ${{ secrets.AWS_ARM64_METAL_ROLE }}
           role-session-name: ${{ env.RUN }}
           role-duration-seconds: 10800
           aws-region: us-east-1
@@ -143,7 +144,7 @@ jobs:
       - uses: aws-actions/configure-aws-credentials@v4
         if: always()
         with:
-          role-to-assume: ${{ vars.AWS_ARM64_METAL_ROLE }}
+          role-to-assume: ${{ secrets.AWS_ARM64_METAL_ROLE }}
           role-session-name: ${{ env.RUN }}-teardown
           aws-region: us-east-1
 

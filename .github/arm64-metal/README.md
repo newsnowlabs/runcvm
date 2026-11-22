@@ -46,11 +46,14 @@ is given to the host in its user data, so no EC2 key pair is involved.
 ## AWS setup
 
 Every instance, volume and security group `launch` creates is tagged `Project=runcvm-ci`. The
-IAM policy below lets it create
-instances, volumes and security groups only with that tag, add tags only as it creates them, and
-terminate, delete or change only resources carrying it, so it cannot touch anything else in the
-account. Its `Describe*` and pricing reads cannot be scoped: EC2 does not support resource-level
-permissions for them.
+IAM policy below lets it create instances, volumes and security groups only with that tag, add
+tags only as it creates them, and terminate, delete or change only resources carrying it, so it
+cannot touch anything else in the account. It lets it launch only the instance types in
+`TYPES` (`c6g.metal` and `c7g.metal`), so that leaked credentials could not launch costlier
+ones; to consider another type, add it to both. The type condition has a statement of its own,
+apart from the volume's: a volume has no instance type, so the condition would refuse it. Its
+`Describe*` and pricing reads cannot be scoped: EC2 does not support resource-level permissions
+for them.
 
 The same customer-managed policy serves both a maintainer's IAM user (for running `launch` by
 hand) and the role that GitHub Actions assumes: a managed policy can be attached to users, groups
@@ -86,10 +89,22 @@ and roles alike. In what follows, replace `ACCOUNT_ID` with the AWS account's id
       "Resource": "*"
     },
     {
-      "Sid": "RunInstancesCreateTagged",
+      "Sid": "RunInstancesCreateTaggedInstance",
       "Effect": "Allow",
       "Action": "ec2:RunInstances",
-      "Resource": ["arn:aws:ec2:*:ACCOUNT_ID:instance/*", "arn:aws:ec2:*:ACCOUNT_ID:volume/*"],
+      "Resource": "arn:aws:ec2:*:ACCOUNT_ID:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Project": "runcvm-ci",
+          "ec2:InstanceType": ["c6g.metal", "c7g.metal"]
+        }
+      }
+    },
+    {
+      "Sid": "RunInstancesCreateTaggedVolume",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*:ACCOUNT_ID:volume/*",
       "Condition": { "StringEquals": { "aws:RequestTag/Project": "runcvm-ci" } }
     },
     {
@@ -206,12 +221,14 @@ aws iam attach-role-policy --role-name runcvm-ci-gha \
   --policy-arn arn:aws:iam::ACCOUNT_ID:policy/runcvm-ci
 ```
 
-Then give the workflow the role's ARN, as a repository variable (not a secret: it grants
-nothing by itself), and create the label:
+Then give the workflow the role's ARN as a repository secret, and create the label. The ARN
+grants nothing by itself, but it holds the account id, which the public workflow log would
+show if the ARN were a variable; a secret is masked there. `gh secret set` asks for the value,
+keeping it out of the shell's history:
 
 ```bash
-gh variable set AWS_ARM64_METAL_ROLE --body arn:aws:iam::ACCOUNT_ID:role/runcvm-ci-gha
-gh label create ci:arm64 --description "Run the arm64 tests on an AWS Graviton bare-metal host"
+gh secret set AWS_ARM64_METAL_ROLE --repo newsnowlabs/runcvm   # arn:aws:iam::ACCOUNT_ID:role/runcvm-ci-gha
+gh label create ci:arm64 --repo newsnowlabs/runcvm --description "Run the arm64 tests on an AWS Graviton bare-metal host"
 ```
 
 ## Running by hand
