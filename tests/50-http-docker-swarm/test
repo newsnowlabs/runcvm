@@ -163,10 +163,22 @@ replicas_launched_or_node_stopped() {
   [ -n "$(stopped_nodes)" ] || [ "$(replicas)" = "$NODES/$NODES" ]
 }
 
+# Log what the swarm reports of the http service, its tasks and the ingress network, and the end
+# of node 1's dockerd log (the manager's), before cleanup removes the nodes.
+log_swarm_state() {
+  local cmd
+  for cmd in "docker node ls" "docker service ps --no-trunc http" "docker service inspect http" \
+             "docker network inspect ingress" "tail -n 60 /var/log/dockerd.log"; do
+    log "${NODE}1: $cmd:"
+    docker exec ${NODE}1 $cmd 2>&1 | sed "s/^/> (${NODE}1) > /"
+  done
+}
+
 wait_for "all $NODES http replicas to launch" 200 replicas_launched_or_node_stopped || true
 check_nodes
 if [ "$(replicas)" != "$NODES/$NODES" ]; then
   log "Only $(replicas) replicas launched in 200s; giving up."
+  log_swarm_state
   exit 253
 fi
 log "All $NODES replicas launched."
