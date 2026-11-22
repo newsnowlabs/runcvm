@@ -1,0 +1,155 @@
+# RunCVM's arm64 tests under KVM, on an AWS Graviton bare-metal host: GitHub's arm64 runners
+# have no /dev/kvm, and on EC2 only the .metal instances have it. A GitHub-hosted runner launches
+# the host (.github/arm64-metal/launch), which builds and installs RunCVM at the commit under
+# test; the runner then runs the tests on it over SSH, in 8 shards at once, gathers their
+# results, and terminates the host. .github/arm64-metal/README.md describes the AWS setup.
+#
+# AWS access is by OpenID Connect: the job assumes the IAM role named by the repository variable
+# AWS_ARM64_METAL_ROLE, whose trust policy admits this repository's main branch and its pull
+# requests, and which may change only resources tagged as RunCVM CI's. No AWS secret is stored.
+# Without the variable (e.g. in a fork) the job is skipped.
+#
+# What runs, and when:
+# - Nightly: every tier, on main.
+# - Pull requests labelled ci:arm64, when labelled and at each push while labelled: the core
+#   tier, or the tier that ci:extended or ci:all selects, as for ci.yml's tests. Not for drafts, nor with ci:skip, nor
+#   for pull requests from forks, which GitHub gives no OIDC token.
+# - By hand (workflow_dispatch, on main): the tests input gives tests/run's arguments.
+#
+# The host terminates itself after MAX_MINUTES, whatever happens to this job; the teardown
+# step terminates it at the end of the job, run or cancelled; and each run first reaps any host
+# of its group left past its expiry.
+name: arm64 metal
+
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+    inputs:
+      tests:
+        description: tests/run arguments (e.g. "--tier all", or tests by name)
+        default: --tier core
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TESTS: >-
+    ${{ inputs.tests
+      || (github.event_name == 'schedule' && '--tier all')
+      || (contains(github.event.pull_request.labels.*.name, 'ci:all') && '--tier all')
+      || (contains(github.event.pull_request.labels.*.name, 'ci:extended') && '--tier extended')
+      || '--tier core' }}
+  SHARDS: 8
+  GROUP: ci
+  RUN: gha-${{ github.run_id }}-${{ github.run_attempt }}
+  MAX_MINUTES: 120
+
+jobs:
+  test:
+    # Pull requests: labelled ci:arm64, not drafts, nor with ci:skip, nor from forks; for label
+    # changes, only adding ci:arm64.
+    if: >-
+      vars.AWS_ARM64_METAL_ROLE != '' && (
+        github.event_name != 'pull_request' || (
+          contains(github.event.pull_request.labels.*.name, 'ci:arm64') &&
+          !github.event.pull_request.draft &&
+          !contains(github.event.pull_request.labels.*.name, 'ci:skip') &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          (github.event.action != 'labeled' || github.event.label.name == 'ci:arm64')
+        )
+      )
+    concurrency:
+      group: arm64-metal-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    # Beyond MAX_MINUTES, so that teardown still runs after the host has gone.
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      # A session long enough for the whole job; teardown refreshes it regardless.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ARM64_METAL_ROLE }}
+          role-session-name: ${{ env.RUN }}
+          role-duration-seconds: 10800
+          aws-region: us-east-1
+
+      - name: SSH key and address
+        run: |
+          ssh-keygen -q -t ed25519 -N '' -C "$RUN" -f "$RUNNER_TEMP/host-key"
+          echo "SSH_CIDR=$(curl -fsS https://checkip.amazonaws.com)/32" >>"$GITHUB_ENV"
+
+      - name: Launch the host
+        id: launch
+        timeout-minutes: 45
+        env:
+          REAP: 1
+          REF: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          LOG: ${{ runner.temp }}/launch.jsonl
+        run: PUBKEY=$(cat "$RUNNER_TEMP/host-key.pub") .github/arm64-metal/launch launch
+
+      - name: Wait for the host to build and install RunCVM
+        timeout-minutes: 60
+        env:
+          IP: ${{ steps.launch.outputs.ip }}
+          KEY: ${{ runner.temp }}/host-key
+          WAIT_MINUTES: 55
+        run: .github/arm64-metal/launch wait
+
+      - name: Integration tests (${{ env.TESTS }}, ${{ env.SHARDS }} shards)
+        timeout-minutes: 60
+        env:
+          IP: ${{ steps.launch.outputs.ip }}
+        run: |
+          # TESTS holds several arguments, so it is split into words.
+          # shellcheck disable=SC2086
+          ssh -i "$RUNNER_TEMP/host-key" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            -o UserKnownHostsFile="$RUNNER_TEMP/arm64-metal-known-hosts" -o ServerAliveInterval=30 \
+            "ubuntu@$IP" bash -s -- "$SHARDS" /home/ubuntu/results $TESTS <.github/arm64-metal/run-shards
+
+      - name: Fetch the results
+        if: always() && steps.launch.outputs.ip
+        env:
+          IP: ${{ steps.launch.outputs.ip }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/results"
+          scp -r -i "$RUNNER_TEMP/host-key" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            -o UserKnownHostsFile="$RUNNER_TEMP/arm64-metal-known-hosts" \
+            "ubuntu@$IP:results/." "$RUNNER_TEMP/results/"
+
+      - name: Summarise the results
+        if: always() && steps.launch.outputs.ip
+        run: |
+          .github/arm64-metal/summarise "$RUNNER_TEMP/results" "$SHARDS" \
+            "${{ steps.launch.outputs.type }} in ${{ steps.launch.outputs.region }}, ${{ steps.launch.outputs.market }} at ${{ steps.launch.outputs.price }} USD/hour" || true
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm64-metal-results
+          path: |
+            ${{ runner.temp }}/results
+            ${{ runner.temp }}/launch.jsonl
+          if-no-files-found: ignore
+
+      # Fresh credentials, in case the job has outlasted the first session.
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: always()
+        with:
+          role-to-assume: ${{ vars.AWS_ARM64_METAL_ROLE }}
+          role-session-name: ${{ env.RUN }}-teardown
+          aws-region: us-east-1
+
+      - name: Tear down the host
+        if: always()
+        env:
+          REGION: ${{ steps.launch.outputs.region }}
+          LOG: ${{ runner.temp }}/launch.jsonl
+        run: .github/arm64-metal/launch teardown
