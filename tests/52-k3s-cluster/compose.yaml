@@ -9,12 +9,19 @@
 # - a kernel from RunCVM: the image's os-release names no distribution, so RUNCVM_KERNEL picks
 #   Debian's.
 # The kernel loads the modules k3s needs (overlay, br_netfilter, vxlan, netfilter's) on demand.
+#
+# k3s exits on some errors in its first seconds, expecting to be started again, as its systemd
+# units do (Restart=always): e.g. an agent whose load balancer, switching from the server's name
+# to its address, closes the connection of a request flannel's start-up makes. Each node
+# therefore restarts on failure, booting its VM afresh with its disk and state, and rejoins the
+# cluster.
 
 name: ${K3S_PROJECT:-runcvm-k3s}
 
 x-node: &node
   image: rancher/k3s:${K3S_VERSION:-v1.34.1-k3s1}
   runtime: runcvm
+  restart: on-failure
   mem_limit: ${K3S_NODE_MEMORY:-1536m}
   cpus: 2
   environment:
