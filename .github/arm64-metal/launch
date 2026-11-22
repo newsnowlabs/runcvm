@@ -179,7 +179,7 @@ scan() {
 }
 
 # Find the region's Ubuntu AMI and default VPC (creating the VPC where there is none), and its
-# group security group (creating it where there is none); add this run's SSH rule.
+# group security group (creating it where there is none).
 prepare() { # region
   local r=$1 sg
   [ -n "${PREPARED[$r]:-}" ] && return 0
@@ -203,11 +203,21 @@ prepare() { # region
       --query GroupId --output text 2>/dev/null)
     case "$sg" in sg-*) : ;; *) return 1 ;; esac ;;
   esac
-  # Revoked by teardown, or by reap after its expiry (the run's maximum, plus ten minutes).
-  aws --region "$r" ec2 authorize-security-group-ingress --group-id "$sg" --ip-permissions \
-    "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=$SSH_CIDR,Description=run $RUN until $(( $(date +%s) + MAX_MINUTES * 60 + 600 ))}]" \
-    >/dev/null 2>&1 || return 1
   SG[$r]=$sg; PREPARED[$r]=1
+}
+
+# Add this run's SSH rule to the region's group security group: only in the region where the
+# host started, so that teardown, which looks there, revokes it; otherwise reap does, after its
+# expiry (the run's maximum, plus ten minutes). A rule for the same addresses left by another
+# run is replaced, so that the rule carries this run's description and expiry.
+allow_ssh() { # region
+  local r=$1 rule out
+  rule="IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=$SSH_CIDR,Description=run $RUN until $(( $(date +%s) + MAX_MINUTES * 60 + 600 ))}]"
+  out=$(aws --region "$r" ec2 authorize-security-group-ingress --group-id "${SG[$r]}" --ip-permissions "$rule" 2>&1) && return 0
+  case "$out" in *InvalidPermission.Duplicate*) : ;; *) return 1 ;; esac
+  aws --region "$r" ec2 revoke-security-group-ingress --group-id "${SG[$r]}" \
+    --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=$SSH_CIDR}]" >/dev/null 2>&1 &&
+    aws --region "$r" ec2 authorize-security-group-ingress --group-id "${SG[$r]}" --ip-permissions "$rule" >/dev/null 2>&1
 }
 
 write_userdata() {
@@ -288,6 +298,11 @@ attempt() { # market region az type price
     fi
     sleep 10
   done
+  if ! allow_ssh "$region"; then
+    aws --region "$region" ec2 terminate-instances --instance-ids "$id" >/dev/null 2>&1
+    logrec market="$market" region="$region" az="$az" type="$type" price="$price" id="$id" outcome=ssh-rule-failed
+    INFLIGHT_ID=""; return 2
+  fi
   L_ID=$id; L_REGION=$region; L_TYPE=$type; L_MARKET=$market; L_PRICE=$price
   L_IP=$(aws --region "$region" ec2 describe-instances --instance-ids "$id" \
     --query 'Reservations[0].Instances[0].PublicIpAddress' --output text 2>/dev/null)
