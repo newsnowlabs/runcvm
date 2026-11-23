@@ -25,8 +25,8 @@
 # - launch terminates an instance it started but has not yet reported, on any exit, so that an
 #   interrupted launch leaves none behind;
 # - teardown, which the workflow runs whatever happens before it, terminates the run's host;
-# - reap, which the workflow runs before launching, terminates any host of its group whose
-#   Expires time has passed by ten minutes, whatever left it.
+# - the reap launch runs first when REAP=1 (as the workflow sets it) terminates any host of its
+#   group whose Expires time has passed by ten minutes, whatever left it.
 # SSH reaches a host only from the address that launched it: a rule per run, in the group's
 # security group, whose description holds the run and an expiry, by which reap revokes it.
 #

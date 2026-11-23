@@ -6,8 +6,8 @@
 # Usage: run-shards SHARDS RESULTS [tests/run arguments...]
 #
 # On a c6g.metal (64 CPUs, 128 GB), 8 shards of up to RUNCVM_TEST_JOBS=3 Container/VMs each
-# keep the host busy without overcommitting it: with more, the load passes twice the CPU count,
-# and tests start to time out.
+# keep the host busy without overcommitting it: more would push the load past twice the CPU
+# count, where Container/VMs contend for CPU and time out.
 
 shards=$1 results=$2
 shift 2

@@ -5,8 +5,8 @@ AWS's bare-metal arm64 (Graviton) instances, the `.metal` types, do. The workflo
 `.github/workflows/arm64-metal.yml` therefore runs RunCVM's arm64 tests on a `.metal` host that
 it launches for the run and terminates afterwards:
 
-1. A GitHub-hosted runner assumes an AWS IAM role by OpenID Connect (no AWS secret is stored in
-   GitHub).
+1. A GitHub-hosted runner assumes an AWS IAM role by OpenID Connect (no AWS credential is stored
+   in GitHub).
 2. `launch launch` reaps any host of its group left past its expiry (the workflow sets
    `REAP=1`), finds the cheapest spot
    offer for the instance types in `TYPES` under `PRICE_CAP` across every region enabled in the
@@ -34,8 +34,8 @@ requests from forks are skipped: GitHub gives them no OIDC token.
 - `launch` terminates an instance it started but has not yet reported, on any exit.
 - The workflow's teardown step runs at the end of the job, whether the job passed, failed or was
   cancelled.
-- `launch reap`, which the workflow runs before each launch (`REAP=1`), terminates any host of
-  its group (tag `Group`) whose `Expires` tag has passed by ten minutes. Groups keep CI's hosts (`ci`) apart from those launched
+- The reap `launch launch` runs first when `REAP=1` (as the workflow sets it) terminates any host
+  of its group (tag `Group`) whose `Expires` tag has passed by ten minutes. Groups keep CI's hosts (`ci`) apart from those launched
   by hand (`manual`, the default), so that neither reaps the other's.
 
 SSH reaches a host only from the address that launched it: each run adds a rule for that address
@@ -169,9 +169,10 @@ and roles alike. In what follows, replace `ACCOUNT_ID` with the AWS account's id
 }
 ```
 
-`launch` itself uses no EC2 key pairs, quotas or pricing: the statements for key pairs
-(`ImportTaggedKeyPair`, `DeleteKeyPair`, and the key pairs in `ReadOnlyDiscovery` and
-`RunInstancesReference`) and for quotas and pricing serve a maintainer's own tools and checks,
+`launch` itself uses no EC2 key pairs, Service Quotas or Pricing API (it reads spot prices
+through EC2's own `DescribeSpotPriceHistory`, in `ReadOnlyDiscovery`): the statements for key
+pairs (`ImportTaggedKeyPair`, `DeleteKeyPair`, and the key pairs in `ReadOnlyDiscovery` and
+`RunInstancesReference`) and for the Service Quotas and Pricing APIs serve a maintainer's own tools and checks,
 under the same tag rules, and may be left out where none are used. `CreateDefaultNetworking`
 cannot be tag-scoped, as the VPC does not exist yet; it creates only a region's free default
 VPC and its subnets, untagged.
