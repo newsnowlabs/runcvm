@@ -40,8 +40,9 @@ requests from forks are skipped: GitHub gives them no OIDC token.
   of its group (tag `Group`) whose `Expires` tag has passed by ten minutes. Groups keep CI's hosts (`ci`) apart from those launched
   by hand (`manual`, the default), so that neither reaps the other's.
 
-SSH reaches a host only from the address that launched it: each run adds a rule for that address
-to its group's security group (`runcvm-ci-<group>`), which teardown revokes, as does reap once the
+SSH reaches a host only from the addresses `SSH_CIDR` allows (the launching host's own address by
+default): each run adds a rule for them to its group's security group (`runcvm-ci-<group>`), which
+teardown revokes, as does reap once the
 rule's recorded expiry has passed. Each run's key pair is generated for the run, and its public key
 is given to the host in its user data, so no EC2 key pair is involved.
 
@@ -50,7 +51,7 @@ is given to the host in its user data, so no EC2 key pair is involved.
 Every instance, volume and security group `launch` creates is tagged `Project=runcvm-ci`. The
 IAM policy below lets it create instances, volumes and security groups only with that tag, add
 tags only as it creates them, and terminate, delete or change only resources carrying it, so it
-cannot touch anything else in the account. It lets it launch only the instance types in
+cannot terminate, delete or modify anything else in the account. It lets it launch only the instance types in
 `TYPES` (`c6g.metal` and `c7g.metal`), so that leaked credentials could not launch costlier
 ones; to consider another type, add it to both. The type condition has a statement of its own,
 apart from the volume's: a volume has no instance type, so the condition would refuse it. Its
@@ -192,7 +193,7 @@ aws iam create-open-id-connect-provider \
   --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com
 ```
 
-Create the role with this trust policy (`trust.json`), which admits this repository's `main`
+Create the role with this trust policy, saved as `trust.json`, which admits this repository's `main`
 branch (nightly and manual runs) and its pull requests, and nothing else. GitHub gives no OIDC
 token to a pull request from a fork, so `pull_request` admits only pull requests from this
 repository's own branches, which only its writers can push:

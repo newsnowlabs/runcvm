@@ -143,7 +143,7 @@ jobs:
             ${{ runner.temp }}/launch.jsonl
           if-no-files-found: ignore
 
-      # Fresh credentials, in case the job has outlasted the first session.
+      # Re-assume the role so the teardown step runs under its own session.
       - uses: aws-actions/configure-aws-credentials@v4
         if: always()
         with:
