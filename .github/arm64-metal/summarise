@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Summarises the results of a run of run-shards: reads RESULTS/shard-*/results.json, prints a
+GitHub Actions error annotation for each test that failed, timed out or was interrupted (and for
+each shard whose results are missing or incomplete), and writes a summary in Markdown to
+$GITHUB_STEP_SUMMARY, or to stdout where that is unset. Exits 1 if there is any such test or
+shard.
+
+Usage: summarise RESULTS SHARDS [HOST-DESCRIPTION]
+"""
+
+import json
+import os
+import sys
+
+
+def annotate(title, message):
+    # Workflow commands take a message on one line, with %, CR and LF escaped, and properties
+    # (title) with ':' and ',' escaped too.
+    def escape(s):
+        return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print("::error title=%s::%s" % (escape(title).replace(":", "%3A").replace(",", "%2C"), escape(message)))
+
+
+def main(argv):
+    results_dir, shards = argv[1], int(argv[2])
+    host = argv[3] if len(argv) > 3 else ""
+    tests, problems = [], []
+    for i in range(1, shards + 1):
+        path = os.path.join(results_dir, "shard-%d" % i, "results.json")
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, ValueError) as e:
+            problems.append("shard %d/%d: no results (%s)" % (i, shards, e))
+            continue
+        if not data.get("complete"):
+            problems.append("shard %d/%d: incomplete results, stopped during %s" % (i, shards, data.get("running") or "setup"))
+        for t in data.get("tests", []):
+            t["shard"] = i
+            tests.append(t)
+
+    counts = {s: sum(1 for t in tests if t["status"] == s) for s in ("pass", "fail", "timeout", "skip", "interrupted")}
+    failed = [t for t in tests if t["status"] in ("fail", "timeout", "interrupted")]
+    for t in failed:
+        checks = [c["description"] for c in t.get("checks", []) if c.get("status") not in ("PASS", "SKIP")]
+        annotate("arm64 metal: %s %s" % (t["name"], t["status"].upper()),
+                 "; ".join(filter(None, [t.get("reason")] + checks)) or "exit code %s" % t.get("exit_code"))
+    for p in problems:
+        annotate("arm64 metal: results", p)
+
+    lines = ["## arm64 metal tests", ""]
+    if host:
+        lines += [host, ""]
+    lines += ["| passed | failed | timed out | skipped | interrupted |", "|---|---|---|---|---|",
+              "| %(pass)d | %(fail)d | %(timeout)d | %(skip)d | %(interrupted)d |" % counts, ""]
+    if failed or problems:
+        lines += ["### Not passed", ""]
+        lines += ["- `%s` (shard %d): %s%s" % (t["name"], t["shard"], t["status"].upper(),
+                                               ", " + t["reason"] if t.get("reason") else "") for t in failed]
+        lines += ["- %s" % p for p in problems]
+        lines += [""]
+    slowest = sorted((t for t in tests if t.get("duration")), key=lambda t: -t["duration"])[:5]
+    if slowest:
+        lines += ["### Slowest tests", ""]
+        lines += ["- `%s`: %ss" % (t["name"], t["duration"]) for t in slowest]
+        lines += [""]
+    out = os.environ.get("GITHUB_STEP_SUMMARY")
+    if out:
+        with open(out, "a") as f:
+            f.write("\n".join(lines) + "\n")
+    else:
+        print("\n".join(lines))
+    return 1 if failed or problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

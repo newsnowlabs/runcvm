@@ -1,0 +1,497 @@
+#!/bin/bash
+# Launches, waits for and tears down an AWS Graviton bare-metal host for RunCVM's arm64 tests:
+# a .metal instance, which has /dev/kvm, so that RunCVM's Container/VMs run there under KVM.
+# GitHub Actions runs it (.github/workflows/arm64-metal.yml), and so can a maintainer, by hand.
+#
+# It launches spot capacity, choosing where by AWS's spot placement score (how likely a pool is
+# to have capacity and run without interruption) and then by price: the AZs AWS scores highest
+# come first, cheapest within a score, and the rest follow cheapest-first. It repeats the whole
+# ordered pass SPOT_PASSES times, since capacity frees up over minutes, and falls back to
+# on-demand only when every spot attempt fails.
+#
+# Usage: launch {scan|launch|wait|teardown|reap}
+#   scan      print the ordered candidates, "score price region az type", best first
+#   launch    launch a host for run $RUN, which builds and installs RunCVM at $REF; print its
+#             id, region and address, and under GitHub Actions set them as step outputs
+#   wait      wait for the host at $IP to finish building and installing RunCVM, then print
+#             its setup log
+#   teardown  terminate run $RUN's host and revoke its SSH rule
+#   reap      terminate group $GROUP's hosts past their expiry, and revoke its expired SSH rules
+#
+# Every instance, volume and security group it creates is tagged Project=$PROJECT_TAG, which its
+# IAM policy requires of them, and of any resource it changes or removes (see README.md); a
+# region's default VPC, which it creates where there is none, is not tagged. A host is also
+# tagged Group, Run and Expires (a Unix time).
+#
+# A host does not stay up for long after its run:
+# - the host schedules its own poweroff MAX_MINUTES after boot, before anything else, and is
+#   launched with shutdown behaviour "terminate", so the poweroff terminates it; its root volume
+#   is deleted on termination;
+# - launch terminates an instance it started but has not yet reported, on any exit, so that an
+#   interrupted launch leaves none behind;
+# - teardown, which the workflow runs whatever happens before it, terminates the run's host;
+# - the reap launch runs first when REAP=1 (as the workflow sets it) terminates any host of its
+#   group whose Expires time has passed by ten minutes, whatever left it.
+# SSH reaches a host only from the addresses SSH_CIDR allows (by default the launching host's own
+# address): a rule per run, in the group's security group, whose description holds the run and an
+# expiry, by which reap revokes it.
+#
+# Settings (environment):
+#   TYPES          instance types to consider              (default "c6g.metal c7g.metal")
+#   SPOT_PASSES    spot passes over the ordered candidates before on-demand   (default 1)
+#   SPOT_RETRY_DELAY  seconds between spot passes           (default 45)
+#   MIN_SCORE      a placement score below this is treated as unscored (tail) (default 1)
+#   PRICE_CAP_PCT  skip spot offers above this % of the region's on-demand price; 100 disables
+#                  the cap and its Pricing API lookup       (default 100)
+#   FALLBACK       with no spot capacity: ondemand, or fail  (default ondemand)
+#   MAX_MINUTES    the host's lifetime, after which it terminates itself      (default 120)
+#   GROUP          resource group: reap acts only within it  (default manual)
+#   REAP           1: reap before launching                  (default 0)
+#   REGIONS        regions to consider                       (default: every enabled region)
+#   SKIP_REGIONS   regions to leave out                      (default: none)
+#   PROJECT_TAG    the tag value the IAM policy requires      (default runcvm-ci)
+#   RUN            the run's id                               (default manual-<UTC time>)
+#   REGION         teardown: the run's region, saving a search of every region
+#   REPO, REF      the GitHub repository and the ref or commit that the host builds
+#                  (default newsnowlabs/runcvm, main)
+#   PUBKEY         launch: the SSH public key the host accepts for user ubuntu  (required)
+#   SSH_CIDR       launch: the addresses SSH accepts     (default: this host's public address/32)
+#   IP, KEY        wait: the host's address, and the SSH private key's file     (required)
+#   WAIT_MINUTES   wait: how long to wait for the host's setup   (default 60)
+#   LOG            JSON-lines record of each launch attempt's outcome (default
+#                  ${TMPDIR:-/tmp}/arm64-metal-launch.jsonl), for spotting regions that rarely
+#                  have spot capacity, to list in SKIP_REGIONS
+
+set -o pipefail
+
+TYPES=${TYPES:-c6g.metal c7g.metal}
+SPOT_PASSES=${SPOT_PASSES:-1}
+SPOT_RETRY_DELAY=${SPOT_RETRY_DELAY:-45}
+MIN_SCORE=${MIN_SCORE:-1}
+PRICE_CAP_PCT=${PRICE_CAP_PCT:-100}
+FALLBACK=${FALLBACK:-ondemand}
+MAX_MINUTES=${MAX_MINUTES:-120}
+GROUP=${GROUP:-manual}
+REAP=${REAP:-0}
+SKIP_REGIONS=${SKIP_REGIONS:-}
+PROJECT_TAG=${PROJECT_TAG:-runcvm-ci}
+RUN=${RUN:-manual-$(date -u +%Y%m%d-%H%M%S)}
+REPO=${REPO:-newsnowlabs/runcvm}
+REF=${REF:-main}
+WAIT_MINUTES=${WAIT_MINUTES:-60}
+LOG=${LOG:-${TMPDIR:-/tmp}/arm64-metal-launch.jsonl}
+NAME=runcvm-ci
+SG_NAME=$NAME-$GROUP
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="${TMPDIR:-/tmp}/arm64-metal-known-hosts"
+          -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o BatchMode=yes)
+
+# Every call names its region: a default (e.g. CloudShell's AWS_REGION) would only misdirect.
+# The placement-score and pricing calls still need an endpoint, for which they name a region.
+unset AWS_REGION AWS_DEFAULT_REGION
+API_REGION=us-east-1
+
+declare -A AMI VPC SG PREPARED SKIPPED
+INFLIGHT_ID="" INFLIGHT_REGION=""   # an instance started but not yet reported
+UD=""
+
+logrec() { # key=value ...: append one JSON object to $LOG, and show it on stderr
+  local out kv k v
+  out="{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"run\":\"$RUN\",\"group\":\"$GROUP\""
+  for kv in "$@"; do
+    k=${kv%%=*}; v=${kv#*=}
+    v=${v//\\/}; v=${v//\"/}; v=${v//$'\n'/ }; v=${v//$'\r'/}
+    out="$out,\"$k\":\"$v\""
+  done
+  printf '%s}\n' "$out" >>"$LOG"
+  printf 'log: %s}\n' "$out" >&2
+}
+
+cleanup() {
+  local rc=$?
+  trap - EXIT INT TERM QUIT
+  if [ -n "$INFLIGHT_ID" ]; then
+    echo "Terminating instance $INFLIGHT_ID ($INFLIGHT_REGION), started but not reported" >&2
+    aws --region "$INFLIGHT_REGION" ec2 terminate-instances --instance-ids "$INFLIGHT_ID" >/dev/null 2>&1
+    logrec region="$INFLIGHT_REGION" id="$INFLIGHT_ID" outcome=cleanup-terminated
+  fi
+  [ -n "$UD" ] && rm -f "$UD"
+  exit "$rc"
+}
+
+resolve_regions() {
+  [ -n "${REGIONS:-}" ] || REGIONS=$(aws ec2 describe-regions --region "$API_REGION" --query 'Regions[].RegionName' --output text)
+  local out="" r s
+  for r in $REGIONS; do
+    for s in $SKIP_REGIONS; do [ "$r" = "$s" ] && continue 2; done
+    out="$out $r"
+  done
+  REGIONS=$out
+}
+
+# The group's security group in a region, if it exists.
+group_sg() { # region
+  aws --region "$1" ec2 describe-security-groups \
+    --filters Name=group-name,Values="$SG_NAME" Name=tag:Project,Values="$PROJECT_TAG" \
+    --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null
+}
+
+# Revoke the SSH rules of the security group $2 in region $1 whose description matches the
+# pattern $3; with $3 "expired", those whose expiry has passed.
+revoke_rules() { # region sg pattern
+  local r=$1 sg=$2 pat=$3 now cidr desc until
+  now=$(date +%s)
+  while read -r cidr desc; do
+    [ -n "$cidr" ] && [ "$cidr" != None ] || continue
+    if [ "$pat" = expired ]; then
+      until=${desc##*until }; until=${until%% *}
+      case "$until" in ''|*[!0-9]*) continue ;; esac
+      [ "$now" -gt "$until" ] || continue
+    else
+      case "$desc" in *"$pat"*) : ;; *) continue ;; esac
+    fi
+    aws --region "$r" ec2 revoke-security-group-ingress --group-id "$sg" \
+      --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=$cidr}]" >/dev/null 2>&1 &&
+      logrec region="$r" outcome=revoked detail="$cidr $desc"
+  done < <(aws --region "$r" ec2 describe-security-groups --group-ids "$sg" \
+             --query 'SecurityGroups[0].IpPermissions[?FromPort==`22`].IpRanges[].[CidrIp,Description]' \
+             --output text 2>/dev/null)
+}
+
+do_reap() {
+  resolve_regions
+  local r now id expires run sg
+  now=$(date +%s)
+  for r in $REGIONS; do
+    while read -r id expires run; do
+      [ -n "$id" ] && [ "$id" != None ] || continue
+      case "$expires" in ''|*[!0-9]*) expires=0 ;; esac
+      [ "$now" -gt $((expires + 600)) ] || continue
+      aws --region "$r" ec2 terminate-instances --instance-ids "$id" >/dev/null 2>&1
+      logrec region="$r" id="$id" outcome=reaped detail="run=$run expires=$expires"
+    done < <(aws --region "$r" ec2 describe-instances \
+               --filters Name=tag:Project,Values="$PROJECT_TAG" Name=tag:Group,Values="$GROUP" \
+                         Name=instance-state-name,Values=pending,running,stopping,stopped \
+               --query "Reservations[].Instances[].[InstanceId, Tags[?Key=='Expires']|[0].Value, Tags[?Key=='Run']|[0].Value]" \
+               --output text 2>/dev/null)
+    sg=$(group_sg "$r")
+    case "$sg" in sg-*) revoke_rules "$r" "$sg" expired ;; esac
+  done
+}
+
+# Print "price region az type" for each AZ and type's cheapest current spot price, across all
+# regions, cheapest first.
+spot_prices() {
+  local r
+  for r in $REGIONS; do
+    aws ec2 describe-spot-price-history --region "$r" \
+      --instance-types $TYPES --product-descriptions Linux/UNIX --start-time "$(date -u +%Y-%m-%dT%H:%M:%S)" \
+      --query "SpotPriceHistory[].[SpotPrice,'$r',AvailabilityZone,InstanceType]" --output text 2>/dev/null
+  done | awk '{ k = $3 " " $4; if (!(k in p) || $1 < p[k]) { p[k] = $1; line[k] = $0 } }
+              END { for (k in line) print line[k] }' | sort -n
+}
+
+# Print "region azname score" for the AZs AWS scores most likely to have spot capacity for the
+# types (at most ten, highest first). Empty if the score call is unavailable, so that selection
+# falls back to price alone. GetSpotPlacementScores returns AZ IDs (use1-az6), which are mapped
+# to AZ names (us-east-1d) per scored region, since launching needs the name.
+placement_scores() {
+  local a scored r b=""
+  a=$(aws ec2 get-spot-placement-scores --region "$API_REGION" --instance-types $TYPES \
+        --target-capacity 1 --target-capacity-unit-type units --single-availability-zone \
+        --region-names $REGIONS --max-results 10 \
+        --query 'SpotPlacementScores[].[Region,AvailabilityZoneId,Score]' --output text 2>/dev/null) || return 0
+  [ -n "$a" ] || return 0
+  scored=$(printf '%s\n' "$a" | cut -f1 | sort -u)
+  for r in $scored; do
+    b+=$(aws --region "$r" ec2 describe-availability-zones \
+      --query "AvailabilityZones[].['$r',ZoneId,ZoneName]" --output text 2>/dev/null)$'\n'
+  done
+  awk 'FNR==NR { name[$1,$2]=$3; next } { az=name[$1,$2]; if (az!="") print $1, az, $3 }' \
+    <(printf '%s\n' "$b") <(printf '%s\n' "$a")
+}
+
+# The region's on-demand price (USD/hour) for a type, from the Pricing API; empty on failure.
+ondemand_price() { # region type
+  aws pricing get-products --region "$API_REGION" --service-code AmazonEC2 \
+    --filters "Type=TERM_MATCH,Field=instanceType,Value=$2" "Type=TERM_MATCH,Field=regionCode,Value=$1" \
+      "Type=TERM_MATCH,Field=tenancy,Value=Shared" "Type=TERM_MATCH,Field=operatingSystem,Value=Linux" \
+      "Type=TERM_MATCH,Field=capacitystatus,Value=Used" \
+    --query 'PriceList[0]' --output text 2>/dev/null | python3 -I -c '
+import json, sys
+try:
+    d = json.load(sys.stdin); term = list(d["terms"]["OnDemand"].values())[0]
+    print(list(term["priceDimensions"].values())[0]["pricePerUnit"]["USD"])
+except Exception:
+    pass' 2>/dev/null
+}
+
+# Keep "price region az type" offers at or under PRICE_CAP_PCT% of their region/type's on-demand
+# price; an offer whose on-demand price cannot be found is kept. One Pricing lookup per distinct
+# region/type, cached.
+apply_cap() { # offers on stdin
+  local -A OD
+  local offers price region az type key
+  offers=$(cat)
+  while read -r region type; do
+    [ -n "$region" ] || continue
+    OD[$region/$type]=$(ondemand_price "$region" "$type")
+  done < <(printf '%s\n' "$offers" | awk '{print $2, $4}' | sort -u)
+  while read -r price region az type; do
+    [ -n "$price" ] || continue
+    key=${OD[$region/$type]}
+    case "$key" in ''|0) printf '%s %s %s %s\n' "$price" "$region" "$az" "$type"; continue ;; esac
+    awk -v p="$price" -v o="$key" -v pct="$PRICE_CAP_PCT" 'BEGIN { exit !(p+0 <= o*pct/100) }' &&
+      printf '%s %s %s %s\n' "$price" "$region" "$az" "$type"
+  done < <(printf '%s\n' "$offers")
+}
+
+# Print "score price region az type", best first: AZs scoring at least MIN_SCORE come first by
+# score then price, the rest (unscored, or below MIN_SCORE) follow cheapest-first.
+score_offers() {
+  local offers scores
+  offers=$(spot_prices)
+  [ "${PRICE_CAP_PCT:-100}" -lt 100 ] 2>/dev/null && offers=$(printf '%s\n' "$offers" | apply_cap)
+  scores=$(placement_scores)
+  awk -v min="$MIN_SCORE" 'FNR==NR { s[$1,$2]=$3; next }
+       { sc = s[$2,$3] + 0; if (sc < min) sc = 0; print sc, $0 }' \
+    <(printf '%s\n' "$scores") <(printf '%s\n' "$offers") | sort -k1,1nr -k2,2n
+}
+
+# Find the region's Ubuntu AMI and default VPC (creating the VPC where there is none), and its
+# group security group (creating it where there is none).
+prepare() { # region
+  local r=$1 sg
+  [ -n "${PREPARED[$r]:-}" ] && return 0
+  AMI[$r]=$(aws --region "$r" ssm get-parameter \
+    --name /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id \
+    --query Parameter.Value --output text 2>/dev/null)
+  case "${AMI[$r]}" in ami-*) : ;; *) return 1 ;; esac
+  VPC[$r]=$(aws --region "$r" ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text 2>/dev/null)
+  case "${VPC[$r]}" in
+    vpc-*) : ;;
+    *) # A default VPC (with a subnet per AZ, an internet gateway and routes) is free, and stays
+       # for later runs; this covers a newly enabled region, or one whose default VPC was deleted.
+       VPC[$r]=$(aws --region "$r" ec2 create-default-vpc --query Vpc.VpcId --output text 2>/dev/null)
+       case "${VPC[$r]}" in vpc-*) logrec region="$r" outcome=created-default-vpc detail="${VPC[$r]}" ;; *) return 1 ;; esac ;;
+  esac
+  sg=$(group_sg "$r")
+  case "$sg" in sg-*) : ;; *)
+    sg=$(aws --region "$r" ec2 create-security-group --vpc-id "${VPC[$r]}" --group-name "$SG_NAME" \
+      --description "RunCVM arm64 metal hosts, group $GROUP: SSH" \
+      --tag-specifications "ResourceType=security-group,Tags=[{Key=Project,Value=$PROJECT_TAG},{Key=Group,Value=$GROUP}]" \
+      --query GroupId --output text 2>/dev/null)
+    case "$sg" in sg-*) : ;; *) return 1 ;; esac ;;
+  esac
+  SG[$r]=$sg; PREPARED[$r]=1
+}
+
+# Add this run's SSH rule to the region's group security group: only in the region where the
+# host started, so that teardown, which looks there, revokes it; otherwise reap does, after its
+# expiry (the run's maximum, plus ten minutes). A rule for the same addresses left by another
+# run is replaced, so that the rule carries this run's description and expiry.
+allow_ssh() { # region
+  local r=$1 rule out
+  rule="IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=$SSH_CIDR,Description=run $RUN until $(( $(date +%s) + MAX_MINUTES * 60 + 600 ))}]"
+  out=$(aws --region "$r" ec2 authorize-security-group-ingress --group-id "${SG[$r]}" --ip-permissions "$rule" 2>&1) && return 0
+  case "$out" in *InvalidPermission.Duplicate*) : ;; *) return 1 ;; esac
+  aws --region "$r" ec2 revoke-security-group-ingress --group-id "${SG[$r]}" \
+    --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=$SSH_CIDR}]" >/dev/null 2>&1 &&
+    aws --region "$r" ec2 authorize-security-group-ingress --group-id "${SG[$r]}" --ip-permissions "$rule" >/dev/null 2>&1
+}
+
+write_userdata() {
+  UD=$(mktemp)
+  cat >"$UD" <<EOF
+#!/bin/bash
+# Builds and installs RunCVM at $REF, from $REPO, under the latest Docker release.
+# Progress: /var/log/runcvm-setup.log; outcome: /var/log/runcvm-setup.done or .failed.
+exec >/var/log/runcvm-setup.log 2>&1
+set -x
+# First, so that nothing after it can keep the host running: the host was launched with
+# shutdown behaviour "terminate", so this poweroff terminates it.
+shutdown -h +$MAX_MINUTES "RunCVM arm64 metal host: lifetime reached" || true
+install -d -o ubuntu -g ubuntu -m 700 /home/ubuntu/.ssh
+echo '$PUBKEY' >>/home/ubuntu/.ssh/authorized_keys
+chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
+chmod 600 /home/ubuntu/.ssh/authorized_keys
+trap 'touch /var/log/runcvm-setup.failed' ERR
+set -e
+curl -fsSL https://get.docker.com | sh
+usermod -aG docker,kvm ubuntu
+ls -l /dev/kvm
+sudo -u ubuntu git init -q /home/ubuntu/runcvm
+cd /home/ubuntu/runcvm
+sudo -u ubuntu git fetch -q --depth 1 https://github.com/$REPO.git $REF
+sudo -u ubuntu git checkout -q FETCH_HEAD
+sudo -u ubuntu git log -1 --format='%H %s'
+./build/build.sh --tag ci
+REPO=newsnowlabs/runcvm:ci ./runcvm-scripts/runcvm-install-runtime.sh </dev/null
+docker run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=kvm alpine uname -mr
+touch /var/log/runcvm-setup.done
+EOF
+}
+
+# Launch one offer. Returns 0 with the instance running, 2 where the failure rules out the whole
+# region, and 1 otherwise.
+attempt() { # market region az type price score
+  local market=$1 region=$2 az=$3 type=$4 price=$5 score=$6 subnet out id state start expires
+  local market_opt=()
+  prepare "$region" || { logrec market="$market" region="$region" az="$az" type="$type" score="$score" outcome=prepare-failed; return 2; }
+  subnet=$(aws --region "$region" ec2 describe-subnets \
+    --filters Name=vpc-id,Values="${VPC[$region]}" Name=availability-zone,Values="$az" Name=default-for-az,Values=true \
+    --query 'Subnets[0].SubnetId' --output text 2>/dev/null)
+  case "$subnet" in subnet-*) : ;; *) logrec market="$market" region="$region" az="$az" type="$type" outcome=no-default-subnet; return 1 ;; esac
+  [ "$market" = spot ] && market_opt=(--instance-market-options 'MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}')
+  expires=$(( $(date +%s) + MAX_MINUTES * 60 ))
+  out=$(aws --region "$region" ec2 run-instances --image-id "${AMI[$region]}" --instance-type "$type" \
+    --network-interfaces "DeviceIndex=0,SubnetId=$subnet,Groups=${SG[$region]},AssociatePublicIpAddress=true" \
+    --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":100,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
+    "${market_opt[@]}" --instance-initiated-shutdown-behavior terminate --user-data "file://$UD" \
+    --tag-specifications \
+      "ResourceType=instance,Tags=[{Key=Project,Value=$PROJECT_TAG},{Key=Group,Value=$GROUP},{Key=Name,Value=$NAME-$GROUP},{Key=Run,Value=$RUN},{Key=Expires,Value=$expires}]" \
+      "ResourceType=volume,Tags=[{Key=Project,Value=$PROJECT_TAG},{Key=Group,Value=$GROUP},{Key=Run,Value=$RUN}]" \
+    --query 'Instances[0].InstanceId' --output text 2>&1)
+  case "$out" in
+    i-*) : ;;
+    *) logrec market="$market" region="$region" az="$az" type="$type" price="$price" score="$score" outcome=launch-error \
+         detail="$(printf '%s\n' "$out" | grep -o 'An error occurred ([A-Za-z.]*)' | tr '\n' ' ')"
+       case "$out" in *VcpuLimitExceeded*|*MaxSpotInstanceCountExceeded*|*UnauthorizedOperation*|*OptInRequired*) return 2 ;; esac
+       return 1 ;;
+  esac
+  id=$out; INFLIGHT_ID=$id; INFLIGHT_REGION=$region; start=$(date +%s)
+  while :; do
+    state=$(aws --region "$region" ec2 describe-instances --instance-ids "$id" \
+      --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null)
+    case "$state" in
+      running) break ;;
+      shutting-down|terminated|stopping|stopped)
+        logrec market="$market" region="$region" az="$az" type="$type" price="$price" id="$id" outcome=terminated-early \
+          detail="$(aws --region "$region" ec2 describe-instances --instance-ids "$id" \
+                      --query 'Reservations[0].Instances[0].StateReason.Message' --output text 2>/dev/null)"
+        INFLIGHT_ID=""; return 1 ;;
+    esac
+    if [ $(( $(date +%s) - start )) -gt 900 ]; then
+      aws --region "$region" ec2 terminate-instances --instance-ids "$id" >/dev/null 2>&1
+      logrec market="$market" region="$region" az="$az" type="$type" price="$price" id="$id" outcome=timeout-terminated
+      INFLIGHT_ID=""; return 1
+    fi
+    sleep 10
+  done
+  if ! allow_ssh "$region"; then
+    aws --region "$region" ec2 terminate-instances --instance-ids "$id" >/dev/null 2>&1
+    logrec market="$market" region="$region" az="$az" type="$type" price="$price" id="$id" outcome=ssh-rule-failed
+    INFLIGHT_ID=""; return 2
+  fi
+  L_ID=$id; L_REGION=$region; L_TYPE=$type; L_MARKET=$market; L_PRICE=$price; L_SCORE=$score
+  L_IP=$(aws --region "$region" ec2 describe-instances --instance-ids "$id" \
+    --query 'Reservations[0].Instances[0].PublicIpAddress' --output text 2>/dev/null)
+  logrec market="$market" region="$region" az="$az" type="$type" price="$price" score="$score" id="$id" ip="$L_IP" outcome=launched
+}
+
+# Try each candidate in turn, skipping regions that an attempt has ruled out. The candidates are
+# read from file descriptor 3, leaving stdin to the commands an attempt runs.
+try_offers() { # market, then "score price region az type" lines on fd 3
+  local market=$1 score price region az type
+  while read -r -u 3 score price region az type; do
+    [ -n "$region" ] && [ -z "${SKIPPED[$region]:-}" ] || continue
+    attempt "$market" "$region" "$az" "$type" "$([ "$market" = spot ] && echo "$price" || echo ondemand)" "$score"
+    case $? in
+      0) return 0 ;;
+      2) SKIPPED[$region]=1 ;;
+    esac
+  done
+  return 1
+}
+
+do_scan() {
+  resolve_regions
+  score_offers
+}
+
+do_launch() {
+  [ -n "${PUBKEY:-}" ] || { echo "launch: PUBKEY is required" >&2; exit 2; }
+  case "$PUBKEY" in *"'"*|*$'\n'*) echo "launch: PUBKEY must be one line, without quotes" >&2; exit 2 ;; esac
+  trap cleanup EXIT INT TERM QUIT
+  [ -n "${SSH_CIDR:-}" ] || SSH_CIDR=$(curl -fsS https://checkip.amazonaws.com)/32
+  case "$SSH_CIDR" in [0-9]*/[0-9]*) : ;; *) echo "launch: cannot find this host's public address; set SSH_CIDR" >&2; exit 2 ;; esac
+  resolve_regions
+  [ "$REAP" = 1 ] && do_reap
+  write_userdata
+  local pass launched=0
+  for (( pass=1; pass<=SPOT_PASSES; pass++ )); do
+    SKIPPED=()
+    if try_offers spot 3< <(score_offers); then launched=1; break; fi
+    logrec outcome=spot-pass-failed detail="pass $pass/$SPOT_PASSES"
+    [ "$pass" -lt "$SPOT_PASSES" ] && sleep "$SPOT_RETRY_DELAY"
+  done
+  if [ "$launched" = 0 ]; then
+    logrec outcome=spot-exhausted detail="passes $SPOT_PASSES"
+    SKIPPED=()   # a region's spot limits do not rule out its on-demand capacity
+    # On-demand fallback: cheapest-first by spot price as a proxy (placement scores and the price
+    # cap concern spot, not on-demand), with score 0.
+    if [ "$FALLBACK" = ondemand ] && try_offers ondemand 3< <(spot_prices | awk '{print 0, $0}'); then
+      launched=1
+    else
+      logrec outcome=no-capacity detail="fallback $FALLBACK"
+      echo "launch: no capacity (spot passes $SPOT_PASSES, fallback $FALLBACK)" >&2
+      return 1
+    fi
+  fi
+  INFLIGHT_ID=""
+  echo "Launched $L_ID in $L_REGION: $L_TYPE, $L_MARKET at $L_PRICE USD/hour (score $L_SCORE), address $L_IP"
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    printf '%s\n' "id=$L_ID" "region=$L_REGION" "type=$L_TYPE" "market=$L_MARKET" "price=$L_PRICE" "ip=$L_IP" >>"$GITHUB_OUTPUT"
+  fi
+}
+
+do_wait() {
+  [ -n "${IP:-}" ] && [ -n "${KEY:-}" ] || { echo "wait: IP and KEY are required" >&2; exit 2; }
+  local deadline state=unreachable
+  deadline=$(( $(date +%s) + WAIT_MINUTES * 60 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    state=$(ssh -i "$KEY" "${SSH_OPTS[@]}" "ubuntu@$IP" \
+      'if [ -e /var/log/runcvm-setup.done ]; then echo done; elif [ -e /var/log/runcvm-setup.failed ]; then echo failed; else echo building; fi' \
+      2>/dev/null) || state=unreachable
+    echo "$(date -u +%H:%M:%S) host setup: $state"
+    case "$state" in done|failed) break ;; esac
+    sleep 20
+  done
+  [ -n "${GITHUB_ACTIONS:-}" ] && echo "::group::Host setup log"
+  ssh -i "$KEY" "${SSH_OPTS[@]}" "ubuntu@$IP" 'sudo cat /var/log/runcvm-setup.log' 2>&1
+  [ -n "${GITHUB_ACTIONS:-}" ] && echo "::endgroup::"
+  case "$state" in
+    done) return 0 ;;
+    failed) echo "wait: host setup failed (see its log above)" >&2 ;;
+    *) echo "wait: host setup did not finish within $WAIT_MINUTES minutes (last state: $state)" >&2 ;;
+  esac
+  return 1
+}
+
+do_teardown() {
+  local r ids sg found=0
+  [ -n "${REGION:-}" ] && REGIONS=$REGION
+  resolve_regions
+  for r in $REGIONS; do
+    ids=$(aws --region "$r" ec2 describe-instances \
+      --filters Name=tag:Project,Values="$PROJECT_TAG" Name=tag:Run,Values="$RUN" \
+                Name=instance-state-name,Values=pending,running,stopping,stopped \
+      --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null)
+    if [ -n "$ids" ] && [ "$ids" != None ]; then
+      # shellcheck disable=SC2086
+      aws --region "$r" ec2 terminate-instances --instance-ids $ids >/dev/null &&
+        { logrec region="$r" outcome=teardown detail="$ids"; echo "Terminated in $r: $ids"; found=1; }
+    fi
+    sg=$(group_sg "$r")
+    case "$sg" in sg-*) revoke_rules "$r" "$sg" "run $RUN until" ;; esac
+  done
+  [ "$found" = 1 ] || echo "No running instance for run $RUN"
+}
+
+case "${1:-}" in
+  scan)     do_scan ;;
+  launch)   do_launch ;;
+  wait)     do_wait ;;
+  teardown) do_teardown ;;
+  reap)     do_reap ;;
+  *) echo "usage: $0 {scan|launch|wait|teardown|reap}" >&2; exit 2 ;;
+esac
