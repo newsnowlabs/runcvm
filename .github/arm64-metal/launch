@@ -1,11 +1,16 @@
 #!/bin/bash
 # Launches, waits for and tears down an AWS Graviton bare-metal host for RunCVM's arm64 tests:
-# a .metal instance, which has /dev/kvm, so that RunCVM's Container/VMs run there under KVM. GitHub Actions runs it (.github/workflows/arm64-metal.yml),
-# and so can a maintainer, by hand. It takes the cheapest spot capacity under a price cap, across
-# every region enabled in the account, and falls back to on-demand capacity.
+# a .metal instance, which has /dev/kvm, so that RunCVM's Container/VMs run there under KVM.
+# GitHub Actions runs it (.github/workflows/arm64-metal.yml), and so can a maintainer, by hand.
+#
+# It launches spot capacity, choosing where by AWS's spot placement score (how likely a pool is
+# to have capacity and run without interruption) and then by price: the AZs AWS scores highest
+# come first, cheapest within a score, and the rest follow cheapest-first. It repeats the whole
+# ordered pass SPOT_PASSES times, since capacity frees up over minutes, and falls back to
+# on-demand only when every spot attempt fails.
 #
 # Usage: launch {scan|launch|wait|teardown|reap}
-#   scan      print the spot offers under the price cap, "price region az type", cheapest first
+#   scan      print the ordered candidates, "score price region az type", best first
 #   launch    launch a host for run $RUN, which builds and installs RunCVM at $REF; print its
 #             id, region and address, and under GitHub Actions set them as step outputs
 #   wait      wait for the host at $IP to finish building and installing RunCVM, then print
@@ -31,31 +36,38 @@
 # security group, whose description holds the run and an expiry, by which reap revokes it.
 #
 # Settings (environment):
-#   TYPES         instance types to consider, cheapest offer first  (default "c6g.metal c7g.metal")
-#   PRICE_CAP     ignore spot offers above this, USD/hour           (default 0.60)
-#   FALLBACK      with no spot capacity under the cap: ondemand, or fail   (default ondemand)
-#   MAX_MINUTES   the host's lifetime, after which it terminates itself    (default 120)
-#   GROUP         resource group: reap acts only within it          (default manual)
-#   REAP          1: reap before launching                          (default 0)
-#   REGIONS       regions to consider                               (default: every enabled region)
-#   SKIP_REGIONS  regions to leave out                              (default: none)
-#   PROJECT_TAG   the tag value the IAM policy requires             (default runcvm-ci)
-#   RUN           the run's id                                      (default manual-<UTC time>)
-#   REGION        teardown: the run's region, saving a search of every region
-#   REPO, REF     the GitHub repository and the ref or commit that the host builds
-#                 (default newsnowlabs/runcvm, main)
-#   PUBKEY        launch: the SSH public key the host accepts for user ubuntu   (required)
-#   SSH_CIDR      launch: the addresses SSH accepts      (default: this host's public address/32)
-#   IP, KEY       wait: the host's address, and the SSH private key's file      (required)
-#   WAIT_MINUTES  wait: how long to wait for the host's setup       (default 60)
-#   LOG           JSON-lines record of each launch attempt's outcome (default
-#                 ${TMPDIR:-/tmp}/arm64-metal-launch.jsonl), for spotting regions that rarely
-#                 have spot capacity, to list in SKIP_REGIONS
+#   TYPES          instance types to consider              (default "c6g.metal c7g.metal")
+#   SPOT_PASSES    spot passes over the ordered candidates before on-demand   (default 1)
+#   SPOT_RETRY_DELAY  seconds between spot passes           (default 45)
+#   MIN_SCORE      a placement score below this is treated as unscored (tail) (default 1)
+#   PRICE_CAP_PCT  skip spot offers above this % of the region's on-demand price; 100 disables
+#                  the cap and its Pricing API lookup       (default 100)
+#   FALLBACK       with no spot capacity: ondemand, or fail  (default ondemand)
+#   MAX_MINUTES    the host's lifetime, after which it terminates itself      (default 120)
+#   GROUP          resource group: reap acts only within it  (default manual)
+#   REAP           1: reap before launching                  (default 0)
+#   REGIONS        regions to consider                       (default: every enabled region)
+#   SKIP_REGIONS   regions to leave out                      (default: none)
+#   PROJECT_TAG    the tag value the IAM policy requires      (default runcvm-ci)
+#   RUN            the run's id                               (default manual-<UTC time>)
+#   REGION         teardown: the run's region, saving a search of every region
+#   REPO, REF      the GitHub repository and the ref or commit that the host builds
+#                  (default newsnowlabs/runcvm, main)
+#   PUBKEY         launch: the SSH public key the host accepts for user ubuntu  (required)
+#   SSH_CIDR       launch: the addresses SSH accepts     (default: this host's public address/32)
+#   IP, KEY        wait: the host's address, and the SSH private key's file     (required)
+#   WAIT_MINUTES   wait: how long to wait for the host's setup   (default 60)
+#   LOG            JSON-lines record of each launch attempt's outcome (default
+#                  ${TMPDIR:-/tmp}/arm64-metal-launch.jsonl), for spotting regions that rarely
+#                  have spot capacity, to list in SKIP_REGIONS
 
 set -o pipefail
 
 TYPES=${TYPES:-c6g.metal c7g.metal}
-PRICE_CAP=${PRICE_CAP:-0.60}
+SPOT_PASSES=${SPOT_PASSES:-1}
+SPOT_RETRY_DELAY=${SPOT_RETRY_DELAY:-45}
+MIN_SCORE=${MIN_SCORE:-1}
+PRICE_CAP_PCT=${PRICE_CAP_PCT:-100}
 FALLBACK=${FALLBACK:-ondemand}
 MAX_MINUTES=${MAX_MINUTES:-120}
 GROUP=${GROUP:-manual}
@@ -73,7 +85,9 @@ SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="${TMPDIR:-/
           -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o BatchMode=yes)
 
 # Every call names its region: a default (e.g. CloudShell's AWS_REGION) would only misdirect.
+# The placement-score and pricing calls still need an endpoint, for which they name a region.
 unset AWS_REGION AWS_DEFAULT_REGION
+API_REGION=us-east-1
 
 declare -A AMI VPC SG PREPARED SKIPPED
 INFLIGHT_ID="" INFLIGHT_REGION=""   # an instance started but not yet reported
@@ -104,7 +118,7 @@ cleanup() {
 }
 
 resolve_regions() {
-  [ -n "${REGIONS:-}" ] || REGIONS=$(aws ec2 describe-regions --region us-east-1 --query 'Regions[].RegionName' --output text)
+  [ -n "${REGIONS:-}" ] || REGIONS=$(aws ec2 describe-regions --region "$API_REGION" --query 'Regions[].RegionName' --output text)
   local out="" r s
   for r in $REGIONS; do
     for s in $SKIP_REGIONS; do [ "$r" = "$s" ] && continue 2; done
@@ -163,19 +177,83 @@ do_reap() {
   done
 }
 
-# Print "price region az type" for each AZ and type at or under the cap, cheapest first; with
-# argument "all", whatever the price.
-scan() {
-  resolve_regions
-  local cap=$PRICE_CAP r
-  [ "${1:-}" = all ] && cap=1000000
+# Print "price region az type" for each AZ and type's cheapest current spot price, across all
+# regions, cheapest first.
+spot_prices() {
+  local r
   for r in $REGIONS; do
     aws ec2 describe-spot-price-history --region "$r" \
       --instance-types $TYPES --product-descriptions Linux/UNIX --start-time "$(date -u +%Y-%m-%dT%H:%M:%S)" \
       --query "SpotPriceHistory[].[SpotPrice,'$r',AvailabilityZone,InstanceType]" --output text 2>/dev/null
-  done | awk -v cap="$cap" '
-      { k = $3 " " $4; if (!(k in p) || $1 < p[k]) { p[k] = $1; line[k] = $0 } }
-      END { for (k in line) if (p[k] + 0 <= cap + 0) print line[k] }' | sort -n
+  done | awk '{ k = $3 " " $4; if (!(k in p) || $1 < p[k]) { p[k] = $1; line[k] = $0 } }
+              END { for (k in line) print line[k] }' | sort -n
+}
+
+# Print "region azname score" for the AZs AWS scores most likely to have spot capacity for the
+# types (at most ten, highest first). Empty if the score call is unavailable, so that selection
+# falls back to price alone. GetSpotPlacementScores returns AZ IDs (use1-az6), which are mapped
+# to AZ names (us-east-1d) per scored region, since launching needs the name.
+placement_scores() {
+  local a scored r b=""
+  a=$(aws ec2 get-spot-placement-scores --region "$API_REGION" --instance-types $TYPES \
+        --target-capacity 1 --target-capacity-unit-type units --single-availability-zone \
+        --region-names $REGIONS --max-results 10 \
+        --query 'SpotPlacementScores[].[Region,AvailabilityZoneId,Score]' --output text 2>/dev/null) || return 0
+  [ -n "$a" ] || return 0
+  scored=$(printf '%s\n' "$a" | cut -f1 | sort -u)
+  for r in $scored; do
+    b+=$(aws --region "$r" ec2 describe-availability-zones \
+      --query "AvailabilityZones[].['$r',ZoneId,ZoneName]" --output text 2>/dev/null)$'\n'
+  done
+  awk 'FNR==NR { name[$1,$2]=$3; next } { az=name[$1,$2]; if (az!="") print $1, az, $3 }' \
+    <(printf '%s\n' "$b") <(printf '%s\n' "$a")
+}
+
+# The region's on-demand price (USD/hour) for a type, from the Pricing API; empty on failure.
+ondemand_price() { # region type
+  aws pricing get-products --region "$API_REGION" --service-code AmazonEC2 \
+    --filters "Type=TERM_MATCH,Field=instanceType,Value=$2" "Type=TERM_MATCH,Field=regionCode,Value=$1" \
+      "Type=TERM_MATCH,Field=tenancy,Value=Shared" "Type=TERM_MATCH,Field=operatingSystem,Value=Linux" \
+      "Type=TERM_MATCH,Field=capacitystatus,Value=Used" \
+    --query 'PriceList[0]' --output text 2>/dev/null | python3 -I -c '
+import json, sys
+try:
+    d = json.load(sys.stdin); term = list(d["terms"]["OnDemand"].values())[0]
+    print(list(term["priceDimensions"].values())[0]["pricePerUnit"]["USD"])
+except Exception:
+    pass' 2>/dev/null
+}
+
+# Keep "price region az type" offers at or under PRICE_CAP_PCT% of their region/type's on-demand
+# price; an offer whose on-demand price cannot be found is kept. One Pricing lookup per distinct
+# region/type, cached.
+apply_cap() { # offers on stdin
+  local -A OD
+  local offers price region az type key
+  offers=$(cat)
+  while read -r region type; do
+    [ -n "$region" ] || continue
+    OD[$region/$type]=$(ondemand_price "$region" "$type")
+  done < <(printf '%s\n' "$offers" | awk '{print $2, $4}' | sort -u)
+  while read -r price region az type; do
+    [ -n "$price" ] || continue
+    key=${OD[$region/$type]}
+    case "$key" in ''|0) printf '%s %s %s %s\n' "$price" "$region" "$az" "$type"; continue ;; esac
+    awk -v p="$price" -v o="$key" -v pct="$PRICE_CAP_PCT" 'BEGIN { exit !(p+0 <= o*pct/100) }' &&
+      printf '%s %s %s %s\n' "$price" "$region" "$az" "$type"
+  done < <(printf '%s\n' "$offers")
+}
+
+# Print "score price region az type", best first: AZs scoring at least MIN_SCORE come first by
+# score then price, the rest (unscored, or below MIN_SCORE) follow cheapest-first.
+score_offers() {
+  local offers scores
+  offers=$(spot_prices)
+  [ "${PRICE_CAP_PCT:-100}" -lt 100 ] 2>/dev/null && offers=$(printf '%s\n' "$offers" | apply_cap)
+  scores=$(placement_scores)
+  awk -v min="$MIN_SCORE" 'FNR==NR { s[$1,$2]=$3; next }
+       { sc = s[$2,$3] + 0; if (sc < min) sc = 0; print sc, $0 }' \
+    <(printf '%s\n' "$scores") <(printf '%s\n' "$offers") | sort -k1,1nr -k2,2n
 }
 
 # Find the region's Ubuntu AMI and default VPC (creating the VPC where there is none), and its
@@ -254,10 +332,10 @@ EOF
 
 # Launch one offer. Returns 0 with the instance running, 2 where the failure rules out the whole
 # region, and 1 otherwise.
-attempt() { # market region az type price
-  local market=$1 region=$2 az=$3 type=$4 price=$5 subnet out id state start expires
+attempt() { # market region az type price score
+  local market=$1 region=$2 az=$3 type=$4 price=$5 score=$6 subnet out id state start expires
   local market_opt=()
-  prepare "$region" || { logrec market="$market" region="$region" az="$az" type="$type" outcome=prepare-failed; return 2; }
+  prepare "$region" || { logrec market="$market" region="$region" az="$az" type="$type" score="$score" outcome=prepare-failed; return 2; }
   subnet=$(aws --region "$region" ec2 describe-subnets \
     --filters Name=vpc-id,Values="${VPC[$region]}" Name=availability-zone,Values="$az" Name=default-for-az,Values=true \
     --query 'Subnets[0].SubnetId' --output text 2>/dev/null)
@@ -274,7 +352,7 @@ attempt() { # market region az type price
     --query 'Instances[0].InstanceId' --output text 2>&1)
   case "$out" in
     i-*) : ;;
-    *) logrec market="$market" region="$region" az="$az" type="$type" price="$price" outcome=launch-error \
+    *) logrec market="$market" region="$region" az="$az" type="$type" price="$price" score="$score" outcome=launch-error \
          detail="$(printf '%s\n' "$out" | grep -o 'An error occurred ([A-Za-z.]*)' | tr '\n' ' ')"
        case "$out" in *VcpuLimitExceeded*|*MaxSpotInstanceCountExceeded*|*UnauthorizedOperation*|*OptInRequired*) return 2 ;; esac
        return 1 ;;
@@ -303,19 +381,19 @@ attempt() { # market region az type price
     logrec market="$market" region="$region" az="$az" type="$type" price="$price" id="$id" outcome=ssh-rule-failed
     INFLIGHT_ID=""; return 2
   fi
-  L_ID=$id; L_REGION=$region; L_TYPE=$type; L_MARKET=$market; L_PRICE=$price
+  L_ID=$id; L_REGION=$region; L_TYPE=$type; L_MARKET=$market; L_PRICE=$price; L_SCORE=$score
   L_IP=$(aws --region "$region" ec2 describe-instances --instance-ids "$id" \
     --query 'Reservations[0].Instances[0].PublicIpAddress' --output text 2>/dev/null)
-  logrec market="$market" region="$region" az="$az" type="$type" price="$price" id="$id" ip="$L_IP" outcome=launched
+  logrec market="$market" region="$region" az="$az" type="$type" price="$price" score="$score" id="$id" ip="$L_IP" outcome=launched
 }
 
-# Try each offer in turn, skipping regions that an attempt has ruled out. The offers are read
-# from file descriptor 3, leaving stdin to the commands an attempt runs.
-try_offers() { # market, then "price region az type" lines on fd 3
-  local market=$1 price region az type
-  while read -r -u 3 price region az type; do
+# Try each candidate in turn, skipping regions that an attempt has ruled out. The candidates are
+# read from file descriptor 3, leaving stdin to the commands an attempt runs.
+try_offers() { # market, then "score price region az type" lines on fd 3
+  local market=$1 score price region az type
+  while read -r -u 3 score price region az type; do
     [ -n "$region" ] && [ -z "${SKIPPED[$region]:-}" ] || continue
-    attempt "$market" "$region" "$az" "$type" "$([ "$market" = spot ] && echo "$price" || echo ondemand)"
+    attempt "$market" "$region" "$az" "$type" "$([ "$market" = spot ] && echo "$price" || echo ondemand)" "$score"
     case $? in
       0) return 0 ;;
       2) SKIPPED[$region]=1 ;;
@@ -324,27 +402,42 @@ try_offers() { # market, then "price region az type" lines on fd 3
   return 1
 }
 
+do_scan() {
+  resolve_regions
+  score_offers
+}
+
 do_launch() {
   [ -n "${PUBKEY:-}" ] || { echo "launch: PUBKEY is required" >&2; exit 2; }
   case "$PUBKEY" in *"'"*|*$'\n'*) echo "launch: PUBKEY must be one line, without quotes" >&2; exit 2 ;; esac
   trap cleanup EXIT INT TERM QUIT
   [ -n "${SSH_CIDR:-}" ] || SSH_CIDR=$(curl -fsS https://checkip.amazonaws.com)/32
   case "$SSH_CIDR" in [0-9]*/[0-9]*) : ;; *) echo "launch: cannot find this host's public address; set SSH_CIDR" >&2; exit 2 ;; esac
+  resolve_regions
   [ "$REAP" = 1 ] && do_reap
   write_userdata
-  local offers
-  offers=$(scan)
-  if ! try_offers spot 3<<<"$offers"; then
-    logrec outcome=spot-exhausted detail="cap $PRICE_CAP"
+  local pass launched=0
+  for (( pass=1; pass<=SPOT_PASSES; pass++ )); do
+    SKIPPED=()
+    if try_offers spot 3< <(score_offers); then launched=1; break; fi
+    logrec outcome=spot-pass-failed detail="pass $pass/$SPOT_PASSES"
+    [ "$pass" -lt "$SPOT_PASSES" ] && sleep "$SPOT_RETRY_DELAY"
+  done
+  if [ "$launched" = 0 ]; then
+    logrec outcome=spot-exhausted detail="passes $SPOT_PASSES"
     SKIPPED=()   # a region's spot limits do not rule out its on-demand capacity
-    [ "$FALLBACK" = ondemand ] && try_offers ondemand 3<<<"$(scan all)" || {
+    # On-demand fallback: cheapest-first by spot price as a proxy (placement scores and the price
+    # cap concern spot, not on-demand), with score 0.
+    if [ "$FALLBACK" = ondemand ] && try_offers ondemand 3< <(spot_prices | awk '{print 0, $0}'); then
+      launched=1
+    else
       logrec outcome=no-capacity detail="fallback $FALLBACK"
-      echo "launch: no capacity (spot cap $PRICE_CAP, fallback $FALLBACK)" >&2
+      echo "launch: no capacity (spot passes $SPOT_PASSES, fallback $FALLBACK)" >&2
       return 1
-    }
+    fi
   fi
   INFLIGHT_ID=""
-  echo "Launched $L_ID in $L_REGION: $L_TYPE, $L_MARKET at $L_PRICE USD/hour, address $L_IP"
+  echo "Launched $L_ID in $L_REGION: $L_TYPE, $L_MARKET at $L_PRICE USD/hour (score $L_SCORE), address $L_IP"
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     printf '%s\n' "id=$L_ID" "region=$L_REGION" "type=$L_TYPE" "market=$L_MARKET" "price=$L_PRICE" "ip=$L_IP" >>"$GITHUB_OUTPUT"
   fi
@@ -394,7 +487,7 @@ do_teardown() {
 }
 
 case "${1:-}" in
-  scan)     scan ;;
+  scan)     do_scan ;;
   launch)   do_launch ;;
   wait)     do_wait ;;
   teardown) do_teardown ;;

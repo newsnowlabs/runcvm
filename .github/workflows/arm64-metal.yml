@@ -48,6 +48,9 @@ env:
   GROUP: ci
   RUN: gha-${{ github.run_id }}-${{ github.run_attempt }}
   MAX_MINUTES: 120
+  # Repeat the spot pass before falling back to on-demand, since metal capacity frees up over
+  # minutes; a nightly run can spend the extra latency.
+  SPOT_PASSES: 2
 
 jobs:
   test:

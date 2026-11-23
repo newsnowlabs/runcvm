@@ -7,12 +7,14 @@ it launches for the run and terminates afterwards:
 
 1. A GitHub-hosted runner assumes an AWS IAM role by OpenID Connect (no AWS credential is stored
    in GitHub).
-2. `launch launch` reaps any host of its group left past its expiry (the workflow sets
-   `REAP=1`), finds the cheapest spot
-   offer for the instance types in `TYPES` under `PRICE_CAP` across every region enabled in the
-   account, and tries offers in turn, cheapest first, until a host starts; with no spot capacity
-   under the cap, it takes on-demand capacity. The host builds and installs RunCVM at the commit
-   under test.
+2. `launch launch` reaps any host of its group left past its expiry (the workflow sets `REAP=1`),
+   then launches a spot host for the instance types in `TYPES`, choosing where by AWS's spot
+   placement score (how likely a pool is to have capacity and run without interruption) and then
+   by price: the availability zones AWS scores highest come first, cheapest within a score, and
+   the rest follow cheapest-first, across every region enabled in the account. It repeats the
+   whole ordered pass `SPOT_PASSES` times, since capacity frees up over minutes, and falls back
+   to on-demand only when every spot attempt fails. The host builds and installs RunCVM at the
+   commit under test.
 3. `launch wait` waits for the host's setup to finish, and prints its log.
 4. `run-shards` runs the tests on the host over SSH, in 8 shards at once. `summarise` turns the
    shards' results into annotations and a job summary.
@@ -73,7 +75,7 @@ and roles alike. In what follows, replace `ACCOUNT_ID` with the AWS account's id
         "ec2:DescribeInstanceStatus", "ec2:DescribeInstanceTypes", "ec2:DescribeAvailabilityZones",
         "ec2:DescribeVpcs", "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups",
         "ec2:DescribeKeyPairs", "ec2:DescribeImages", "ec2:DescribeSpotPriceHistory",
-        "ssm:GetParameter"
+        "ec2:GetSpotPlacementScores", "ssm:GetParameter"
       ],
       "Resource": "*"
     },
@@ -169,12 +171,16 @@ and roles alike. In what follows, replace `ACCOUNT_ID` with the AWS account's id
 }
 ```
 
-`launch` itself uses no EC2 key pairs, Service Quotas or Pricing API (it reads spot prices
-through EC2's own `DescribeSpotPriceHistory`, in `ReadOnlyDiscovery`): the statements for key
-pairs (`ImportTaggedKeyPair`, `DeleteKeyPair`, and the key pairs in `ReadOnlyDiscovery` and
-`RunInstancesReference`) and for the Service Quotas and Pricing APIs serve a maintainer's own tools and checks,
-under the same tag rules, and may be left out where none are used. `CreateDefaultNetworking`
-cannot be tag-scoped, as the VPC does not exist yet; it creates only a region's free default
+`launch` reads spot prices and placement scores (`DescribeSpotPriceHistory`,
+`GetSpotPlacementScores`) and, only when `PRICE_CAP_PCT` is below 100, on-demand prices through
+the Pricing API (`pricing:GetProducts`); it uses no EC2 key pairs and no Service Quotas. The
+statements for key pairs (`ImportTaggedKeyPair`, `DeleteKeyPair`, and the key pairs in
+`ReadOnlyDiscovery` and `RunInstancesReference`), the Service Quotas actions, and the
+instance-discovery reads in `ReadOnlyDiscovery` that `launch` does not call
+(`DescribeInstanceTypeOfferings`, `DescribeInstanceStatus`, `DescribeInstanceTypes`,
+`DescribeImages`), serve a maintainer's own tools and checks, and may be left out where none are
+used.
+`CreateDefaultNetworking` cannot be tag-scoped, as the VPC does not exist yet; it creates only a region's free default
 VPC and its subnets, untagged.
 
 ### The role GitHub Actions assumes
@@ -251,4 +257,4 @@ outbound address varies (e.g. several gateways in turn), give the range in `SSH_
 `SSH_CIDR=192.0.2.0/24`. Hosts launched by hand are in group `manual` unless `GROUP` says
 otherwise, and terminate
 themselves after `MAX_MINUTES` (120 by default) if not torn down first. `launch scan` shows the
-current spot offers under the cap without launching anything.
+ordered candidates (score, price, region, AZ, type) without launching anything.
