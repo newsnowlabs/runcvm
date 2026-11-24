@@ -1175,7 +1175,7 @@ Under software emulation (see `RUNCVM_QEMU_ACCEL`), sets the size of QEMU's cach
 
 **`RUNCVM_SYS_ADMIN=1`**
 
-Launches `virtiofsd` with `--modcaps=+sys_admin`, giving `CAP_SYS_ADMIN` to `virtiofsd` alone, e.g. so that the VM can read and write `trusted.*` extended attributes (as `dockerd`'s overlay filesystems use) on the container's files. RunCVM's other processes in the container (its network configuration, `dnsmasq`, `mke2fs` and QEMU) do not hold the capability, unless `docker run` gives it to the container itself (`--cap-add=SYS_ADMIN`, or `--privileged`). By default, `virtiofsd` is not launched with `--modcaps=+sys_admin`.
+Launches `virtiofsd` with `--modcaps=+sys_admin`, giving `CAP_SYS_ADMIN` to `virtiofsd` alone, e.g. so that the VM can read and write `trusted.*` extended attributes (as `dockerd`'s overlay filesystems use) on the container's files. RunCVM's other processes in the container (its network configuration, `dnsmasq`, the mkfs commands, such as `mke2fs`, and QEMU) do not hold the capability, unless `docker run` gives it to the container itself (`--cap-add=SYS_ADMIN`, or `--privileged`). By default, `virtiofsd` is not launched with `--modcaps=+sys_admin`.
 
 ### RUNCVM_KERNEL_MOUNT_LIB_MODULES
 

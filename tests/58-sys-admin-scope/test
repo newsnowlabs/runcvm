@@ -4,8 +4,9 @@
 With RUNCVM_SYS_ADMIN=1, virtiofsd holds CAP_SYS_ADMIN (it runs with
 --modcaps=+sys_admin), so that the VM can set a trusted.* extended attribute
 on a file in its root filesystem; the container's other processes, its init
-(runcvm-init), dnsmasq and QEMU, hold it in none of their bounding, permitted
-and effective sets. Also under --security-opt=no-new-privileges, and with and
+(runcvm-ctr-entrypoint, which has become runcvm-init by the time the VM runs),
+dnsmasq and QEMU, hold it in none of their bounding, permitted and effective
+sets. Also under --security-opt=no-new-privileges, and with and
 without --init. Where docker run gives the container CAP_SYS_ADMIN itself
 (--cap-add=SYS_ADMIN), the other processes keep it. Without RUNCVM_SYS_ADMIN,
 no process holds it, and the VM cannot set the attribute.
