@@ -1248,10 +1248,67 @@ write_manifests() {
   } >>/.runcvm/fstab
 }
 
+# Sets DISK_AIO to QEMU's asynchronous I/O mode for disks:
+# - io_uring: Linux io_uring, with the lowest overhead;
+# - native: Linux AIO (libaio);
+# - threads: a pool of threads making ordinary system calls, which works wherever the file does.
+# QEMU fails to open a disk in a mode that is unavailable, so the VM would not start. io_uring is
+# unavailable where the host kernel has it turned off, or where a seccomp filter on the container
+# denies io_uring_setup, io_uring_enter and io_uring_register (as Docker's default profile does).
+#
+# RUNCVM_DISK_AIO, if set to one of the three modes, forces it. Otherwise the mode is chosen from
+# /proc alone, without starting QEMU:
+# - A seccomp filter (Seccomp non-zero in /proc/self/status): native. The filter's rules cannot be
+#   read from inside the container (that needs CAP_SYS_ADMIN), so whether it permits io_uring is
+#   unknown; native's system calls are allowed by Docker's default profile, and by any filter
+#   permissive enough to run QEMU and KVM.
+# - Otherwise io_uring, unless kernel.io_uring_disabled turns it off for this process: 2, for every
+#   process; 1, for a process without CAP_SYS_ADMIN (CapEff bit 21). Then native. Membership of
+#   kernel.io_uring_group also qualifies under 1, but is not checked, so io_uring may be passed over
+#   for native on the rare host that sets that group.
+#
+# The host kernel must have io_uring compiled in (CONFIG_IO_URING), as every mainstream kernel since
+# Linux 5.1 has: where it is absent, kernel.io_uring_disabled is absent too and indistinguishable
+# from a pre-6.6 kernel that has io_uring, so with no seccomp filter io_uring is chosen and QEMU
+# fails to open the disk.
+disk_choose_aio() {
+  local disabled=0 seccomp="" capeff=0 key value reason=""
+
+  case "$RUNCVM_DISK_AIO" in
+    io_uring|native|threads) DISK_AIO="$RUNCVM_DISK_AIO"; return ;;
+  esac
+
+  [ -r /proc/sys/kernel/io_uring_disabled ] && read -r disabled </proc/sys/kernel/io_uring_disabled
+  while read -r key value _; do
+    case "$key" in
+      Seccomp:) seccomp="$value" ;;
+      CapEff:)  capeff="$value" ;;
+    esac
+  done </proc/self/status
+
+  if [ "$seccomp" != "0" ]; then
+    DISK_AIO="native"
+    reason="a seccomp filter is in place and may deny io_uring's system calls"
+  elif [ "$disabled" = "2" ]; then
+    DISK_AIO="native"
+    reason="turned off in the host kernel: kernel.io_uring_disabled=2"
+  elif [ "$disabled" = "1" ] && (( (0x$capeff & (1 << 21)) == 0 )); then
+    DISK_AIO="native"
+    reason="turned off in the host kernel for unprivileged processes: kernel.io_uring_disabled=1"
+  else
+    DISK_AIO="io_uring"
+  fi
+
+  [ "$DISK_AIO" = "io_uring" ] || \
+    echo "RunCVM: Warning: io_uring is not used for disks ($reason); using aio=$DISK_AIO instead" >&2
+}
+
 # Adds disk backing file $1 to the QEMU command line, as disk number $2, with prealloc $3 ('on' or
 # 'off').
 disk_add_device() {
   local src="$1" id="$2" prealloc="$3" queues discard
+
+  [ -n "$DISK_AIO" ] || disk_choose_aio
 
   if [ "${RUNCVM_CPUS:-1}" -gt 8 ]; then
     queues=8
@@ -1275,12 +1332,12 @@ disk_add_device() {
     # format=raw             : treat the file as raw block device
     # media=disk             : marks this as a disk, not a CD-ROM
     # cache=none             : use O_DIRECT, bypass host page cache, rely on guest flushes for durability
-    # aio=io_uring           : use Linux io_uring for asynchronous I/O (lower overhead than libaio)
+    # aio=$DISK_AIO          : asynchronous I/O mode: io_uring where available (see disk_choose_aio)
     # $discard              : discard=unmap,detect-zeroes=unmap passes guest TRIM/UNMAP, and
     #                          converts guest zero writes into UNMAPs, to the backing file;
     #                          discard=ignore,detect-zeroes=off does neither (see above)
     # The whole argument is quoted: the path may hold whitespace.
-    -drive "id=drv$id,file=${src//,/,,},if=none,format=raw,media=disk,cache=none,aio=io_uring,$discard"
+    -drive "id=drv$id,file=${src//,/,,},if=none,format=raw,media=disk,cache=none,aio=$DISK_AIO,$discard"
 
     # Create a dedicated I/O thread (dataplane) to offload block I/O
     # -object iothread,id=ioth$id : defines an iothread with a unique identifier

@@ -962,6 +962,12 @@ As in Docker, where a deeper mount is mounted over a shallower one, disks, volum
 
 Data written to a disk stays in the VM's memory until the VM's kernel writes it out, so whether a disk's contents survive the VM ending depends on how the VM shuts down: see [Shutdown and disk data integrity](#shutdown-and-disk-data-integrity) below.
 
+#### Disk I/O
+
+QEMU accesses each disk's backing file with direct I/O (`cache=none`), bypassing the host's page cache, and asynchronously through Linux io_uring (`aio=io_uring`). RunCVM chooses the asynchronous I/O mode from `/proc` alone, without starting QEMU, and logs a warning to the container's output (`docker logs`) whenever it does not use io_uring. Where a seccomp profile is applied to the container (as Docker's default profile is, once RunCVM restores one), its rules cannot be read from inside the container, so whether it permits io_uring's system calls — which Docker's default profile denies — is unknown; RunCVM then uses Linux AIO (`aio=native`), whose system calls that profile, and any profile permissive enough to run QEMU, allow. With no seccomp profile, RunCVM uses `io_uring`, unless `kernel.io_uring_disabled` turns it off (2 for every process, or 1 for a process without `CAP_SYS_ADMIN`), in which case `native`. Setting the `RUNCVM_DISK_AIO` environment variable to `io_uring`, `native` or `threads` (a pool of I/O threads, which works wherever the backing file does) forces that mode.
+
+The host kernel must have io_uring compiled in (`CONFIG_IO_URING`), as every mainstream kernel since Linux 5.1 has. On a kernel built entirely without it, `kernel.io_uring_disabled` is absent and indistinguishable from a pre-6.6 kernel that supports io_uring, so with no seccomp profile RunCVM selects `io_uring` and QEMU fails to open the disk; set `RUNCVM_DISK_AIO=native` (or `threads`) on such a host.
+
 #### Preallocated disks
 
 A backing file is sparse by default: it takes space on the host only as the VM writes to the disk, and QEMU passes the VM's discards (e.g. from `fstrim`) and its writes of zeroes on to the backing file, freeing that space again. So the host's filesystem can fill up while the VM runs, after which the VM's writes to the disk fail with I/O errors.
