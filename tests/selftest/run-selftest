@@ -165,6 +165,11 @@ class RunnerTests(unittest.TestCase):
             t.check_cmd("wait_for succeeds when ready", lambda: t.wait_for("a file", 5, ["test", "-e", "../framework.py"]))
             t.check("wait_for times out", False, t.wait_for("never", 2, lambda: False))
             t.check("parallel keeps order", [1, 4, 9, 16], t.parallel(lambda x: x * x, [1, 2, 3, 4], jobs=2))
+            t.check("registry_unavailable: sees a 5xx", True, t.registry_unavailable("received unexpected HTTP status: 500 Internal Server Error"))
+            t.check("registry_unavailable: sees a timeout", True, t.registry_unavailable("Get ...: net/http: TLS handshake timeout"))
+            t.check("registry_unavailable: ignores a missing image", False, t.registry_unavailable("manifest unknown: manifest unknown"))
+            t.check("registry_unavailable: ignores workload output", False, t.registry_unavailable("uname=6.12.0\\nid=0\\npwd=/"))
+            t.skip_check("skip_check records a skip", "demonstration")
             t.param("language", "python")
             t.finish()
             """))
@@ -235,6 +240,8 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual([c["description"] for c in a["checks"]], ["one equals one", "true succeeds"])
         self.assertEqual(a["params"], {"mode": "test"})
         self.assertEqual(self.full.test("l-python-helpers")["params"], {"language": "python"})
+        self.assertIn(("skip_check records a skip", "SKIP"),
+                      [(c["description"], c["status"]) for c in self.full.test("l-python-helpers")["checks"]])
         self.assertEqual(sum(1 for c in self.full.test("c-many-failures")["checks"] if c["status"] == "FAIL"), 256)
 
     def test_tap(self):
