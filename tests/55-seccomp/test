@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The container's seccomp filter, and QEMU's disks under it.
 
-Four Container/VMs, each with a disk: one under the engine's default seccomp
+Four Container/VMs with a disk each: one under the engine's default seccomp
 profile; one under that profile with RUNCVM_SYS_ADMIN=1; one with
 RUNCVM_SECCOMP=unconfined; and one launched with --security-opt
 seccomp=unconfined, for which the engine gives the container no profile (not a
@@ -13,9 +13,10 @@ no disk. For each:
   seccomp-filtered (Seccomp: 2 in their /proc/<pid>/status) under the
   default profile, and not filtered (Seccomp: 0) when unconfined. virtiofsd,
   which installs a seccomp filter of its own, is not a witness.
-- QEMU opens the disk with aio=io_uring, unless the host's
-  kernel.io_uring_disabled turns io_uring off for QEMU: 2; or 1, except with
-  RUNCVM_SYS_ADMIN=1, which gives QEMU CAP_SYS_ADMIN. Then aio=native.
+- QEMU opens the disk with aio=io_uring, unless RUNCVM_DISK_AIO=native forces
+  aio=native, or the host's kernel.io_uring_disabled turns io_uring off for
+  QEMU: 2; or 1, except with RUNCVM_SYS_ADMIN=1, which gives QEMU
+  CAP_SYS_ADMIN. Then aio=native.
 - The VM boots, and reads back a file written to the disk.
 - QEMU holds an io_uring instance (which it uses for its event loop where it
   can) only where the profile allows io_uring's system calls, which it does
