@@ -987,11 +987,22 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     reduce ("bounding", "effective", "permitted") as $set (.;
       .process.capabilities[$set] = ((.process.capabilities[$set] // []) + $caps | unique))'
   
-  # Filter for RUNCVM_SYS_ADMIN=1
+  # RUNCVM_SYS_ADMIN=1 is for virtiofsd's --modcaps=+sys_admin alone. Unless the container was
+  # given CAP_SYS_ADMIN itself (docker run --cap-add=SYS_ADMIN, or --privileged), the runtime adds
+  # it and sets RUNCVM_SYS_ADMIN_ADDED=1, and runcvm-ctr-entrypoint starts virtiofsd, then drops it
+  # for every other process RunCVM runs in the container. RUNCVM_SYS_ADMIN_ADDED is the runtime's
+  # own: any value the container was given is replaced.
+  jq_set "$CFG" '.process.env |= map(select(startswith("RUNCVM_SYS_ADMIN_ADDED=") | not))'
   RUNCVM_SYS_ADMIN=$(get_config_env "RUNCVM_SYS_ADMIN")
   if [ "$RUNCVM_SYS_ADMIN" = "1" ]; then
-    # TODO use 'unique'
-    jq_set "$CFG" '.process.capabilities.bounding += ["CAP_SYS_ADMIN"] | .process.capabilities.effective += ["CAP_SYS_ADMIN"] | .process.capabilities.permitted += ["CAP_SYS_ADMIN"]'
+    if [ "$(jq_get "$CFG" '.process.capabilities.bounding // [] | index("CAP_SYS_ADMIN") != null')" = "true" ]; then
+      set_config_env "RUNCVM_SYS_ADMIN_ADDED" "0"
+    else
+      set_config_env "RUNCVM_SYS_ADMIN_ADDED" "1"
+      jq_set "$CFG" '
+        reduce ("bounding", "effective", "permitted") as $set (.;
+          .process.capabilities[$set] = ((.process.capabilities[$set] // []) + ["CAP_SYS_ADMIN"] | unique))'
+    fi
   fi
 
   # CONFIGURE ENVIRONMENT
