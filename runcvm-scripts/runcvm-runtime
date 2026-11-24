@@ -937,15 +937,19 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   #   disk_choose_aio in runcvm-ctr-qemu, which relies on them being allowed).
   # - get_mempolicy, set_mempolicy, mbind: QEMU's memory, which the default profile allows only
   #   with CAP_SYS_NICE.
+  # - chroot: virtiofsd's sandbox (--sandbox=chroot), which the default profile allows only with
+  #   CAP_SYS_CHROOT, and so not for a container launched without it (e.g. --cap-drop=ALL).
   # The engine resolves its profile against the capabilities given to docker run or podman run,
-  # not those added below, so these calls must be allowed here, not left to a capability.
+  # not those the runtime gives RunCVM's own processes (below), so these calls must be allowed
+  # here, not left to a capability. Of those capabilities, only CAP_SYS_CHROOT gates a system
+  # call in Docker's default profile.
   # A bundle with no profile (--security-opt seccomp=unconfined, or --privileged) is left
   # unconfined.
   jq_set "$CFG" '
     if .linux.seccomp then
       .linux.seccomp.syscalls += [{
         "names": ["io_uring_setup", "io_uring_enter", "io_uring_register",
-                  "get_mempolicy", "set_mempolicy", "mbind"],
+                  "get_mempolicy", "set_mempolicy", "mbind", "chroot"],
         "action": "SCMP_ACT_ALLOW"
       }]
     else . end'
