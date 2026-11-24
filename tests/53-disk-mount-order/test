@@ -1,0 +1,756 @@
+#!/usr/bin/env python3
+"""RUNCVM_DISKS: the order of the VM's mounts, what new disks hold, and RUNCVM_FSTAB.
+
+- Nested disks, tmpfs mounts, volumes and bind mounts: nested disks in
+  either order in RUNCVM_DISKS (including through the image's symbolic link
+  /var/run), a tmpfs mount, a volume or a bind mount above a disk, a tmpfs
+  mount below a disk, a tmpfs mount, a volume or a bind mount between two
+  disks, a tmpfs mount below a volume below a disk, a volume below a disk
+  below a volume or a tmpfs mount, a volume below a tmpfs mount, a disk at a
+  volume's or a bind mount's destination (also where that disk is below
+  another disk, or below a tmpfs mount), a volume reached through the
+  image's symbolic link /var/run, a whole-root disk with a disk, volume and
+  tmpfs mount, and destinations sharing only a prefix (/home and /homes):
+  the Container/VM runs, with and without --init, and with RUNCVM_FSTAB=all,
+  and each path is on the intended disk, tmpfs mount, volume or bind mount,
+  as a deeper mount is mounted over a shallower one, and a disk over a
+  volume or bind mount at its destination.
+- A new disk leaves out another disk's destination below its own, holding
+  an empty directory there with the directory's mode, whichever is listed
+  first, for an ext4 and an xfs outer disk (populated by mke2fs and in the
+  VM): with disks at /usr/share and /usr/share/apk, the outer disk's apk
+  directory is empty, and /usr/share/apk, on the inner disk, holds the
+  image's keys.
+- What a new disk holds below its destination, for ext4, xfs and btrfs, and
+  layouts 'subdirs' and 'root': an empty directory at a volume, a
+  bind-mounted directory, a tmpfs mount and another disk; at a bind-mounted
+  file, an empty file (which the VM creates as its mountpoint, the copy
+  leaving the file out); and the image's other files. In the VM, each mount
+  is in place.
+- A new disk at a volume's destination, with another volume (on the same
+  host filesystem) below it, holds the first volume's files and an empty
+  directory for the second.
+- A disk at /etc, ext4 and xfs: Docker's /etc/hostname, /etc/hosts and
+  /etc/resolv.conf stay mounted over it, and the disk holds no copy of them,
+  only an empty file as each one's mountpoint.
+- Paths with spaces, backslashes, a literal '\\040', a backslash followed by
+  'n', and UTF-8 characters: volumes (and a tmpfs mount) at such paths below
+  an ext4 and an xfs disk, below an xfs disk with a whole-root disk
+  (populated before the root switch, so after the volumes were accessed),
+  and carried onto a whole-root disk, are each mounted at their paths, and a
+  disk at their parent holds an empty directory at each.
+- Control characters: a volume at a path with a newline, a file
+  bind-mounted at one with a tab, a tmpfs mount at one with 0x7F, and a disk
+  backing file with a newline are each rejected, with the path shown
+  escaped, and nothing is created.
+- Disk backing files below a destination, for ext4 and xfs: one volume at
+  both /disks and /data, with a disk /disks/state.img at /data: the disk
+  holds no state.img; likewise another disk's backing file in that volume,
+  and a backing file named through a dangling symbolic link to state.img;
+  a backing file under /vm (the image's view in the container) below its
+  own destination is left out; and a volume's unrelated file with a
+  backing file's name, at the container path of that backing file, is kept.
+  Disks whose backing files are reached through symbolic links to paths
+  with a space and a ',' start, mounted, when created and when reused.
+- Invalid plans create nothing, and change no existing disk: a later disk
+  without a size, or with a malformed one; a backing file path that is
+  relative, or has a '.' or '..' component (including '..' after a directory
+  not yet created, naming an existing disk); a 'root'-layout destination
+  with whitespace or '..'; two disks with one backing file, by one path
+  spelt two ways, through one volume mounted at two paths (neither file
+  existing yet, at /disks and /disks/alias), through a dangling symbolic
+  link, or as hard links; two existing disks with one UUID; a new ext4 disk
+  with 257 mounts to leave out below its destination, or with 65
+  destinations. Each is rejected, with exit status 1, naming the spec, and
+  the disks' volume holds no new or changed file.
+- An existing disk with changed mounts: created with a volume below it, then
+  used without it (an empty directory remains on the disk), then with a
+  tmpfs mount there.
+- A whole-root disk with a new xfs disk: the xfs disk is populated from the
+  image.
+- RUNCVM_FSTAB: with 'disks', /.runcvm/fstab marks a held volume with a
+  '#runcvm-held' comment, /.runcvm/submounts is gone, and an image without
+  /etc/fstab is left without one; with 'all', it lists the volume as a bind
+  mount from /.runcvm/submounts, mounted over /etc/fstab (created if the image
+  lacks one), and 'mount -a' mounts an unmounted held volume again, writes to
+  it reaching the volume. Under systemd (almalinux/9-init, with and without
+  an image /etc/fstab): no failed units, in both modes; with 'all', restarting
+  a held volume's own mount unit (also one at a path with a space) mounts it
+  again, writes reaching the volume, and so does restarting its ancestor's
+  unit (home.mount). An invalid RUNCVM_FSTAB is rejected.
+
+Specs that are invalid in themselves, or together, and the planner's
+held mounts, exclusions and manifests, are checked without a VM by
+tests/54-disk-planner.
+"""
+
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+TIMEOUT = 600 if t.ACCEL == "tcg" else 180
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+SIZE = {"ext4": "64M", "xfs": "320M", "btrfs": "128M"}  # mkfs.xfs needs 300M; mkfs.btrfs 109M.
+SYSTEMD_IMAGE = "almalinux/9-init"
+
+
+def seed_volume(name, files):
+    """Create a labelled volume holding 'files' ({path: contents})."""
+    volume = t.unique(name)
+    t.volume_create(volume)
+    script = "; ".join("printf %%s '%s' >'/v/%s'" % (body, path) for path, body in files.items())
+    t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v", "%s:/v" % volume,
+             "alpine", "sh", "-c", script or "true", check=True)
+    return volume
+
+
+def mount_opts(opts, name):
+    """Return docker run options 'opts' with each {vol} and {vol2} replaced by a new volume's name,
+    each volume holding a file .vol."""
+    result = []
+    for opt in opts:
+        for key in ("vol", "vol2"):
+            if "{%s}" % key in opt:
+                opt = opt.replace("{%s}" % key, seed_volume("%s-%s" % (name, key), {".vol": ""}))
+        result.append(opt)
+    return result
+
+
+def vm(name, disks, opts, script, *args, image="alpine", init=False, env=(), disks_volume=None):
+    """Run 'script' (sh -c) with 'args' in a new Container/VM with RUNCVM_DISKS 'disks', a volume at
+    /disks (new, unless 'disks_volume' is given) and further options 'opts'."""
+    if disks_volume is None:
+        disks_volume = t.unique(name + "-disks")
+        t.volume_create(disks_volume)
+    return t.docker("run", "--rm", "--name", t.unique(name), *t.labels(), "--runtime=" + t.RUNTIME,
+                    *t.vm_opts(), *(["--init"] if init else []),
+                    "--mount", "type=volume,src=%s,dst=/disks" % disks_volume, *opts,
+                    *["--env=" + e for e in env], "--env", "RUNCVM_DISKS=" + disks,
+                    image, "sh", "-c", script, "sh", *args, timeout=TIMEOUT)
+
+
+def values(r):
+    """The key=value lines of a result's output, as a dict."""
+    return dict(line.split("=", 1) for line in r.stdout.replace("\r", "").splitlines() if "=" in line)
+
+
+# Binds the mount at "$1" (a disk's destination) non-recursively at /tmp/under, showing what the
+# disk itself holds there, without the mounts below it.
+UNDER = 'mkdir -p /tmp/under && mount --bind "$1" /tmp/under && shift; '
+
+# --- Layering ---------------------------------------------------------------------------------
+
+# (name, RUNCVM_DISKS, further docker run options, {path: the disk expected there, by its position in
+# RUNCVM_DISKS, or "tmpfs", "volume", "bind" or "root" (a whole-root disk)}). Every other disk has
+# layout 'subdirs', so it is mounted at /.runcvm/disks/<n>, whose device a path on it shares. Each
+# {vol} and {vol2} in the options is a new volume holding a file .vol; the bind mounts are of the
+# host's /opt/runcvm, which holds LICENSE and a directory scripts, so that a disk below the bind
+# mount is at an existing directory, and nothing is created on the host.
+LAYERED = [
+    ("outer-disk-first", "/disks/a,/home,ext4,16M;/disks/b,/home/b,ext4,16M", [],
+     {"/home": 0, "/home/b": 1}),
+    ("outer-disk-last", "/disks/b,/home/b,ext4,16M;/disks/a,/home,ext4,16M", [],
+     {"/home": 1, "/home/b": 0}),
+    ("outer-disk-last-symlink", "/disks/b,/run/b,ext4,16M;/disks/a,/var/run,ext4,16M", [],
+     {"/run": 1, "/run/b": 0}),
+    ("three-deep", "/disks/c,/srv/a/b,ext4,16M;/disks/a,/srv,ext4,16M;/disks/b,/srv/a,ext4,16M", [],
+     {"/srv": 1, "/srv/a": 2, "/srv/a/b": 0}),
+    ("tmpfs-above-disk", "/disks/b,/home/b,ext4,16M", ["--mount", "type=tmpfs,dst=/home"],
+     {"/home": "tmpfs", "/home/b": 0}),
+    ("tmpfs-below-disk", "/disks/a,/home,ext4,16M", ["--mount", "type=tmpfs,dst=/home/cache"],
+     {"/home": 0, "/home/cache": "tmpfs"}),
+    ("prefix-only", "/disks/a,/home,ext4,16M;/disks/b,/homes,ext4,16M", ["--mount", "type=tmpfs,dst=/homes2"],
+     {"/home": 0, "/homes": 1, "/homes2": "tmpfs"}),
+    ("volume-above-disk", "/disks/a,/data/db,ext4,16M", ["--mount", "type=volume,src={vol},dst=/data"],
+     {"/data": "volume", "/data/db": 0}),
+    ("bind-above-disk", "/disks/a,/srv/rcvm/scripts,ext4,16M",
+     ["--mount", "type=bind,src=/opt/runcvm,dst=/srv/rcvm,readonly"],
+     {"/srv/rcvm": "bind", "/srv/rcvm/scripts": 0}),
+    ("disk-tmpfs-disk", "/disks/b,/home/x/y,ext4,16M;/disks/a,/home,ext4,16M", ["--mount", "type=tmpfs,dst=/home/x"],
+     {"/home": 1, "/home/x": "tmpfs", "/home/x/y": 0}),
+    ("disk-volume-disk", "/disks/a,/home,ext4,16M;/disks/b,/home/shared/db,ext4,16M",
+     ["--mount", "type=volume,src={vol},dst=/home/shared"],
+     {"/home": 0, "/home/shared": "volume", "/home/shared/db": 1}),
+    ("disk-bind-disk", "/disks/a,/srv,ext4,16M;/disks/b,/srv/rcvm/scripts,ext4,16M",
+     ["--mount", "type=bind,src=/opt/runcvm,dst=/srv/rcvm,readonly"],
+     {"/srv": 0, "/srv/rcvm": "bind", "/srv/rcvm/scripts": 1}),
+    ("disk-volume-tmpfs", "/disks/a,/home,ext4,16M",
+     ["--mount", "type=volume,src={vol},dst=/home/shared", "--mount", "type=tmpfs,dst=/home/shared/tmp"],
+     {"/home": 0, "/home/shared": "volume", "/home/shared/tmp": "tmpfs"}),
+    ("volume-disk-volume", "/disks/a,/data/db,ext4,16M",
+     ["--mount", "type=volume,src={vol},dst=/data", "--mount", "type=volume,src={vol2},dst=/data/db/v"],
+     {"/data": "volume", "/data/db": 0, "/data/db/v": "volume"}),
+    ("tmpfs-disk-volume", "/disks/a,/t/d,ext4,16M",
+     ["--mount", "type=tmpfs,dst=/t", "--mount", "type=volume,src={vol},dst=/t/d/v"],
+     {"/t": "tmpfs", "/t/d": 0, "/t/d/v": "volume"}),
+    ("disk-at-volume", "/disks/a,/data,ext4,16M", ["--mount", "type=volume,src={vol},dst=/data"],
+     {"/data": 0}),
+    ("disk-at-bind", "/disks/a,/srv/s,ext4,16M", ["--mount", "type=bind,src=/opt/runcvm/scripts,dst=/srv/s,readonly"],
+     {"/srv/s": 0}),
+    ("tmpfs-volume", "/disks/a,/srv,ext4,16M",
+     ["--mount", "type=tmpfs,dst=/t", "--mount", "type=volume,src={vol},dst=/t/v"],
+     {"/srv": 0, "/t": "tmpfs", "/t/v": "volume"}),
+    ("disk-at-volume-below-disk", "/disks/a,/data,ext4,16M;/disks/b,/data/db,ext4,16M",
+     ["--mount", "type=volume,src={vol},dst=/data/db"],
+     {"/data": 0, "/data/db": 1}),
+    ("disk-at-volume-below-tmpfs", "/disks/a,/t/d,ext4,16M",
+     ["--mount", "type=tmpfs,dst=/t", "--mount", "type=volume,src={vol},dst=/t/d"],
+     {"/t": "tmpfs", "/t/d": 0}),
+    ("volume-through-symlink", "/disks/a,/run,ext4,16M", ["--mount", "type=volume,src={vol},dst=/var/run/v"],
+     {"/run": 0, "/run/v": "volume"}),
+    ("whole-root", "/disks/r,/,ext4,256M;/disks/a,/home,ext4,16M",
+     ["--mount", "type=volume,src={vol},dst=/home/v", "--mount", "type=tmpfs,dst=/srv/t"],
+     {"/": "root", "/home": 1, "/home/v": "volume", "/srv/t": "tmpfs"}),
+]
+
+# Prints, for each path given, its device number, its filesystem type, and 'volume' if it holds .vol
+# (a test volume's file), 'bind' if it holds LICENSE (the host's /opt/runcvm), or '-'.
+PROBE = ('for p in "$@"; do m=-; [ -e "$p/.vol" ] && m=volume; [ -e "$p/LICENSE" ] && m=bind; '
+         'echo "$p $(stat -c %d "$p") $(stat -f -c %T "$p") $m"; done')
+
+FSTAB_MODES = [(False, "disks"), (True, "disks"), (False, "all")]
+
+
+def run_layered(case):
+    (name, disks, opts, expected), (init, fstab) = case
+    name += "-%s-%s" % ("init" if init else "noinit", fstab)
+    paths = list(expected) + ["/.runcvm/disks/%d" % n for n in range(disks.count(";") + 1)]
+    return vm("layered-" + name, disks, mount_opts(opts, "layered-" + name), PROBE, *paths, init=init,
+              env=["RUNCVM_FSTAB=" + fstab])
+
+
+LAYERED_RUNS = [(case, mode) for case in LAYERED for mode in FSTAB_MODES]
+t.param("init", "no, yes")
+t.param("RUNCVM_FSTAB", "disks, all")
+for ((name, disks, opts, expected), (init, fstab)), r in zip(LAYERED_RUNS, t.parallel(run_layered, LAYERED_RUNS)):
+    name += ", %s, RUNCVM_FSTAB=%s" % ("--init" if init else "no --init", fstab)
+    if not t.check("%s: exit status" % name, 0, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+        continue
+    probed = {}
+    for line in r.stdout.replace("\r", "").splitlines():
+        fields = line.split()
+        if len(fields) == 4:
+            probed[fields[0]] = (fields[1], fields[2], fields[3])
+    disk_devices = [probed[p][0] for p in probed if p.startswith("/.runcvm/disks/")]
+    for path, where in expected.items():
+        dev, fstype, marker = probed.get(path, (None, None, None))
+        if where == "tmpfs":
+            t.check("%s: %s is the tmpfs mount" % (name, path), "tmpfs", fstype)
+        elif where == "root":
+            t.check("%s: %s is the whole-root disk" % (name, path), "ext2/ext3", fstype)
+        elif where in ("volume", "bind"):
+            kind = "volume" if where == "volume" else "bind mount"
+            t.check("%s: %s is the %s, not on a disk" % (name, path, kind), True,
+                    marker == where and fstype != "tmpfs" and dev not in disk_devices)
+        else:
+            disk = probed.get("/.runcvm/disks/%d" % where, (None, None, None))[0]
+            t.check("%s: %s is on disk %d" % (name, path, where), True, disk is not None and dev == disk)
+
+# --- Population ---------------------------------------------------------------------------------
+
+# A disk at /usr/share and one at /usr/share/apk: (name, RUNCVM_DISKS, the outer disk's position in
+# RUNCVM_DISKS). Each has layout 'subdirs', so the outer disk's directory for /usr/share/apk is
+# /.runcvm/disks/<n>/usr-share/apk.
+POPULATED = [
+    ("ext4-outer-first", "/disks/a,/usr/share,ext4,64M;/disks/b,/usr/share/apk,ext4,16M", 0),
+    ("ext4-outer-last", "/disks/b,/usr/share/apk,ext4,16M;/disks/a,/usr/share,ext4,64M", 1),
+    ("xfs-outer-first", "/disks/a,/usr/share,xfs,320M;/disks/b,/usr/share/apk,ext4,16M", 0),
+    ("xfs-outer-last", "/disks/b,/usr/share/apk,ext4,16M;/disks/a,/usr/share,xfs,320M", 1),
+]
+
+# Prints the entries of the outer disk's directory for /usr/share/apk, then its mode, then the
+# number of entries in /usr/share/apk/keys.
+POPULATED_PROBE = ('d=/.runcvm/disks/$1/usr-share/apk; echo "entries=$(ls -A "$d" | tr "\\n" " ")"; '
+                   'echo "mode=$(stat -c %a "$d")"; '
+                   'echo "keys=$(ls /usr/share/apk/keys | wc -l)"')
+
+for (name, disks, outer), r in zip(POPULATED, t.parallel(
+        lambda c: vm("populated-" + c[0], c[1], [], POPULATED_PROBE, str(c[2])), POPULATED)):
+    if not t.check("%s: exit status" % name, 0, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+        continue
+    v = values(r)
+    t.check("%s: outer disk's directory for /usr/share/apk is empty" % name, "", v.get("entries", "?").strip())
+    t.check("%s: and has the image's directory's mode" % name, "755", v.get("mode"))
+    t.check("%s: /usr/share/apk/keys, on the inner disk, holds the image's keys" % name, True,
+            v.get("keys", "0").strip() not in ("", "0"))
+
+# The exclusion matrix: a disk at /usr/share, of each filesystem and layout, with a volume, a
+# bind-mounted directory and file, a tmpfs mount and another disk below it. Prints, for what the disk
+# holds (UNDER): each of vol, bdir, tmp and apk as '<type>:<entries>'; bfile as '<type>:<size>', or
+# 'none'; and whether the image's udhcpc/default.script was copied. Then, in the VM: each mount's
+# marker.
+MATRIX_PROBE = (UNDER +
+                'for e in vol bdir tmp apk; do p=/tmp/under/$e; '
+                'if [ -d "$p" ]; then echo "$e=dir:$(ls -A "$p" | wc -l)"; else echo "$e=none"; fi; done; '
+                'p=/tmp/under/bfile; if [ -f "$p" ]; then echo "bfile=file:$(stat -c %s "$p")"; '
+                'elif [ -e "$p" ]; then echo bfile=other; else echo bfile=none; fi; '
+                '[ -f /tmp/under/udhcpc/default.script ] && echo script=copied || echo script=missing; '
+                'echo "vm_vol=$(ls -A /usr/share/vol)"; echo "vm_bdir=$(ls /usr/share/bdir | grep -cx runcvm-ctr-qemu)"; '
+                '[ -s /usr/share/bfile ] && echo vm_bfile=1; echo "vm_tmp=$(stat -f -c %T /usr/share/tmp)"; '
+                'echo "vm_keys=$(ls /usr/share/apk/keys | wc -l)"')
+MATRIX = [(fs, layout) for fs in ("ext4", "xfs", "btrfs") for layout in ("subdirs", "root")]
+
+
+def run_matrix(case):
+    fs, layout = case
+    name = "matrix-%s-%s" % case
+    disks = "/disks/a,/usr/share,%s,%s,layout=%s;/disks/b,/usr/share/apk,ext4,16M" % (fs, SIZE[fs], layout)
+    opts = mount_opts(["--mount", "type=volume,src={vol},dst=/usr/share/vol",
+                       "--mount", "type=bind,src=/opt/runcvm/scripts,dst=/usr/share/bdir,readonly",
+                       "--mount", "type=bind,src=/opt/runcvm/LICENSE,dst=/usr/share/bfile,readonly",
+                       "--mount", "type=tmpfs,dst=/usr/share/tmp"], name)
+    return vm(name, disks, opts, MATRIX_PROBE, "/usr/share")
+
+
+for (fs, layout), r in zip(MATRIX, t.parallel(run_matrix, MATRIX)):
+    name = "%s, layout %s" % (fs, layout)
+    if not t.check("%s: exit status" % name, 0, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+        continue
+    v = values(r)
+    for e, what in (("vol", "volume"), ("bdir", "bind-mounted directory"), ("tmp", "tmpfs mount"),
+                    ("apk", "other disk's destination")):
+        t.check("%s: disk holds an empty directory at the %s" % (name, what), "dir:0", v.get(e))
+    t.check("%s: disk holds an empty file at the bind-mounted file" % name, "file:0", v.get("bfile"))
+    t.check("%s: disk holds the image's other files" % name, "copied", v.get("script"))
+    t.check("%s: VM: the volume" % name, ".vol", v.get("vm_vol"))
+    t.check("%s: VM: the bind-mounted directory" % name, "1", v.get("vm_bdir"))
+    t.check("%s: VM: the bind-mounted file" % name, "1", v.get("vm_bfile"))
+    t.check("%s: VM: the tmpfs mount" % name, "tmpfs", v.get("vm_tmp"))
+    t.check("%s: VM: the other disk holds the image's keys" % name, True, v.get("vm_keys", "0") not in ("", "0"))
+
+# A disk at a volume's destination, with another volume below it on the same host filesystem.
+SEEDED_PROBE = UNDER + 'echo "entries=$(ls -A /tmp/under | tr "\\n" " ")"; echo "b=$(ls -A /tmp/under/b | wc -l)"; ' \
+                       'echo "vm_b=$(ls -A /data/b)"'
+SEEDED = ["ext4", "xfs"]
+
+
+def run_seeded(fs):
+    name = "seeded-" + fs
+    a = seed_volume(name + "-a", {"a.txt": "a"})
+    b = seed_volume(name + "-b", {".vol": ""})
+    return vm(name, "/disks/a,/data,%s,%s" % (fs, SIZE[fs]),
+              ["--mount", "type=volume,src=%s,dst=/data" % a, "--mount", "type=volume,src=%s,dst=/data/b" % b],
+              SEEDED_PROBE, "/data")
+
+
+for fs, r in zip(SEEDED, t.parallel(run_seeded, SEEDED)):
+    name = "disk at a volume, volume below it, " + fs
+    if not t.check("%s: exit status" % name, 0, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+        continue
+    v = values(r)
+    t.check("%s: disk holds the first volume's files" % name, ["a.txt", "b"], sorted(v.get("entries", "").split()))
+    t.check("%s: and an empty directory for the second" % name, "0", v.get("b"))
+    t.check("%s: VM: the second volume" % name, ".vol", v.get("vm_b"))
+
+# A disk at /etc.
+ETC_PROBE = (UNDER + '[ "$(cat /etc/hostname)" = h53 ] && echo hostname=ok; grep -q h53 /etc/hosts && echo hosts=ok; '
+             'grep -q nameserver /etc/resolv.conf && echo resolv=ok; [ -s /tmp/under/passwd ] && echo passwd=ok; '
+             'for f in hostname hosts resolv.conf; do p=/tmp/under/$f; '
+             'if [ -e "$p" ]; then echo "disk_$f=$(stat -c %s "$p")"; else echo "disk_$f=none"; fi; done')
+ETC = ["ext4", "xfs"]
+
+for fs, r in zip(ETC, t.parallel(lambda fs: vm("etc-" + fs, "/disks/a,/etc,%s,%s" % (fs, SIZE[fs]),
+                                               ["--hostname", "h53"], ETC_PROBE, "/etc"), ETC)):
+    name = "disk at /etc, " + fs
+    if not t.check("%s: exit status" % name, 0, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+        continue
+    v = values(r)
+    for key in ("hostname", "hosts", "resolv", "passwd"):
+        t.check("%s: %s" % (name, {"passwd": "disk holds the image's /etc/passwd"}.get(key, "Docker's /etc/" + key)),
+                "ok", v.get(key))
+    for f in ("hostname", "hosts", "resolv.conf"):
+        t.check("%s: disk holds an empty file at /etc/%s" % (name, f), "0", v.get("disk_" + f))
+
+# --- Encoding -----------------------------------------------------------------------------------
+
+ODD = ["a b", "c\\d", "e\\040f", "n\\nl", "caf\u00e9", "\u65e5\u672c"]
+ODD_TMPFS = "tm p"
+# For each path given after the disk's destination: 'ok' if it is a mountpoint, and the disk holds a
+# directory there (where a disk's destination is given, else '-').
+ENCODING_PROBE = ('d="$1"; shift; [ "$d" = - ] || { mkdir -p /tmp/under && mount --bind "$d" /tmp/under; }; '
+                  'for p in "$@"; do m=bad; mountpoint -q "$p" && m=ok; '
+                  'if [ "$d" != - ]; then [ -d "/tmp/under/${p#$d/}" ] || m="$m-noplaceholder"; fi; echo "$m"; done; '
+                  'echo "tmpfs=$(stat -f -c %T "/srv/tm p")"')
+# (name, RUNCVM_DISKS, the parent of the odd paths, the disk destination whose placeholders to check)
+ENCODING = [
+    ("ext4", "/disks/a,/srv,ext4,64M", "/srv", "/srv"),
+    ("xfs", "/disks/a,/srv,xfs,320M", "/srv", "/srv"),
+    ("whole-root-xfs", "/disks/r,/,ext4,256M;/disks/a,/srv,xfs,320M", "/srv", "/srv"),
+    ("whole-root-carried", "/disks/r,/,ext4,256M", "/srv", "-"),
+]
+
+
+def run_encoding(case):
+    name, disks, parent, under = case
+    paths = ["%s/%s" % (parent, p) for p in ODD]
+    opts = []
+    for p in paths:
+        opts += ["-v", p]
+    opts += ["--tmpfs", "%s/%s" % (parent, ODD_TMPFS)]
+    return vm("encoding-" + name, disks, opts, ENCODING_PROBE, under, *paths)
+
+
+for (name, disks, parent, under), r in zip(ENCODING, t.parallel(run_encoding, ENCODING)):
+    name = "odd paths, " + name
+    if not t.check("%s: exit status" % name, 0, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+        continue
+    lines = [line for line in r.stdout.replace("\r", "").splitlines() if line.startswith(("ok", "bad"))]
+    for p, line in zip(ODD, lines + [""] * len(ODD)):
+        t.check("%s: volume at %r mounted%s" % (name, p, ", with a placeholder on the disk" if under != "-" else ""),
+                "ok", line)
+    t.check("%s: tmpfs mount at %r" % (name, ODD_TMPFS), "tmpfs", values(r).get("tmpfs"))
+
+# Mount destinations, and disk backing files, with control characters are rejected, each shown
+# escaped, before any disk is created: by runcvm-runtime for Docker's mounts, which docker run then
+# reports; by runcvm-ctr-qemu for RUNCVM_DISKS. (name, docker run options, RUNCVM_DISKS, the error)
+CTL = "must not contain control characters (bytes 0x01-0x1F and 0x7F)"
+CONTROL = [
+    ("volume-newline", ["-v", "/t/dir\n/file"], "/disks/a,/srv,ext4,64M",
+     "RunCVM: Error: mount destination $'/t/dir\\n/file' " + CTL),
+    ("bind-file-tab", ["-v", "/opt/runcvm/LICENSE:/srv/d\tx/file:ro"], "/disks/a,/srv,ext4,64M",
+     "RunCVM: Error: mount destination $'/srv/d\\tx/file' " + CTL),
+    ("tmpfs-0x7f", ["--tmpfs", "/t/x\x7f"], "/disks/a,/srv,ext4,64M",
+     "RunCVM: Error: mount destination $'/t/x\\177' " + CTL),
+    ("backing-file-newline", [], "/disks/a\nb,/srv,ext4,64M",
+     "Error: disk spec $'/disks/a\\nb,/srv,ext4,64M' invalid: src $'/disks/a\\nb' " + CTL),
+]
+
+
+def run_control(case):
+    name, opts, disks = case[:3]
+    volume = t.unique("control-" + name + "-disks")
+    t.volume_create(volume)
+    r = vm("control-" + name, disks, opts, "true", disks_volume=volume)
+    listing = t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v", "%s:/disks" % volume,
+                       "alpine", "sh", "-c", "find /disks -mindepth 1").stdout
+    return r, listing
+
+
+for (name, opts, disks, error), (r, listing) in zip(CONTROL, t.parallel(run_control, CONTROL)):
+    name = "control characters, " + name
+    t.check("%s: rejected" % name, True, r.returncode != 0)
+    if not t.check("%s: error message" % name, True, error in r.stdout):
+        t.log("output:\n%s" % r.stdout)
+    t.check("%s: nothing created" % name, "", listing)
+
+# --- Backing files ------------------------------------------------------------------------------
+
+def runc(volume, script):
+    t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v", "%s:/disks" % volume,
+             "alpine", "sh", "-c", script, check=True)
+
+
+# What the disk holds at its destination "$1": its entries, and state.img's contents, if any.
+BACKING_PROBE = UNDER + 'echo "entries=$(ls -A /tmp/under | tr "\\n" " ")"; echo "state=$(cat /tmp/under/state.img 2>/dev/null)"'
+BACKING = [(case, fs) for case in ("own", "other", "dangling", "prefixed", "unrelated") for fs in ("ext4", "xfs")]
+
+
+def run_backing(case):
+    kind, fs = case
+    name = "backing-%s-%s" % case
+    size = SIZE[fs]
+    if kind in ("own", "other", "dangling"):
+        shared = t.unique(name + "-shared")
+        t.volume_create(shared)
+        disks = "/disks/state.img,/data,%s,%s" % (fs, size)
+        if kind == "other":
+            disks = "/disks/a.img,/data,%s,%s;/disks/state.img,/other,ext4,16M" % (fs, size)
+        if kind == "dangling":
+            runc(shared, "ln -s state.img /disks/link.img")
+            disks = "/disks/link.img,/data,%s,%s" % (fs, size)
+        return vm(name, disks, ["--mount", "type=volume,src=%s,dst=/data" % shared], BACKING_PROBE, "/data",
+                  disks_volume=shared)
+    if kind == "prefixed":
+        return vm(name, "/vm/srv/state.img,/srv,%s,%s" % (fs, size), [], BACKING_PROBE, "/srv")
+    seed = seed_volume(name + "-seed", {"state.img": "seed"})
+    return vm(name, "/data/state.img,/data,%s,%s" % (fs, size), ["--mount", "type=volume,src=%s,dst=/data" % seed],
+              BACKING_PROBE, "/data")
+
+
+for (kind, fs), r in zip(BACKING, t.parallel(run_backing, BACKING)):
+    name = {"own": "one volume at /disks and /data, disk /disks/state.img at /data",
+            "other": "one volume at /disks and /data, another disk's backing file in it",
+            "dangling": "one volume at /disks and /data, disk /disks/link.img, a dangling link to state.img",
+            "prefixed": "backing file /vm/srv/state.img, disk at /srv",
+            "unrelated": "volume at /data holding state.img, backing file /data/state.img"}[kind] + ", " + fs
+    if not t.check("%s: exit status" % name, 0, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+        continue
+    v = values(r)
+    entries = v.get("entries", "").split()
+    if kind == "unrelated":
+        t.check("%s: the volume's state.img is kept" % name, "seed", v.get("state"))
+    else:
+        t.check("%s: no backing file on the disk" % name, ["link.img"] if kind == "dangling" else [],
+                [e for e in entries if e.endswith(".img")])
+
+# Backing files reached through symbolic links to paths with a space and a ',': each Container/VM
+# starts with both disks mounted, creating them, then finding them again.
+def run_whitespace_links():
+    volume = t.unique("whitespace-links-disks")
+    t.volume_create(volume)
+    runc(volume, "mkdir '/disks/store dir' /disks/comma,dir && ln -s 'store dir/a.img' /disks/a-link && "
+                 "ln -s comma,dir/b.img /disks/b-link")
+    disks = "/disks/a-link,/srv/a,ext4,16M;/disks/b-link,/srv/b,ext4,16M"
+    probe = 'mountpoint -q /srv/a && mountpoint -q /srv/b && echo mounted=yes'
+    first = vm("whitespace-links-1", disks, [], probe, disks_volume=volume)
+    second = vm("whitespace-links-2", disks, [], probe, disks_volume=volume)
+    listing = t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v", "%s:/disks" % volume,
+                       "alpine", "sh", "-c", "ls '/disks/store dir' /disks/comma,dir").stdout
+    return first, second, listing
+
+
+WS_FIRST, WS_SECOND, WS_LISTING = run_whitespace_links()
+for step, r in (("created", WS_FIRST), ("found again", WS_SECOND)):
+    name = "backing files through links to paths with a space and a ',', " + step
+    if not t.check("%s: exit status" % name, 0, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+        continue
+    t.check("%s: both disks mounted" % name, "yes", values(r).get("mounted"))
+t.check("backing files through links to paths with a space and a ',': created at the links' targets",
+        ["a.img", "b.img"], sorted(w for w in WS_LISTING.split() if w.endswith(".img")))
+
+# --- Invalid plans ------------------------------------------------------------------------------
+
+# Lists /disks, as a runc container sees it, with each file's checksum.
+def disks_listing(volume):
+    return t.docker("run", "--rm", "--runtime=runc", "--network=none", *t.labels(), "-v", "%s:/disks" % volume,
+                    "alpine", "sh", "-c", "cd /disks && find . | sort && find . -type f -exec md5sum {} + | sort").stdout
+
+
+TMPFS_257 = []
+for n in range(257):
+    TMPFS_257 += ["--tmpfs", "/srv/t%d" % n]
+
+# (name, setup: a valid RUNCVM_DISKS to create disks with first, then a script run on /disks, further
+# options, RUNCVM_DISKS, the spec reported, the message)
+INVALID = [
+    ("later-disk-no-size", None, None, [], "/disks/a,/srv/a,ext4,16M;/disks/b,/srv/b,ext4", "/disks/b,/srv/b,ext4",
+     "size must be specified if src '/disks/b' does not exist"),
+    ("root-whitespace", None, None, [], "/disks/a,/srv/a b,ext4,16M,layout=root", None,
+     "dst '/srv/a b' must not contain whitespace or '\\'"),
+    ("root-dotdot", None, None, [], "/disks/a,/srv/../x,ext4,16M,layout=root", None,
+     "dst '/srv/../x' must be an absolute path other than '/', without '.' or '..' components"),
+    ("same-src", None, None, [], "/disks/a,/srv/a,ext4,16M;/disks//a,/srv/b,ext4,16M", "/disks//a,/srv/b,ext4,16M",
+     "src '/disks//a' is the same file as the src of an earlier disk, '/disks/a'"),
+    ("same-src-aliased-volume", None, "mkdir /disks/alias", ["{alias}"],
+     "/disks/a,/srv/a,ext4,16M;/disks/alias/a,/srv/b,ext4,16M", "/disks/alias/a,/srv/b,ext4,16M",
+     "src '/disks/alias/a' is the same file as the src of an earlier disk, '/disks/a'"),
+    ("same-src-dangling-symlink", None, "ln -s a /disks/l", [], "/disks/a,/srv/a,ext4,16M;/disks/l,/srv/b,ext4,16M",
+     "/disks/l,/srv/b,ext4,16M", "src '/disks/l' is the same file as the src of an earlier disk, '/disks/a'"),
+    ("same-src-hard-link", "/disks/a,/srv/a,ext4,16M", "ln /disks/a /disks/h", [],
+     "/disks/a,/srv/a,ext4;/disks/h,/srv/h,ext4", "/disks/h,/srv/h,ext4",
+     "src '/disks/h' is the same file as the src of an earlier disk, '/disks/a'"),
+    ("same-uuid", "/disks/a,/srv/a,ext4,16M", "cp /disks/a /disks/c", [],
+     "/disks/a,/srv/a,ext4;/disks/c,/srv/c,ext4", "/disks/c,/srv/c,ext4",
+     "src '/disks/c' has the same filesystem UUID as the src of an earlier disk, '/disks/a'"),
+    ("257-exclusions", None, None, TMPFS_257, "/disks/a,/srv,ext4,16M", None,
+     "a new disk with fs 'ext4' can leave out at most 256 paths mounted below its destinations, and this one has 257"),
+    ("src-dotdot-alias", "/disks/a,/srv/a,ext4,16M,layout=root", None, [],
+     "/disks/a,/data,ext4;/disks/missing/../a,/other,ext4,16M", "/disks/missing/../a,/other,ext4,16M",
+     "src '/disks/missing/../a' must be an absolute path to a file, without '.' or '..' components"),
+    ("src-relative", None, None, [], "state.img,/srv/a,ext4,16M", None,
+     "src 'state.img' must be an absolute path to a file, without '.' or '..' components"),
+    ("src-dot", None, None, [], "/disks/./a,/srv/a,ext4,16M", None,
+     "src '/disks/./a' must be an absolute path to a file, without '.' or '..' components"),
+    ("later-disk-bad-size", None, None, [], "/disks/a,/srv/a,ext4,16M;/disks/b,/srv/b,ext4,garbage",
+     "/disks/b,/srv/b,ext4,garbage", "size 'garbage' invalid"),
+    ("65-dsts", None, None, [], "/disks/a,%s,ext4,16M" % ":".join("/srv/d%d" % n for n in range(65)), None,
+     "a new disk with fs 'ext4' and layout 'subdirs' can have at most 64 dst"),
+]
+
+
+def run_invalid(case):
+    name, setup, script, opts, disks = case[:5]
+    volume = t.unique("invalid-" + name)
+    t.volume_create(volume)
+    if setup:
+        first = vm("invalid-" + name + "-setup", setup, [], "true", disks_volume=volume)
+        if first.returncode != 0:
+            return first, None, None
+    if script:
+        runc(volume, script)
+    before = disks_listing(volume)
+    opts = [o for o in opts if o != "{alias}"] + (
+        ["--mount", "type=volume,src=%s,dst=/disks/alias" % volume] if "{alias}" in opts else [])
+    r = vm("invalid-" + name, disks, opts, "true", disks_volume=volume)
+    return r, before, disks_listing(volume)
+
+
+for (name, setup, script, opts, disks, spec, message), (r, before, after) in zip(INVALID, t.parallel(run_invalid, INVALID)):
+    if before is None:
+        t.check("%s: setup Container/VM exit status" % name, 0, r.returncode)
+        t.log("output:\n%s" % r.stdout)
+        continue
+    t.check("%s: exit status" % name, 1, r.returncode)
+    if not t.check("%s: error message" % name, True, ("disk spec '%s' invalid: %s" % (spec or disks, message)) in r.stdout):
+        t.log("output:\n%s" % r.stdout)
+    t.check("%s: nothing created" % name, before, after)
+
+# --- An existing disk with changed mounts ------------------------------------------------------
+
+
+def run_changed():
+    name = "changed"
+    volume = t.unique(name + "-disks")
+    t.volume_create(volume)
+    disks = "/disks/a,/data,ext4,64M"
+    probe = ('echo "v=$(stat -f -c %T /data/v)"; [ -d /data/v ] && echo dir=yes; '
+             'echo "entries=$(ls -A /data/v | tr "\\n" " ")"')
+    return [vm(name + "-1", disks, mount_opts(["--mount", "type=volume,src={vol},dst=/data/v"], name), probe,
+               disks_volume=volume),
+            vm(name + "-2", disks, [], probe, disks_volume=volume),
+            vm(name + "-3", disks, ["--mount", "type=tmpfs,dst=/data/v"], probe, disks_volume=volume)]
+
+
+for step, r, expected in zip(("with a volume below it", "without it", "with a tmpfs mount there"), run_changed(),
+                             (".vol", "", "")):
+    name = "existing disk, " + step
+    if not t.check("%s: exit status" % name, 0, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+        continue
+    v = values(r)
+    t.check("%s: /data/v is a directory" % name, "yes", v.get("dir"))
+    t.check("%s: /data/v holds" % name, expected, v.get("entries", "?").strip())
+    if step == "with a tmpfs mount there":
+        t.check("%s: /data/v is the tmpfs mount" % name, "tmpfs", v.get("v"))
+
+# --- A whole-root disk with a new xfs disk -----------------------------------------------------
+
+r = vm("whole-root-xfs", "/disks/r,/,ext4,256M;/disks/x,/usr/share,xfs,320M", [],
+       'echo "script=$(ls /usr/share/udhcpc)"; echo "keys=$(ls /usr/share/apk/keys | wc -l)"; '
+       'echo "fs=$(stat -f -c %T /usr/share)"')
+if t.check("whole-root and xfs disks: exit status", 0, r.returncode):
+    v = values(r)
+    t.check("whole-root and xfs disks: /usr/share is the xfs disk", "xfs", v.get("fs"))
+    t.check("whole-root and xfs disks: populated from the image", "default.script", v.get("script"))
+else:
+    t.log("output:\n%s" % r.stdout)
+
+# --- RUNCVM_FSTAB -------------------------------------------------------------------------------
+
+no_fstab_image = t.unique("no-fstab").lower()
+subprocess.run(["docker", "build", "-q", *t.labels(), "-t", no_fstab_image, "-"], check=True,
+               input="FROM alpine\nRUN rm -f /etc/fstab\n", universal_newlines=True, stdout=subprocess.DEVNULL)
+t.cleanup_image(no_fstab_image)
+
+FSTAB_PROBE = ('grep -E "^(#runcvm-held|/.runcvm/submounts)" /.runcvm/fstab | sed "s/^/fstab=/"; '
+               '[ -d /.runcvm/submounts ] && echo submounts=yes || echo submounts=no; '
+               'if [ -e /etc/fstab ]; then cmp -s /etc/fstab /.runcvm/fstab && echo etc=ours || echo etc=other; '
+               'else echo etc=none; fi; '
+               'umount /data/v && [ ! -e /data/v/.vol ] && echo unmounted=yes; mount -a >/dev/null 2>&1; '
+               '[ -e /data/v/.vol ] && echo remounted=yes || echo remounted=no; echo w >/data/v/w')
+FSTAB = [(mode, image) for mode in ("disks", "all") for image in ("alpine", no_fstab_image)]
+
+
+def run_fstab(case):
+    mode, image = case
+    name = "fstab-%s-%s" % (mode, "alpine" if image == "alpine" else "no-fstab")
+    vol = seed_volume(name + "-vol", {".vol": ""})
+    r = vm(name, "/disks/a,/data,ext4,64M", ["--mount", "type=volume,src=%s,dst=/data/v" % vol], FSTAB_PROBE,
+           image=image, env=["RUNCVM_FSTAB=" + mode])
+    return r, t.volume_read(vol, "w")
+
+
+for (mode, image), (r, written) in zip(FSTAB, t.parallel(run_fstab, FSTAB)):
+    has_fstab = image == "alpine"
+    name = "RUNCVM_FSTAB=%s, image %s /etc/fstab" % (mode, "with" if has_fstab else "without")
+    if not t.check("%s: exit status" % name, 0, r.returncode):
+        t.log("output:\n%s" % r.stdout)
+        continue
+    v = values(r)
+    if mode == "disks":
+        t.check("%s: fstab marks the held volume" % name, "#runcvm-held 0 /data/v", v.get("fstab"))
+        t.check("%s: /.runcvm/submounts is gone" % name, "no", v.get("submounts"))
+        t.check("%s: /etc/fstab" % name, "ours" if has_fstab else "none", v.get("etc"))
+    else:
+        t.check("%s: fstab lists the held volume" % name, "/.runcvm/submounts/0 /data/v none bind 0 0", v.get("fstab"))
+        t.check("%s: /.runcvm/submounts is kept" % name, "yes", v.get("submounts"))
+        t.check("%s: /etc/fstab is ours" % name, "ours", v.get("etc"))
+        t.check("%s: held volume unmounted" % name, "yes", v.get("unmounted"))
+        t.check("%s: 'mount -a' mounts it again" % name, "yes", v.get("remounted"))
+        t.check("%s: a write to it reaches the volume" % name, "w\n", written)
+
+r = t.docker("run", "--rm", *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(), "--env", "RUNCVM_FSTAB=some",
+             "alpine", "true", timeout=TIMEOUT)
+t.check("invalid RUNCVM_FSTAB: rejected", True, r.returncode != 0)
+if not t.check("invalid RUNCVM_FSTAB: error message", True, "RUNCVM_FSTAB 'some' invalid" in r.stdout):
+    t.log("output:\n%s" % r.stdout)
+
+# Under systemd: (RUNCVM_FSTAB, whether the image has an /etc/fstab).
+fstab_image = t.unique("systemd-fstab").lower()
+subprocess.run(["docker", "build", "-q", *t.labels(), "-t", fstab_image, "-"], check=True,
+               input="FROM %s\nRUN touch /etc/fstab\n" % SYSTEMD_IMAGE, universal_newlines=True,
+               stdout=subprocess.DEVNULL)
+t.cleanup_image(fstab_image)
+SYSTEMD = [(mode, has_fstab) for mode in ("disks", "all") for has_fstab in (False, True)]
+SPACED = "/home/w x"
+
+# Restarts a held volume's own mount units, then its ancestor's, printing what follows each.
+SYSTEMD_PROBE = ('echo "failed=$(systemctl --failed --no-legend | wc -l)"; '
+                 'systemctl restart home-v.mount && [ -e /home/v/.vol ] && echo restart_own=yes; '
+                 'echo own >/home/v/own; '
+                 'systemctl restart "$(systemd-escape -p --suffix=mount "/home/w x")" && '
+                 'mountpoint -q "/home/w x" && echo restart_spaced=yes; '
+                 # systemd restarts home-v.mount, which requires home.mount, in a job of its own, which
+                 # 'systemctl restart home.mount' does not wait for.
+                 'systemctl restart home.mount; a=lost; for i in $(seq 20); do [ -e /home/v/.vol ] && a=kept && break; '
+                 'sleep 0.5; done; echo ancestor=$a; '
+                 'echo "failed_after=$(systemctl --failed --no-legend | wc -l)"')
+
+
+def run_systemd(case):
+    mode, has_fstab = case
+    name = "systemd-%s-%s" % (mode, "fstab" if has_fstab else "nofstab")
+    vol = seed_volume(name + "-vol", {".vol": ""})
+    disks = t.unique(name + "-disks")
+    t.volume_create(disks)
+    container = t.unique(name)
+    t.cleanup_container(container)
+    r = t.docker("run", "-d", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 "--mount", "type=volume,src=%s,dst=/disks" % disks, "--mount", "type=volume,src=%s,dst=/home/v" % vol,
+                 "-v", SPACED, "--env", "RUNCVM_DISKS=/disks/a,/home,ext4,64M", "--env", "RUNCVM_FSTAB=" + mode,
+                 fstab_image if has_fstab else SYSTEMD_IMAGE)
+    if r.returncode != 0 or not t.wait_for_exec(container, BOOT_TIMEOUT) or not t.wait_for(
+            "systemd running in %s" % container, BOOT_TIMEOUT,
+            ["docker", "exec", container, "sh", "-c", "systemctl is-system-running | grep -E 'running|degraded'"]):
+        return {"error": r.stdout + t.docker("logs", container).stdout}
+    if mode == "disks":
+        r = t.docker("exec", container, "sh", "-c", 'echo "failed=$(systemctl --failed --no-legend | wc -l)"; '
+                     '[ -e /home/v/.vol ] && echo vol=yes; [ -e /etc/fstab ] && echo etc=yes || echo etc=no')
+    else:
+        r = t.docker("exec", container, "sh", "-c", SYSTEMD_PROBE)
+    failed = t.docker("exec", container, "systemctl", "--failed", "--no-legend").stdout
+    t.docker("rm", "-f", container)
+    return {"values": values(r), "failed": failed, "own": t.volume_read(vol, "own")}
+
+
+for (mode, has_fstab), result in zip(SYSTEMD, t.parallel(run_systemd, SYSTEMD)):
+    name = "systemd, RUNCVM_FSTAB=%s, image %s /etc/fstab" % (mode, "with" if has_fstab else "without")
+    if not t.check("%s: booted" % name, True, "error" not in result):
+        t.log("output:\n%s" % result["error"])
+        continue
+    v = result["values"]
+    if not t.check("%s: no failed units" % name, "0", v.get("failed")):
+        t.log("failed units:\n%s" % result["failed"])
+    if mode == "disks":
+        t.check("%s: the held volume is mounted" % name, "yes", v.get("vol"))
+        t.check("%s: /etc/fstab" % name, "yes" if has_fstab else "no", v.get("etc"))
+        continue
+    t.check("%s: restarting the volume's mount unit mounts it again" % name, "yes", v.get("restart_own"))
+    t.check("%s: a write to it then reaches the volume" % name, "own\n", result["own"])
+    t.check("%s: restarting the mount unit of a volume at a path with a space" % name, "yes", v.get("restart_spaced"))
+    t.check("%s: restarting the ancestor's mount unit mounts it again" % name, "kept", v.get("ancestor"))
+    if not t.check("%s: no failed units after the restarts" % name, "0", v.get("failed_after")):
+        t.log("failed units:\n%s" % result["failed"])
+
+t.finish()

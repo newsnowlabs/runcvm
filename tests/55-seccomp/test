@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""The container's seccomp filter, and QEMU's disks under it.
+
+Four Container/VMs with a disk each: one under the engine's default seccomp
+profile; one under that profile with RUNCVM_SYS_ADMIN=1; one with
+RUNCVM_SECCOMP=unconfined; and one launched with --security-opt
+seccomp=unconfined, for which the engine gives the container no profile (not a
+supported way to run unconfined, but one that must still work). Two more under
+the default profile: one with a disk and RUNCVM_DISK_AIO=native, and one with
+no disk. For each:
+
+- The container's init (runcvm-ctr-entrypoint) and QEMU, on the host, are
+  seccomp-filtered (Seccomp: 2 in their /proc/<pid>/status) under the
+  default profile, and not filtered (Seccomp: 0) when unconfined. virtiofsd,
+  which installs a seccomp filter of its own, is not a witness.
+- QEMU opens the disk with aio=io_uring, unless RUNCVM_DISK_AIO=native forces
+  aio=native, or the host's kernel.io_uring_disabled turns io_uring off for
+  QEMU: 2; or 1, except with RUNCVM_SYS_ADMIN=1, which gives QEMU
+  CAP_SYS_ADMIN. Then aio=native.
+- The VM boots, and reads back a file written to the disk.
+- QEMU holds an io_uring instance (which it uses for its event loop where it
+  can) only where the profile allows io_uring's system calls, which it does
+  only for a container with a disk that may use io_uring (not with no disk,
+  nor with RUNCVM_DISK_AIO=native), or with no profile; and where the host's
+  kernel.io_uring_disabled lets QEMU use io_uring. QEMU's file descriptors are
+  read through a short-lived container with the host's process namespace, as
+  they are readable only by root.
+
+A Container/VM with an invalid RUNCVM_SECCOMP value fails to start, with an
+error naming the variable.
+
+The init's process is found with docker inspect, QEMU's with docker top, and
+their status read from the host's /proc.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+IMAGE = "alpine"
+SIZE = 64 << 20
+CASES = {
+    "default": [],
+    "sys-admin": ["--env", "RUNCVM_SYS_ADMIN=1"],
+    "runcvm-unconfined": ["--env", "RUNCVM_SECCOMP=unconfined"],
+    "unconfined": ["--security-opt", "seccomp=unconfined"],
+    "aio-native": ["--env", "RUNCVM_DISK_AIO=native"],
+    "no-disk": [],
+}
+DISKLESS = ("no-disk",)
+UNCONFINED = ("runcvm-unconfined", "unconfined")
+
+
+def io_uring_disabled():
+    """The host's kernel.io_uring_disabled, or "0" where the kernel has no such setting."""
+    try:
+        with open("/proc/sys/kernel/io_uring_disabled") as f:
+            return f.read().strip()
+    except OSError:
+        return "0"
+
+
+def io_uring_usable(case):
+    """Whether the host's kernel.io_uring_disabled lets QEMU in CASE use io_uring."""
+    disabled = io_uring_disabled()
+    return disabled == "0" or (disabled == "1" and case == "sys-admin")
+
+
+def io_uring_allowed(case):
+    """Whether the container's seccomp profile in CASE allows io_uring's system calls."""
+    return case in UNCONFINED or (case not in DISKLESS and case != "aio-native")
+
+
+def qemu_io_uring_fds(case, pid):
+    """The number of io_uring instances QEMU (host PID) holds, or None if unreadable."""
+    r = t.docker("run", "--rm", "--name", t.unique("seccomp-fds-" + case), *t.labels(), "--privileged",
+                 "--pid=host", IMAGE, "sh", "-c",
+                 # QEMU opens and closes descriptors as it runs, so ls may fail on one that goes
+                 # between its listing and its reading; the directory's presence is the test.
+                 "ls -l /proc/%s/fd 2>/dev/null; test -d /proc/%s/fd" % (pid, pid))
+    return r.stdout.count("anon_inode:[io_uring]") if r.returncode == 0 else None
+
+
+def expected_aio(case):
+    """The aio mode QEMU should use for disks in CASE on this host."""
+    if case == "aio-native":
+        return "native"
+    disabled = io_uring_disabled()
+    if disabled == "2" or (disabled == "1" and case != "sys-admin"):
+        return "native"
+    return "io_uring"
+
+
+def processes(name):
+    """Return {pid: args} for the processes in container NAME."""
+    r = t.docker("top", name, "-eo", "pid,args")
+    procs = {}
+    for line in r.stdout.splitlines()[1:]:
+        pid, _, args = line.strip().partition(" ")
+        if pid.isdigit():
+            procs[pid] = args
+    return procs
+
+
+def seccomp_mode(pid):
+    """The Seccomp field of /proc/PID/status, or None if unreadable."""
+    try:
+        with open("/proc/%s/status" % pid) as f:
+            for line in f:
+                if line.startswith("Seccomp:"):
+                    return line.split()[1]
+    except OSError:
+        pass
+    return None
+
+
+def run(case):
+    volume = t.unique("seccomp-" + case)
+    t.volume_create(volume)
+    name = t.unique("seccomp-" + case)
+    results = {}
+
+    disk = [] if case in DISKLESS else ["--mount", "type=volume,src=%s,dst=/disks" % volume,
+                                        "--env", "RUNCVM_DISKS=/disks/d,/srv/d,ext4,%d" % SIZE]
+    r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 *CASES[case], *disk, IMAGE, "sleep", "infinity")
+    if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
+        results["error"] = r.stdout + t.docker("logs", name).stdout
+        return results
+
+    results["init"] = seccomp_mode(t.docker("inspect", "-f", "{{.State.Pid}}", name).stdout.strip())
+    for pid, args in processes(name).items():
+        if "qemu-system" in args:
+            results["qemu"] = (seccomp_mode(pid), args)
+            results["io_uring_fds"] = qemu_io_uring_fds(case, pid)
+            break
+
+    if case not in DISKLESS:
+        r = t.docker("exec", name, "sh", "-c", "echo written >/srv/d/f && sync && cat /srv/d/f")
+        results["disk"] = r.stdout.strip()
+    results["logs"] = t.docker("logs", name).stdout
+    return results
+
+
+t.param("seccomp", ", ".join(CASES))
+t.param("kernel.io_uring_disabled", io_uring_disabled())
+for case, results in zip(CASES, t.parallel(run, list(CASES), remove=True)):
+    aio = expected_aio(case)
+    if "error" in results:
+        t.check("%s: Container/VM started" % case, True, False)
+        t.log(results["error"])
+        continue
+
+    filtered = "0" if case in UNCONFINED else "2"
+    qemu_mode, qemu_args = results.get("qemu", (None, ""))
+    t.check("%s: init's Seccomp mode" % case, filtered, results["init"])
+    t.check("%s: QEMU's Seccomp mode" % case, filtered, qemu_mode)
+    holds = io_uring_allowed(case) and io_uring_usable(case)
+    fds = results.get("io_uring_fds")
+    if t.check("%s: QEMU's file descriptors read" % case, True, fds is not None):
+        t.check("%s: QEMU holds an io_uring instance" % case, holds, fds > 0)
+    if case in DISKLESS:
+        continue
+    t.check("%s: QEMU's disk uses aio=%s" % (case, aio), True, ("aio=%s," % aio) in qemu_args)
+    t.check("%s: disk reads back what was written" % case, "written", results["disk"])
+    if aio == "io_uring":
+        t.check("%s: no warning that io_uring is unused" % case, False,
+                "io_uring is not used for disks" in results["logs"])
+
+name = t.unique("seccomp-invalid")
+r = t.docker("run", "--rm", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+             "--env", "RUNCVM_SECCOMP=bogus", IMAGE, "true")
+t.check("invalid RUNCVM_SECCOMP: Container/VM fails to start", True, r.returncode != 0)
+t.check("invalid RUNCVM_SECCOMP: error names RUNCVM_SECCOMP", True, "RUNCVM_SECCOMP" in (r.stdout or ""))
+
+t.finish()

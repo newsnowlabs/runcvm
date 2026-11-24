@@ -18,9 +18,12 @@ RUNCVM_ENV_VARS=(
   RUNCVM_BREAK
   RUNCVM_CGROUPFS
   RUNCVM_CPUS
+  RUNCVM_CPU_HEADROOM
   RUNCVM_DISKS
+  RUNCVM_DISK_AIO
   RUNCVM_DISPLAY_MODE
   RUNCVM_DNS_IP
+  RUNCVM_FSTAB
   RUNCVM_GUEST
   RUNCVM_HAS_HOME
   RUNCVM_HUGETLB
@@ -47,10 +50,19 @@ RUNCVM_ENV_VARS=(
   RUNCVM_QEMU_VGA
   RUNCVM_QEMU_VNC_DISPLAY
   RUNCVM_RUNTIME_DEBUG
+  RUNCVM_SECCOMP
+  RUNCVM_SHUTDOWN
   RUNCVM_SYS_ADMIN
   RUNCVM_TMPFS
+  RUNCVM_TTY
   RUNCVM_UIDGID
   RUNCVM_VIRTIOFSD_CACHE
+  RUNCVM_VIRTIOFSD_CACHE_PATHS
+  RUNCVM_VIRTIOFSD_KILLPRIV
+  RUNCVM_VIRTIOFSD_NEGATIVE_TIMEOUT
+  RUNCVM_VIRTIOFSD_POLL
+  RUNCVM_VIRTIOFSD_POLL_US
+  RUNCVM_VIRTIOFSD_SUBMOUNT_CACHE
   RUNCVM_VM_MOUNTPOINT
 )
 
@@ -109,6 +121,25 @@ disk_fs() {
 # $RUNCVM_GUEST/etc/disk-filesystems, one per line.
 disk_fs_list() {
   awk -v f="$1" '$1 !~ /^#/ && NF { print $f }' "$RUNCVM_GUEST/etc/disk-filesystems"
+}
+
+# split_list <array> <separator> <string>
+# Sets <array> to the entries of <string> between <separator>s, each without the whitespace around
+# it (such as the newline that ends a YAML block scalar), and skips entries of whitespace alone.
+# <string> is split with mapfile, not read, which would stop at a newline. runcvm-runtime has its own copy.
+split_list() {
+  local -n __split_list="$1"
+  local __item
+  local -a __items=()
+
+  mapfile -d "$2" -t __items < <(printf '%s' "$3")
+  __split_list=()
+  for __item in "${__items[@]}"
+  do
+    __item="${__item#"${__item%%[![:space:]]*}"}"
+    __item="${__item%"${__item##*[![:space:]]}"}"
+    [ -z "$__item" ] || __split_list+=("$__item")
+  done
 }
 
 load_network() {
@@ -176,6 +207,7 @@ create_aliases() {
     poweroff
     ps
     qemu-ga
+    qemu-system-aarch64
     qemu-system-x86_64
     rm
     rmdir

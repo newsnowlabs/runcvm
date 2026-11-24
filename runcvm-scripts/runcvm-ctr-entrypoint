@@ -71,6 +71,10 @@ export -n SHLVL OLDPWD
 
 export >/.runcvm/config
 
+# Directory for the state RunCVM records while the Container/VM runs, as distinct from the
+# files written here at its start
+mkdir -p /.runcvm/state
+
 # NOW LOAD DEFAULT ENV AND PATH
 . $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 

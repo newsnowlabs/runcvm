@@ -69,6 +69,9 @@ class FakeTests:
         e.pop("RUNCVM_TEST_MOCK", None)
         e.pop("RUNCVM_TEST_ACCEL", None)
         e.pop("RUNCVM_TEST_TCG_CASES", None)
+        e.pop("RUNCVM_TEST_PULL", None)
+        for var in ("RUNCVM_TEST_VM_ENV", "RUNCVM_TEST_CPUS", "RUNCVM_TEST_MEMORY", "RUNCVM_TEST_EXEC_TIMEOUT"):
+            e.pop(var, None)
         if env:
             e.update(env)
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -162,6 +165,11 @@ class RunnerTests(unittest.TestCase):
             t.check_cmd("wait_for succeeds when ready", lambda: t.wait_for("a file", 5, ["test", "-e", "../framework.py"]))
             t.check("wait_for times out", False, t.wait_for("never", 2, lambda: False))
             t.check("parallel keeps order", [1, 4, 9, 16], t.parallel(lambda x: x * x, [1, 2, 3, 4], jobs=2))
+            t.check("registry_unavailable: sees a 5xx", True, t.registry_unavailable("received unexpected HTTP status: 500 Internal Server Error"))
+            t.check("registry_unavailable: sees a timeout", True, t.registry_unavailable("Get ...: net/http: TLS handshake timeout"))
+            t.check("registry_unavailable: ignores a missing image", False, t.registry_unavailable("manifest unknown: manifest unknown"))
+            t.check("registry_unavailable: ignores workload output", False, t.registry_unavailable("uname=6.12.0\\nid=0\\npwd=/"))
+            t.skip_check("skip_check records a skip", "demonstration")
             t.param("language", "python")
             t.finish()
             """))
@@ -232,6 +240,8 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual([c["description"] for c in a["checks"]], ["one equals one", "true succeeds"])
         self.assertEqual(a["params"], {"mode": "test"})
         self.assertEqual(self.full.test("l-python-helpers")["params"], {"language": "python"})
+        self.assertIn(("skip_check records a skip", "SKIP"),
+                      [(c["description"], c["status"]) for c in self.full.test("l-python-helpers")["checks"]])
         self.assertEqual(sum(1 for c in self.full.test("c-many-failures")["checks"] if c["status"] == "FAIL"), 256)
 
     def test_tap(self):
@@ -290,6 +300,22 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(r.json()["runtime"], "runc")
                 self.assertTrue(r.json()["mock"])
 
+    def test_runcvm_package_requirement(self):
+        ft = FakeTests()
+        try:
+            ft.add("v-requires-package", "#!/bin/bash\nexit 0\n", requires="runcvm-package")
+            for args in ([], ["--mock"]):
+                with self.subTest(args=args):
+                    r = ft.run("v-requires-package", *args)
+                    if os.path.exists("/opt/runcvm/bin/bash"):
+                        self.assertEqual(r.status("v-requires-package"), "pass", r.out)
+                    else:
+                        self.assertEqual(r.status("v-requires-package"), "skip", r.out)
+                        self.assertEqual(r.test("v-requires-package")["reason"],
+                                         "requires runcvm-package (not installed at /opt/runcvm)")
+        finally:
+            ft.cleanup()
+
     def test_mock_mode_seen_by_tests(self):
         ft = FakeTests()
         try:
@@ -330,6 +356,145 @@ class RunnerTests(unittest.TestCase):
         finally:
             ft.cleanup()
 
+    def test_vm_options(self):
+        ft = FakeTests()
+        try:
+            ft.add("x-vm-bash", """\
+                #!/bin/bash -e
+                . ../framework.sh
+                check "vm_opts" "$EXPECT_OPTS" "$(vm_opts)"
+                check "vm_opts --no-size" "$EXPECT_UNSIZED" "$(vm_opts --no-size)"
+                finish
+                """)
+            ft.add("y-vm-python", PY_PREAMBLE + textwrap.dedent("""\
+                t.check("vm_opts", os.environ["EXPECT_OPTS"].split(), t.vm_opts())
+                t.check("vm_opts(size=False)", os.environ["EXPECT_UNSIZED"].split(), t.vm_opts(size=False))
+                t.finish()
+                """))
+            unsized = "--env=RUNCVM_X=1 --env=RUNCVM_Y=a,b --env=RUNCVM_Z=2 --env=RUNCVM_QEMU_ACCEL=kvm"
+            r = ft.run("--accel", "kvm", "--vm-env", "RUNCVM_Y=a,b", "--vm-env", "RUNCVM_Z=2", "--vm-cpus", "1.5",
+                       "--vm-memory", "768m",
+                       env={"RUNCVM_TEST_VM_ENV": " RUNCVM_X=1 ", "EXPECT_UNSIZED": unsized,
+                            "EXPECT_OPTS": unsized + " --cpus=1.5 --memory=768m"})
+            self.assertEqual(r.rc, 0, r.out)
+            self.assertEqual(r.json()["vm_env"], ["RUNCVM_X=1", "RUNCVM_Y=a,b", "RUNCVM_Z=2"])
+            self.assertEqual((r.json()["vm_cpus"], r.json()["vm_memory"]), ("1.5", "768m"))
+            self.assertIn("vm env: RUNCVM_X=1 RUNCVM_Y=a,b RUNCVM_Z=2; vm cpus: 1.5; vm memory: 768m",
+                          r.read("results.tap"))
+            r = ft.run(env={"RUNCVM_TEST_CPUS": "2", "EXPECT_UNSIZED": "", "EXPECT_OPTS": "--cpus=2"})
+            self.assertEqual(r.rc, 0, r.out)
+            r = ft.run(env={"EXPECT_UNSIZED": "", "EXPECT_OPTS": ""})
+            self.assertEqual(r.rc, 0, r.out)
+            self.assertEqual((r.json()["vm_env"], r.json()["vm_cpus"], r.json()["vm_memory"]), ([], None, None))
+            for args, env in ((["--vm-env", "RUNCVM_X"], None), (["--vm-env", "RUNCVM_X=a b"], None),
+                              (["--vm-cpus", "two"], None), (["--vm-memory", "1 g"], None),
+                              ([], {"RUNCVM_TEST_VM_ENV": "RUNCVM_X=1 junk"}), ([], {"RUNCVM_TEST_MEMORY": "lots"})):
+                with self.subTest(args=args, env=env):
+                    self.assertEqual(ft.run(*args, env=env).rc, 2)
+        finally:
+            ft.cleanup()
+
+    def test_parallel_remove(self):
+        ft = FakeTests()
+        try:
+            # A stand-in docker CLI that logs each command to $DOCKER_LOG
+            bindir = os.path.join(ft.root, "bin")
+            os.makedirs(bindir)
+            with open(os.path.join(bindir, "docker"), "w") as f:
+                f.write('#!/bin/sh\necho "$*" >>"$DOCKER_LOG"\n')
+            os.chmod(os.path.join(bindir, "docker"), 0o755)
+            log = os.path.join(ft.root, "docker.log")
+            open(log, "w").close()
+            ft.add("p-parallel-remove", PY_PREAMBLE + textwrap.dedent("""\
+                def log():
+                    with open(os.environ["DOCKER_LOG"]) as f:
+                        return f.read().splitlines()
+
+                t.cleanup_container("whole-test")
+
+                def case(i):
+                    t.cleanup_container("c%d" % i)
+                    t.cleanup_volume("v%d" % i)
+                    t.cleanup_network("n%d" % i)
+                    return log()
+
+                seen = t.parallel(case, [1, 2], jobs=1, remove=True)
+                t.check("first call's objects not yet removed while it runs", [], seen[0])
+                t.check("first call's container, then volume, removed before the second call",
+                        ["rm -fv c1", "volume rm -f v1"], seen[1])
+                t.check("only the calls' containers and volumes removed by the end",
+                        ["rm -fv c1", "volume rm -f v1", "rm -fv c2", "volume rm -f v2"], log())
+                t.check("without remove, nothing removed", [], t.parallel(lambda i: log()[4:], [3], remove=False)[0])
+                t.finish()
+                """))
+            r = ft.run("p-parallel-remove", env={"PATH": bindir + os.pathsep + os.environ["PATH"],
+                                                 "DOCKER_LOG": log})
+            self.assertEqual(r.rc, 0, r.out)
+            with open(log) as f:
+                rest = f.read().splitlines()[4:]
+            # The rest, at exit: containers, then networks, then volumes (removing again does no harm)
+            self.assertEqual(rest, ["rm -fv c2", "rm -fv c1", "rm -fv whole-test", "network rm n2", "network rm n1",
+                                    "volume rm -f v2", "volume rm -f v1"])
+        finally:
+            ft.cleanup()
+
+    def test_exec_deadline(self):
+        ft = FakeTests()
+        try:
+            # A stand-in docker CLI that hangs on 'exec' and on 'run' not detached
+            bindir = os.path.join(ft.root, "bin")
+            os.makedirs(bindir)
+            with open(os.path.join(bindir, "docker"), "w") as f:
+                f.write(textwrap.dedent("""\
+                    #!/bin/sh
+                    case "$1 $*" in
+                      "exec "*|"run "*) case " $* " in *" -d "*) echo started; exit 0 ;; esac
+                                        echo partial; exec sleep 60 ;;
+                    esac
+                    echo ok
+                    """))
+            os.chmod(os.path.join(bindir, "docker"), 0o755)
+            ft.add("x-deadline-python", PY_PREAMBLE + textwrap.dedent("""\
+                import time
+                t.check("EXEC_TIMEOUT", 2, t.EXEC_TIMEOUT)
+                start = time.time()
+                r = t.docker("exec", "c", "true")
+                t.check("exec stopped at its deadline", (124, "partial"), (r.returncode, r.stdout.strip()))
+                r = t.docker("run", "--rm", "alpine", "true")
+                t.check("foreground run stopped at its deadline", 124, r.returncode)
+                r = t.docker("run", "-d", "alpine", "sleep", "9")
+                t.check("detached run has no deadline", (0, "started"), (r.returncode, r.stdout.strip()))
+                t.check("other commands run as before", "ok", t.docker("ps").stdout.strip())
+                t.check("wait_for gives up at its own deadline", False, t.wait_for("never", 3, ["docker", "exec", "c", "true"]))
+                t.check("expect_exit sees 124", 124, t._run(["docker", "exec", "c", "true"]).returncode)
+                try:
+                    t.docker("exec", "c", "true", check=True)
+                    raised = False
+                except __import__("subprocess").CalledProcessError as e:
+                    raised = e.returncode == 124
+                t.check("check=True raises CalledProcessError(124)", True, raised)
+                t.check("all within the deadlines", True, time.time() - start < 20)
+                t.finish()
+                """))
+            ft.add("y-deadline-bash", """\
+                #!/bin/bash -e
+                . ../framework.sh
+                start=$(date +%s)
+                rc=0; out=$(docker exec c true) || rc=$?
+                check "exec stopped at its deadline" "124 partial" "$rc $out"
+                rc=0; docker run --rm alpine true >/dev/null || rc=$?
+                check "foreground run stopped at its deadline" 124 "$rc"
+                check "detached run has no deadline" started "$(docker run -d alpine sleep 9)"
+                check "other commands run as before" ok "$(docker ps)"
+                check "all within the deadlines" 1 "$(( $(date +%s) - start < 15 ))"
+                finish
+                """)
+            r = ft.run(env={"PATH": bindir + os.pathsep + os.environ["PATH"], "RUNCVM_TEST_EXEC_TIMEOUT": "2"})
+            self.assertEqual(r.rc, 0, r.out)
+            self.assertIn("Timed out after 2s: docker exec c true", r.out)
+        finally:
+            ft.cleanup()
+
     def test_tcg_cases(self):
         ft = FakeTests()
         try:
@@ -351,6 +516,29 @@ class RunnerTests(unittest.TestCase):
                 r = ft.run(*opts, env=dict(env, EXPECT=expect))
                 self.assertEqual(r.rc, 0, r.out)
                 self.assertEqual(r.json()["tcg_cases"], expect == "1")
+        finally:
+            ft.cleanup()
+
+    def test_pull(self):
+        ft = FakeTests()
+        try:
+            ft.add("t-pull-bash", """\
+                #!/bin/bash -e
+                . ../framework.sh
+                check "RUNCVM_TEST_PULL" "$EXPECT" "$RUNCVM_TEST_PULL"
+                finish
+                """)
+            ft.add("u-pull-python", PY_PREAMBLE + textwrap.dedent("""\
+                t.check("PULL", os.environ["EXPECT"] == "1", t.PULL)
+                t.check("pull_images without --pull", True, t.pull_images([] if t.PULL else ["no-such/image:x"]))
+                t.finish()
+                """))
+            for opts, env, expect in [([], {}, "0"),
+                                      (["--pull"], {}, "1"),
+                                      ([], {"RUNCVM_TEST_PULL": "1"}, "1")]:
+                r = ft.run(*opts, env=dict(env, EXPECT=expect))
+                self.assertEqual(r.rc, 0, r.out)
+                self.assertEqual(r.json()["pull"], expect == "1")
         finally:
             ft.cleanup()
 
