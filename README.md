@@ -1454,7 +1454,7 @@ In more detail, the RunCVM runtime `create` process:
    - Set the seccomp profile to 'unconfined'.
    - Set `/dev/shm` to the size desired for the VM's memory, set `RUNCVM_MEM_SIZE` env var accordingly, and set the container memory limit to the size plus 256Mb (a contingency for QEMU itself, along with virtiofsd, dnsmasq and other container contents)
    - Give the container the capabilities RunCVM's own processes need, whatever it was given: Docker's default capabilities and `NET_ADMIN`.
-   - Only if requested by `--env=SYS_ADMIN=1`, add the `SYS_ADMIN` capability.
+   - Only if requested by `--env=RUNCVM_SYS_ADMIN=1`, add the `SYS_ADMIN` capability.
    - Pass the container's environment variables (as given by Docker or Podman) to `runcvm-ctr-entrypoint` as arguments: a count, then one `NAME=VALUE` argument per variable, ahead of the original entrypoint and command line. Then reduce the container's environment to RunCVM's own: its `RUNCVM_*` variables, `TERM` (if set), a `PATH` of RunCVM's own tool directories, and `HOME=/.runcvm`. So RunCVM's scripts and tools are unaffected by the workload's environment (e.g. `LD_LIBRARY_PATH`, `BASH_ENV`, `UID`), which only the workload receives.
 - Executes the standard container runtime `runc` with the modified `config.json`.
 
