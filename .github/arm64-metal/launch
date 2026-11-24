@@ -7,7 +7,8 @@
 # to have capacity and run without interruption) and then by price: the AZs AWS scores highest
 # come first, cheapest within a score, and the rest follow cheapest-first. It repeats the whole
 # ordered pass SPOT_PASSES times, since capacity frees up over minutes, and falls back to
-# on-demand only when every spot attempt fails.
+# on-demand only when every spot attempt fails; with MARKET=ondemand, it goes straight to
+# on-demand.
 #
 # Usage: launch {scan|launch|wait|teardown|reap}
 #   scan      print the ordered candidates, "score price region az type", best first
@@ -43,6 +44,7 @@
 #   MIN_SCORE      a placement score below this is treated as unscored (tail) (default 1)
 #   PRICE_CAP_PCT  skip spot offers above this % of the region's on-demand price; 100 disables
 #                  the cap and its Pricing API lookup       (default 100)
+#   MARKET         spot: try spot capacity first; ondemand: launch on-demand only   (default spot)
 #   FALLBACK       with no spot capacity: ondemand, or fail  (default ondemand)
 #   MAX_MINUTES    the host's lifetime, after which it terminates itself      (default 120)
 #   GROUP          resource group: reap acts only within it  (default manual)
@@ -69,6 +71,7 @@ SPOT_PASSES=${SPOT_PASSES:-1}
 SPOT_RETRY_DELAY=${SPOT_RETRY_DELAY:-45}
 MIN_SCORE=${MIN_SCORE:-1}
 PRICE_CAP_PCT=${PRICE_CAP_PCT:-100}
+MARKET=${MARKET:-spot}
 FALLBACK=${FALLBACK:-ondemand}
 MAX_MINUTES=${MAX_MINUTES:-120}
 GROUP=${GROUP:-manual}
@@ -423,6 +426,8 @@ do_launch() {
   [ "$REAP" = 1 ] && do_reap
   write_userdata
   local pass launched=0
+  case "$MARKET" in spot|ondemand) : ;; *) echo "launch: MARKET must be spot or ondemand" >&2; exit 2 ;; esac
+  [ "$MARKET" = ondemand ] && SPOT_PASSES=0
   for (( pass=1; pass<=SPOT_PASSES; pass++ )); do
     SKIPPED=()
     if try_offers spot 3< <(score_offers); then launched=1; break; fi
@@ -430,15 +435,15 @@ do_launch() {
     [ "$pass" -lt "$SPOT_PASSES" ] && sleep "$SPOT_RETRY_DELAY"
   done
   if [ "$launched" = 0 ]; then
-    logrec outcome=spot-exhausted detail="passes $SPOT_PASSES"
+    [ "$MARKET" = spot ] && logrec outcome=spot-exhausted detail="passes $SPOT_PASSES"
     SKIPPED=()   # a region's spot limits do not rule out its on-demand capacity
     # On-demand fallback: cheapest-first by spot price as a proxy (placement scores and the price
     # cap concern spot, not on-demand), with score 0.
-    if [ "$FALLBACK" = ondemand ] && try_offers ondemand 3< <(spot_prices | awk '{print 0, $0}'); then
+    if { [ "$MARKET" = ondemand ] || [ "$FALLBACK" = ondemand ]; } && try_offers ondemand 3< <(spot_prices | awk '{print 0, $0}'); then
       launched=1
     else
-      logrec outcome=no-capacity detail="fallback $FALLBACK"
-      echo "launch: no capacity (spot passes $SPOT_PASSES, fallback $FALLBACK)" >&2
+      logrec outcome=no-capacity detail="market $MARKET, fallback $FALLBACK"
+      echo "launch: no capacity (market $MARKET, spot passes $SPOT_PASSES, fallback $FALLBACK)" >&2
       return 1
     fi
   fi

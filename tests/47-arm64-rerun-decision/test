@@ -1,0 +1,90 @@
+#!/bin/bash -e
+
+# The arm64 CI launcher's rerun decision (rerun_decision in .github/arm64-metal/run-ci): after
+# a step fails on a spot host, the host's StateReason.Code, given as a stub, decides whether the
+# launcher reruns, with no call to AWS:
+# - Server.SpotInstanceTermination: rerun, on-demand or spot as RERUN_ON_INTERRUPT says
+# - a Client.* code (the host's dead-man's switch): no rerun
+# - no code (the host still running), or any other code: no rerun
+# - RERUN_ON_INTERRUPT=off, or a rerun already made: no rerun, whatever the code
+# It also checks that run-ci rejects an unknown RERUN_ON_INTERRUPT, and runs it whole against
+# stand-ins for launch, ssh and aws (a host whose state reason is always the one given, whose
+# tests always fail) to check that it relaunches once at most, and on the market chosen.
+# It needs no Container/VM.
+
+. ../framework.sh
+
+source_tree || skip "run-ci is not part of the installed package"
+RUN_CI="$TESTS_DIR/../.github/arm64-metal/run-ci"
+[ -f "$RUN_CI" ] || skip "no $RUN_CI"
+
+# Sourcing run-ci defines its functions without running it.
+# shellcheck source=/dev/null
+. "$RUN_CI"
+
+# decide DESCRIPTION MODE RERUNS CODE STATE EXPECTED-STATUS EXPECTED-DECISION-PREFIX
+decide() {
+  local desc=$1 out rc=0
+  # Read by rerun_decision.
+  # shellcheck disable=SC2034
+  RERUN_ON_INTERRUPT=$2 RERUNS=$3
+  out=$(rerun_decision "$4" "$5") || rc=$?
+  log_detail "$desc: '$out'"
+  check "$desc (status)" "$6" "$rc"
+  check "$desc (decision)" "$7" "${out%%:*}"
+}
+
+decide "spot interruption, ondemand mode" ondemand 0 Server.SpotInstanceTermination terminated 0 rerun
+decide "spot interruption, spot mode" spot 0 Server.SpotInstanceTermination terminated 0 rerun
+decide "dead-man's switch (Client.InstanceInitiatedShutdown)" ondemand 0 Client.InstanceInitiatedShutdown terminated 1 no-rerun
+decide "other Client.* code" ondemand 0 Client.UserInitiatedShutdown terminated 1 no-rerun
+decide "host still running, no code" ondemand 0 "" running 1 no-rerun
+decide "no code, state unknown" ondemand 0 "" "" 1 no-rerun
+decide "another Server.* code" ondemand 0 Server.InternalError terminated 1 no-rerun
+decide "spot interruption, rerun off" off 0 Server.SpotInstanceTermination terminated 1 no-rerun
+decide "spot interruption, rerun already made" ondemand 1 Server.SpotInstanceTermination terminated 1 no-rerun
+
+rc=0
+out=$(RERUN_ON_INTERRUPT=sometimes PUBKEY=k KEY=k "$RUN_CI" 2>&1) || rc=$?
+check "an unknown RERUN_ON_INTERRUPT is rejected (status)" 2 "$rc"
+check "an unknown RERUN_ON_INTERRUPT is named in the error" yes "$([[ $out == *RERUN_ON_INTERRUPT* ]] && echo yes || echo no)"
+
+# orchestrate DESCRIPTION MODE CODE EXPECTED-LAUNCH-MARKETS
+# Runs run-ci whole, in a scratch copy with stand-ins for launch, ssh and aws on the PATH; checks
+# which markets it launched hosts on, and that it failed.
+orchestrate() {
+  local desc=$1 dir rc=0 markets
+  dir=$(mktemp -d)
+  cp "$(dirname "$RUN_CI")/run-ci" "$(dirname "$RUN_CI")/run-shards" "$dir/"
+  cat >"$dir/launch" <<'STUB'
+#!/bin/bash
+case "$1" in
+  launch) echo "launch ${MARKET}" >>"$CALLS"
+          printf '%s\n' id=i-1 region=r-1 type=t market="$MARKET" price=1 ip=10.0.0.1 >>"$GITHUB_OUTPUT" ;;
+  wait) : ;;
+  teardown) echo teardown >>"$CALLS" ;;
+esac
+STUB
+  printf '#!/bin/bash\nexit 255\n' >"$dir/ssh"
+  cat >"$dir/aws" <<'STUB'
+#!/bin/bash
+case "$*" in *StateReason.Code*) echo "$STATE_CODE" ;; *) echo terminated ;; esac
+STUB
+  chmod +x "$dir"/launch "$dir"/ssh "$dir"/aws
+  : >"$dir/calls"
+  PATH="$dir:$PATH" CALLS="$dir/calls" STATE_CODE=$3 RERUN_ON_INTERRUPT=$2 PUBKEY=k KEY=k \
+    "$dir/run-ci" >"$dir/out" 2>&1 || rc=$?
+  log_detail "$desc: $(tr '\n' ';' <"$dir/calls") run-ci's output: $(tr '\n' ';' <"$dir/out")"
+  markets=$(awk '$1 == "launch" { printf "%s ", $2 }' "$dir/calls")
+  check "$desc (launches)" "$4" "${markets% }"
+  check "$desc (run-ci failed)" 255 "$rc"
+  rm -rf "$dir"
+}
+
+orchestrate "spot interruption, ondemand mode: one on-demand rerun, then failure" ondemand Server.SpotInstanceTermination "spot ondemand"
+orchestrate "spot interruption, spot mode: one spot rerun, then failure" spot Server.SpotInstanceTermination "spot spot"
+orchestrate "spot interruption, rerun off: no rerun" off Server.SpotInstanceTermination "spot"
+orchestrate "dead-man's switch: no rerun" ondemand Client.InstanceInitiatedShutdown "spot"
+orchestrate "no state reason: no rerun" ondemand None "spot"
+
+finish

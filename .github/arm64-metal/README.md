@@ -24,13 +24,46 @@ it launches for the run and terminates afterwards:
    host's type, region, market and price, and, where teardown reported them, its run time and
    cost.
 
-`launch`'s header describes its settings.
+Steps 2 to 4 run as one step of the workflow, under `run-ci`, which repeats them once if AWS
+reclaims a spot host in the course of steps 3 and 4 (see [Rerun after a spot
+interruption](#rerun-after-a-spot-interruption)). `launch`'s header describes its settings.
 
 ## When it runs
 
 Nightly (every tier, on `main`); on pull requests labelled `ci:arm64` (the core tier, or the
 tier that `ci:extended` or `ci:all` selects); and by hand from the Actions tab, on `main`. Pull
 requests from forks are skipped: GitHub gives them no OIDC token.
+
+## Rerun after a spot interruption
+
+`run-ci` launches the host, waits for it and runs the tests on it, as steps 2 to 4 above. If the
+wait or the tests fail, it asks AWS why the host is in its state, with
+
+```bash
+aws ec2 describe-instances --instance-ids <id> --query 'Reservations[0].Instances[0].StateReason.Code'
+```
+
+and decides, in its function `rerun_decision`, from that state reason code:
+
+| The host's state reason | Meaning | Decision |
+| --- | --- | --- |
+| `Server.SpotInstanceTermination` | AWS reclaimed the spot host | Tear it down and rerun once: launch a new host, wait for it and run the tests |
+| `Client.*`, such as `Client.InstanceInitiatedShutdown` | The host's own dead-man's switch powered it off after `MAX_MINUTES` | Fail |
+| None (the host is still running), or any other | A test failed, or SSH dropped while the host was up, or the host stopped for another reason | Fail |
+
+The rerun is made at most once, so a run launches at most two hosts and cannot loop; a launch
+that fails is not rerun, as there is no host to ask. The workflow's teardown step terminates the
+last host, and its results are those of the last host's run. When the run was a rerun, the job's
+summary says so.
+
+`RERUN_ON_INTERRUPT` (default `ondemand`) chooses how to rerun:
+
+- `ondemand`: on an on-demand host, which AWS does not reclaim (`launch` with `MARKET=ondemand`);
+- `spot`: on spot capacity again, with `launch`'s usual passes and `FALLBACK`;
+- `off`: do not rerun; an interrupted run fails.
+
+`tests/47-arm64-rerun-decision` tests the decision for each state reason, and `run-ci` as a
+whole against stand-ins for `launch`, `ssh` and `aws`; it needs no AWS credentials.
 
 ## A host does not stay up for long after its run
 
@@ -262,4 +295,7 @@ outbound address varies (e.g. several gateways in turn), give the range in `SSH_
 `SSH_CIDR=192.0.2.0/24`. Hosts launched by hand are in group `manual` unless `GROUP` says
 otherwise, and terminate
 themselves after `MAX_MINUTES` (120 by default) if not torn down first. `launch scan` shows the
-ordered candidates (score, price, region, AZ, type) without launching anything.
+ordered candidates (score, price, region, AZ, type) without launching anything. `MARKET=ondemand
+launch launch` skips spot and launches an on-demand host. `run-ci` runs the launch, the wait and
+the tests in one go, with a rerun after a spot interruption: `PUBKEY=$(cat $KEY.pub) KEY=$KEY
+.github/arm64-metal/run-ci`, then `launch teardown` as above, with `REGION` and `RUN` set.
