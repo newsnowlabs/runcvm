@@ -198,16 +198,65 @@ def parallel(func, items, jobs=None, remove=False):
         return list(pool.map(call, items))
 
 
+# Substrings of a failed 'docker pull' (or 'docker run' with a lazy pull) that mark the failure as
+# the registry being unreachable or erroring, rather than the image being absent or the daemon
+# rejecting it. A test treats these as a reason to skip, not to fail, since they say nothing about
+# RunCVM: a public registry's 5xx, a rate limit, or a network fault is not a defect under test.
+# Matched case-insensitively. The list is deliberately a whitelist of transport/availability
+# symptoms: 'manifest unknown', 'not found', 'unauthorized', 'denied' and the like are real errors
+# a test must still surface, so they are absent and stay failures.
+REGISTRY_UNAVAILABLE_SIGNATURES = (
+    "received unexpected http status: 5",   # 5xx from the registry (e.g. 500, 502, 503, 504)
+    "500 internal server error",
+    "502 bad gateway",
+    "503 service unavailable",
+    "504 gateway time",
+    "download failed after attempts=",       # the daemon retried a blob and gave up
+    "error pulling image configuration",     # the config blob could not be fetched
+    "toomanyrequests",                       # a registry rate limit (e.g. Docker Hub)
+    "too many requests",
+    "tls handshake timeout",
+    "i/o timeout",
+    "context deadline exceeded",
+    "client.timeout exceeded",
+    "connection refused",
+    "connection reset by peer",
+    "no route to host",
+    "network is unreachable",
+    "temporary failure in name resolution",
+    "server misbehaving",
+    "unexpected eof",
+)
+
+
+def registry_unavailable(output):
+    """Whether 'output' (a docker command's combined output) shows that an image could not be
+    pulled because the registry was unreachable or erroring, as opposed to the image being absent
+    or rejected. Lets a test skip, rather than fail, a case lost to a transient registry fault."""
+    if not output:
+        return False
+    low = output.lower()
+    return any(sig in low for sig in REGISTRY_UNAVAILABLE_SIGNATURES)
+
+
 def pull_images(images):
     """With --pull (RUNCVM_TEST_PULL=1), pull each image, recording a check for each, so that the
     test boots what each tag points to upstream now; otherwise do nothing, as docker pulls an image
-    the host lacks when it is first used. Returns False if any pull failed."""
+    the host lacks when it is first used. A pull that fails only because the registry is unavailable
+    (see registry_unavailable) is recorded as a skip, not a failure. Returns False if any pull
+    failed for another reason."""
     if not PULL:
         return True
     images = list(dict.fromkeys(images))
     ok = True
     for image, r in zip(images, parallel(lambda i: docker("pull", "-q", i, timeout=600), images)):
-        if not check("pulled %s" % image, 0, r.returncode):
+        if r.returncode == 0:
+            check("pulled %s" % image, 0, r.returncode)
+        elif registry_unavailable(r.stdout):
+            skip_check("pulled %s" % image, "registry unavailable")
+            log(r.stdout)
+        else:
+            check("pulled %s" % image, 0, r.returncode)
             log(r.stdout)
             ok = False
     return ok
@@ -240,6 +289,14 @@ def check(desc, expected, actual):
     record_result("FAIL", desc)
     errors += 1
     return False
+
+
+def skip_check(desc, reason):
+    """Record one sub-result as skipped (not passed, not failed, not counted as an error), e.g. a
+    case lost to a transient registry fault (see registry_unavailable). Unlike skip(), this skips
+    the single check named by 'desc', not the whole test, so a test's other cases still run."""
+    log("%s: SKIP (%s)" % (desc, reason))
+    record_result("SKIP", desc)
 
 
 def check_cmd(desc, cmd):

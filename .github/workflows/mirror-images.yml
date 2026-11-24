@@ -1,0 +1,80 @@
+# Mirrors the upstream images the integration tests pull into this repository's own GitHub
+# Container Registry namespace, ghcr.io/newsnowlabs/runcvm/images/mirrored/<name>, so that a test
+# does not fail when a third-party registry is briefly unreachable or erroring. The images to
+# mirror, and the name each takes, are listed in .github/mirrored-images.
+#
+# Each image is copied with "docker buildx imagetools create", which copies the whole manifest
+# (every platform), so the mirror serves arm64 as well as x86-64 — both are tested in CI.
+#
+# When it runs:
+# - Nightly, one hour before the CI workflow's nightly run (that runs at 02:23 UTC), so that the
+#   tests it feeds pull freshly-mirrored images. GitHub disables a public repository's scheduled
+#   workflows after 60 days without activity in it, and emails before doing so; the Actions tab
+#   re-enables them. GitHub sends a scheduled run's failure notices to whoever last changed the
+#   schedule.
+# - On a push to main that changes this workflow or the image list, so a newly-listed image is
+#   mirrored at once rather than at the next nightly run.
+# - By hand (workflow_dispatch), e.g. to populate the namespace for the first time.
+#
+# One-time setup, the first time an image is mirrored: its ghcr.io package is created private, so
+# make it public in the repository's package settings, so that the tests (and anyone) can pull it
+# without authenticating.
+name: Mirror images
+
+on:
+  schedule:
+    - cron: '23 1 * * *'
+  push:
+    branches: [main]
+    paths: ['.github/mirrored-images', '.github/workflows/mirror-images.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: mirror-images
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to ghcr.io
+        run: echo '${{ github.token }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: Mirror each listed image
+        env:
+          NAMESPACE: ghcr.io/newsnowlabs/runcvm/images/mirrored
+        run: |
+          set -o pipefail
+          failed=()
+          while read -r src name rest; do
+            case "$src" in ''|'#'*) continue;; esac
+            if [ -z "$name" ] || [ -n "$rest" ]; then
+              echo "::error::Malformed line in .github/mirrored-images: expected '<source-ref> <mirror-name>', got: $src $name $rest"
+              failed+=("$src")
+              continue
+            fi
+            # A reference's tag is a ':' in its last path element (so a registry's host:port is not
+            # mistaken for one); without a tag, mirror ':latest'. The mirror keeps the source's tag.
+            case "${src##*/}" in
+              *:*) tag="${src##*:}" ;;
+              *)   tag="latest"; src="$src:latest" ;;
+            esac
+            dest="$NAMESPACE/$name:$tag"
+            echo "=== Mirroring $src -> $dest"
+            if docker buildx imagetools create --tag "$dest" "$src"; then
+              echo "=== Mirrored $src -> $dest"
+            else
+              echo "::error::Failed to mirror $src -> $dest"
+              failed+=("$src")
+            fi
+          done < .github/mirrored-images
+          if [ "${#failed[@]}" -ne 0 ]; then
+            echo "::error::Could not mirror: ${failed[*]}"
+            exit 1
+          fi

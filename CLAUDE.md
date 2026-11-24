@@ -248,3 +248,22 @@ done
 ```
 
 A single-commit branch carries no trailer; check whether its content is already on `main`.
+
+## Messaging other Claude sessions
+
+Messages between Claude sessions (e.g. one testing on another host) are fire-and-forget: a
+successful send does not show that the message arrived, and a recipient otherwise replies only
+once it has finished the work the message asks for, which may take hours. To tell a lost
+message from one still being worked on:
+
+- **Sending.** Give each message a first line that identifies it (e.g. "PR #171 spot test on
+  arm64"), and ask the recipient to acknowledge receipt immediately, before acting on the rest
+  of the message. This includes a message reporting results, so that its sender knows they
+  arrived; only an acknowledgement itself asks for none.
+- **Receiving.** When a message asks for an acknowledgement, send it first, before any other
+  work on the message: name the message by its first line, and say whether you will act on it,
+  and if not, why. Then do the work, and send the results as a separate message.
+- **No acknowledgement.** Where none arrives by the recipient's next reply, or within a few
+  minutes of a recipient that is idle, treat the message as lost and send it again, saying it
+  is a resend. A recipient that receives the same message twice acknowledges and acts on it
+  once.

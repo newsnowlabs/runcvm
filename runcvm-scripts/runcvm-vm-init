@@ -6,6 +6,52 @@
 # Load defaults and aliases
 . $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
+# Writes warning $1 to the console, and carries on.
+vm_init_warn() {
+  local console
+
+  read -r console </.runcvm/console
+  echo "RunCVM: Warning: $1" >"/dev/$console"
+}
+
+# Reports error $1 on the console device, which the container's output is connected to, and powers
+# the VM off with exit status 1.
+vm_init_error() {
+  local console
+
+  # Clear the EXIT trap (see vm_init_exit), which the 'exit' below would otherwise run.
+  trap - EXIT
+
+  read -r console </.runcvm/console
+  echo "RunCVM: Error: $1" >"/dev/$console"
+  echo 1 >/.runcvm/exitcode
+  poweroff -f
+  exit 1
+}
+
+# This script is the VM's PID 1, and runs with 'bash -e', so a command failing where nothing handles
+# its failure ends it: the kernel then panics, and the VM ends with no exit status recorded, which
+# the container would report as 0. Report any such exit as an error instead, so that the
+# Container/VM exits with status 1, naming the command that failed ($2, BASH_COMMAND, which in an
+# EXIT trap is the command that ended the script) and where in this script it failed: for a failure
+# within a function, the line this script's top level called it from (BASH_LINENO), and the
+# function, where this script defines it rather than a script it sources (such as the 'ip' wrapper
+# that runcvm-ctr-defaults defines); otherwise the failing command's line, which the ERR trap
+# records (an ERR trap runs only at the top level, as this script does not set errtrace).
+vm_init_exit() {
+  local n=${#FUNCNAME[@]} where="line $VM_INIT_FAILED_LINE"
+
+  # FUNCNAME lists this function, those the failed command ran within, innermost first, and main;
+  # BASH_LINENO, the line each was called from; BASH_SOURCE, the file defining each.
+  if [ "$n" -gt 2 ]; then
+    where="line ${BASH_LINENO[n-2]}"
+    [ "${BASH_SOURCE[n-2]}" = "${BASH_SOURCE[n-1]}" ] && where+=", in ${FUNCNAME[n-2]}"
+  fi
+  vm_init_error "runcvm-vm-init failed (status $1) at $where: $2"
+}
+trap 'VM_INIT_FAILED_LINE=$LINENO' ERR
+trap 'vm_init_exit $? "$BASH_COMMAND"' EXIT
+
 # Keep the console's device out of runtime power management, where it has it (e.g. the arm64 virt
 # machine's UART, ttyAMA0, in RUNCVM_DISPLAY_MODE=serial): a runtime-suspended UART defers output
 # until it resumes, so output written just before the VM powers off would be lost.
@@ -73,26 +119,6 @@ fi
 # requests, such as overlay on its first mount. The loader is in RunCVM's tools, which stay
 # available to the kernel for the VM's lifetime, including after a switch to a whole-root disk.
 echo "$RUNCVM_GUEST/scripts/runcvm-vm-modprobe" >/proc/sys/kernel/modprobe
-
-# Writes warning $1 to the console, and carries on.
-vm_init_warn() {
-  local console
-
-  read -r console </.runcvm/console
-  echo "RunCVM: Warning: $1" >"/dev/$console"
-}
-
-# Reports error $1 on the console device, which the container's output is connected to, and powers
-# the VM off with exit status 1.
-vm_init_error() {
-  local console
-
-  read -r console </.runcvm/console
-  echo "RunCVM: Error: $1" >"/dev/$console"
-  echo 1 >/.runcvm/exitcode
-  poweroff -f
-  exit 1
-}
 
 # Sets variable $1 to field $2 decoded: RunCVM writes each path in /.runcvm/fstab and the other
 # files it passes to the VM with fstab's octal escapes for '\', space, tab and newline (see
