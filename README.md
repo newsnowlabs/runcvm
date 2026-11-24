@@ -565,7 +565,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
    - [+] `--user` (or `-u`), `--workdir` (or `-w`), `--env` (or `-e`), `--env-file`, `--detach` (or `-d`), `--interactive` (or `-i`) and `--tty` (or `-t`) are all supported
    - [+] Stdout and Stderr _are_ independently multiplexed so `docker exec <container> bash -c 'echo stdout; echo stderr >&2' >/tmp/stdout 2>/tmp/stderr` _does_ produce the expected result
 - Security
-   - [+] The processes RunCVM runs in the container on the host (QEMU, `virtiofsd` and `dnsmasq`) are seccomp-filtered by Docker's (or Podman's) default profile, as a standard container's are, with a few system calls RunCVM's processes need also allowed: io_uring's (`io_uring_setup`, `io_uring_enter`, `io_uring_register`), for QEMU's disks; the NUMA memory-policy calls (`get_mempolicy`, `set_mempolicy`, `mbind`), for QEMU's memory, which the default profile allows only with `CAP_SYS_NICE`; and `chroot`, for `virtiofsd`'s sandbox, which the default profile allows only with `CAP_SYS_CHROOT` (absent with e.g. `--cap-drop=ALL`). `--security-opt seccomp=unconfined` (or `--privileged`) runs them unconfined. A profile of your own given with `--security-opt seccomp=<file>` is unsupported. The workload itself runs in the VM, behind the VM's kernel, not the container's seccomp filter.
+   - [+] The processes RunCVM runs in the container on the host (QEMU, `virtiofsd` and `dnsmasq`) are seccomp-filtered by Docker's (or Podman's) default profile, with a few system calls RunCVM's processes need also allowed, so more permissively than a standard container (a profile cut down to RunCVM's own needs is planned): io_uring's (`io_uring_setup`, `io_uring_enter`, `io_uring_register`), for QEMU's disks; the NUMA memory-policy calls (`get_mempolicy`, `set_mempolicy`, `mbind`), for QEMU's memory, which the default profile allows only with `CAP_SYS_NICE`; and `chroot`, for `virtiofsd`'s sandbox, which the default profile allows only with `CAP_SYS_CHROOT` (absent with e.g. `--cap-drop=ALL`). [`RUNCVM_SECCOMP=unconfined`](#runcvm_seccomp) runs them unconfined. `--security-opt seccomp=unconfined` and `--privileged` also leave them unconfined, as the engine then gives the container no profile, but are not supported ways to do so: their meaning for a Container/VM may change, e.g. to apply to the VM. A profile of your own given with `--security-opt seccomp=<file>` is unsupported. The workload itself runs in the VM, behind the VM's kernel, not the container's seccomp filter.
    - The RunCVM software package at `/opt/runcvm` is mounted read-only within RunCVM containers. Container applications cannot compromise RunCVM, but they can execute binaries from within the RunCVM package. The set of binaries available to the VM may be reduced to a minimum in a later version.
 - Kernels
    - [+] Use any kernel, either one pre-packaged with RunCVM or roll your own
@@ -1177,6 +1177,12 @@ Selects how QEMU runs the VM:
 
 Under software emulation (see `RUNCVM_QEMU_ACCEL`), sets the size of QEMU's cache of translated code, in Mb (default 128; from 32 to 4096). This is added to the container's memory limit, in addition to the VM's memory (`--memory`) and the usual allowance for RunCVM's helper processes. Increase it for workloads that run a large amount of code. It has no effect when KVM is used.
 
+### RUNCVM_SECCOMP
+
+**`RUNCVM_SECCOMP=unconfined`**
+
+Runs the processes RunCVM runs in the container on the host (QEMU, `virtiofsd`, `dnsmasq` and RunCVM's own scripts and tools) without a seccomp filter. By default they run under the engine's default profile, with the few system calls RunCVM needs also allowed (see [Features and limitations](#features-and-limitations)). The workload, which runs in the VM, is unaffected either way.
+
 ### RUNCVM_SYS_ADMIN
 
 **`RUNCVM_SYS_ADMIN=1`**
@@ -1457,7 +1463,7 @@ In more detail, the RunCVM runtime `create` process:
       - Add a bind mount to `/vm/lib/modules/<version>` for the kernel's modules
       - Set container env vars `RUNCVM_KERNEL_PATH`, `RUNCVM_KERNEL_INITRAMFS_PATH` and `RUNCVM_KERNEL_ROOT`
    - Add device mounts for `/dev/kvm` and `/dev/net/tun`.
-   - Add to the container's seccomp profile, if it has one, the system calls RunCVM's processes need that Docker's default profile may not allow (io_uring's, the NUMA memory-policy calls and `chroot`), whatever capabilities the container was given.
+   - With `RUNCVM_SECCOMP=unconfined`, remove the container's seccomp profile. Otherwise, add to the profile, if it has one, the system calls RunCVM's processes need that Docker's default profile may not allow (io_uring's, the NUMA memory-policy calls and `chroot`), whatever capabilities the container was given.
    - Set `/dev/shm` to the size desired for the VM's memory, set `RUNCVM_MEM_SIZE` env var accordingly, and set the container memory limit to the size plus 256Mb (a contingency for QEMU itself, along with virtiofsd, dnsmasq and other container contents)
    - Give the container the capabilities RunCVM's own processes need, whatever it was given: Docker's default capabilities and `NET_ADMIN`.
    - Only if requested by `--env=RUNCVM_SYS_ADMIN=1`, add the `SYS_ADMIN` capability.

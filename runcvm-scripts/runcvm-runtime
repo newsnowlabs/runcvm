@@ -943,8 +943,16 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   # not those the runtime gives RunCVM's own processes (below), so these calls must be allowed
   # here, not left to a capability. Of those capabilities, only CAP_SYS_CHROOT gates a system
   # call in Docker's default profile.
-  # A bundle with no profile (--security-opt seccomp=unconfined, or --privileged) is left
-  # unconfined.
+  # RUNCVM_SECCOMP=unconfined removes the profile, leaving RunCVM's processes unfiltered. A bundle
+  # the engine left with no profile (docker run --security-opt seccomp=unconfined, or --privileged)
+  # is left unconfined too, but that is not a supported way to run them so: these options are
+  # reserved to apply, in future, to the VM rather than to RunCVM's processes.
+  RUNCVM_SECCOMP="$(get_config_env 'RUNCVM_SECCOMP')"
+  case "$RUNCVM_SECCOMP" in
+    '') ;;
+    unconfined) jq_set "$CFG" 'del(.linux.seccomp)' ;;
+    *) error "RUNCVM_SECCOMP '$RUNCVM_SECCOMP' invalid (should be unconfined)" ;;
+  esac
   jq_set "$CFG" '
     if .linux.seccomp then
       .linux.seccomp.syscalls += [{
