@@ -930,9 +930,9 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     jq_set "$CFG" '.linux.devices+=[{"path":"/dev/vhost-net","type":"c","major":10,"minor":238,"fileMode":8630,"uid":0,"gid":0}]'
   fi
   
-  # Seccomp: the container keeps the default profile Docker or Podman resolved into the bundle
-  # (a profile of the user's own, from --security-opt seccomp=<file>, is unsupported), with these
-  # system calls also allowed, which RunCVM's processes in the container need beyond the default:
+  # Seccomp: unless RUNCVM_SECCOMP=unconfined (below), the container keeps the default profile
+  # Docker or Podman resolved into the bundle (a profile of the user's own, from --security-opt
+  # seccomp=<file>, is unsupported), with these system calls also allowed, which RunCVM's processes in the container need beyond the default:
   # - io_uring_setup, io_uring_enter, io_uring_register: QEMU's disks (aio=io_uring; see
   #   disk_choose_aio in runcvm-ctr-qemu, which relies on them being allowed).
   # - get_mempolicy, set_mempolicy, mbind: QEMU's memory, which the default profile allows only
