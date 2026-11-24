@@ -75,7 +75,9 @@ IMAGES = (("alpine:3.22", "alpine"), ("alpine:3.23", "alpine"), ("alpine:3.24", 
           ("kalilinux/kali-rolling", "debian"),
           ("busybox", "debian"),
           *([("archlinux", "debian")] if X86_64 else []),
-          ("cgr.dev/chainguard/wolfi-base", "debian"))
+          # Wolfi, pulled from this repository's own mirror of cgr.dev/chainguard/wolfi-base (see
+          # .github/mirrored-images), so the test does not depend on Chainguard's registry being up.
+          ("ghcr.io/newsnowlabs/runcvm/images/mirrored/wolfi-base", "debian"))
 
 t.pull_images(["alpine"] + [i for i, _ in IMAGES])
 
@@ -121,7 +123,7 @@ if X86_64:
 CASES += [("image-os-release-link", [], [link_image, "sh", "-c", PROBE], "alpine", None)]
 
 # The cases whose image's distribution has no RunCVM kernel, so whose output shows the warning.
-FALLBACK_CASES = {"image-archlinux", "image-cgr.dev-chainguard-wolfi-base"}
+FALLBACK_CASES = {"image-archlinux", "image-ghcr.io-newsnowlabs-runcvm-images-mirrored-wolfi-base"}
 
 
 def run(args):
