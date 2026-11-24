@@ -16,9 +16,13 @@ it launches for the run and terminates afterwards:
    to on-demand only when every spot attempt fails. The host builds and installs RunCVM at the
    commit under test.
 3. `launch wait` waits for the host's setup to finish, and prints its log.
-4. `run-shards` runs the tests on the host over SSH, in 8 shards at once. `summarise` turns the
-   shards' results into annotations and a job summary.
-5. `launch teardown` terminates the host, and revokes its SSH rule.
+4. `run-shards` runs the tests on the host over SSH, in 8 shards at once; a shard given no tests
+   runs nothing.
+5. `launch teardown` terminates the host, revokes its SSH rule, and reports how long the host ran
+   and, where its price is known, about what that cost.
+6. `summarise` turns the shards' results into annotations and a job summary, which gives the
+   host's type, region, market and price, and, where teardown reported them, its run time and
+   cost.
 
 `launch`'s header describes its settings.
 

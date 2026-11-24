@@ -127,12 +127,6 @@ jobs:
             -o UserKnownHostsFile="$RUNNER_TEMP/arm64-metal-known-hosts" \
             "ubuntu@$IP:results/." "$RUNNER_TEMP/results/"
 
-      - name: Summarise the results
-        if: always() && steps.launch.outputs.ip
-        run: |
-          .github/arm64-metal/summarise "$RUNNER_TEMP/results" "$SHARDS" \
-            "${{ steps.launch.outputs.type }} in ${{ steps.launch.outputs.region }}, ${{ steps.launch.outputs.market }} at ${{ steps.launch.outputs.price }} USD/hour" || true
-
       - name: Upload the results
         if: always()
         uses: actions/upload-artifact@v4
@@ -152,8 +146,20 @@ jobs:
           aws-region: us-east-1
 
       - name: Tear down the host
+        id: teardown
         if: always()
         env:
           REGION: ${{ steps.launch.outputs.region }}
+          PRICE: ${{ steps.launch.outputs.price }}
           LOG: ${{ runner.temp }}/launch.jsonl
         run: .github/arm64-metal/launch teardown
+
+      # After the teardown, so that the summary gives the host's run time and its cost.
+      - name: Summarise the results
+        if: always() && steps.launch.outputs.ip
+        env:
+          HOST: >-
+            ${{ steps.launch.outputs.type }} in ${{ steps.launch.outputs.region }},
+            ${{ steps.launch.outputs.market }} at ${{ steps.launch.outputs.price }} USD/hour
+          USAGE: ${{ steps.teardown.outputs.usage }}
+        run: .github/arm64-metal/summarise "$RUNNER_TEMP/results" "$SHARDS" "$HOST${USAGE:+; $USAGE}" || true
