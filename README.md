@@ -686,7 +686,7 @@ Instead of a disk, you can mount Docker volumes at `/var/lib/docker` and `/var/l
 docker run --runtime=runcvm --mount=type=volume,src=mydocker1,dst=/var/lib/docker --mount=type=volume,src=mycontainerd1,dst=/var/lib/containerd --env=RUNCVM_SYS_ADMIN=1 docker:dind
 ```
 
-> N.B. This option adds `CAP_SYS_ADMIN` capabilities to the container and then launches `virtiofsd` with `--modcaps=+sys_admin`.
+> N.B. This option launches `virtiofsd` with `--modcaps=+sys_admin`, giving it `CAP_SYS_ADMIN` (see [`RUNCVM_SYS_ADMIN`](#runcvm_sys_admin)).
 
 ### Container runtimes inside RunCVM
 
@@ -944,7 +944,7 @@ In the keyed form, each field is split at its first `=`, so values may contain `
 
 Every destination, whatever the disk's layout, other than a whole-root disk's `/`, must be an absolute path other than `/`, without `.` or `..` components, whitespace or `\`. No destination or backing file path may contain an ASCII control character (a byte 0x01–0x1F or 0x7F), as given or once symbolic links are resolved, including links in the directories above a backing file; such a spec is rejected, shown in bash's `$'…'` notation. (Whitespace here means ASCII whitespace: UTF-8 characters, such as a non-breaking space, are allowed.) No two disks may have one backing file, whether named by one path, by another path leading to the same file, or as hard links to one file; nor may two existing disks have one filesystem UUID (as a copy of a disk's backing file does), by which the VM finds each disk. Every spec is checked, including each existing disk's filesystem, layout and UUID, and each new disk's size, before anything is created: an invalid spec anywhere in `RUNCVM_DISKS` creates no directory, backing file or filesystem. A new `ext4` disk, which RunCVM's `mke2fs` populates, can leave out at most 256 paths below its destinations, and with layout `subdirs` have at most 64 destinations; a spec beyond either limit is rejected likewise.
 
-When first created, the backing file will be created as a sparse file to the specified `<size>`, formatted with the specified `<filesystem>`, and prepopulated with any files preexisting at each `<dst>`, with their ownership, modes, timestamps, extended attributes and hard links. An `ext4` disk is formatted and prepopulated in the container, by `mke2fs`. A disk with another filesystem is formatted empty in the container, then prepopulated when the VM first boots with it, before anything is mounted over the destinations, by copying each `<dst>` with RunCVM's own `cp -a`, before the VM switches to any whole-root disk. (`trusted.*` extended attributes are copied only if the container has `CAP_SYS_ADMIN`, e.g. with `--cap-add=SYS_ADMIN`, because `mke2fs` runs in the container. For a disk with another filesystem, they are copied only with `--env=RUNCVM_SYS_ADMIN=1` as well, as the VM reads the container's files through `virtiofsd`, which otherwise drops the capability.)
+When first created, the backing file will be created as a sparse file to the specified `<size>`, formatted with the specified `<filesystem>`, and prepopulated with any files preexisting at each `<dst>`, with their ownership, modes, timestamps, extended attributes and hard links. An `ext4` disk is formatted and prepopulated in the container, by `mke2fs`. A disk with another filesystem is formatted empty in the container, then prepopulated when the VM first boots with it, before anything is mounted over the destinations, by copying each `<dst>` with RunCVM's own `cp -a`, before the VM switches to any whole-root disk. (`trusted.*` extended attributes are copied to an `ext4` disk only if `docker run` gives the container `CAP_SYS_ADMIN` (`--cap-add=SYS_ADMIN`), because `mke2fs` runs in the container; `--env=RUNCVM_SYS_ADMIN=1` gives the capability to `virtiofsd` alone. To a disk with another filesystem, they are copied only with `--env=RUNCVM_SYS_ADMIN=1`, as the VM reads the container's files through `virtiofsd`, which otherwise drops the capability.)
 
 A new disk gets a copy of the image's files at each `<dst>`, with these exceptions:
 
@@ -1175,7 +1175,7 @@ Under software emulation (see `RUNCVM_QEMU_ACCEL`), sets the size of QEMU's cach
 
 **`RUNCVM_SYS_ADMIN=1`**
 
-By default, `virtiofsd` is not launched with `--modcaps=+sys_admin` (and containers are not granted `CAP_SYS_ADMIN`). Use this option if you need to change this.
+Launches `virtiofsd` with `--modcaps=+sys_admin`, giving `CAP_SYS_ADMIN` to `virtiofsd` alone, e.g. so that the VM can read and write `trusted.*` extended attributes (as `dockerd`'s overlay filesystems use) on the container's files. RunCVM's other processes in the container (its network configuration, `dnsmasq`, `mke2fs` and QEMU) do not hold the capability, unless `docker run` gives it to the container itself (`--cap-add=SYS_ADMIN`, or `--privileged`). By default, `virtiofsd` is not launched with `--modcaps=+sys_admin`.
 
 ### RUNCVM_KERNEL_MOUNT_LIB_MODULES
 
@@ -1454,15 +1454,15 @@ In more detail, the RunCVM runtime `create` process:
    - Set the seccomp profile to 'unconfined'.
    - Set `/dev/shm` to the size desired for the VM's memory, set `RUNCVM_MEM_SIZE` env var accordingly, and set the container memory limit to the size plus 256Mb (a contingency for QEMU itself, along with virtiofsd, dnsmasq and other container contents)
    - Give the container the capabilities RunCVM's own processes need, whatever it was given: Docker's default capabilities and `NET_ADMIN`.
-   - Only if requested by `--env=RUNCVM_SYS_ADMIN=1`, add the `SYS_ADMIN` capability.
+   - Only if requested by `--env=RUNCVM_SYS_ADMIN=1`, add the `SYS_ADMIN` capability, for `virtiofsd` alone; where the container was not given it, set `RUNCVM_SYS_ADMIN_ADDED=1`.
    - Pass the container's environment variables (as given by Docker or Podman) to `runcvm-ctr-entrypoint` as arguments: a count, then one `NAME=VALUE` argument per variable, ahead of the original entrypoint and command line. Then reduce the container's environment to RunCVM's own: its `RUNCVM_*` variables, `TERM` (if set), a `PATH` of RunCVM's own tool directories, and `HOME=/.runcvm`. So RunCVM's scripts and tools are unaffected by the workload's environment (e.g. `LD_LIBRARY_PATH`, `BASH_ENV`, `UID`), which only the workload receives.
 - Executes the standard container runtime `runc` with the modified `config.json`.
 
 The `runcvm-ctr-entrypoint`:
 - Is always launched as PID1 within the standard Docker container.
+- Launches `virtiofsd` to serve the container's root filesystem. Where the runtime added `CAP_SYS_ADMIN` for it (`RUNCVM_SYS_ADMIN_ADDED=1`), it then runs again without the capability, through `setpriv`, so that no other process RunCVM runs in the container holds it.
 - Saves the container's originally-intended entrypoint and command line, the workload's environment variables (the container's, without RunCVM's own `RUNCVM_*` settings), RunCVM's own environment and network configuration (IPv4, and IPv6 if a global IPv6 address is present) to files inside `/.runcvm`.
 - Creates a bridge (acting as a hub) for each container network interface, to join that interface to a VM tap network interface.
-- Launches `virtiofsd` to serve the container's root filesystem.
 - Configures `/etc/resolv.conf` in the container.
 - Launches `dnsmasq`. Where the container's DNS server is Docker's embedded one (`127.0.0.11`, on user-defined networks), which only the container can reach, it rewrites that server in `/vm/etc/resolv.conf` to RunCVM's DNS address (`RUNCVM_DNS_IP`, by default `169.254.53.53`), which `dnsmasq` answers, forwarding the VM's DNS requests to Docker's DNS. Elsewhere (e.g. on the default bridge network), the VM uses the container's DNS servers directly.
 - Adds container firewall rules (with `nft`) for the traffic between the VM and RunCVM's own services in the container: replies to `docker exec`'s connections to the VM; the VM's UDP DNS requests to `dnsmasq`, where `dnsmasq` is its DNS server; and, in VNC display mode, connections to QEMU's VNC server. Such traffic crosses the container's bridge addressed to the VM, or to the Docker network's gateway, so rules in the bridge's prerouting hook readdress it to the container, by its arrival interface, addresses and ports, and `nat` rules hand it to the service. The rules match the VM's traffic to RunCVM's DNS address only from TCP port 22222 (dropbear's) and to UDP port 53; the VM's other traffic passes through the bridge unchanged. An `arp` rule sends the container's own ARP requests, which would name the bridge's private address as sender, as ARP probes, with sender address `0.0.0.0`: Linux answers those without validating the sender, so strict reverse-path filtering (`rp_filter=1`) on the host's bridge does not affect the reply, and RunCVM needs no particular `rp_filter` setting on the host.

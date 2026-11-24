@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""RUNCVM_SYS_ADMIN=1 gives CAP_SYS_ADMIN to virtiofsd alone.
+
+With RUNCVM_SYS_ADMIN=1, virtiofsd holds CAP_SYS_ADMIN (it runs with
+--modcaps=+sys_admin), so that the VM can set a trusted.* extended attribute
+on a file in its root filesystem; the container's other processes, its init
+(runcvm-init), dnsmasq and QEMU, hold it in none of their bounding, permitted
+and effective sets. Also under --security-opt=no-new-privileges, and with and
+without --init. Where docker run gives the container CAP_SYS_ADMIN itself
+(--cap-add=SYS_ADMIN), the other processes keep it. Without RUNCVM_SYS_ADMIN,
+no process holds it, and the VM cannot set the attribute.
+
+Each process's capabilities are read from the host's /proc/<pid>/status.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+IMAGE = "python:3.13-alpine"
+CAP_SYS_ADMIN = 1 << 21
+SYS_ADMIN = ["--env", "RUNCVM_SYS_ADMIN=1"]
+
+# (name, docker run options, whether the processes other than virtiofsd hold CAP_SYS_ADMIN,
+#  whether virtiofsd holds it)
+CASES = [
+    ("default", [], False, False),
+    ("sys-admin", SYS_ADMIN, False, True),
+    ("sys-admin-init", SYS_ADMIN + ["--init"], False, True),
+    ("sys-admin-no-new-privileges", SYS_ADMIN + ["--security-opt=no-new-privileges"], False, True),
+    ("sys-admin-cap-add", SYS_ADMIN + ["--cap-add=SYS_ADMIN"], True, True),
+]
+
+SET_TRUSTED = """
+import os
+open('/trusted-test', 'w').close()
+try:
+    os.setxattr('/trusted-test', 'trusted.runcvm', b'1')
+    print(os.getxattr('/trusted-test', 'trusted.runcvm').decode())
+except OSError as e:
+    print(e.strerror)
+"""
+
+
+def caps(pid):
+    """{field: int} for CapBnd, CapPrm and CapEff of /proc/PID/status, or None if unreadable."""
+    try:
+        with open("/proc/%s/status" % pid) as f:
+            return {k: int(v, 16) for k, _, v in (line.partition(":") for line in f)
+                    if k in ("CapBnd", "CapPrm", "CapEff")}
+    except OSError:
+        return None
+
+
+def run(case):
+    name, opts, _, _ = case
+    container = t.unique("sys-admin-" + name)
+    results = {}
+    r = t.docker("run", "-d", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 *opts, IMAGE, "sleep", "infinity")
+    if r.returncode != 0 or not t.wait_for_exec(container, BOOT_TIMEOUT):
+        results["error"] = r.stdout + t.docker("logs", container).stdout
+        return results
+    procs = {"init": t.docker("inspect", "-f", "{{.State.Pid}}", container).stdout.strip()}
+    for line in t.docker("top", container, "-eo", "pid,args").stdout.splitlines()[1:]:
+        pid, _, args = line.strip().partition(" ")
+        for proc in ("virtiofsd", "dnsmasq", "qemu-system"):
+            if proc in args and proc not in procs:
+                procs[proc] = pid
+    results["caps"] = {proc: caps(pid) for proc, pid in procs.items()}
+    results["trusted"] = t.docker("exec", container, "python3", "-c", SET_TRUSTED).stdout.strip()
+    return results
+
+
+for case, results in zip(CASES, t.parallel(run, CASES, remove=True)):
+    name, opts, others_hold, virtiofsd_holds = case
+    t.param(name, " ".join(opts) or "(none)")
+    if not t.check("%s: Container/VM boots and 'docker exec' works" % name, True, "error" not in results):
+        t.log(results["error"])
+        continue
+    for proc in ("init", "dnsmasq", "qemu-system", "virtiofsd"):
+        sets = results["caps"].get(proc)
+        if not t.check("%s: %s's capabilities read" % (name, proc), True, sets is not None):
+            continue
+        if proc == "virtiofsd":
+            t.check("%s: virtiofsd holds CAP_SYS_ADMIN" % name, virtiofsd_holds,
+                    bool(sets["CapEff"] & CAP_SYS_ADMIN))
+        else:
+            for field in ("CapBnd", "CapPrm", "CapEff"):
+                t.check("%s: %s holds CAP_SYS_ADMIN in %s" % (name, proc, field), others_hold,
+                        bool(sets[field] & CAP_SYS_ADMIN))
+    t.check("%s: the VM sets a trusted.* attribute" % name, "1" if virtiofsd_holds else "Operation not permitted",
+            results["trusted"])
+
+t.finish()

@@ -3,6 +3,22 @@
 # DEBUG
 if [[ "$RUNCVM_BREAK" =~ (prenet|postnet) ]]; then set -x; fi
 
+# LAUNCH VIRTIOFSD
+# virtiofsd starts first, from RunCVM's own environment alone. Where runcvm-runtime added
+# CAP_SYS_ADMIN for it (RUNCVM_SYS_ADMIN_ADDED=1, for virtiofsd's --modcaps=+sys_admin), this script
+# then runs again without the capability, so that no other process RunCVM runs in the container
+# (its network configuration, dnsmasq, mkfs and QEMU) holds it: setpriv drops it from the bounding
+# and inheritable sets, so a root process cannot regain it across exec. RUNCVM_VIRTIOFSD_STARTED
+# marks the second run.
+if [ "$RUNCVM_VIRTIOFSD_STARTED" != "1" ]; then
+  $RUNCVM_GUEST/scripts/runcvm-ctr-virtiofsd &
+  if [ "$RUNCVM_SYS_ADMIN_ADDED" = "1" ]; then
+    RUNCVM_VIRTIOFSD_STARTED=1 exec $RUNCVM_GUEST/bin/setpriv --bounding-set=-sys_admin \
+      --inh-caps=-sys_admin -- "$0" "$@"
+  fi
+fi
+unset RUNCVM_VIRTIOFSD_STARTED
+
 # READ THE WORKLOAD'S ENVIRONMENT
 # runcvm-runtime passes it as a count N, then N NAME=VALUE entries, before the original
 # entrypoint and command; this script's own environment is RunCVM's alone.
@@ -329,9 +345,6 @@ fi
 # and the VM's requests for $RUNCVM_DNS_IP, redirected to it by the nat rules above.
 # '-C /dev/null' keeps it from reading the image's /etc/dnsmasq.conf (and any conf-dir it names).
 dnsmasq -C /dev/null -u root --no-hosts
-
-# LAUNCH VIRTIOFSD
-$RUNCVM_GUEST/scripts/runcvm-ctr-virtiofsd &
 
 # DEBUG
 if [[ "$RUNCVM_BREAK" =~ postnet ]]; then bash; fi
