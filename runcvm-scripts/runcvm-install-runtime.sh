@@ -1,13 +1,19 @@
 #!/bin/sh
 
 # Installs RunCVM from the image $REPO (default newsnowlabs/runcvm, i.e. the latest release):
+# - with --pull, pulls the image first, so that a tag that moves (e.g. latest) installs its
+#   current image rather than an older copy on this host, which is installed instead where the pull
+#   fails; without it, a copy on this host is installed as it is, and docker run pulls an image
+#   that this host lacks;
 # - copies the RunCVM package from the image to /opt/runcvm;
-# - then runs the installer in that package, with --no-dockerd, which registers the runtime with
+# - then runs the installer in that package, with --no-dockerd (--register-only's other name, the
+#   only one that releases before --register-only accept), which registers the runtime with
 #   Docker. So the host-side steps are always those of the release being installed, whichever
 #   version of this script installs it.
 #
-# With --no-dockerd, it skips the dockerd check and the package copy, and registers the package
-# already in /opt/runcvm. Every release from v1.5.0 accepts --no-dockerd in the same way.
+# With --register-only (or --no-dockerd), it skips the dockerd check and the package copy, and
+# registers the package already in /opt/runcvm, needing no Docker daemon (e.g. in 'docker build').
+# Every release from v1.5.0 accepts --no-dockerd in the same way.
 
 RUNCVM=/opt/runcvm
 RUNCVM_LD=$RUNCVM/lib/ld
@@ -47,9 +53,23 @@ jq_get() {
 usage() {
   cat <<_EOE_ >&2
 
-Usage: sudo [REPO=<image>] $0 [--no-dockerd]
+Usage: sudo [REPO=<image>] $0 [--pull] [--register-only]
+
+  REPO=<image>  Install RunCVM from <image> (default newsnowlabs/runcvm, the latest release).
+  --pull        Pull <image> first, so that a tag that has moved (such as latest) installs its
+                current image; where the pull fails, the copy on this host, if any, is installed,
+                with a warning. Without --pull, a copy of <image> already on this host is
+                installed as it is, and one this host lacks is pulled.
+  --register-only
+                Register the package already in /opt/runcvm with Docker, skipping the dockerd
+                check and the package's installation from <image>, so that no Docker daemon is
+                needed (e.g. in 'docker build'). Also --no-dockerd, which releases from v1.5.0
+                accept.
 
 e.g. sudo REPO=newsnowlabs/runcvm:v1.7.0 $0
+
+Images from v1.7.0 are also on GitHub's container registry, e.g. REPO=ghcr.io/newsnowlabs/runcvm:latest,
+for where pulls from Docker Hub are rate-limited or blocked.
 _EOE_
   exit 1
 }
@@ -124,10 +144,19 @@ do
 done
 
 
-if [ "$1" = "--no-dockerd" ]; then
-  NO_DOCKERD="1"
-  log "- Skipping dockerd check and docker-based package install due to '--no-dockerd'"
+while [ $# -gt 0 ]
+do
+  case "$1" in
+    --register-only|--no-dockerd) REGISTER_ONLY="1" ;;
+    --pull) PULL="1" ;;
+    -h|--help) usage ;;
+    *) log "- Error: unknown argument '$1'"; usage ;;
+  esac
   shift
+done
+
+if [ -n "$REGISTER_ONLY" ]; then
+  log "- Registering the package already in /opt/runcvm, skipping the dockerd check and the package install, due to '--register-only'"
 else
   log "- Checking dockerd ..."
   if docker info >/dev/null 2>&1; then
@@ -139,7 +168,19 @@ else
 fi
 
 # Install the RunCVM package to /opt/runcvm, which the installer image sees mounted at $MNT
-if [ -z "$NO_DOCKERD" ]; then
+if [ -z "$REGISTER_ONLY" ]; then
+  if [ -n "$PULL" ]; then
+    log "- Pulling $REPO, due to '--pull' ..."
+    if docker pull --quiet "$REPO" >/dev/null; then
+      log "  - Pulled $REPO"
+    elif docker image inspect "$REPO" >/dev/null 2>&1; then
+      log "  - Warning: pulling $REPO failed; installing the copy already on this host"
+    else
+      log "  - Error: pulling $REPO failed, and this host has no copy of it; aborting!"
+      exit 1
+    fi
+  fi
+
   log "- Installing RunCVM package to /opt/runcvm ..."
   if docker run --rm -v /opt/runcvm:$MNT $REPO --quiet; then
     log "- Installed RunCVM package to /opt/runcvm"

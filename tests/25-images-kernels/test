@@ -75,7 +75,9 @@ IMAGES = (("alpine:3.22", "alpine"), ("alpine:3.23", "alpine"), ("alpine:3.24", 
           ("kalilinux/kali-rolling", "debian"),
           ("busybox", "debian"),
           *([("archlinux", "debian")] if X86_64 else []),
-          ("cgr.dev/chainguard/wolfi-base", "debian"))
+          # Wolfi, pulled from this repository's own mirror of cgr.dev/chainguard/wolfi-base (see
+          # .github/mirrored-images), so the test does not depend on Chainguard's registry being up.
+          ("ghcr.io/newsnowlabs/runcvm/images/mirrored/wolfi-base", "debian"))
 
 t.pull_images(["alpine"] + [i for i, _ in IMAGES])
 
@@ -121,7 +123,7 @@ if X86_64:
 CASES += [("image-os-release-link", [], [link_image, "sh", "-c", PROBE], "alpine", None)]
 
 # The cases whose image's distribution has no RunCVM kernel, so whose output shows the warning.
-FALLBACK_CASES = {"image-archlinux", "image-cgr.dev-chainguard-wolfi-base"}
+FALLBACK_CASES = {"image-archlinux", "image-ghcr.io-newsnowlabs-runcvm-images-mirrored-wolfi-base"}
 
 
 def run(args):
@@ -146,6 +148,14 @@ def field(output, key):
 
 for name, opts, image_cmd, dist, modprobe in CASES:
     r = results[name]
+    # An image pulled live at boot (no --pull) depends on its registry: a transient registry fault
+    # says nothing about RunCVM, so skip the case rather than fail it (see framework's
+    # registry_unavailable). cgr.dev/chainguard/wolfi-base in particular is pulled from Chainguard's
+    # registry, which has no mirror here.
+    if r.returncode != 0 and t.registry_unavailable(r.stdout):
+        t.skip_check("%s: booted" % name, "could not pull image: registry unavailable")
+        t.log("output:\n%s" % r.stdout)
+        continue
     expected = kernel_version(dist)
     if not t.check("%s: booted" % name, 0, r.returncode):
         t.log("output:\n%s" % r.stdout)

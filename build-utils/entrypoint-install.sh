@@ -17,12 +17,21 @@ if ! mountpoint $MNT >/dev/null 2>&1; then
   cat <<_EOE_ >&2
 ERROR: Host bind-mount not specified, see below for correct usage.
 
-Usage: docker run --rm -v /opt/runcvm:$MNT $REPO [--quiet] [--sleep]
+Usage: docker run --rm -v /opt/runcvm:$MNT $REPO[:<tag>] [--quiet] [--sleep]
 
- - Installs runcvm package to the host at /opt/runcvm
+ - Copies the RunCVM package to the host at /opt/runcvm
    (installation elsewhere is currently unsupported)
 
-   N.B. This image should normally only be used by the install script.
+   --quiet  Print nothing after a successful copy.
+   --sleep  After copying, print '<hostname>: RunCVM package installed.' and sleep, as a
+            global Docker service does to copy the package to every node of a swarm
+            (also --wait or --pause).
+
+   N.B. This image should normally only be used by the installer, which also registers the
+        runtime with Docker, and with --pull pulls the image first:
+
+     curl -s -o - https://raw.githubusercontent.com/newsnowlabs/runcvm/main/runcvm-scripts/runcvm-install-runtime.sh | sudo [REPO=<image>] sh [-s -- --pull]
+
         See README.md for installation instructions.
 _EOE_
 
@@ -46,11 +55,15 @@ If this is your first time installing RunCVM on this server/VM, then:
 
 1. Run the following to update /etc/docker/daemon.json and restart docker:
 
-  sudo /opt/runcvm/scripts/runcvm-install-runtime.sh
+  sudo /opt/runcvm/scripts/runcvm-install-runtime.sh --register-only
+
+   (--register-only registers the package already in /opt/runcvm; without it, the installer
+   installs the package from the image REPO=<image>, by default newsnowlabs/runcvm, pulling
+   it first with --pull.)
 
 2. Optionally, run the integration tests:
 
-  ./tests/run
+  /opt/runcvm/tests/run
 
 _EOE_
 fi
