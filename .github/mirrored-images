@@ -1,0 +1,18 @@
+# Upstream images mirrored into ghcr.io/newsnowlabs/runcvm/images/mirrored/<mirror-name>, so the
+# integration tests need not depend on third-party registries staying up. The mirror-images
+# workflow copies each line's source to that namespace, keeping every platform (multiarch), on a
+# schedule shortly before the nightly CI run and whenever this list changes.
+#
+# One image per line, two fields separated by whitespace:
+#
+#     <source-ref>  <mirror-name>
+#
+# <source-ref> is a pullable reference, "repository" or "repository:tag" (no tag means :latest).
+# <mirror-name> is the last path element under the mirrored namespace; the mirror keeps the
+# source's tag, so <source-ref>:latest becomes .../mirrored/<mirror-name>:latest.
+#
+# Blank lines and lines beginning with '#' are ignored. To mirror another image — e.g. a Docker
+# Hub image a run has seen fail to pull — add a line here.
+#
+# source                                 mirror-name
+cgr.dev/chainguard/wolfi-base:latest     wolfi-base

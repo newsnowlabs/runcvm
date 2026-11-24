@@ -6,7 +6,8 @@
   destination.
 - A new disk is prepopulated with the image's existing contents at its
   destination.
-- Several disks, separated by ';', are each mounted.
+- Several disks, separated by ';', are each mounted; whitespace around each
+  disk's spec, such as the newlines of a YAML block scalar, is ignored.
 - A backing file may be in the container's own filesystem or in a volume.
 - /disks, where backing files are usually kept, is mounted only in the
   container, not in the VM.
@@ -37,9 +38,10 @@ t.docker("run", "--rm", *t.labels(), "--runtime=runc", "--network=none", "-v", v
 
 # /disks/one in the volume, mounted at /data (new, empty); /disks/two in the volume, mounted at
 # /etc/apk (prepopulated from the image); /disk-overlay in the container's filesystem;
-# /disks/labelled, pre-existing, mounted at /labelled.
-disks = ";".join(["/disks/one,/data,ext4,64M", "/disks/two,/etc/apk,ext4,32M", "/disk-overlay,/extra,ext4,32M",
-                  "/disks/labelled,/labelled,ext4"])
+# /disks/labelled, pre-existing, mounted at /labelled. One spec per line, ending in a newline, as a
+# YAML block scalar gives them.
+disks = ";\n".join(["/disks/one,/data,ext4,64M", "/disks/two,/etc/apk,ext4,32M", "/disk-overlay,/extra,ext4,32M",
+                  "/disks/labelled,/labelled,ext4"]) + "\n"
 t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
          "--mount", "type=volume,src=%s,dst=/disks" % volume, "--env", "RUNCVM_DISKS=" + disks,
          "alpine", "sleep", "600", check=True)

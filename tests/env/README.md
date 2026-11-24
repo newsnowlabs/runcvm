@@ -16,13 +16,13 @@ The image runs in _dev mode_ when launched with no arguments: a long-lived L1 fo
 
 The image is published on GitHub's container registry as `ghcr.io/newsnowlabs/runcvm/images/test-l1`, with these tags:
 
-- `<release>`, e.g. `v1.7.0`: the RunCVM release preinstalled;
+- `<release>`, e.g. `v1.8.0`: the RunCVM release preinstalled;
 - `latest`: published alongside a release's tag, so the most recent of those;
 - `sha-<commit>`: the repository commit (its first 12 hex digits) each image was built from.
 
 Each image's labels name its commit (`org.opencontainers.image.revision`) and the RunCVM image preinstalled (`io.github.newsnowlabs.runcvm.image`). Published images do not include [Claude Code](#claude-code).
 
-To launch a published image, give its name in place of `runcvm-l1` in [Launching](#launching), e.g. `ghcr.io/newsnowlabs/runcvm/images/test-l1:v1.7.0`.
+To launch a published image, give its name in place of `runcvm-l1` in [Launching](#launching), e.g. `ghcr.io/newsnowlabs/runcvm/images/test-l1:v1.8.0`.
 
 ## Building
 
@@ -47,7 +47,7 @@ Build arguments:
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `RUNCVM_IMAGE` | `newsnowlabs/runcvm:v1.7.0` | The RunCVM image whose `/opt/runcvm` is preinstalled in L1, for running L2s: the RunCVM a new L1 starts with (see [Limitations](#limitations)). Any image built by `./build/build.sh` may be given, e.g. a local build tagged `newsnowlabs/runcvm:dev`. |
+| `RUNCVM_IMAGE` | `newsnowlabs/runcvm:v1.8.0` | The RunCVM image whose `/opt/runcvm` is preinstalled in L1, for running L2s: the RunCVM a new L1 starts with (see [Limitations](#limitations)). Any image built by `./build/build.sh` may be given, e.g. a local build tagged `newsnowlabs/runcvm:dev`. |
 | `DOCKER_VERSION` | `29.9.2` | The version of `docker-ce` and `docker-ce-cli` |
 | `CONTAINERD_VERSION` | `2.4.2-3` | The version of `containerd.io` |
 | `BUILDX_VERSION` | `0.38.1` | The version of `docker-buildx-plugin` |
@@ -266,7 +266,7 @@ Run these as a user with uid 1000 on L0, or `chown 1000` the directory and file,
 
 ## Limitations
 
-- **The RunCVM under test:** `tests/run`, from whichever checkout of the repository it is run, exercises the RunCVM installed in L1's `/opt/runcvm`. `RUNCVM_IMAGE` (default: release `v1.7.0`) sets only the RunCVM a new L1 starts with, as `/opt/runcvm` is on L1's disk, which is populated once (see [Disks](#disks)). Tests of behaviour added since the installed RunCVM was built fail or are skipped against it. To test another build, install it in L1: build it with `./build/build.sh --tag <tag>` and install it with `sudo REPO=newsnowlabs/runcvm:<tag> ./runcvm-scripts/runcvm-install-runtime.sh`; or, where only `runcvm-scripts/` differ, copy them into `/opt/runcvm/scripts/`, which affects Container/VMs created afterwards.
+- **The RunCVM under test:** `tests/run`, from whichever checkout of the repository it is run, exercises the RunCVM installed in L1's `/opt/runcvm`. `RUNCVM_IMAGE` (default: release `v1.8.0`) sets only the RunCVM a new L1 starts with, as `/opt/runcvm` is on L1's disk, which is populated once (see [Disks](#disks)). Tests of behaviour added since the installed RunCVM was built fail or are skipped against it. To test another build, install it in L1: build it with `./build/build.sh --tag <tag>` and install it with `sudo REPO=newsnowlabs/runcvm:<tag> ./runcvm-scripts/runcvm-install-runtime.sh`; or, where only `runcvm-scripts/` differ, copy them into `/opt/runcvm/scripts/`, which affects Container/VMs created afterwards.
 - **Batch mode:** this image does not implement it. An L1 launched with arguments powers off with exit status 2.
 - **L1's kernel:** this is L0's RunCVM's Ubuntu kernel, as RunCVM chooses for an Ubuntu image.
 - **Dockside:** launching L1 from Dockside has not been tested.
