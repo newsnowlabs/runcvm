@@ -385,7 +385,12 @@ attempt() { # market region az type price score
   L_ID=$id; L_REGION=$region; L_TYPE=$type; L_MARKET=$market; L_PRICE=$price; L_SCORE=$score
   L_IP=$(aws --region "$region" ec2 describe-instances --instance-ids "$id" \
     --query 'Reservations[0].Instances[0].PublicIpAddress' --output text 2>/dev/null)
-  logrec market="$market" region="$region" az="$az" type="$type" price="$price" score="$score" id="$id" ip="$L_IP" outcome=launched
+  # Under GitHub Actions, the public log masks the host's address; $LOG, which is uploaded as an
+  # artifact, leaves it out.
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    case "$L_IP" in [0-9]*.[0-9]*) echo "::add-mask::$L_IP" ;; esac
+  fi
+  logrec market="$market" region="$region" az="$az" type="$type" price="$price" score="$score" id="$id" outcome=launched
 }
 
 # Try each candidate in turn, skipping regions that an attempt has ruled out. The candidates are

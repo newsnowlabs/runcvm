@@ -8,7 +8,8 @@
 # secret AWS_ARM64_METAL_ROLE, whose trust policy admits this repository's main branch and its
 # pull requests, and which may change only resources tagged as RunCVM CI's. The ARN is a secret
 # so that the public log masks the account id in it; no AWS credential is stored. The job runs
-# only in newsnowlabs/runcvm (a job's if: cannot test a secret), and is skipped in forks.
+# only in newsnowlabs/runcvm (a job's if: cannot test a secret), and is skipped in forks. The log
+# also masks the runner's public address (SSH_CIDR) and the host's.
 #
 # What runs, and when:
 # - Nightly: every tier, on main.
@@ -86,7 +87,9 @@ jobs:
       - name: SSH key and address
         run: |
           ssh-keygen -q -t ed25519 -N '' -C "$RUN" -f "$RUNNER_TEMP/host-key"
-          echo "SSH_CIDR=$(curl -fsS https://checkip.amazonaws.com)/32" >>"$GITHUB_ENV"
+          ip=$(curl -fsS https://checkip.amazonaws.com)
+          echo "::add-mask::$ip"
+          echo "SSH_CIDR=$ip/32" >>"$GITHUB_ENV"
 
       - name: Launch the host
         id: launch
