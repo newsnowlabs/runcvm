@@ -16,8 +16,15 @@ export RUNCVM_TEST_JOBS=${RUNCVM_TEST_JOBS:-3}
 echo "Host: $(nproc) CPUs, $(free -g | awk '/^Mem:/ { print $2 }') GB; $(git log -1 --format='%h %s')"
 echo "Running tests/run $* in $shards shards of up to $RUNCVM_TEST_JOBS Container/VMs each"
 
+# A shard with no tests runs nothing, and leaves a file no-tests in place of its results, for
+# summarise; where no test at all is selected, every shard runs, and tests/run reports it.
+all=$(tests/run "$@" --list 2>/dev/null)
 pids=()
 for i in $(seq 1 "$shards"); do
+  if [ -n "$all" ] && [ -z "$(tests/run "$@" --list --shard "$i/$shards" 2>/dev/null)" ]; then
+    mkdir -p "$results/shard-$i" && : >"$results/shard-$i/no-tests"
+    continue
+  fi
   (
     set -o pipefail
     tests/run "$@" --shard "$i/$shards" --results "$results/shard-$i" 2>&1 | sed -u "s|^|[$i/$shards] |"

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Summarises the results of a run of run-shards: reads RESULTS/shard-*/results.json, prints a
 GitHub Actions error annotation for each test that failed, timed out or was interrupted (and for
-each shard whose results are missing or incomplete), and writes a summary in Markdown to
-$GITHUB_STEP_SUMMARY, or to stdout where that is unset. Exits 1 if there is any such test or
-shard.
+each shard whose results are missing or incomplete, other than one to which run-shards gave
+no tests), and writes a summary in Markdown to $GITHUB_STEP_SUMMARY, or to stdout where that is
+unset. Exits 1 if there is any such test or shard.
 
 Usage: summarise RESULTS SHARDS [HOST-DESCRIPTION]
 """
@@ -27,6 +27,8 @@ def main(argv):
     tests, problems = [], []
     for i in range(1, shards + 1):
         path = os.path.join(results_dir, "shard-%d" % i, "results.json")
+        if not os.path.exists(path) and os.path.exists(os.path.join(results_dir, "shard-%d" % i, "no-tests")):
+            continue
         try:
             with open(path) as f:
                 data = json.load(f)

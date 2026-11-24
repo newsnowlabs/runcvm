@@ -15,7 +15,7 @@
 #             id, region and address, and under GitHub Actions set them as step outputs
 #   wait      wait for the host at $IP to finish building and installing RunCVM, then print
 #             its setup log
-#   teardown  terminate run $RUN's host and revoke its SSH rule
+#   teardown  terminate run $RUN's host, revoke its SSH rule, and report its run time and cost
 #   reap      terminate group $GROUP's hosts past their expiry, and revoke its expired SSH rules
 #
 # Every instance, volume and security group it creates is tagged Project=$PROJECT_TAG, which its
@@ -438,6 +438,12 @@ do_launch() {
     fi
   fi
   INFLIGHT_ID=""
+  # An on-demand offer is ordered by its spot price, as a proxy; its price is the on-demand one,
+  # or unknown where the Pricing API gives none.
+  if [ "$L_MARKET" = ondemand ]; then
+    L_PRICE=$(ondemand_price "$L_REGION" "$L_TYPE")
+    L_PRICE=${L_PRICE:-unknown}
+  fi
   echo "Launched $L_ID in $L_REGION: $L_TYPE, $L_MARKET at $L_PRICE USD/hour (score $L_SCORE), address $L_IP"
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     printf '%s\n' "id=$L_ID" "region=$L_REGION" "type=$L_TYPE" "market=$L_MARKET" "price=$L_PRICE" "ip=$L_IP" >>"$GITHUB_OUTPUT"
@@ -467,24 +473,41 @@ do_wait() {
   return 1
 }
 
+# Terminates the run's instances, and reports how long they ran, from launch to termination, and,
+# given PRICE (USD/hour), about what that cost; under GitHub Actions, also as the step output
+# 'usage'.
 do_teardown() {
-  local r ids sg found=0
+  local r rows ids sg found=0 now id t start secs=0 usage
   [ -n "${REGION:-}" ] && REGIONS=$REGION
   resolve_regions
   for r in $REGIONS; do
-    ids=$(aws --region "$r" ec2 describe-instances \
+    rows=$(aws --region "$r" ec2 describe-instances \
       --filters Name=tag:Project,Values="$PROJECT_TAG" Name=tag:Run,Values="$RUN" \
                 Name=instance-state-name,Values=pending,running,stopping,stopped \
-      --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null)
-    if [ -n "$ids" ] && [ "$ids" != None ]; then
+      --query 'Reservations[].Instances[].[InstanceId,LaunchTime]' --output text 2>/dev/null)
+    ids=$(awk '$1 ~ /^i-/ { printf "%s ", $1 }' <<<"$rows")
+    if [ -n "$ids" ]; then
       # shellcheck disable=SC2086
-      aws --region "$r" ec2 terminate-instances --instance-ids $ids >/dev/null &&
-        { logrec region="$r" outcome=teardown detail="$ids"; echo "Terminated in $r: $ids"; found=1; }
+      if aws --region "$r" ec2 terminate-instances --instance-ids $ids >/dev/null; then
+        logrec region="$r" outcome=teardown detail="$ids"; echo "Terminated in $r: $ids"; found=1
+        now=$(date +%s)
+        while read -r id t; do
+          [ -n "$t" ] && start=$(date -d "$t" +%s 2>/dev/null) && secs=$(( secs + now - start ))
+        done <<<"$rows"
+      fi
     fi
     sg=$(group_sg "$r")
     case "$sg" in sg-*) revoke_rules "$r" "$sg" "run $RUN until" ;; esac
   done
   [ "$found" = 1 ] || echo "No running instance for run $RUN"
+  [ "$secs" -gt 0 ] || return 0
+  usage=$(awk -v s="$secs" -v p="${PRICE:-}" 'BEGIN {
+    printf "ran %d h %02d min, from launch to termination", s / 3600, s % 3600 / 60
+    if (p ~ /^[0-9.]+$/) printf ", about %.2f USD", s / 3600 * p
+  }')
+  echo "Host $usage"
+  [ -n "${GITHUB_OUTPUT:-}" ] && echo "usage=$usage" >>"$GITHUB_OUTPUT"
+  return 0
 }
 
 case "${1:-}" in
