@@ -930,9 +930,37 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     jq_set "$CFG" '.linux.devices+=[{"path":"/dev/vhost-net","type":"c","major":10,"minor":238,"fileMode":8630,"uid":0,"gid":0}]'
   fi
   
-  # For now, hardcode --security-opt=seccomp=unconfined;
-  # later, we can work out the minimal seccomp permissions required.
-  jq_set "$CFG" '.linux.seccomp |= empty'
+  # Seccomp: unless RUNCVM_SECCOMP=unconfined (below), the container keeps the default profile
+  # Docker or Podman resolved into the bundle (a profile of the user's own, from --security-opt
+  # seccomp=<file>, is unsupported), with these system calls also allowed, which RunCVM's processes in the container need beyond the default:
+  # - io_uring_setup, io_uring_enter, io_uring_register: QEMU's disks (aio=io_uring; see
+  #   disk_choose_aio in runcvm-ctr-qemu, which relies on them being allowed).
+  # - get_mempolicy, set_mempolicy, mbind: QEMU's memory, which the default profile allows only
+  #   with CAP_SYS_NICE.
+  # - chroot: virtiofsd's sandbox (--sandbox=chroot), which the default profile allows only with
+  #   CAP_SYS_CHROOT, and so not for a container launched without it (e.g. --cap-drop=ALL).
+  # The engine resolves its profile against the capabilities given to docker run or podman run,
+  # not those the runtime gives RunCVM's own processes (below), so these calls must be allowed
+  # here, not left to a capability. Of those capabilities, only CAP_SYS_CHROOT gates a system
+  # call in Docker's default profile.
+  # RUNCVM_SECCOMP=unconfined removes the profile, leaving RunCVM's processes unfiltered. A bundle
+  # the engine left with no profile (docker run --security-opt seccomp=unconfined, or --privileged)
+  # is left unconfined too, but that is not a supported way to run them so: these options are
+  # reserved to apply, in future, to the VM rather than to RunCVM's processes.
+  RUNCVM_SECCOMP="$(get_config_env 'RUNCVM_SECCOMP')"
+  case "$RUNCVM_SECCOMP" in
+    '') ;;
+    unconfined) jq_set "$CFG" 'del(.linux.seccomp)' ;;
+    *) error "RUNCVM_SECCOMP '$RUNCVM_SECCOMP' invalid (should be unconfined)" ;;
+  esac
+  jq_set "$CFG" '
+    if .linux.seccomp then
+      .linux.seccomp.syscalls += [{
+        "names": ["io_uring_setup", "io_uring_enter", "io_uring_register",
+                  "get_mempolicy", "set_mempolicy", "mbind", "chroot"],
+        "action": "SCMP_ACT_ALLOW"
+      }]
+    else . end'
   
   # CONFIGURE MEMORY
   # Set /dev/shm to RUNCVM_MEM_SIZE env var, or to default
