@@ -1253,8 +1253,9 @@ write_manifests() {
 # - native: Linux AIO (libaio);
 # - threads: a pool of threads making ordinary system calls, which works wherever the file does.
 # QEMU fails to open a disk in a mode that is unavailable, so the VM would not start. io_uring is
-# unavailable where the host kernel has it turned off. The container's seccomp profile always allows
-# io_uring's system calls: runcvm-runtime adds them to it.
+# unavailable where the host kernel has it turned off. The container's seccomp profile allows
+# io_uring's system calls wherever this chooses io_uring: runcvm-runtime adds them to it for a
+# container with disks, unless RUNCVM_DISK_AIO is native or threads.
 #
 # RUNCVM_DISK_AIO, if set to one of the three modes, forces it. Otherwise the mode is chosen from
 # /proc alone, without starting QEMU: io_uring, unless kernel.io_uring_disabled turns it off for this

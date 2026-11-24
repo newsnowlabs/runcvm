@@ -934,7 +934,9 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   # Docker or Podman resolved into the bundle (a profile of the user's own, from --security-opt
   # seccomp=<file>, is unsupported), with these system calls also allowed, which RunCVM's processes in the container need beyond the default:
   # - io_uring_setup, io_uring_enter, io_uring_register: QEMU's disks (aio=io_uring; see
-  #   disk_choose_aio in runcvm-ctr-qemu, which relies on them being allowed).
+  #   disk_choose_aio in runcvm-ctr-qemu), and so only where the container has disks
+  #   (RUNCVM_DISKS) and RUNCVM_DISK_AIO does not choose native or threads, the modes that do
+  #   without io_uring. QEMU also tries io_uring for its event loop, and without it uses epoll.
   # - get_mempolicy, set_mempolicy, mbind: QEMU's memory, which the default profile allows only
   #   with CAP_SYS_NICE.
   # - chroot: virtiofsd's sandbox (--sandbox=chroot), which the default profile allows only with
@@ -953,13 +955,16 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     unconfined) jq_set "$CFG" 'del(.linux.seccomp)' ;;
     *) error "RUNCVM_SECCOMP '$RUNCVM_SECCOMP' invalid (should be unconfined)" ;;
   esac
-  jq_set "$CFG" '
+  SECCOMP_ALLOW='"get_mempolicy","set_mempolicy","mbind","chroot"'
+  if [ -n "$(get_config_env 'RUNCVM_DISKS')" ]; then
+    case "$(get_config_env 'RUNCVM_DISK_AIO')" in
+      native|threads) ;;
+      *) SECCOMP_ALLOW+=',"io_uring_setup","io_uring_enter","io_uring_register"' ;;
+    esac
+  fi
+  jq_set "$CFG" --argjson names "[$SECCOMP_ALLOW]" '
     if .linux.seccomp then
-      .linux.seccomp.syscalls += [{
-        "names": ["io_uring_setup", "io_uring_enter", "io_uring_register",
-                  "get_mempolicy", "set_mempolicy", "mbind", "chroot"],
-        "action": "SCMP_ACT_ALLOW"
-      }]
+      .linux.seccomp.syscalls += [{"names": $names, "action": "SCMP_ACT_ALLOW"}]
     else . end'
   
   # CONFIGURE MEMORY
