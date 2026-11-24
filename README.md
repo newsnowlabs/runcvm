@@ -1457,7 +1457,7 @@ In more detail, the RunCVM runtime `create` process:
       - Add a bind mount to `/vm/lib/modules/<version>` for the kernel's modules
       - Set container env vars `RUNCVM_KERNEL_PATH`, `RUNCVM_KERNEL_INITRAMFS_PATH` and `RUNCVM_KERNEL_ROOT`
    - Add device mounts for `/dev/kvm` and `/dev/net/tun`.
-   - Add to the container's seccomp profile, if it has one, the system calls RunCVM's processes need beyond Docker's default profile for the capabilities the container was given (io_uring's, the NUMA memory-policy calls and `chroot`).
+   - Add to the container's seccomp profile, if it has one, the system calls RunCVM's processes need that Docker's default profile may not allow (io_uring's, the NUMA memory-policy calls and `chroot`), whatever capabilities the container was given.
    - Set `/dev/shm` to the size desired for the VM's memory, set `RUNCVM_MEM_SIZE` env var accordingly, and set the container memory limit to the size plus 256Mb (a contingency for QEMU itself, along with virtiofsd, dnsmasq and other container contents)
    - Give the container the capabilities RunCVM's own processes need, whatever it was given: Docker's default capabilities and `NET_ADMIN`.
    - Only if requested by `--env=SYS_ADMIN=1`, add the `SYS_ADMIN` capability.
