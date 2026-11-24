@@ -5,7 +5,7 @@ RunCVM's own processes in the container (QEMU, virtiofsd, dnsmasq and the
 network configuration) need capabilities, which the container keeps whatever
 it was given: a Container/VM launched with --cap-drop=ALL, also with
 --security-opt=no-new-privileges, boots, runs its workload and serves
-'docker exec'. The workload runs under the VM's own kernel, so keeps its
+'docker exec'. The workload runs under the VM's own kernel, so it keeps its
 capabilities there. Each case runs with and without --init.
 """
 

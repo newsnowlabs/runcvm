@@ -540,7 +540,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [+] `--env` (or `-e`), `--env-file` is supported
       - [+] `--entrypoint` is supported
       - [+] `--init` - is supported (but runs RunCVM's own VM init process rather than Docker's default, `tini`)
-      - [-] `--cap-drop` and `--security-opt=no-new-privileges` are accepted, but do not restrict the workload, which runs under the VM's own kernel; RunCVM's own processes in the container keep the capabilities they need
+      - [-] `--cap-drop` and `--security-opt=no-new-privileges` are accepted, but do not restrict the workload, which runs under the VM's own kernel; RunCVM's own processes in the container are given the capabilities they need
    - stdio/Terminals
       - [+] `--detach` (or `-d`) is supported
       - [+] `--interactive` (or `-i`) is supported
