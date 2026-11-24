@@ -85,6 +85,44 @@ RUNCVM_TEST_NAME="${RUNCVM_TEST_NAME:-$(basename "$PWD")}"
 
 ERRORS=${ERRORS:-0}
 
+# The deadline, in seconds, for each 'docker exec', and each 'docker run' not detached (-d), that a
+# test runs: RUNCVM_TEST_EXEC_TIMEOUT, or 60 (300 under TCG). A hung command then fails (exit
+# status 124, after logging the timeout on standard error), rather than holding the test until the
+# runner's time limit.
+if [ -z "$RUNCVM_TEST_EXEC_TIMEOUT" ]; then
+  if [ "$RUNCVM_TEST_ACCEL" = "tcg" ]; then RUNCVM_TEST_EXEC_TIMEOUT=300; else RUNCVM_TEST_EXEC_TIMEOUT=60; fi
+fi
+
+# docker ...
+# The docker CLI, giving 'docker exec', and 'docker run' not detached, the deadline
+# RUNCVM_TEST_EXEC_TIMEOUT. --foreground keeps the command in the terminal's process group, so that
+# 'docker exec -t' and 'docker run -t' can use the terminal.
+docker() {
+  local arg rc=0 deadline=0
+  case "$1" in
+    exec) deadline=1 ;;
+    run)
+      deadline=1
+      for arg in "${@:2}"; do
+        case "$arg" in -d|--detach|--detach=*) deadline=0; break ;; esac
+      done
+      ;;
+  esac
+  if [ "$deadline" = 0 ]; then
+    command docker "$@"
+    return
+  fi
+  local start=$SECONDS
+  timeout --foreground -k 10 "$RUNCVM_TEST_EXEC_TIMEOUT" docker "$@" || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo "> Timed out after ${RUNCVM_TEST_EXEC_TIMEOUT}s: docker $*" >&2
+  elif [ $((SECONDS - start)) -ge 10 ]; then
+    # A command taking 10s or more is logged, with its time, as a detail line.
+    log_detail "Took $((SECONDS - start))s: docker $*" >&2
+  fi
+  return "$rc"
+}
+
 # unique NAME
 # Print a Docker object name that is unique to this run, so that runs (and
 # tests) can proceed concurrently without name clashes.
@@ -100,14 +138,26 @@ labels() {
   echo "--label runcvm-test.run=$RUNCVM_TEST_RUN_ID --label runcvm-test.test=$RUNCVM_TEST_NAME"
 }
 
-# vm_opts
-# Print 'docker run' options for RunCVM Container/VMs selected by the runner,
-# currently the QEMU acceleration (--accel kvm|auto|tcg, as RUNCVM_QEMU_ACCEL).
+# vm_opts [--no-size]
+# Print 'docker run' options for RunCVM Container/VMs selected by the runner: RunCVM settings
+# (tests/run --vm-env, as RUNCVM_TEST_VM_ENV), the QEMU acceleration (--accel kvm|auto|tcg, as
+# RUNCVM_QEMU_ACCEL) and, without --no-size, the VM's size (--vm-cpus and --vm-memory, as
+# --cpus and --memory). They go before the test's own options, so that a test that sets the
+# same variable or option keeps its own value: Docker takes the last --env given for a
+# variable, and the last --cpus or --memory. Tests that check the VM's size against its
+# defaults pass --no-size.
 # Usage: docker run $(labels) $(vm_opts) --runtime=$RUNTIME ...
 vm_opts() {
-  if [ -n "$RUNCVM_TEST_ACCEL" ]; then
-    echo "--env=RUNCVM_QEMU_ACCEL=$RUNCVM_TEST_ACCEL"
+  local e env opts=()
+  read -r -a env <<<"$RUNCVM_TEST_VM_ENV"
+  for e in "${env[@]}"; do opts+=("--env=$e"); done
+  [ -n "$RUNCVM_TEST_ACCEL" ] && opts+=("--env=RUNCVM_QEMU_ACCEL=$RUNCVM_TEST_ACCEL")
+  if [ "$1" != "--no-size" ]; then
+    [ -n "$RUNCVM_TEST_CPUS" ] && opts+=("--cpus=$RUNCVM_TEST_CPUS")
+    [ -n "$RUNCVM_TEST_MEMORY" ] && opts+=("--memory=$RUNCVM_TEST_MEMORY")
   fi
+  [ ${#opts[@]} -gt 0 ] && echo "${opts[*]}"
+  return 0
 }
 
 # tcg_cases
@@ -121,6 +171,30 @@ tcg_cases() {
     0) return 1 ;;
   esac
   [ "$RUNCVM_TEST_ACCEL" = "tcg" ] || [ ! -e /dev/kvm ]
+}
+
+# The tests directory: in a source checkout, beside runcvm-scripts; in the installed package,
+# /opt/runcvm/tests, beside the package's scripts.
+TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# source_tree
+# Succeed if the tests run from a source checkout (the repository's root holding
+# runcvm-scripts beside the tests directory), rather than from the installed
+# package's /opt/runcvm/tests.
+source_tree() {
+  [ -d "$TESTS_DIR/../runcvm-scripts" ]
+}
+
+# scripts_dir
+# Print the directory of RunCVM's scripts, for tests that run or read them without
+# a Container/VM: the checkout's runcvm-scripts, from a source tree, or else the
+# package's scripts, beside its tests.
+scripts_dir() {
+  if source_tree; then
+    (cd "$TESTS_DIR/../runcvm-scripts" && pwd -P)
+  else
+    (cd "$TESTS_DIR/../scripts" && pwd -P)
+  fi
 }
 
 # record_result STATUS DESCRIPTION

@@ -5,7 +5,8 @@
   container's addresses and routes onto bridges for the VM, which in the
   host's network namespace would reconfigure the host's own interfaces.
   runcvm-runtime refuses it before anything runs: 'docker run' fails with
-  exit status 125, and the host's interfaces and routes are unchanged.
+  exit status 125, and the host's interfaces and routes are unchanged
+  (other than Docker's own, which concurrent runs add and remove).
 - --network=none, or only --internal networks: with no default route, the
   container-side entrypoint fails with exit status 1 and an explanation,
   before the VM starts.
@@ -18,6 +19,7 @@ otherwise.
 
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -57,10 +59,19 @@ except (OSError, TypeError):
     rejects_host = False
 
 if rejects_host:
+    # Docker's own interfaces, which other Container/VMs and tests running at the same time on
+    # this host add and remove: each container's veth end, and each network's bridge (br- and the
+    # network id's first 12 hex digits). RunCVM's would be named after the host's interfaces
+    # (br-<interface>, tap-<interface>), so leaving out Docker's still shows any change RunCVM
+    # makes to the host's own.
+    DOCKER_INTERFACE = re.compile(r"^(veth.*|br-[0-9a-f]{12})$")
+
     def host_network():
-        """The host's network interfaces and IPv4 routes, each as a set of lines."""
+        """The host's network interfaces and IPv4 routes, each as a set of lines, leaving out
+        Docker's own interfaces and their routes."""
         with open("/proc/net/route") as f:
-            return set(os.listdir("/sys/class/net")), set(line.strip() for line in f)
+            routes = set(line.strip() for line in f if not DOCKER_INTERFACE.match(line.split("\t", 1)[0]))
+        return set(i for i in os.listdir("/sys/class/net") if not DOCKER_INTERFACE.match(i)), routes
 
     before = host_network()
     check_failure("--network=host", run("host", "--network=host"), 125, HOST_MESSAGE)

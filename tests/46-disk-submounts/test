@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""RUNCVM_DISKS: mounts below a disk's destination stay visible in the VM.
+
+As in Docker, where a deeper mount is mounted over a shallower one, a
+volume, a volume nested in it, a tmpfs mount, and a directory and a file
+bind-mounted from the host (from /opt/runcvm, which every host running
+RunCVM has), each below a disk's destination, are mounted over the disk in
+the VM, for ext4 disks with layout 'subdirs' and 'root', and an xfs disk,
+populated in the VM, with and without --init:
+
+- Each mount is visible at its path, with its own contents: a volume's
+  contents are those written to it before the Container/VM started, and a
+  file written to it in the VM appears in the volume; the tmpfs mount is a
+  tmpfs; the bind mounts show the host's directory and file.
+- The disk is still mounted at its destination, and a file written beside
+  the mounts goes to the disk, not to the volume.
+- A new disk is not prepopulated with the mounts' contents: the disk holds
+  an empty directory, or an empty file, at each mountpoint.
+- The same holds when the Container/VM starts again, with the existing
+  disks.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+
+# The first line of the host's /opt/runcvm/LICENSE, as a standard container sees it bind-mounted.
+LICENSE = t.docker("run", "--rm", *t.labels(), "--runtime=runc", "--network=none",
+                   "--mount", "type=bind,src=/opt/runcvm/LICENSE,dst=/LICENSE,readonly",
+                   "alpine", "head", "-n", "1", "/LICENSE", check=True).stdout.strip()
+
+
+def run(init):
+    mode = "--init" if init else "no --init"
+    suffix = "-init" if init else "-noinit"
+    disks_volume = t.unique("submounts-disks" + suffix)
+    shared = t.unique("submounts-shared" + suffix)
+    nested = t.unique("submounts-nested" + suffix)
+    data = t.unique("submounts-data" + suffix)
+    cache = t.unique("submounts-cache" + suffix)
+    for volume in (disks_volume, shared, nested, data, cache):
+        t.volume_create(volume)
+
+    # Seed each volume with a marker, before the Container/VM first starts.
+    for volume, marker in ((shared, "shared"), (nested, "nested"), (data, "data"), (cache, "cache")):
+        t.docker("run", "--rm", *t.labels(), "--runtime=runc", "--network=none", "-v", volume + ":/v",
+                 "alpine", "sh", "-c", "echo %s >/v/marker" % marker, check=True)
+
+    name = t.unique("submounts" + suffix)
+    t.cleanup_container(name)
+
+    # Disk 0, ext4 with layout 'subdirs', holds /home and /srv; disk 1, ext4 with layout 'root',
+    # holds /var/lib/app; disk 2, xfs with layout 'subdirs', holds /var/cache/app, and is populated
+    # in the VM, not by mke2fs. (xfs needs at least 300M.)
+    disks = ";".join(["/disks/home,/home:/srv,ext4,64M", "/disks/app,/var/lib/app,ext4,32M,layout=root",
+                      "/disks/cache,/var/cache/app,xfs,400M"])
+    t.docker("create", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+             *(["--init"] if init else []),
+             "--mount", "type=volume,src=%s,dst=/disks" % disks_volume,
+             "--mount", "type=volume,src=%s,dst=/home/user/shared" % shared,
+             "--mount", "type=volume,src=%s,dst=/home/user/shared/nested" % nested,
+             "--mount", "type=tmpfs,dst=/home/user/tmp",
+             "--mount", "type=bind,src=/opt/runcvm/scripts,dst=/srv/runcvm-scripts,readonly",
+             "--mount", "type=bind,src=/opt/runcvm/LICENSE,dst=/home/user/LICENSE,readonly",
+             "--mount", "type=volume,src=%s,dst=/var/lib/app/data" % data,
+             "--mount", "type=volume,src=%s,dst=/var/cache/app/vol" % cache,
+             "--env", "RUNCVM_DISKS=" + disks,
+             "alpine", "sleep", "600", check=True)
+
+    def ex(*cmd):
+        return t.docker("exec", name, *cmd)
+
+    def out(*cmd):
+        return ex(*cmd).stdout.strip()
+
+    def fstype(path):
+        """The filesystem type of the topmost mount at path, as /proc/mounts lists it last."""
+        return out("awk", "$2 == \"%s\" { fs = $3 } END { print fs }" % path, "/proc/mounts")
+
+    for boot in ("first start", "second start"):
+        t.docker("start", name, check=True)
+        if not t.wait_for_exec(name, BOOT_TIMEOUT):
+            t.check("%s, %s: Container/VM started" % (mode, boot), True, False)
+            return
+
+        t.check("%s, %s: /home is on its disk" % (mode, boot), "ext4", fstype("/home"))
+        t.check("%s, %s: /var/lib/app is on its disk" % (mode, boot), "ext4", fstype("/var/lib/app"))
+
+        t.check("%s, %s: volume below /home is visible" % (mode, boot), "shared",
+                out("cat", "/home/user/shared/marker"))
+        t.check("%s, %s: volume nested in it is visible" % (mode, boot), "nested",
+                out("cat", "/home/user/shared/nested/marker"))
+        t.check("%s, %s: tmpfs below /home is a tmpfs" % (mode, boot), "tmpfs", fstype("/home/user/tmp"))
+        t.check("%s, %s: volume below a layout 'root' disk is visible" % (mode, boot), "data",
+                out("cat", "/var/lib/app/data/marker"))
+        t.check("%s, %s: directory bind-mounted below /srv is visible" % (mode, boot), True,
+                "runcvm-runtime" in out("ls", "/srv/runcvm-scripts").split())
+        t.check("%s, %s: file bind-mounted below /home is visible" % (mode, boot), LICENSE,
+                out("head", "-n", "1", "/home/user/LICENSE"))
+        t.check("%s, %s: /var/cache/app is on its disk" % (mode, boot), "xfs", fstype("/var/cache/app"))
+        t.check("%s, %s: volume below an xfs disk is visible" % (mode, boot), "cache",
+                out("cat", "/var/cache/app/vol/marker"))
+
+        # Neither disk with layout 'subdirs', whose directories are visible at /.runcvm/disks/<n>,
+        # holds a copy of a mount's contents: each holds an empty mountpoint (an empty file, for
+        # the file bind mount).
+        t.check("%s, %s: disk 0 holds an empty mountpoint for the volume" % (mode, boot), "",
+                out("ls", "-A", "/.runcvm/disks/0/home/user/shared"))
+        t.check("%s, %s: disk 0 holds an empty file for the file bind mount" % (mode, boot), "0",
+                out("stat", "-c", "%s", "/.runcvm/disks/0/home/user/LICENSE"))
+        t.check("%s, %s: xfs disk 2 holds an empty mountpoint for the volume" % (mode, boot), "",
+                out("ls", "-A", "/.runcvm/disks/2/var-cache-app/vol"))
+
+        tag = boot.split()[0]
+        t.check_cmd("%s, %s: write to the volume in the VM" % (mode, boot),
+                    ["docker", "exec", name, "sh", "-c", "echo %s >/home/user/shared/from-vm-%s" % (tag, tag)])
+        t.check_cmd("%s, %s: write beside the volume, to the disk" % (mode, boot),
+                    ["docker", "exec", name, "sh", "-c", "echo %s >/home/user/on-disk-%s" % (tag, tag)])
+        t.check("%s, %s: file written in the VM is in the volume" % (mode, boot), tag + "\n",
+                t.volume_read(shared, "from-vm-" + tag))
+        t.check("%s, %s: file written beside the volume is on the disk" % (mode, boot), tag,
+                out("cat", "/.runcvm/disks/0/home/user/on-disk-" + tag))
+        t.check("%s, %s: file written beside the volume is not in the volume" % (mode, boot), None,
+                t.volume_read(shared, "on-disk-" + tag))
+
+        t.docker("stop", "-t", "30", name, check=True)
+
+    # The disk kept what was written to it during the first start.
+    t.docker("start", name, check=True)
+    if t.wait_for_exec(name, BOOT_TIMEOUT):
+        t.check("%s: file written to the disk persists" % mode, "first", out("cat", "/home/user/on-disk-first"))
+    else:
+        t.check("%s: Container/VM started a third time" % mode, True, False)
+    t.docker("stop", "-t", "30", name, check=True)
+
+
+t.param("init", "no, yes")
+for init in (False, True):
+    run(init)
+
+t.finish()

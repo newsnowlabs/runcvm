@@ -25,6 +25,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 RUN_ID = os.environ.get("RUNCVM_TEST_RUN_ID") or "manual-%d" % os.getpid()
@@ -37,9 +38,30 @@ ACCEL = os.environ.get("RUNCVM_TEST_ACCEL") or None
 # it is unset, with --accel tcg or without /dev/kvm
 TCG_CASES = (os.environ["RUNCVM_TEST_TCG_CASES"] == "1" if os.environ.get("RUNCVM_TEST_TCG_CASES")
              else ACCEL == "tcg" or not os.path.exists("/dev/kvm"))
+# Whether tests pull the images they boot before using them, refreshing tags that upstream has
+# re-pointed (see tests/run --pull)
+PULL = os.environ.get("RUNCVM_TEST_PULL") == "1"
+# Options for every RunCVM Container/VM, chosen by the runner (see tests/run --vm-env, --vm-cpus
+# and --vm-memory): RunCVM settings, as NAME=VALUE, and the VM's size
+VM_ENV = (os.environ.get("RUNCVM_TEST_VM_ENV") or "").split()
+# The deadline, in seconds, for each 'docker exec', and each 'docker run' not detached (-d), that a
+# test runs through these helpers (docker(), check_cmd, expect_exit, wait_for):
+# RUNCVM_TEST_EXEC_TIMEOUT, or 60 (300 under TCG). A hung command then fails its check, rather
+# than holding the test until the runner's time limit.
+EXEC_TIMEOUT = int(os.environ.get("RUNCVM_TEST_EXEC_TIMEOUT") or (300 if ACCEL == "tcg" else 60))
+# Such a command taking at least this many seconds is logged, with its time, as a detail line.
+SLOW_COMMAND = 10
+CPUS = os.environ.get("RUNCVM_TEST_CPUS") or None
+MEMORY = os.environ.get("RUNCVM_TEST_MEMORY") or None
+
+# The tests directory: in a source checkout, beside runcvm-scripts; in the installed package,
+# /opt/runcvm/tests, beside the package's scripts.
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 errors = 0
 _cleanups = []
+# The cleanups registered by the current thread's call in parallel(..., remove=True)
+_call = threading.local()
 
 
 def log(msg):
@@ -63,9 +85,34 @@ def labels():
     return ["--label", "runcvm-test.run=%s" % RUN_ID, "--label", "runcvm-test.test=%s" % TEST_NAME]
 
 
-def vm_opts():
-    """'docker run' options for RunCVM Container/VMs selected by the runner (QEMU acceleration)."""
-    return ["--env=RUNCVM_QEMU_ACCEL=%s" % ACCEL] if ACCEL else []
+def vm_opts(size=True):
+    """'docker run' options for RunCVM Container/VMs selected by the runner: RunCVM settings
+    (VM_ENV), the QEMU acceleration and, unless size is False, the VM's size (CPUS and MEMORY).
+
+    They go before the test's own options, so that a test that sets the same variable or option
+    keeps its own value: Docker takes the last --env given for a variable, and the last --cpus or
+    --memory. Tests that check the VM's size against its defaults pass size=False.
+    """
+    opts = ["--env=%s" % e for e in VM_ENV]
+    if ACCEL:
+        opts.append("--env=RUNCVM_QEMU_ACCEL=%s" % ACCEL)
+    if size and CPUS:
+        opts.append("--cpus=%s" % CPUS)
+    if size and MEMORY:
+        opts.append("--memory=%s" % MEMORY)
+    return opts
+
+
+def source_tree():
+    """Whether the tests run from a source checkout (the repository's root holding runcvm-scripts
+    beside the tests directory), rather than from the installed package's /opt/runcvm/tests."""
+    return os.path.isdir(os.path.join(TESTS_DIR, "..", "runcvm-scripts"))
+
+
+def scripts_dir():
+    """RunCVM's scripts, for tests that run or read them without a Container/VM: the checkout's
+    runcvm-scripts, from a source tree, or else the package's scripts, beside its tests."""
+    return os.path.realpath(os.path.join(TESTS_DIR, "..", "runcvm-scripts" if source_tree() else "scripts"))
 
 
 def docker(*args, check=False, timeout=None, capture=True, input=None):
@@ -74,23 +121,96 @@ def docker(*args, check=False, timeout=None, capture=True, input=None):
     With check=True, raise subprocess.CalledProcessError on a non-zero exit.
     With capture=False, output goes straight to this test's output.
     With input, the text is passed on standard input (e.g. to 'docker run -i').
+    With timeout, raise subprocess.TimeoutExpired should the command take longer. Without it,
+    'docker exec', and 'docker run' not detached, have EXEC_TIMEOUT, after which the command is
+    stopped and its result has exit status 124 (raising subprocess.CalledProcessError with
+    check=True), with whatever it had written.
     """
+    cmd = ("docker",) + tuple(args)
     out = subprocess.PIPE if capture else None
-    return subprocess.run(("docker",) + tuple(args), stdout=out, stderr=subprocess.STDOUT if capture else None,
-                          universal_newlines=True, check=check, timeout=timeout, input=input)
+    if timeout is not None or not _has_deadline(cmd):
+        return subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT if capture else None,
+                              universal_newlines=True, check=check, timeout=timeout, input=input)
+    r = _run(cmd, stdout=out, stderr=subprocess.STDOUT if capture else None, universal_newlines=True,
+             input=input)
+    if check and r.returncode != 0:
+        raise subprocess.CalledProcessError(r.returncode, cmd, r.stdout)
+    return r
 
 
-def parallel(func, items, jobs=None):
+def _has_deadline(cmd):
+    """Whether cmd, an argument list, is a 'docker exec', or a 'docker run' not detached."""
+    cmd = list(cmd)
+    if cmd[:2] == ["docker", "exec"]:
+        return True
+    return cmd[:2] == ["docker", "run"] and not any(a in ("-d", "--detach") or a.startswith("--detach=")
+                                                    for a in cmd[2:])
+
+
+def _run(cmd, timeout=None, **kwargs):
+    """subprocess.run(cmd, ...), where a 'docker exec', or a 'docker run' not detached, has a
+    deadline: timeout, or EXEC_TIMEOUT. Should it pass, the command is stopped, the timeout is
+    logged, and the result has exit status 124, with whatever the command had written."""
+    if not _has_deadline(cmd):
+        return subprocess.run(cmd, timeout=timeout, **kwargs)
+    timeout = EXEC_TIMEOUT if timeout is None else timeout
+    start = time.time()
+    try:
+        r = subprocess.run(cmd, timeout=timeout, **kwargs)
+        if time.time() - start >= SLOW_COMMAND:
+            log_detail("Took %.0fs: %s" % (time.time() - start, " ".join(cmd)))
+        return r
+    except subprocess.TimeoutExpired as e:
+        log("Timed out after %ds: %s" % (timeout, " ".join(cmd)))
+        out = e.stdout
+        if isinstance(out, bytes) and kwargs.get("universal_newlines"):
+            out = out.decode(errors="replace")
+        return subprocess.CompletedProcess(cmd, 124, out if out is not None else
+                                           ("" if kwargs.get("universal_newlines") else None))
+
+
+def parallel(func, items, jobs=None, remove=False):
     """Return [func(item) for item in items], running up to 'jobs' calls at once.
 
     For tests made of many independent cases, each launching its own
     Container/VM. 'jobs' defaults to RUNCVM_TEST_JOBS, or 3. Results keep the
     order of 'items'; record checks from the results afterwards, in this
     thread, so that the log stays in order.
+
+    With remove=True, the containers and volumes that a call registers with
+    cleanup_container and cleanup_volume (in its own thread) are removed as
+    soon as it returns, so that no more than 'jobs' of the cases' Container/VMs
+    run at once. Its result must then hold all that the checks need.
     """
     jobs = jobs or int(os.environ.get("RUNCVM_TEST_JOBS") or 3)
+
+    def call(item):
+        if not remove:
+            return func(item)
+        _call.cleanups = []
+        try:
+            return func(item)
+        finally:
+            _remove(_call.cleanups)
+            _call.cleanups = None
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
-        return list(pool.map(func, items))
+        return list(pool.map(call, items))
+
+
+def pull_images(images):
+    """With --pull (RUNCVM_TEST_PULL=1), pull each image, recording a check for each, so that the
+    test boots what each tag points to upstream now; otherwise do nothing, as docker pulls an image
+    the host lacks when it is first used. Returns False if any pull failed."""
+    if not PULL:
+        return True
+    images = list(dict.fromkeys(images))
+    ok = True
+    for image, r in zip(images, parallel(lambda i: docker("pull", "-q", i, timeout=600), images)):
+        if not check("pulled %s" % image, 0, r.returncode):
+            log(r.stdout)
+            ok = False
+    return ok
 
 
 def record_result(status, desc):
@@ -128,7 +248,7 @@ def check_cmd(desc, cmd):
     if callable(cmd):
         ok = bool(cmd())
     else:
-        ok = subprocess.run(cmd).returncode == 0
+        ok = _run(cmd).returncode == 0
     log("%s - %s" % (desc, "PASS" if ok else "FAIL"))
     record_result("PASS" if ok else "FAIL", desc)
     if not ok:
@@ -138,7 +258,7 @@ def check_cmd(desc, cmd):
 
 def expect_exit(desc, expected, cmd):
     """Run cmd (an argument list, typically ['docker', 'run', ...]) and check its exit status."""
-    rc = subprocess.run(cmd).returncode
+    rc = _run(cmd).returncode
     return check("%s (exit status)" % desc, expected, rc)
 
 
@@ -149,7 +269,13 @@ def wait_for(desc, timeout, cmd, interval=1):
         if callable(cmd):
             ok = bool(cmd())
         else:
-            ok = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+            # Each attempt has the time left as its deadline (at least a second), at most EXEC_TIMEOUT
+            remaining = max(1, min(EXEC_TIMEOUT, deadline - time.time()))
+            try:
+                ok = _run(cmd, timeout=remaining, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
+            except subprocess.TimeoutExpired:
+                ok = False
         if ok:
             log("Ready: %s" % desc)
             return True
@@ -177,30 +303,39 @@ def volume_read(volume, path):
     return r.stdout if r.returncode == 0 else None
 
 
+def _register(kind, name):
+    _cleanups.append((kind, name))
+    if kind in ("container", "volume") and getattr(_call, "cleanups", None) is not None:
+        _call.cleanups.append((kind, name))
+
+
 def cleanup_container(name):
-    """Remove the named container when the test exits."""
-    _cleanups.append(("container", name))
+    """Remove the named container when the test exits (or, in parallel(..., remove=True), when
+    the call that registers it returns)."""
+    _register("container", name)
 
 
 def cleanup_network(name):
     """Remove the named network when the test exits."""
-    _cleanups.append(("network", name))
+    _register("network", name)
 
 
 def cleanup_volume(name):
-    """Remove the named volume when the test exits."""
-    _cleanups.append(("volume", name))
+    """Remove the named volume when the test exits (or, in parallel(..., remove=True), when the
+    call that registers it returns)."""
+    _register("volume", name)
 
 
 def cleanup_image(name):
     """Remove the named image (e.g. one built or committed by the test) when the test exits."""
-    _cleanups.append(("image", name))
+    _register("image", name)
 
 
-def cleanup():
-    """Remove registered containers, then networks, volumes and images (also run automatically at exit)."""
+def _remove(cleanups):
+    """Remove the given (kind, name) objects: containers, then networks, volumes and images, each
+    kind in the reverse order of registration. Removing one already gone does no harm."""
     order = {"container": 0, "network": 1, "volume": 2, "image": 3}
-    for kind, name in sorted(reversed(_cleanups), key=lambda c: order[c[0]]):
+    for kind, name in sorted(reversed(cleanups), key=lambda c: order[c[0]]):
         if kind == "container":
             docker("rm", "-fv", name)
         elif kind == "network":
@@ -209,6 +344,11 @@ def cleanup():
             docker("volume", "rm", "-f", name)
         else:
             docker("image", "rm", "-f", name)
+
+
+def cleanup():
+    """Remove registered containers, then networks, volumes and images (also run automatically at exit)."""
+    _remove(_cleanups)
     del _cleanups[:]
 
 

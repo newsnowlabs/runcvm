@@ -6,4 +6,6 @@
 # Load defaults and aliases
 . $RUNCVM_GUEST/scripts/runcvm-ctr-defaults
 
-echo "system_powerdown" | nc -w 1 -U $QEMU_MONITOR_SOCKET
+# Ask QEMU, through its monitor, to power the VM off (ACPI). The monitor answers with its banner
+# and echoes the command, which would otherwise reach the container's output, i.e. 'docker logs'.
+echo "system_powerdown" | nc -w 1 -U $QEMU_MONITOR_SOCKET >/dev/null 2>&1

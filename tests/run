@@ -29,6 +29,12 @@ Results files (results.tap, junit.xml, results.json, summary.txt, status) are
 rewritten before and after each test, so they always show the run's progress:
 until the run ends, results.json has "complete": false and status reads
 'running', and while a test runs, summary.txt and results.json name it.
+results.tap, junit.xml, results.json and summary.txt record the version of the
+RunCVM package installed at /opt/runcvm, from its VERSION file ('unknown'
+without one, 'not installed' without a package).
+
+The tests run from a source checkout, or from the installed package's copy in
+/opt/runcvm/tests, which matches the package: /opt/runcvm/tests/run.
 
 Optional per-test metadata files, in each test directory:
   tier      'core' (default) or 'extended'
@@ -39,6 +45,10 @@ Optional per-test metadata files, in each test directory:
               kvm   VMs use KVM acceleration: /dev/kvm present on this host,
                     and not in stand-in mode or with --accel tcg
               ipv6  dockerd can create an IPv6-enabled network
+              runcvm-package
+                    RunCVM's package is installed at /opt/runcvm (for tests
+                    that run its scripts and tools without a VM, in runc
+                    containers, so in stand-in mode too)
               docker>=<major>.<minor>
                     dockerd's version is at least <major>.<minor>, e.g.
                     docker>=29.0
@@ -62,11 +72,37 @@ to 1 (framework helper tcg_cases): when asked to, or when VMs do not use KVM
 anyway (--accel tcg, or no /dev/kvm). Otherwise the test records them as
 skipped.
 
+VM settings (--vm-env NAME=VALUE, repeatable, adding to RUNCVM_TEST_VM_ENV, a
+whitespace-separated list) are RunCVM settings, such as
+RUNCVM_VIRTIOFSD_CACHE=always, for every RunCVM Container/VM the tests launch,
+so that the suite can run with settings other than RunCVM's defaults. VM size
+(--vm-cpus N and --vm-memory SIZE, or RUNCVM_TEST_CPUS and RUNCVM_TEST_MEMORY)
+is passed to those Container/VMs as --cpus and --memory, e.g. to keep the VMs
+that run at once within a small host's CPUs and memory. Tests receive these
+settings as RUNCVM_TEST_VM_ENV, RUNCVM_TEST_CPUS and RUNCVM_TEST_MEMORY, and
+pass them on with framework helper vm_opts, before their own options, so that
+a test that sets the same variable or option keeps its own value; tests that
+check the VM's size against its defaults leave out the size. Fewer Container/VMs at once (RUNCVM_TEST_JOBS) also lightens the
+load on a small host.
+
+Image refresh (--pull, or RUNCVM_TEST_PULL=1): tests pull the images they boot
+before using them (Python framework helper pull_images), so that a tag that
+upstream re-points to new images, such as alpine:3.24 or fedora:45 at each
+rebuild, is tested as published now. Without it, docker pulls an image only if
+the host has no copy, so a host goes on testing the copy it first pulled, and
+runs need no network access for images already present. Tests see
+RUNCVM_TEST_PULL=1 or 0.
+
 Detail lines (framework helper log_detail) record step-by-step progress, such
 as each of many requests' outcomes. They are written to the test's log, but to
 the terminal only with --verbose (or RUNCVM_TEST_VERBOSE=1). A detail line is
 one that starts with the ASCII record separator (0x1e), which the runner
 removes.
+
+Shards (--shard I/N) split a run across hosts, e.g. CI runners: of the tests
+otherwise selected (by tier and TEST), in name order, shard I runs every Nth,
+starting with the Ith, so that shards 1/N to N/N together run each test once.
+A shard with no tests runs none, and exits 0.
 
 Requires only Python 3.6+ and the docker CLI.
 """
@@ -85,7 +121,7 @@ import xml.etree.ElementTree as ET
 
 SKIP_CODE = 77
 TIERS = ("core", "extended")
-KNOWN_REQUIREMENTS = ("vm", "kvm", "ipv6")
+KNOWN_REQUIREMENTS = ("vm", "kvm", "ipv6", "runcvm-package")
 DOCKER_VERSION_REQUIREMENT = re.compile(r"^docker>=(\d+)\.(\d+)$")
 ACCELS = ("kvm", "auto", "tcg")
 DEFAULT_TIMEOUT = 1800
@@ -159,9 +195,31 @@ def warn(msg):
     print("%s: Warning: %s" % (os.path.basename(sys.argv[0]), msg), file=sys.stderr, flush=True)
 
 
+PACKAGE_DIR = "/opt/runcvm"
+
+
+def package_version():
+    """The RunCVM package installed at /opt/runcvm, as its VERSION file gives it (e.g.
+    'v1.8.0 (2211e3e)'); 'unknown' for a package without one; 'not installed' where there is none."""
+    if not os.path.isdir(os.path.join(PACKAGE_DIR, "scripts")):
+        return "not installed"
+    try:
+        with open(os.path.join(PACKAGE_DIR, "VERSION")) as f:
+            return f.read().strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
 class Environment:
-    def __init__(self, runtime, mock, run_id, use_docker, accel=None, tcg_cases=False):
+    def __init__(self, runtime, mock, run_id, use_docker, accel=None, tcg_cases=False, pull=False,
+                 vm_env=(), vm_cpus=None, vm_memory=None):
         self.runtime = runtime
+        # The RunCVM package installed on this host, recorded with the results
+        self.package = package_version()
+        self.vm_env = list(vm_env)
+        self.vm_cpus = vm_cpus
+        self.vm_memory = vm_memory
+        self.pull = pull
         self.mock = mock
         self.accel = accel
         # TCG cases run when asked for, or when VMs do not use KVM anyway
@@ -197,6 +255,11 @@ class Environment:
             return not self.mock
         if req == "kvm":
             return not self.mock and self.accel != "tcg" and os.path.exists("/dev/kvm")
+        if req == "runcvm-package":
+            if os.path.exists("/opt/runcvm/bin/bash"):
+                return True
+            self._probe_notes[req] = "not installed at /opt/runcvm"
+            return False
         if req == "ipv6":
             if not self.use_docker:
                 return False
@@ -339,10 +402,17 @@ def run_test(test, env, logs_dir, kill_after, verbose=False):
         "RUNCVM_TEST_MOCK": "1" if env.mock else "0",
         "RUNCVM_TEST_ACCEL": env.accel or "",
         "RUNCVM_TEST_TCG_CASES": "1" if env.tcg_cases else "0",
+        "RUNCVM_TEST_PULL": "1" if env.pull else "0",
+        "RUNCVM_TEST_VM_ENV": " ".join(env.vm_env),
+        "RUNCVM_TEST_CPUS": env.vm_cpus or "",
+        "RUNCVM_TEST_MEMORY": env.vm_memory or "",
         "RUNCVM_TEST_RUN_ID": env.run_id,
         "RUNCVM_TEST_NAME": test.name,
         "RUNCVM_TEST_CHECKS": checks_path,
         "RUNCVM_TEST_PARAMS": params_path,
+        # Tests run from the installed package as well as from a checkout, and must leave the
+        # package as installed: no __pycache__ of framework.py in /opt/runcvm/tests.
+        "PYTHONDONTWRITEBYTECODE": "1",
     })
 
     start = time.time()
@@ -462,9 +532,10 @@ def write_junit(path, results, env, logs_dir):
     for r in results:
         suite = ET.SubElement(root, "testsuite", name=r.test.name, time=str(r.duration))
         props = ET.SubElement(suite, "properties")
-        for k, v in [("runtime", env.runtime), ("mock", "1" if env.mock else "0"),
+        for k, v in [("runtime", env.runtime), ("package", env.package), ("mock", "1" if env.mock else "0"),
                      ("accel", env.accel or ""), ("tcg_cases", "1" if env.tcg_cases else "0"),
-                     ("tier", r.test.tier), ("requires", " ".join(r.test.requires))] + r.params:
+                     ("pull", "1" if env.pull else "0"), ("vm_env", " ".join(env.vm_env)),
+                     ("vm_cpus", env.vm_cpus or ""), ("vm_memory", env.vm_memory or ""), ("tier", r.test.tier), ("requires", " ".join(r.test.requires))] + r.params:
             ET.SubElement(props, "property", name=k, value=v)
         for status, desc in r.checks:
             case = ET.SubElement(suite, "testcase", classname=r.test.name, name=desc)
@@ -486,8 +557,9 @@ def write_junit(path, results, env, logs_dir):
 
 def write_json(path, results, env, tier, status_code, running):
     data = {
-        "run_id": env.run_id, "runtime": env.runtime, "mock": env.mock, "accel": env.accel,
-        "tcg_cases": env.tcg_cases, "tier": tier,
+        "run_id": env.run_id, "runtime": env.runtime, "package": env.package, "mock": env.mock, "accel": env.accel,
+        "tcg_cases": env.tcg_cases, "pull": env.pull, "vm_env": env.vm_env, "vm_cpus": env.vm_cpus,
+        "vm_memory": env.vm_memory, "tier": tier,
         "complete": status_code is not None, "running": running, "status": status_code,
         "tests": [{
             "name": r.test.name, "tier": r.test.tier, "requires": r.test.requires,
@@ -506,10 +578,14 @@ def write_results(results_dir, logs_dir, results, env, args, selected, status_co
     progress, with the test named by 'running' (if any) under way. Each file is written to a
     temporary name and renamed into place, so that a reader never sees a partly written file."""
     counts = {s: sum(1 for r in results if r.status == s) for s in ("pass", "fail", "timeout", "skip")}
-    header = "run id: %s; runtime: %s; mock: %d; accel: %s; tcg cases: %d; tier: %s" % (
-        env.run_id, env.runtime, int(args.mock), args.accel or "default", int(env.tcg_cases), args.tier)
+    header = ("run id: %s; runtime: %s; package: %s; mock: %d; accel: %s; tcg cases: %d; pull: %d; "
+              "vm env: %s; vm cpus: %s; vm memory: %s; tier: %s") % (
+        env.run_id, env.runtime, env.package, int(args.mock), args.accel or "default", int(env.tcg_cases),
+        int(env.pull), " ".join(env.vm_env) or "none", env.vm_cpus or "default", env.vm_memory or "default",
+        args.tier)
 
-    lines = ["%-8s %-32s %5ss  %s" % (r.status.upper(), r.test.name, r.duration, r.reason) for r in results]
+    lines = ["RunCVM package: %s" % env.package, ""]
+    lines += ["%-8s %-32s %5ss  %s" % (r.status.upper(), r.test.name, r.duration, r.reason) for r in results]
     if running:
         lines.append("%-8s %s" % ("RUNNING", running))
     lines += ["", "passed: %d  failed: %d  timed out: %d  skipped: %d  (of %d selected)"
@@ -553,6 +629,29 @@ def truthy(value):
     return (value or "").strip().lower() in ("1", "yes", "true", "on")
 
 
+def shard_arg(value):
+    m = re.match(r"^(\d+)/(\d+)$", value)
+    if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
+        raise argparse.ArgumentTypeError("'%s' is not I/N, with 1 <= I <= N" % value)
+    return int(m.group(1)), int(m.group(2))
+
+
+VM_ENV_ENTRY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*$")
+VM_SIZE = re.compile(r"^[0-9]+(\.[0-9]+)?[A-Za-z]?$")
+
+
+def vm_env_arg(value):
+    if not VM_ENV_ENTRY.match(value):
+        raise argparse.ArgumentTypeError("'%s' is not NAME=VALUE, with no whitespace in VALUE" % value)
+    return value
+
+
+def vm_size_arg(value):
+    if not VM_SIZE.match(value):
+        raise argparse.ArgumentTypeError("'%s' is not a number, with an optional unit suffix" % value)
+    return value
+
+
 def parse_args(argv):
     here = os.path.dirname(os.path.abspath(__file__))
     p = argparse.ArgumentParser(
@@ -561,6 +660,9 @@ def parse_args(argv):
                     "(e.g. 10-user-workdir) or a shell pattern (e.g. '1*'). With no TEST, "
                     "all tests in the selected tier run.",
         epilog="Environment: RUNTIME, RUNCVM_TEST_MOCK, RUNCVM_TEST_ACCEL, RUNCVM_TEST_TCG_CASES, "
+               "RUNCVM_TEST_PULL, RUNCVM_TEST_VM_ENV, RUNCVM_TEST_CPUS, RUNCVM_TEST_MEMORY, "
+               "RUNCVM_TEST_EXEC_TIMEOUT (seconds each 'docker exec', and 'docker run' not detached, may "
+               "take in a test; default 60, or 300 with --accel tcg), "
                "RUNCVM_TEST_RUN_ID, RUNCVM_TEST_RESULTS, "
                "RUNCVM_TEST_KILL_AFTER (seconds between SIGTERM and SIGKILL on timeout; "
                "default %d), RUNCVM_TEST_JOBS (Container/VMs a test may run at once; default 3). See the comment at the top of this file for details." % DEFAULT_KILL_AFTER)
@@ -583,10 +685,27 @@ def parse_args(argv):
     p.add_argument("--tcg-cases", action="store_true", default=truthy(os.environ.get("RUNCVM_TEST_TCG_CASES")),
                    help="run checks that launch Container/VMs under software emulation (TCG) even "
                         "where VMs use KVM (always on with --accel tcg, or without /dev/kvm)")
+    p.add_argument("--pull", action="store_true", default=truthy(os.environ.get("RUNCVM_TEST_PULL")),
+                   help="have tests pull the images they boot first, refreshing tags that upstream has "
+                        "re-pointed (default: use the host's copy, pulling only images it lacks)")
+    p.add_argument("--vm-env", action="append", type=vm_env_arg, metavar="NAME=VALUE",
+                   default=(os.environ.get("RUNCVM_TEST_VM_ENV") or "").split(),
+                   help="a RunCVM setting for every RunCVM Container/VM the tests launch, e.g. "
+                        "RUNCVM_VIRTIOFSD_CACHE=always; repeatable, adding to any in $RUNCVM_TEST_VM_ENV")
+    p.add_argument("--vm-cpus", type=vm_size_arg, metavar="N", default=os.environ.get("RUNCVM_TEST_CPUS") or None,
+                   help="--cpus for RunCVM Container/VMs (default: $RUNCVM_TEST_CPUS, else RunCVM's default)")
+    p.add_argument("--vm-memory", type=vm_size_arg, metavar="SIZE",
+                   default=os.environ.get("RUNCVM_TEST_MEMORY") or None,
+                   help="--memory for RunCVM Container/VMs, e.g. 512m (default: $RUNCVM_TEST_MEMORY, "
+                        "else RunCVM's default)")
     p.add_argument("-v", "--verbose", action="store_true", default=truthy(os.environ.get("RUNCVM_TEST_VERBOSE")),
                    help="show tests' detail lines on the terminal as well as in their logs")
     p.add_argument("-x", "--exitfirst", action="store_true", help="stop after the first failure or timeout")
     p.add_argument("-l", "--list", action="store_true", help="list selected tests and exit")
+    p.add_argument("--shard", type=shard_arg, metavar="I/N",
+                   help="run only shard I of N: of the tests otherwise selected, in name order, "
+                        "every Nth, starting with the Ith; for splitting a run across hosts. A "
+                        "shard with no tests runs none, and exits 0")
     p.add_argument("--no-preflight", action="store_true",
                    help="skip Docker checks and clean-up (for tests that do not use Docker)")
     return p.parse_args(argv)
@@ -603,6 +722,12 @@ def choose_runtime(args):
 
 def main(argv):
     args = parse_args(argv)
+    # Entries from RUNCVM_TEST_VM_ENV, which argparse does not pass through 'type'
+    for entry in args.vm_env:
+        try:
+            vm_env_arg(entry)
+        except argparse.ArgumentTypeError as e:
+            raise HarnessError("RUNCVM_TEST_VM_ENV: %s" % e)
     tests_dir = os.path.abspath(args.dir)
     if not os.path.isdir(tests_dir):
         raise HarnessError("tests directory '%s' not found" % args.dir)
@@ -620,6 +745,13 @@ def main(argv):
                 raise HarnessError("test '%s' has unknown requirement '%s' (known: %s)"
                                    % (t.name, req, ", ".join(KNOWN_REQUIREMENTS + ("docker>=<major>.<minor>",))))
 
+    if args.shard:
+        index, count = args.shard
+        selected = selected[index - 1::count]
+        if not selected and not args.list:
+            print("No tests in shard %d/%d." % (index, count))
+            return 0
+
     if args.list:
         for t in selected:
             print("%-32s %-9s %6ss  %s" % (t.name, t.tier, t.timeout, " ".join(t.requires)))
@@ -629,7 +761,8 @@ def main(argv):
                            % (args.tier, ", patterns: " + " ".join(args.tests) if args.tests else ""))
 
     env = Environment(runtime, args.mock, run_id, use_docker=not args.no_preflight, accel=args.accel,
-                      tcg_cases=args.tcg_cases)
+                      tcg_cases=args.tcg_cases, pull=args.pull, vm_env=args.vm_env, vm_cpus=args.vm_cpus,
+                      vm_memory=args.vm_memory)
     if not args.no_preflight:
         env.preflight()
 
@@ -646,8 +779,12 @@ def main(argv):
     say("Running RunCVM integration tests")
     say("  run id:   %s" % run_id)
     say("  runtime:  %s%s" % (runtime, " (stand-in mode)" if args.mock else ""))
+    say("  package:  %s (%s)" % (env.package, PACKAGE_DIR))
     say("  accel:    %s" % (args.accel or "(RunCVM default)"))
     say("  tcg:      %s" % ("cases run" if env.tcg_cases else "cases skipped (--tcg-cases to run them)"))
+    say("  pull:     %s" % ("images refreshed" if env.pull else "host's copies used (--pull to refresh)"))
+    say("  vm env:   %s" % (" ".join(env.vm_env) or "(none)"))
+    say("  vm size:  cpus %s, memory %s" % (env.vm_cpus or "(RunCVM default)", env.vm_memory or "(RunCVM default)"))
     say("  tier:     %s" % args.tier)
     say("  tests:    %s" % " ".join(t.name for t in selected))
     say("  results:  %s" % results_dir)

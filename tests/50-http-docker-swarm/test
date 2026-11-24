@@ -24,6 +24,27 @@ volumes() { echo swarm $(nodes); }
 networks() { echo runcvm-mtu; }
 images() { echo $IMAGE; }
 
+# Print the nodes that are not running: launched without --rm, a node that exits stays, with its
+# logs, until cleanup removes it.
+stopped_nodes() {
+  local n
+  for n in $(nodes); do
+    [ "$(docker inspect --format='{{.State.Running}}' $n 2>/dev/null)" = "true" ] || echo $n
+  done
+}
+
+# Fail the test, showing each stopped node's last log lines, if any node is not running.
+check_nodes() {
+  local n stopped
+  stopped=$(stopped_nodes)
+  [ -z "$stopped" ] && return 0
+  for n in $stopped; do
+    log "Node $n is not running (exit code $(docker inspect --format='{{.State.ExitCode}}' $n 2>/dev/null)); its last log lines:"
+    docker logs -n 30 $n 2>&1 | sed "s/^/> ($n) > /"
+  done
+  exit 1
+}
+
 # Run routine cleanup of any preexisting containers, volumes, networks, and images
 cleanup
 
@@ -64,16 +85,20 @@ do
 
   # The swarm volume, mounted at /swarm within the RunCVM VMs, will be used to share swarm info
   # among the nodes.
+  #
+  # Each node has 512m of memory unless the runner gives a size (--vm-cpus, --vm-memory): vm_opts
+  # follows that default, so that Docker takes its values. RUNCVM_VIRTIOFSD_CACHE=none follows
+  # vm_opts, overriding any cache policy the runner gives, so that each node sees at once the
+  # files the others write to the shared swarm volume.
   docker run \
     -d \
-    --rm \
     --runtime=${RUNTIME:-runcvm} \
-    ${RUNCVM_TEST_ACCEL:+--env=RUNCVM_QEMU_ACCEL=$RUNCVM_TEST_ACCEL} \
+    --memory=512m \
+    $(vm_opts) \
     --network=runcvm-mtu \
     --publish=$((8080+$n-1)):80 \
     --name=$NODE$n \
     --hostname=$NODE$n \
-    --memory=512m \
     --env=RUNCVM_VIRTIOFSD_CACHE=none \
     --env=NODE=$n \
     --env=NODES=$NODES \
@@ -85,8 +110,33 @@ do
     $IMAGE
 done
 
+# Follow node 1's logs until it reports the swarm complete or failed, checking each second that
+# every node is still running.
 log "Monitoring ${NODE}1 logs for swarm setup progress ..."
-docker logs -f ${NODE}1 -n 0 2>&1 | sed "s/^/> (${NODE}1) > /; /Swarm complete/q0; /Swarm failed/q129;"
+exec {LOGS}< <(docker logs -f ${NODE}1 -n 0 2>&1)
+LOGS_PID=$!
+while true
+do
+  if IFS= read -r -t 1 line <&$LOGS; then
+    echo "> (${NODE}1) > $line"
+    case "$line" in
+      *"Swarm complete"*) break ;;
+      *"Swarm failed"*) log "Swarm setup failed."; exit 129 ;;
+    esac
+  else
+    status=$?
+    check_nodes
+    # A read status above 128 is a timeout; any other is the end of node 1's logs.
+    if [ $status -le 128 ]; then
+      sleep 1
+      check_nodes
+      log "${NODE}1's logs ended before the swarm was set up."
+      exit 1
+    fi
+  fi
+done
+kill $LOGS_PID 2>/dev/null || true
+exec {LOGS}<&-
 log "Finished monitoring ${NODE}1 logs as swarm is set up."
 
 log "Creating http service (please be patient) ..."
@@ -102,14 +152,35 @@ mini_httpd -d /www -D -l /dev/stdout -c '**.cgi'
 _EOE_
 )"
 
-for i in $(seq 1 200 | sort -nr)
-do
-  replicas=$(docker exec ${NODE}1 docker service ls --format='{{ .Replicas }}' --filter='Name=http')
-  log_detail "Waiting for remainder of $replicas replicas to launch (#$i) ..."
-  [ "$replicas" = "$NODES/$NODES" ] && break
-  [ $i -eq 1 ] && log "Only $replicas replicas launched in 200s; giving up." && exit 253
-  sleep 1
-done
+# The http service's replicas, as 'launched/wanted'
+replicas() {
+  docker exec ${NODE}1 docker service ls --format='{{ .Replicas }}' --filter='Name=http'
+}
+
+# Succeed once every replica has launched, or once a node has stopped, which check_nodes then
+# reports: wait_for discards the output of what it runs.
+replicas_launched_or_node_stopped() {
+  [ -n "$(stopped_nodes)" ] || [ "$(replicas)" = "$NODES/$NODES" ]
+}
+
+# Log what the swarm reports of the http service, its tasks and the ingress network, and the end
+# of node 1's dockerd log (the manager's), before cleanup removes the nodes.
+log_swarm_state() {
+  local cmd
+  for cmd in "docker node ls" "docker service ps --no-trunc http" "docker service inspect http" \
+             "docker network inspect ingress" "tail -n 60 /var/log/dockerd.log"; do
+    log "${NODE}1: $cmd:"
+    docker exec ${NODE}1 $cmd 2>&1 | sed "s/^/> (${NODE}1) > /"
+  done
+}
+
+wait_for "all $NODES http replicas to launch" 200 replicas_launched_or_node_stopped || true
+check_nodes
+if [ "$(replicas)" != "$NODES/$NODES" ]; then
+  log "Only $(replicas) replicas launched in 200s; giving up."
+  log_swarm_state
+  exit 253
+fi
 log "All $NODES replicas launched."
 sleep 1
 
