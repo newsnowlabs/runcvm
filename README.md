@@ -1244,6 +1244,16 @@ With `--cpus` equal to the host's CPU count (or more), and any headroom but `0`,
 - `1`: the host's pool of hugepages (e.g. 2 MB each), which can improve performance in some scenarios, and makes the VM much faster to start under nested virtualisation, e.g. on macOS (see [macOS on Apple Silicon](#macos-on-apple-silicon)). The pool must be reserved in advance with the host's `vm.nr_hugepages` sysctl, and have enough pages available (free and not reserved by another Container/VM) for the VM's memory (512 MB by default, or as given by `--memory`), or the Container/VM fails to start. The pool's memory is set aside for hugepages alone, whether used or not.
 - `auto`: hugepages where the host's pool has enough pages available for the VM's memory (free and not reserved by another Container/VM), and `/dev/shm` otherwise, noting on the container's standard error where a pool exists but has too few pages available. Should other Container/VMs take the available pages between that check and QEMU starting, the Container/VM fails to start, as with `1`.
 
+The kernel reserves each hugepage as a physically contiguous block of RAM. Where a running host's free memory is fragmented, `sysctl vm.nr_hugepages=<n>` reserves fewer pages than asked, without an error, and a Container/VM then fails to start for want of them (QEMU reports `unable to map backing store for guest RAM: Out of memory`). Check `HugePages_Total` and `HugePages_Free` in `/proc/meminfo` after setting it. Reserving the pool at boot, before memory fragments, is the most reliable: e.g. `vm.nr_hugepages=<n>` in a file in `/etc/sysctl.d/`, or `hugepages=<n>` on the kernel's command line. On a running host, freeing the page cache and compacting memory first usually lets the whole pool be reserved:
+
+```console
+sync
+echo 3 | sudo tee /proc/sys/vm/drop_caches     # free the page cache and slab caches
+echo 1 | sudo tee /proc/sys/vm/compact_memory  # gather free memory into contiguous blocks
+sudo sysctl vm.nr_hugepages=<n>
+grep -E 'HugePages_(Total|Free)' /proc/meminfo
+```
+
 ### RUNCVM_QEMU_MEM_PREALLOC
 
 **`RUNCVM_QEMU_MEM_PREALLOC=<on|off>`**
