@@ -540,7 +540,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [+] `--env` (or `-e`), `--env-file` is supported
       - [+] `--entrypoint` is supported
       - [+] `--init` - is supported (but runs RunCVM's own VM init process rather than Docker's default, `tini`)
-      - [-] `--cap-drop` and `--security-opt=no-new-privileges` are accepted, but do not restrict the workload, which runs under the VM's own kernel; RunCVM's own processes in the container hold exactly the capabilities they need, whatever the container was given (see [Security](#features-and-limitations)); by default, `--cap-add` and `--privileged` do not add to them ([`RUNCVM_CAPS`](#runcvm_caps))
+      - [-] `--cap-drop` and `--security-opt=no-new-privileges` are accepted, but do not restrict the workload, which runs under the VM's own kernel; RunCVM's own processes in the container are limited to the capabilities they need, whatever the container was given (see [Security](#features-and-limitations)); by default, `--cap-add` and `--privileged` do not add to them ([`RUNCVM_CAPS`](#runcvm_caps))
    - stdio/Terminals
       - [+] `--detach` (or `-d`) is supported
       - [+] `--interactive` (or `-i`) is supported
@@ -570,7 +570,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - `minimal`: RunCVM's own profile, `/opt/runcvm/scripts/seccomp/profile.json`, in place of the engine's, even where the engine gives none. It allows only the calls those processes need, with io_uring's as above, and any other fails with `EPERM`, the profile's default (runc returns `ENOSYS` for system calls newer than any the profile names). As in Docker's default profile for a container without `CAP_SYS_ADMIN`, `clone` is allowed only without the flags that create namespaces, and `clone3` fails with `ENOSYS`, so that its callers fall back to `clone`. The image build makes the profile from lists in `/opt/runcvm/scripts/seccomp/`, for x86-64 and arm64: the calls those processes make across RunCVM's configurations, found by tracing them, and `virtiofsd`'s own allowlist (its seccomp filter, for the `virtiofsd` version RunCVM builds). A call made only on a path the tracing did not reach is denied, so the lists may need updating when those processes change.
       - `unconfined`: no filter.
       - [-] Under `engine`, `--security-opt seccomp=unconfined` and `--privileged` also leave them unconfined, as the engine then gives the container no profile, but are not supported ways to do so: their meaning for a Container/VM may change, e.g. to apply to the VM. A profile of your own (`--security-opt seccomp=<file>`) is unsupported: `engine` adds RunCVM's calls to it, and `minimal` replaces it.
-   - [+] RunCVM's processes in the container hold exactly the capabilities they need, in the bounding, effective and permitted sets, whatever the container was given (`--cap-add`, `--cap-drop`, `--privileged` or `--security-opt=no-new-privileges`). [`RUNCVM_CAPS`](#runcvm_caps) chooses them:
+   - [+] RunCVM's processes in the container are limited to the capabilities they need, which RunCVM sets as the bounding, effective and permitted sets of the container's processes (`virtiofsd` then drops those it does not keep), whatever the container was given (`--cap-add`, `--cap-drop`, `--privileged` or `--security-opt=no-new-privileges`). [`RUNCVM_CAPS`](#runcvm_caps) chooses them:
       - `minimal` (the default): `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_FSETID`, `CAP_MKNOD`, `CAP_SETFCAP`, `CAP_SETGID`, `CAP_SETUID` and `CAP_SYS_CHROOT` for `virtiofsd`, which serves the VM's file operations from a chroot sandbox; `CAP_NET_ADMIN` for the container's network configuration and QEMU's tap devices; and `CAP_NET_BIND_SERVICE` for `dnsmasq`'s port 53.
       - `engine`: Docker's default capabilities and `CAP_NET_ADMIN`, added to those the container was given.
       - [`RUNCVM_SYS_ADMIN=1`](#runcvm_sys_admin) adds `CAP_SYS_ADMIN` either way.
@@ -1214,7 +1214,7 @@ The processes `docker exec` starts in the container, which relay each command to
 
 **`RUNCVM_SYS_ADMIN=1`**
 
-By default, containers are not granted `CAP_SYS_ADMIN`, and `virtiofsd` is not launched with `--modcaps=+sys_admin`. This option grants the capability and launches `virtiofsd` with `--modcaps=+sys_admin`, so that the VM can use `trusted.*` extended attributes and overlay filesystems on the container's files, and so that [`RUNCVM_DISKS`](#runcvm_disks) copies `trusted.*` extended attributes onto the disks it prepopulates. The capability is granted to the whole container, not to `virtiofsd` and `mke2fs` alone. [`RUNCVM_SECCOMP=minimal`](#runcvm_seccomp) still denies the system calls that need it, such as `mount`, `unshare` and `setns`, as does Docker's default profile unless the container was given `CAP_SYS_ADMIN` itself (`--cap-add=SYS_ADMIN`); Podman's default profile allows `mount`, `umount2`, `unshare` and `setns` to every container.
+By default, containers are not granted `CAP_SYS_ADMIN`, and `virtiofsd` is not launched with `--modcaps=+sys_admin`. This option grants the capability, under either [`RUNCVM_CAPS`](#runcvm_caps) mode, and launches `virtiofsd` with `--modcaps=+sys_admin`, so that the VM can use `trusted.*` extended attributes and overlay filesystems on the container's files, and so that [`RUNCVM_DISKS`](#runcvm_disks) copies `trusted.*` extended attributes onto the disks it prepopulates. The capability is granted to the whole container, not to `virtiofsd` and `mke2fs` alone. Under `RUNCVM_CAPS=engine`, a container given `CAP_SYS_ADMIN` itself (`--cap-add=SYS_ADMIN`) also keeps it, without this option, though `virtiofsd` then still drops it. [`RUNCVM_SECCOMP=minimal`](#runcvm_seccomp) still denies the system calls that need it, such as `mount`, `unshare` and `setns`, as does Docker's default profile unless the container was given `CAP_SYS_ADMIN` itself (`--cap-add=SYS_ADMIN`); Podman's default profile allows `mount`, `umount2`, `unshare` and `setns` to every container.
 
 ### RUNCVM_KERNEL_MOUNT_LIB_MODULES
 
@@ -1240,6 +1240,12 @@ By default BIOS console output is hidden. Enable it with this option. With `--en
 
 Enable debug logging for the runtime (the portion of RunCVM directly invoked by `docker run`, `docker exec` etc).
 Debug logs, and copies of the configuration the runtime is given and returns, are written to files in the host's `/run/runcvm`, a directory only root can read: `runtime-<pid>.log`, `config.json-<pid>-1` and `-2` (for `docker run`), and `process.json-<pid>-1` and `-2` (for `docker exec`).
+
+### RUNCVM_EXEC_DEBUG
+
+**`RUNCVM_EXEC_DEBUG=1`**
+
+Allow `docker exec <container> --- <command>`, for debugging and diagnostics, which runs `<command>` in the container on the host, alongside QEMU and `virtiofsd`, rather than in the VM. It runs as `docker exec` would in a standard container, with the capabilities the engine gives it (e.g. all of them with `docker exec --privileged`), outside the VM's isolation. Without this option, `---` is refused. The option takes effect from the container's environment (`docker run --env`) or the exec's (`docker exec --env`): a user who can set the latter can already run privileged containers, while Kubernetes' exec cannot set environment variables, so in a cluster only the pod's own settings can allow it.
 
 ### RUNCVM_QEMU_DEBUG
 

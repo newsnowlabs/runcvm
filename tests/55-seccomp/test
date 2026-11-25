@@ -239,21 +239,23 @@ for case, results in zip(CASES, t.parallel(run, list(CASES), remove=True)):
             rules = profile.get("syscalls", [])
             t.check("%s: profile denies unlisted calls with EPERM" % case, ("SCMP_ACT_ERRNO", 1),
                     (profile.get("defaultAction"), profile.get("defaultErrnoRet")))
-            allowed = set(n for rule in rules if rule.get("action") == "SCMP_ACT_ALLOW"
-                          for n in rule.get("names", []))
-            expected = ((listed or set()) - {"clone3"}) | (IO_URING if io_uring_allowed(case) else set())
+            expected = ((listed or set()) - {"clone", "clone3"}) | (IO_URING if io_uring_allowed(case) else set())
             t.check("%s: profile has RunCVM's three rules" % case, 3, len(rules))
-            clone = [rule for rule in rules if rule.get("names") == ["clone"]]
-            t.check("%s: clone allowed only without namespace flags" % case,
-                    [{"index": 0, "value": CLONE_NAMESPACE_FLAGS, "valueTwo": 0, "op": "SCMP_CMP_MASKED_EQ"}],
-                    clone[0].get("args") if clone else None)
-            clone3 = [rule for rule in rules if rule.get("names") == ["clone3"]]
-            t.check("%s: clone3 fails with ENOSYS" % case, ("SCMP_ACT_ERRNO", 38),
-                    (clone3[0].get("action"), clone3[0].get("errnoRet")) if clone3 else None)
-            if not t.check("%s: profile allows exactly the listed calls" % case, True, allowed == expected):
+            general = rules[0] if rules else {}
+            t.check("%s: first rule allows" % case, "SCMP_ACT_ALLOW", general.get("action"))
+            names = set(general.get("names", []))
+            if not t.check("%s: first rule allows exactly the listed calls, less clone and clone3" % case,
+                           True, names == expected and "args" not in general):
                 t.log("%s: allowed but not listed: %s; listed but not allowed: %s"
-                      % (case, " ".join(sorted(allowed - expected)) or "-",
-                         " ".join(sorted(expected - allowed)) or "-"))
+                      % (case, " ".join(sorted(names - expected)) or "-",
+                         " ".join(sorted(expected - names)) or "-"))
+            t.check("%s: second rule allows clone only without namespace flags" % case,
+                    {"names": ["clone"], "action": "SCMP_ACT_ALLOW",
+                     "args": [{"index": 0, "value": CLONE_NAMESPACE_FLAGS, "valueTwo": 0, "op": "SCMP_CMP_MASKED_EQ"}]},
+                    rules[1] if len(rules) > 1 else None)
+            t.check("%s: third rule makes clone3 fail with ENOSYS" % case,
+                    {"names": ["clone3"], "action": "SCMP_ACT_ERRNO", "errnoRet": 38},
+                    rules[2] if len(rules) > 2 else None)
     holds = io_uring_allowed(case) and io_uring_usable(case)
     fds = results.get("io_uring_fds")
     if t.check("%s: QEMU's file descriptors read" % case, True, fds is not None):

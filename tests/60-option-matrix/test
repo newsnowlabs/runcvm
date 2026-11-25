@@ -24,9 +24,10 @@ Each Container/VM boots and serves 'docker exec', with and without a
 terminal; writes a file to its disk, where it has one, and reads it back;
 writes, chowns and removes a file in the VM's root filesystem, through
 virtiofsd; resolves its own name through DNS; has its network interface up;
-and shuts down cleanly when asked to stop: its workload exits on SIGTERM, and
-docker stop succeeds within its timeout, rather than killing the VM at its
-end. Each
+and shuts down cleanly when asked to stop: its workload exits on SIGTERM, with
+its own exit status, 42, which RunCVM gives the container, and docker stop
+succeeds within its timeout, rather than killing the VM at its end. The
+bundle holds RunCVM's minimal profile. Each
 option's own effect is checked too: in QEMU's or virtiofsd's command line
 (the disk's aio mode, the memory backend's hugetlb or prealloc, vhost-net,
 the VNC server and VGA device, the serial monitor, the curses display, USB,
@@ -51,8 +52,10 @@ SIZE = 128 << 20
 ARCH = os.uname().machine
 DISK = "/disks/d,/srv/d,ext4,%d" % SIZE
 STOP_TIMEOUT = 10
-# Exits on docker stop's SIGTERM, which the VM's PID 1 otherwise ignores.
-WORKLOAD = 'trap "exit 0" TERM; sleep infinity & wait'
+# Exits on docker stop's SIGTERM, which the VM's PID 1 otherwise ignores, with its own exit
+# status, which RunCVM gives the container (as in 15-stop-kill).
+EXIT_STATUS = 42
+WORKLOAD = 'trap "echo %d >/.runcvm/exitcode; exit 0" TERM; sleep infinity & wait' % EXIT_STATUS
 # RunCVM's own capability set (RUNCVM_CAPS=minimal), as CapEff
 MINIMAL_CAPS = "%016x" % sum(1 << bit for bit in (0, 1, 3, 4, 6, 7, 10, 12, 18, 27, 31))
 X86 = ARCH == "x86_64"
@@ -134,9 +137,12 @@ def run(case):
     if disk:
         results["disk"] = t.docker("exec", container, "sh", "-c",
                                    "echo written >/srv/d/f && sync && cat /srv/d/f").stdout.strip()
-    results["rootfs"] = t.docker("exec", container, "sh", "-c",
-                                 "echo a >/root/f && chown 12:34 /root/f && stat -c %u:%g /root/f"
-                                 " && rm /root/f").stdout.strip()
+    r = t.docker("exec", container, "sh", "-c",
+                 "echo a >/root/f && chown 12:34 /root/f && stat -c %u:%g /root/f && rm /root/f")
+    results["rootfs"] = r.stdout.strip() if r.returncode == 0 else "failed: " + r.stdout.strip()
+    config = t.bundle_config(container)
+    rules = ((config or {}).get("linux", {}).get("seccomp") or {}).get("syscalls") or []
+    results["minimal_profile"] = len(rules) == 3 and rules[2].get("names") == ["clone3"]
     results["tty"] = t.docker("exec", "-t", container, "sh", "-c", "echo tty-ok").stdout.strip()
     # As an absolute name, so that the host's search domains (which the container inherits) play no
     # part in the lookup.
@@ -158,7 +164,8 @@ def run(case):
     started = time.time()
     results["stop_status"] = t.docker("stop", "-t", str(STOP_TIMEOUT), container).returncode
     results["stop_seconds"] = time.time() - started
-    results["stopped"] = t.docker("inspect", "-f", "{{.State.Running}}", container).stdout.strip()
+    results["stopped"] = t.docker("inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}",
+                                  container).stdout.strip()
     return results
 
 
@@ -178,12 +185,14 @@ for (name, opts, disk, _), results in zip(RUNS, t.parallel(run, RUNS, remove=Tru
     t.check("%s: own name resolves through DNS" % name, 0, results["dns"])
     t.check("%s: network interface up" % name, 1, results["interfaces"])
     t.check("%s: container's init seccomp-filtered" % name, "2", results["init"].get("Seccomp"))
+    t.check("%s: bundle has RunCVM's minimal profile" % name, True, results["minimal_profile"])
     t.check("%s: container's init holds RunCVM's own capabilities" % name, MINIMAL_CAPS,
             results["init"].get("CapEff"))
     t.check("%s: option takes effect" % name, True, results["effect"])
     t.check("%s: IPv6 in the VM's kernel only with RUNCVM_IPV6=1" % name, name == "ipv6", results["ipv6"])
     t.check("%s: docker stop succeeds" % name, 0, results["stop_status"])
-    t.check("%s: stops when asked to" % name, "false", results["stopped"])
+    t.check("%s: stops when asked to, with the workload's exit status" % name, "false %d" % EXIT_STATUS,
+            results["stopped"])
     t.check("%s: shuts down within docker stop's timeout" % name, True,
             results["stop_seconds"] < STOP_TIMEOUT)
 

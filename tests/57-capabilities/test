@@ -24,6 +24,11 @@ permitted and bounding sets, with the inheritable and ambient sets empty, in
 each case, whatever RUNCVM_CAPS and RUNCVM_SYS_ADMIN are: for a plain 'docker
 exec', and for one with --privileged and RUNCVM_CAPS=engine and
 RUNCVM_SYS_ADMIN=1 in its own environment.
+
+'docker exec <container> --- <command>', which runs <command> in the container
+rather than the VM, is refused without RUNCVM_EXEC_DEBUG=1, and with it runs
+with the capabilities the engine gives the exec (with --privileged, including
+CAP_SYS_ADMIN).
 """
 
 import os
@@ -66,10 +71,12 @@ def host_caps(pid):
     return {key: int(value, 16) for key, value in t.proc_status(pid).items() if key.startswith("Cap")}
 
 
-def host_pids(container):
-    """The host PIDs of the processes in CONTAINER."""
-    r = t.docker("top", container, "-eo", "pid")
-    return set(line.strip() for line in r.stdout.splitlines()[1:] if line.strip().isdigit())
+def relay_pids(container):
+    """The host PIDs of the processes in CONTAINER that relay a 'docker exec' to the VM:
+    runcvm-ctr-exec, and the dbclient it becomes."""
+    r = t.docker("top", container, "-eo", "pid,args")
+    return set(pid for pid, _, args in (line.strip().partition(" ") for line in r.stdout.splitlines()[1:])
+               if pid.isdigit() and ("runcvm-ctr-exec" in args or "dbclient" in args))
 
 
 def run(item):
@@ -87,14 +94,17 @@ def run(item):
     # the VM: for a plain exec, and for one that asks for more (--privileged, and RunCVM's settings
     # overridden in its environment).
     helpers = {}
-    for kind, exec_opts in (("plain", []), ("privileged", ["--privileged", "-e", "RUNCVM_CAPS=engine",
+    for kind, seconds, exec_opts in (("plain", "601", []),
+                                     ("privileged", "602", ["--privileged", "-e", "RUNCVM_CAPS=engine",
                                                             "-e", "RUNCVM_SYS_ADMIN=1"])):
-        before = host_pids(container)
-        t.docker("exec", "-d", *exec_opts, container, "sleep", "60")
         found = helpers[kind] = {}
+        # Each exec's processes are the relay processes that appear once it starts.
+        before = relay_pids(container)
+        if t.docker("exec", "-d", *exec_opts, container, "sleep", seconds).returncode != 0:
+            continue
 
         def exec_helpers():
-            for pid in host_pids(container) - before:
+            for pid in relay_pids(container) - before:
                 sets = host_caps(pid)
                 if sets:
                     found[pid] = sets
@@ -139,5 +149,24 @@ r = t.docker("run", "--rm", "--name", name, *t.labels(), "--runtime=" + t.RUNTIM
              "--env", "RUNCVM_CAPS=bogus", "alpine", "true")
 t.check("invalid RUNCVM_CAPS: Container/VM fails to start", True, r.returncode != 0)
 t.check("invalid RUNCVM_CAPS: error names RUNCVM_CAPS", True, "RUNCVM_CAPS" in (r.stdout or ""))
+
+# 'docker exec <container> --- <command>' runs <command> in the container rather than the VM, only
+# with RUNCVM_EXEC_DEBUG=1, and then with the capabilities the engine gives the exec.
+for debug in (False, True):
+    desc = "--- passthrough %s RUNCVM_EXEC_DEBUG=1" % ("with" if debug else "without")
+    name = t.unique("caps-passthrough-%s" % ("debug" if debug else "default"))
+    t.cleanup_container(name)
+    r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 *(["--env", "RUNCVM_EXEC_DEBUG=1"] if debug else []), "alpine", "sleep", "infinity")
+    if not t.check("%s: Container/VM boots" % desc, True, r.returncode == 0 and t.wait_for_exec(name, BOOT_TIMEOUT)):
+        continue
+    r = t.docker("exec", "--privileged", name, "---", "grep", "CapEff", "/proc/self/status")
+    if debug:
+        caps = r.stdout.split()
+        t.check("%s: runs, with the exec's capabilities (--privileged: CAP_SYS_ADMIN)" % desc, True,
+                r.returncode == 0 and len(caps) > 1 and int(caps[1], 16) & CAP_SYS_ADMIN != 0)
+    else:
+        t.check("%s: refused" % desc, True, r.returncode != 0)
+        t.check("%s: error names RUNCVM_EXEC_DEBUG" % desc, True, "RUNCVM_EXEC_DEBUG" in (r.stdout or ""))
 
 t.finish()

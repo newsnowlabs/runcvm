@@ -380,13 +380,16 @@ def bundle_config(name):
     could not be read. It is read, as root, through a short-lived standard (runc) container with
     the host's process namespace, from containerd's state (where Docker uses a system containerd,
     or runs its own) or Podman's storage."""
-    cid = docker("inspect", "-f", "{{.Id}}", name).stdout.strip()
+    r = docker("inspect", "-f", "{{.Id}}", name)
+    cid = r.stdout.strip()
+    if r.returncode != 0 or not re.fullmatch(r"[0-9a-f]{64}", cid):
+        return None
     paths = ["/proc/1/root/run/containerd/io.containerd.runtime.v2.task/moby/%s/config.json" % cid,
              "/proc/1/root/run/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/%s/config.json" % cid,
              "/proc/1/root/var/lib/containers/storage/overlay-containers/%s/userdata/config.json" % cid]
     r = docker("run", "--rm", "--name", unique("bundle-" + name), *labels(), "--runtime=runc",
                "--privileged", "--pid=host", "alpine", "sh", "-c",
-               "for f in %s; do [ -f \"$f\" ] && exec cat \"$f\"; done; exit 1" % " ".join(paths))
+               'for f in "$@"; do [ -f "$f" ] && exec cat "$f"; done; exit 1', "sh", *paths)
     if r.returncode != 0:
         return None
     try:
