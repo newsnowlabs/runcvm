@@ -131,6 +131,7 @@ A generator decides the mode before any unit starts. For each further mode it ne
 - **Base:** Ubuntu 24.04 LTS (`ubuntu:24.04`).
 - **Everyday tools:** systemd, udev, D-Bus, git, Python 3 (for `tests/run`), kmod, iproute2, jq, curl, sudo, procps, psmisc and less.
 - **Docker:** Docker CE from Docker's own repository (see [Building](#building)), with the buildx and compose plugins. buildx provides the BuildKit that `./build/build.sh` needs.
+- **Podman:** Ubuntu's `podman` package, with RunCVM registered as its `runcvm` runtime in `/etc/containers/containers.conf.d/runcvm.conf`, as RunCVM's installer does, for running the tests with rootful Podman (`tests/run --engine podman`). It uses the runc that Docker's `containerd.io` package installs.
 
 During the build, `systemctl` is diverted to a stand-in, `build/systemctl`. No systemd is running, so the stand-in:
 
@@ -157,12 +158,13 @@ The dev user is `runcvm`:
 
 ```
 VOLUME /disks
-ENV RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G
+ENV RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/var/lib/containers:/opt/runcvm:/home,ext4,40G
 ```
 
-A single disk holds `/var/lib/docker`, `/var/lib/containerd`, `/opt/runcvm` and `/home`, in the default `subdirs` layout (see the RunCVM README's `RUNCVM_DISKS`). Without the disk, these paths would be served over virtiofs:
+A single disk holds `/var/lib/docker`, `/var/lib/containerd`, `/var/lib/containers`, `/opt/runcvm` and `/home`, in the default `subdirs` layout (see the RunCVM README's `RUNCVM_DISKS`). Without the disk, these paths would be served over virtiofs:
 
 - `/var/lib/docker` and `/var/lib/containerd`: Docker would fall back to its slow `vfs` storage driver, as overlayfs cannot use virtiofs;
+- `/var/lib/containers`: Podman's storage, likewise; and virtiofs, which RunCVM's `virtiofsd` serves without `CAP_SYS_ADMIN` unless `RUNCVM_SYS_ADMIN=1`, cannot hold the `trusted.*` extended attributes that tests set on Podman volumes;
 - `/opt/runcvm`: L2s would see L1's RunCVM over a second, nested, virtiofs;
 - `/home`: builds and checkouts would be slower than on a block device.
 
@@ -172,8 +174,8 @@ Being sparse, the backing file can outgrow the free space on L0's filesystem whi
 
 ```sh
 docker run -d --runtime=runcvm -m 4g --cpus=4 --stop-timeout=120 --name=runcvm-l1 \
-  --env=RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G,prealloc=on runcvm-l1
-docker exec runcvm-l1 runcvm-l1-check --disks=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G,prealloc=on
+  --env=RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/var/lib/containers:/opt/runcvm:/home,ext4,40G,prealloc=on runcvm-l1
+docker exec runcvm-l1 runcvm-l1-check --disks=/disks/l1,/var/lib/docker:/var/lib/containerd:/var/lib/containers:/opt/runcvm:/home,ext4,40G,prealloc=on
 ```
 
 `prealloc=on` also applies to an existing disk, which it allocates in full when L1 next starts.
