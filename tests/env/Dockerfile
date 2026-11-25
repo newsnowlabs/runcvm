@@ -97,12 +97,33 @@ echo 'runcvm ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/runcvm
 chmod 0440 /etc/sudoers.d/runcvm
 _EOE_
 
-# Stock RunCVM, registered with L1's Docker. The installer restarts dockerd through
+# Podman (Ubuntu's package), alongside Docker, for 'tests/run --engine podman'. It uses the runc
+# that Docker's containerd.io package installs. Installed before RunCVM, whose installer registers
+# RunCVM with Podman where Podman is installed.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked <<_EOE_
+apt-get update
+apt-get install -y podman
+mkdir -p /etc/containers/registries.conf.d
+# Resolve short image names (e.g. alpine) on Docker Hub, as Docker does.
+printf 'unqualified-search-registries = ["docker.io"]\n' >/etc/containers/registries.conf.d/50-runcvm-l1-docker-io.conf
+_EOE_
+
+# Stock RunCVM, registered with L1's Docker and Podman. The installer restarts dockerd through
 # /etc/init.d/docker if that exists, and then waits indefinitely for a dockerd that cannot start
-# during a build; systemd's docker.service does not need it.
+# during a build; systemd's docker.service does not need it. Where the installer does not register
+# RunCVM with Podman (e.g. v1.8.0's), the same entry is written here.
 COPY --from=runcvm /opt/runcvm /opt/runcvm
-RUN rm -f /etc/init.d/docker && \
-    sh /opt/runcvm/scripts/runcvm-install-runtime.sh --no-dockerd
+RUN <<_EOE_
+set -e
+rm -f /etc/init.d/docker
+sh /opt/runcvm/scripts/runcvm-install-runtime.sh --no-dockerd
+conf=/etc/containers/containers.conf.d/runcvm.conf
+if ! [ -f "$conf" ]; then
+  mkdir -p "${conf%/*}"
+  printf '[engine.runtimes]\nruncvm = [ "/opt/runcvm/scripts/runcvm-runtime" ]\n' >"$conf"
+fi
+_EOE_
 
 # Claude Code (optional): installed for the runcvm user when CLAUDE_CODE_VERSION is set, with
 # CLAUDE_CODE_SHA256 the SHA-256 of that version's linux-x64 binary (from the version's
@@ -132,10 +153,11 @@ COPY rootfs/ /
 COPY README.md /usr/local/share/doc/runcvm-l1/README.md
 
 # One sparse disk, in the /disks volume, holding the paths that should not be served over
-# virtiofs: Docker's and containerd's storage (overlayfs cannot use virtiofs), the RunCVM that
-# L1 runs L2s with (which would otherwise be nested virtiofs) and /home.
+# virtiofs: Docker's, containerd's and Podman's storage (overlayfs cannot use virtiofs, nor can
+# virtiofs keep trusted.* xattrs without CAP_SYS_ADMIN), the RunCVM that L1 runs L2s with (which
+# would otherwise be nested virtiofs) and /home.
 VOLUME /disks
-ENV RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G
+ENV RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/var/lib/containers:/opt/runcvm:/home,ext4,40G
 
 # IPv6 in L1's kernel, whether or not L1's network on L0 is dual-stack.
 ENV RUNCVM_IPV6=1

@@ -272,8 +272,8 @@ The installation script:
     - Enables the RunCVM runtime, by setting `runtimes.runcvm.path` in `/etc/docker/daemon.json` to `/opt/runcvm/scripts/runcvm-runtime`, leaving any other runtimes there unchanged (see [Registering the runtime by hand](#registering-the-runtime-by-hand))
     - Restarts `dockerd`, if it can be detected how for your system (e.g. `systemctl restart docker`)
     - Verifies that RunCVM is recognised via `docker info`
-  - For Podman support (experimental):
-    - Displays instructions on patching `/etc/containers/containers.conf`
+  - For Podman support (experimental), where Podman is installed:
+    - Registers the RunCVM runtime with Podman, in a drop-in file of its own, `/etc/containers/containers.conf.d/runcvm.conf`, leaving `/etc/containers/containers.conf` unchanged
 
 Following installation, launch a basic test RunCVM Container/VM:
 
@@ -305,9 +305,10 @@ Then restart `dockerd` (e.g. `sudo systemctl restart docker`), and check that Do
 docker info --format '{{.Runtimes.runcvm.Path}}'
 ```
 
-For Podman (experimental), add the following to the `[engine.runtimes]` section of `/etc/containers/containers.conf`:
+For Podman (experimental), the RunCVM runtime is an entry in the `[engine.runtimes]` table of Podman's configuration, which the installer writes to `/etc/containers/containers.conf.d/runcvm.conf`; the same entry may instead be added to that table in `/etc/containers/containers.conf`:
 
 ```toml
+[engine.runtimes]
 runcvm = [ "/opt/runcvm/scripts/runcvm-runtime" ]
 ```
 
@@ -1461,6 +1462,8 @@ The build records its version and the commit it was built from: in the image's `
 To publish the build, add `--push`, which after a successful build pushes each tag to Docker Hub (`newsnowlabs/runcvm:<tag>`), then copies it to GitHub's container registry (`ghcr.io/newsnowlabs/runcvm:<tag>`) with `docker buildx imagetools create`, giving the copy's index the image's `org.opencontainers.image.*` labels (its source repository, description and licence) as annotations, which GitHub uses to link the package on ghcr.io to this repository; `--push=dockerhub` pushes to Docker Hub only. Both need `docker login` to the registries concerned, and `--push` (with `all`) needs Docker's [containerd image store](https://docs.docker.com/engine/storage/containerd/) (the default for new installations of Docker Engine 29 and later): with Docker's classic store, the copy on ghcr.io would be a Docker manifest list, which cannot carry annotations, so the script stops before building. `./build/build.sh --help` lists the options.
 
 The Alpine build stages fetch Alpine's package build recipes (aports) from `gitlab.alpinelinux.org`. Where that is unreachable, as from GitHub-hosted runners, give its GitHub mirror and Alpine's distfiles mirror as build arguments: `./build/build.sh -- --build-arg APORTS_URL=https://github.com/alpinelinux/aports.git --build-arg ALPINE_DISTFILES_MIRROR=https://distfiles.alpinelinux.org/distfiles`. RunCVM's CI (`.github/workflows/ci.yml`) builds this way.
+
+The build downloads e2fsprogs's source from kernel.org's content delivery network, `https://cdn.kernel.org`. The build argument `KERNEL_ORG_MIRROR` names another kernel.org site to download it from, e.g. kernel.org's mirror network: `./build/build.sh -- --build-arg KERNEL_ORG_MIRROR=https://mirrors.edge.kernel.org`. The download is checked against its SHA-256, whichever site serves it.
 
 To install a build tagged other than `latest`, name it in `REPO` when running the installation script, e.g. `sudo REPO=newsnowlabs/runcvm:dev ./runcvm-scripts/runcvm-install-runtime.sh`.
 

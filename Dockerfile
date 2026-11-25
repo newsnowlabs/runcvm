@@ -32,6 +32,12 @@ ARG KERNEL_MODULE_COMPRESSION=xz
 ARG APORTS_URL=https://gitlab.alpinelinux.org/alpine/aports.git
 ARG ALPINE_DISTFILES_MIRROR=
 
+# The kernel.org site the build downloads upstream sources from (e2fsprogs), as a base URL under
+# which kernel.org's /pub tree lies. The default, https://cdn.kernel.org, is kernel.org's content
+# delivery network; https://mirrors.edge.kernel.org, its mirror network, holds the same files.
+# Each download is checked against its SHA-256, whichever site serves it.
+ARG KERNEL_ORG_MIRROR=https://cdn.kernel.org
+
 # --- BUILD STAGE ---
 # Build base alpine-sdk image for later build stages
 FROM alpine:$ALPINE_VERSION as alpine-sdk
@@ -186,6 +192,7 @@ EOF
 # ('-E one_file_system')
 FROM alpine:$ALPINE_VERSION as e2fsprogs
 
+ARG KERNEL_ORG_MIRROR
 ARG E2FSPROGS_VERSION=1.47.4
 ARG E2FSPROGS_SHA256=fd5bf388cbdbe006a3d3b318d983b2948382440acc85a87f1e7d108653e8db0b
 
@@ -195,7 +202,7 @@ RUN <<EOF
 set -e
 apk add --no-cache build-base linux-headers util-linux-dev
 cd /root
-wget -q https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v$E2FSPROGS_VERSION/e2fsprogs-$E2FSPROGS_VERSION.tar.xz
+wget -q $KERNEL_ORG_MIRROR/pub/linux/kernel/people/tytso/e2fsprogs/v$E2FSPROGS_VERSION/e2fsprogs-$E2FSPROGS_VERSION.tar.xz
 echo "$E2FSPROGS_SHA256  e2fsprogs-$E2FSPROGS_VERSION.tar.xz" | sha256sum -c -
 tar xf e2fsprogs-$E2FSPROGS_VERSION.tar.xz
 cd e2fsprogs-$E2FSPROGS_VERSION

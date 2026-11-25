@@ -243,14 +243,19 @@ else
   log "- No /etc/docker detected; your mileage with RunCVM without Docker may vary!"
 fi
 
+# Podman (experimental) finds runtimes in containers.conf's [engine.runtimes] table, which it also
+# reads from the drop-in files in /etc/containers/containers.conf.d (after containers.conf itself).
+# RunCVM's entry is a drop-in file of its own, leaving containers.conf as it is.
 if [ -n "$(which podman)" ]; then
   log "- Detected podman binary"
-  cat <<_EOE_ >&2
-  - To enable experimental RunCVM support for Podman, add the following
-    to /etc/containers/containers.conf in the [engine.runtimes] section:
-
-    runcvm = [ "/opt/runcvm/scripts/runcvm-runtime" ]
-_EOE_
+  PODMAN_CONF=/etc/containers/containers.conf.d/runcvm.conf
+  log "  - Registering the runcvm runtime with Podman in $PODMAN_CONF"
+  mkdir -p "$(dirname "$PODMAN_CONF")"
+  if printf '# RunCVM, registered with Podman by runcvm-install-runtime.sh\n[engine.runtimes]\nruncvm = [ "/opt/runcvm/scripts/runcvm-runtime" ]\n' >"$PODMAN_CONF"; then
+    log "    - Done"
+  else
+    log "    - Failed to write $PODMAN_CONF"
+  fi
 fi
 
 # In a Linux VM run by Apple's Virtualization framework (e.g. Lima's on macOS), Container/VMs start

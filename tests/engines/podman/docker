@@ -1,0 +1,9 @@
+#!/bin/sh
+# The 'docker' command for tests run with 'tests/run --engine podman', which puts this directory
+# first in PATH: it runs Podman's Docker-compatible CLI, as root (rootful Podman), through sudo
+# when not already root.
+if [ "$(id -u)" = 0 ]; then
+  exec podman "$@"
+else
+  exec sudo -n podman "$@"
+fi
