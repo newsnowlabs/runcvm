@@ -291,12 +291,14 @@ jq_set() {
   
   local tmp="$file.runcvm-tmp.$$"
 
-  if jq "$@" "$file" >"$tmp"; then
-    busybox mv "$tmp" "$file"
-  else
+  # Any failure stops the operation: runc must never run a configuration only partly updated.
+  if ! jq "$@" "$file" >"$tmp"; then
     busybox rm -f "$tmp"
-    echo "Failed to update ${file##*/}; aborting!" 2>&1
-    exit 1
+    error "Failed to update $file"
+  fi
+  if ! busybox mv "$tmp" "$file"; then
+    busybox rm -f "$tmp"
+    error "Failed to replace $file"
   fi
 }
 
@@ -405,36 +407,19 @@ get_config_env() {
   [ -n "$value" ] && echo -n "$value" || echo -n "$default"
 }
 
-# set_capabilities <file> <path> <RUNCVM_CAPS> <RUNCVM_SYS_ADMIN>
-# Sets the capability sets at <path> (a JSON array path, e.g. ["process","capabilities"]) in
-# <file>, a bundle's config.json or an exec's process.json, for RunCVM's processes (see
-# RUNCVM_CAPS where the create command calls this). The same sets apply to the container's init and
-# to the processes 'docker exec' starts in the container.
-set_capabilities() {
-  local file="$1" path="$2" mode="$3" sys_admin="$4" caps filter
-
-  case "$mode" in
-    ''|minimal)
-      caps='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_MKNOD","CAP_NET_ADMIN",
-        "CAP_NET_BIND_SERVICE","CAP_SETFCAP","CAP_SETGID","CAP_SETUID","CAP_SYS_CHROOT"]'
-      filter='setpath($p; {"bounding": $caps, "effective": $caps, "permitted": $caps,
-        "inheritable": [], "ambient": []})'
-      ;;
-    engine)
-      caps='["CAP_AUDIT_WRITE","CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_KILL",
-        "CAP_MKNOD","CAP_NET_ADMIN","CAP_NET_BIND_SERVICE","CAP_NET_RAW","CAP_SETFCAP","CAP_SETGID",
-        "CAP_SETPCAP","CAP_SETUID","CAP_SYS_CHROOT"]'
-      filter='reduce ("bounding", "effective", "permitted") as $set (.;
-        setpath($p + [$set]; (getpath($p + [$set]) // []) + $caps | unique))'
-      ;;
-    *) error "RUNCVM_CAPS '$mode' invalid (should be minimal or engine)" ;;
-  esac
-  if [ "$sys_admin" = "1" ]; then
-    filter+=' | reduce ("bounding", "effective", "permitted") as $set (.;
-      setpath($p + [$set]; (getpath($p + [$set]) // []) + ["CAP_SYS_ADMIN"] | unique))'
-  fi
-  jq_set "$file" --argjson p "$path" --argjson caps "$caps" "$filter"
-}
+# RunCVM's capability sets (see the create command's RUNCVM_CAPS): its own processes' needs
+# (minimal), and Docker's default capabilities with CAP_NET_ADMIN (engine).
+RUNCVM_MINIMAL_CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_MKNOD",
+  "CAP_NET_ADMIN","CAP_NET_BIND_SERVICE","CAP_SETFCAP","CAP_SETGID","CAP_SETUID","CAP_SYS_CHROOT"]'
+RUNCVM_ENGINE_CAPS='["CAP_AUDIT_WRITE","CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID",
+  "CAP_KILL","CAP_MKNOD","CAP_NET_ADMIN","CAP_NET_BIND_SERVICE","CAP_NET_RAW","CAP_SETFCAP",
+  "CAP_SETGID","CAP_SETPCAP","CAP_SETUID","CAP_SYS_CHROOT"]'
+# A jq filter setting a capabilities object to exactly $caps, with no inheritable or ambient ones.
+RUNCVM_CAPS_EXACTLY='{"bounding": $caps, "effective": $caps, "permitted": $caps,
+  "inheritable": [], "ambient": []}'
+# A jq filter adding $caps to a capabilities object's bounding, effective and permitted sets.
+RUNCVM_CAPS_ADD='reduce ("bounding", "effective", "permitted") as $set (.;
+  .[$set] = ((.[$set] // []) + $caps | unique))'
 
 set_config_env() {
   local var="$1"
@@ -996,7 +981,11 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     *) error "RUNCVM_SECCOMP '$RUNCVM_SECCOMP' invalid (should be minimal, engine or unconfined)" ;;
   esac
   SECCOMP_IO_URING=
-  if [ -n "$(get_config_env 'RUNCVM_DISKS')" ]; then
+  # Whether RUNCVM_DISKS names any disk: its whole value (get_config_env reads only a first line),
+  # split as runcvm-ctr-qemu splits it, with the same split_list.
+  RUNCVM_DISKS_VALUE=$(jq_get "$CFG" '[.process.env[] | select(startswith("RUNCVM_DISKS=")) | .[13:]] | first // ""')
+  split_list SECCOMP_DISK_SPECS ';' "$RUNCVM_DISKS_VALUE"
+  if [ "${#SECCOMP_DISK_SPECS[@]}" -gt 0 ]; then
     case "$(get_config_env 'RUNCVM_DISK_AIO')" in
       native|threads) ;;
       *) SECCOMP_IO_URING='"io_uring_setup","io_uring_enter","io_uring_register"' ;;
@@ -1077,9 +1066,16 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   # - engine: Docker's default capabilities and CAP_NET_ADMIN, added to those the container was
   #   given.
   # RUNCVM_SYS_ADMIN=1 adds CAP_SYS_ADMIN, for virtiofsd's --modcaps=+sys_admin and mke2fs's
-  # copying of trusted.* xattrs. The exec command gives 'docker exec' processes the same sets.
-  set_capabilities "$CFG" '["process","capabilities"]' "$(get_config_env 'RUNCVM_CAPS')" \
-    "$(get_config_env 'RUNCVM_SYS_ADMIN')"
+  # copying of trusted.* xattrs. The exec command gives 'docker exec' processes the minimal sets.
+  RUNCVM_CAPS="$(get_config_env 'RUNCVM_CAPS')"
+  case "$RUNCVM_CAPS" in
+    ''|minimal) jq_set "$CFG" --argjson caps "$RUNCVM_MINIMAL_CAPS" ".process.capabilities = $RUNCVM_CAPS_EXACTLY" ;;
+    engine) jq_set "$CFG" --argjson caps "$RUNCVM_ENGINE_CAPS" ".process.capabilities |= ($RUNCVM_CAPS_ADD)" ;;
+    *) error "RUNCVM_CAPS '$RUNCVM_CAPS' invalid (should be minimal or engine)" ;;
+  esac
+  if [ "$(get_config_env 'RUNCVM_SYS_ADMIN')" = "1" ]; then
+    jq_set "$CFG" --argjson caps '["CAP_SYS_ADMIN"]' ".process.capabilities |= ($RUNCVM_CAPS_ADD)"
+  fi
 
   # CONFIGURE ENVIRONMENT
   # This must remain the last change to config.json: it follows every set_config_env, and the
@@ -1145,11 +1141,11 @@ elif [ "$COMMAND" = "exec" ]; then
     jq -r . <$PROCESS >"$RUNCVM_DEBUG_DIR/process.json-$$-1"
   fi
 
-  # The exec's process runs on the host, in the container, with the capabilities RunCVM's processes
-  # hold (see set_capabilities), whatever the engine gave it (e.g. docker exec --privileged, or
-  # the container's --cap-add). The container's RUNCVM_ settings reach it in its environment.
-  set_capabilities "$PROCESS" '["capabilities"]' "$(get_process_env "$PROCESS" 'RUNCVM_CAPS')" \
-    "$(get_process_env "$PROCESS" 'RUNCVM_SYS_ADMIN')"
+  # The exec's process runs on the host, in the container, with RunCVM's own fixed set of
+  # capabilities (the minimal set), whatever the engine gave it (e.g. docker exec --privileged, or
+  # the container's --cap-add) and whatever the container's or the exec's RUNCVM_CAPS and
+  # RUNCVM_SYS_ADMIN: no more than the container's init holds in any mode.
+  jq_set "$PROCESS" --argjson caps "$RUNCVM_MINIMAL_CAPS" ".capabilities = $RUNCVM_CAPS_EXACTLY"
 
   ARG1=$(jq_get "$PROCESS" '.args[0]')
   if [ "$ARG1" = "---" ]; then

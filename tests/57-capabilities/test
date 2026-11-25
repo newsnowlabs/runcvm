@@ -19,8 +19,11 @@ The workload runs under the VM's own kernel, so it keeps its capabilities
 there. Each case runs with and without --init.
 
 The processes 'docker exec' starts in the container, on the host, which relay
-its command to the VM, hold the same capabilities in their effective and
-bounding sets as the container's init, in each case.
+its command to the VM, hold RunCVM's own fixed set, in the effective,
+permitted and bounding sets, with the inheritable and ambient sets empty, in
+each case, whatever RUNCVM_CAPS and RUNCVM_SYS_ADMIN are: for a plain 'docker
+exec', and for one with --privileged and RUNCVM_CAPS=engine and
+RUNCVM_SYS_ADMIN=1 in its own environment.
 """
 
 import os
@@ -59,17 +62,8 @@ RUNS = [(init, case) for init in (False, True) for case in CASES]
 
 
 def host_caps(pid):
-    """The capability sets in /proc/PID/status on the host, as {key: int}; {} if unreadable."""
-    caps = {}
-    try:
-        with open("/proc/%s/status" % pid) as f:
-            for line in f:
-                key, _, value = line.partition(":")
-                if key in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
-                    caps[key] = int(value.strip(), 16)
-    except (OSError, ValueError):
-        return {}
-    return caps
+    """The capability sets in /proc/PID/status on the host, as {field: int}; {} if unreadable."""
+    return {key: int(value, 16) for key, value in t.proc_status(pid).items() if key.startswith("Cap")}
 
 
 def host_pids(container):
@@ -86,25 +80,29 @@ def run(item):
                  *(["--init"] if init else []), *opts, "alpine", "sh", "-c",
                  "echo workload-ran; sleep 600")
     if r.returncode != 0 or not t.wait_for_exec(container, BOOT_TIMEOUT):
-        return False, "", {}, [], t.docker("logs", container).stdout
+        return False, "", {}, {}, t.docker("logs", container).stdout
     caps = t.docker("exec", container, "grep", "CapEff", "/proc/self/status").stdout.split()
     host = host_caps(t.docker("inspect", "-f", "{{.State.Pid}}", container).stdout.strip())
-    # The processes a 'docker exec' starts in the container, on the host, while its command runs in
-    # the VM.
-    before = host_pids(container)
-    t.docker("exec", "-d", container, "sleep", "60")
+    # The processes 'docker exec' starts in the container, on the host, while its command runs in
+    # the VM: for a plain exec, and for one that asks for more (--privileged, and RunCVM's settings
+    # overridden in its environment).
     helpers = {}
+    for kind, exec_opts in (("plain", []), ("privileged", ["--privileged", "-e", "RUNCVM_CAPS=engine",
+                                                            "-e", "RUNCVM_SYS_ADMIN=1"])):
+        before = host_pids(container)
+        t.docker("exec", "-d", *exec_opts, container, "sleep", "60")
+        found = helpers[kind] = {}
 
-    def exec_helpers():
-        for pid in host_pids(container) - before:
-            sets = host_caps(pid)
-            if sets:
-                helpers[pid] = sets
-        return helpers
+        def exec_helpers():
+            for pid in host_pids(container) - before:
+                sets = host_caps(pid)
+                if sets:
+                    found[pid] = sets
+            return found
 
-    t.wait_for("'docker exec' processes in %s" % container, 30, exec_helpers)
-    return True, caps[1] if len(caps) > 1 else "", host, list(helpers.values()), \
-        t.docker("logs", container).stdout
+        t.wait_for("'docker exec' (%s) processes in %s" % (kind, container), 30, exec_helpers)
+    return True, caps[1] if len(caps) > 1 else "", host, \
+        {kind: list(found.values()) for kind, found in helpers.items()}, t.docker("logs", container).stdout
 
 
 for (init, (name, opts)), (started, caps, host, helpers, logs) in zip(RUNS, t.parallel(run, RUNS, remove=True)):
@@ -123,10 +121,13 @@ for (init, (name, opts)), (started, caps, host, helpers, logs) in zip(RUNS, t.pa
     for key in ("CapEff", "CapPrm", "CapBnd"):
         t.check("%s: container's init on the host: %s" % (desc, key), "%016x" % expected,
                 "%016x" % host[key] if key in host else "unreadable")
-    t.check("%s: 'docker exec' processes found on the host" % desc, True, len(helpers) > 0)
-    for key in ("CapEff", "CapBnd"):
-        t.check("%s: 'docker exec' processes on the host: %s" % (desc, key), ["%016x" % expected],
-                sorted(set("%016x" % h[key] if key in h else "unreadable" for h in helpers)))
+    for kind, found in sorted(helpers.items()):
+        if not t.check("%s: %s 'docker exec' processes found on the host" % (desc, kind), True, len(found) > 0):
+            continue
+        for key in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
+            t.check("%s: %s 'docker exec' processes on the host: %s" % (desc, kind, key),
+                    ["%016x" % (0 if key in ("CapInh", "CapAmb") else EXPECTED)],
+                    sorted(set("%016x" % h[key] if key in h else "unreadable" for h in found)))
     if name.startswith("engine"):
         continue
     for key in ("CapInh", "CapAmb"):

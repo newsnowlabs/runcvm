@@ -65,13 +65,14 @@ NAMES=$(printf '%s\n%s\n' "$ARCH_NAMES" "$VIRTIOFSD_NAMES")
 
 # CLONE_NEWNS, CLONE_NEWCGROUP, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWUSER, CLONE_NEWPID and
 # CLONE_NEWNET, in clone's flags, its first argument on x86_64 and aarch64.
-printf '%s\n' "$NAMES" | jq -R . | jq -s --argjson architectures "$ARCHITECTURES" '{
+printf '%s\n' "$NAMES" | jq -Rs --argjson architectures "$ARCHITECTURES" '{
     "defaultAction": "SCMP_ACT_ERRNO", "defaultErrnoRet": 1, "architectures": $architectures,
     "syscalls": [
-      {"names": (unique - ["clone", "clone3"]), "action": "SCMP_ACT_ALLOW"},
+      {"names": (split("\n") | map(select(length > 0)) | unique - ["clone", "clone3"]),
+       "action": "SCMP_ACT_ALLOW"},
       {"names": ["clone"], "action": "SCMP_ACT_ALLOW",
        "args": [{"index": 0, "value": 2114060288, "valueTwo": 0, "op": "SCMP_CMP_MASKED_EQ"}]},
       {"names": ["clone3"], "action": "SCMP_ACT_ERRNO", "errnoRet": 38}]}' >"$TMP" ||
   fail "writing the profile failed"
 [ "$(jq '.syscalls[0].names | length' "$TMP")" -gt 0 ] || fail "the profile allows no system calls"
-mv "$TMP" "$DIR/profile.json"
+mv "$TMP" "$DIR/profile.json" || fail "replacing $DIR/profile.json failed"

@@ -8,11 +8,15 @@ with the engine's defaults, and with --cap-drop=ALL and
 --security-opt=no-new-privileges. Each Container/VM:
 
 - boots, and serves 'docker exec';
-- writes a file to its disk and reads it back;
+- writes a file to its disk, mounted (ext4) at its destination, and reads it
+  back;
 - makes, through virtiofsd, file operations needing its capabilities in the
   VM's root filesystem (chown, chmod with the setuid bit, mknod);
 - has its container's init, on the host, seccomp-filtered (Seccomp: 2) unless
-  RUNCVM_SECCOMP=unconfined (Seccomp: 0), with the capabilities RUNCVM_CAPS
+  RUNCVM_SECCOMP=unconfined (Seccomp: 0), under the profile RUNCVM_SECCOMP
+  chooses, read from the container's bundle: RunCVM's own three rules for
+  minimal, the engine's with RunCVM's further calls last for engine or unset,
+  and none for unconfined; with the capabilities RUNCVM_CAPS
   gives: exactly RunCVM's own set for minimal or unset, and Docker's default
   capabilities with CAP_NET_ADMIN, added to the container's, for engine.
 """
@@ -44,18 +48,26 @@ def label(seccomp, caps, variant):
     return "seccomp=%s caps=%s %s" % (seccomp or "unset", caps or "unset", variant[0])
 
 
-def status(pid):
-    """The Seccomp and CapEff fields of /proc/PID/status, or None where unreadable."""
-    fields = {}
-    try:
-        with open("/proc/%s/status" % pid) as f:
-            for line in f:
-                key, _, value = line.partition(":")
-                if key in ("Seccomp", "CapEff"):
-                    fields[key] = value.strip()
-    except OSError:
-        return None
-    return fields
+def bundle_seccomp(name):
+    """The seccomp section of container NAME's bundle: a dict, {} where it has none, or None if
+    the bundle could not be read."""
+    config = t.bundle_config(name)
+    return None if config is None else config.get("linux", {}).get("seccomp") or {}
+
+
+def profile_kind(profile):
+    """Which profile PROFILE is: 'minimal' (RunCVM's own three rules), 'engine' (the engine's, with
+    RunCVM's further calls in its last rule), 'none', or 'other'."""
+    if profile is None:
+        return "unreadable"
+    if not profile:
+        return "none"
+    rules = profile.get("syscalls") or []
+    if len(rules) == 3 and rules[2].get("names") == ["clone3"] and profile.get("defaultErrnoRet") == 1:
+        return "minimal"
+    if len(rules) > 3 and rules[-1].get("action") == "SCMP_ACT_ALLOW" and "chroot" in rules[-1].get("names", []):
+        return "engine"
+    return "other"
 
 
 def run(item):
@@ -75,9 +87,11 @@ def run(item):
                  "--env", "RUNCVM_DISKS=/disks/d,/srv/d,ext4,%d" % SIZE, IMAGE, "sleep", "infinity")
     if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
         return {"error": r.stdout + t.docker("logs", name).stdout}
-    results = {"host": status(t.docker("inspect", "-f", "{{.State.Pid}}", name).stdout.strip())}
+    results = {"host": t.proc_status(t.docker("inspect", "-f", "{{.State.Pid}}", name).stdout.strip())}
     results["disk"] = t.docker("exec", name, "sh", "-c",
-                               "echo written >/srv/d/f && sync && cat /srv/d/f").stdout.strip()
+                               "awk '$2 == \"/srv/d\" && $3 == \"ext4\" { found = 1 } END { exit !found }'"
+                               " /proc/mounts && echo written >/srv/d/f && sync && cat /srv/d/f").stdout.strip()
+    results["profile"] = bundle_seccomp(name)
     results["fsops"] = t.docker("exec", name, "sh", "-c",
                                 "cd /root && echo a >f && chown 12:34 f && chmod 4755 f"
                                 " && mknod c c 1 3 && stat -c '%u:%g %a' f && rm -f f c").stdout.strip()
@@ -94,6 +108,8 @@ for (seccomp, caps, variant), results in zip(RUNS, t.parallel(run, RUNS, remove=
     host = results["host"] or {}
     t.check("%s: container's init Seccomp mode" % desc, "0" if seccomp == "unconfined" else "2",
             host.get("Seccomp"))
+    t.check("%s: container's seccomp profile" % desc,
+            {"minimal": "minimal", "unconfined": "none"}.get(seccomp, "engine"), profile_kind(results["profile"]))
     t.check("%s: container's init CapEff" % desc, "%016x" % (ENGINE if caps == "engine" else MINIMAL),
             host.get("CapEff"))
 
