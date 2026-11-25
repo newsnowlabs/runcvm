@@ -4,13 +4,15 @@
 Container/VMs with a disk each: with RUNCVM_SECCOMP unset, =minimal, =engine
 and =unconfined; with RUNCVM_SYS_ADMIN=1; and launched with --security-opt
 seccomp=unconfined, for which the engine gives the container no profile (not a
-supported way to run unconfined, but one that must still work). Three more:
+supported way to run unconfined, but one that must still work). Four more:
 with RUNCVM_SECCOMP unset, one with a disk and RUNCVM_DISK_AIO=native, and one
-with no disk; and one with RUNCVM_SECCOMP=minimal and no disk. For each:
+with no disk; with RUNCVM_SECCOMP=minimal, one with no disk, and one with a
+disk and --security-opt seccomp=unconfined. For each:
 
 - The container's init (runcvm-ctr-entrypoint) and QEMU, on the host, are
   seccomp-filtered (Seccomp: 2 in their /proc/<pid>/status) under a
-  profile, and not filtered (Seccomp: 0) when unconfined. virtiofsd,
+  profile, and not filtered (Seccomp: 0) when unconfined; RUNCVM_SECCOMP=minimal
+  applies its profile even where the engine gives the container none. virtiofsd,
   which installs a seccomp filter of its own, is not a witness.
 - QEMU opens the disk with aio=io_uring, unless RUNCVM_DISK_AIO=native forces
   aio=native, or the host's kernel.io_uring_disabled turns io_uring off for
@@ -31,9 +33,11 @@ with no disk; and one with RUNCVM_SECCOMP=minimal and no disk. For each:
   exactly the calls listed for the host's architecture
   (runcvm-scripts/seccomp/<arch>, with runcvm-scripts/seccomp/virtiofsd;
   scripts/seccomp/ in the package), with io_uring's only where allowed
-  (above). Otherwise (by default, and with RUNCVM_SECCOMP=engine), it is the
-  engine's default profile with RunCVM's further calls in a rule of their
-  own. Where unconfined, the bundle has no profile. The bundle is read, as
+  (above), except that clone is allowed only without the flags that create
+  namespaces, and clone3 fails with ENOSYS. Otherwise (by default, and with
+  RUNCVM_SECCOMP=engine), it is the engine's default profile with RunCVM's
+  further calls in a final allow rule of their own, and in no rule that
+  denies them. Where unconfined, the bundle has no profile. The bundle is read, as
   root, through the same short-lived container.
 
 A Container/VM with an invalid RUNCVM_SECCOMP value fails to start, with an
@@ -63,9 +67,11 @@ CASES = {
     "aio-native": ["--env", "RUNCVM_DISK_AIO=native"],
     "no-disk": [],
     "minimal-no-disk": ["--env", "RUNCVM_SECCOMP=minimal"],
+    "minimal-unconfined": ["--env", "RUNCVM_SECCOMP=minimal", "--security-opt", "seccomp=unconfined"],
 }
 DISKLESS = ("no-disk", "minimal-no-disk")
-MINIMAL = ("minimal", "minimal-no-disk")
+MINIMAL = ("minimal", "minimal-no-disk", "minimal-unconfined")
+CLONE_NAMESPACE_FLAGS = 0x7E020000
 UNCONFINED = ("runcvm-unconfined", "unconfined")
 
 
@@ -122,7 +128,9 @@ def bundle_seccomp(case, name):
     """The seccomp section of container NAME's bundle (config.json), as Docker or Podman keeps
     it: a dict, {} where it has none, or None if the bundle could not be read."""
     cid = t.docker("inspect", "-f", "{{.Id}}", name).stdout.strip()
+    # containerd's state, where Docker uses a system containerd or runs its own, then Podman's.
     paths = ["/proc/1/root/run/containerd/io.containerd.runtime.v2.task/moby/%s/config.json" % cid,
+             "/proc/1/root/run/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/%s/config.json" % cid,
              "/proc/1/root/var/lib/containers/storage/overlay-containers/%s/userdata/config.json" % cid]
     r = t.docker("run", "--rm", "--name", t.unique("seccomp-bundle-" + case), *t.labels(), "--privileged",
                  "--pid=host", IMAGE, "sh", "-c",
@@ -172,6 +180,7 @@ def run(case):
     volume = t.unique("seccomp-" + case)
     t.volume_create(volume)
     name = t.unique("seccomp-" + case)
+    t.cleanup_container(name)
     results = {}
 
     disk = [] if case in DISKLESS else ["--mount", "type=volume,src=%s,dst=/disks" % volume,
@@ -221,14 +230,25 @@ for case, results in zip(CASES, t.parallel(run, list(CASES), remove=True)):
             expected = ENGINE_ADDED | (IO_URING if io_uring_allowed(case) else set())
             t.check("%s: engine's profile kept, with its own rules" % case, True, len(rules) > 1)
             t.check("%s: RunCVM's calls added to the engine's profile" % case, sorted(expected), sorted(added))
+            t.check("%s: RunCVM's rule allows" % case, "SCMP_ACT_ALLOW", rules[-1].get("action") if rules else None)
+            denying = sorted(set(n for rule in rules if rule.get("action") != "SCMP_ACT_ALLOW"
+                                 for n in rule.get("names", [])) & expected)
+            t.check("%s: no rule denies RunCVM's calls" % case, [], denying)
         else:
             rules = profile.get("syscalls", [])
             t.check("%s: profile denies unlisted calls with EPERM" % case, ("SCMP_ACT_ERRNO", 1),
                     (profile.get("defaultAction"), profile.get("defaultErrnoRet")))
             allowed = set(n for rule in rules if rule.get("action") == "SCMP_ACT_ALLOW"
                           for n in rule.get("names", []))
-            expected = (listed or set()) | (IO_URING if io_uring_allowed(case) else set())
-            t.check("%s: profile has RunCVM's rule alone" % case, 1, len(rules))
+            expected = ((listed or set()) - {"clone3"}) | (IO_URING if io_uring_allowed(case) else set())
+            t.check("%s: profile has RunCVM's three rules" % case, 3, len(rules))
+            clone = [rule for rule in rules if rule.get("names") == ["clone"]]
+            t.check("%s: clone allowed only without namespace flags" % case,
+                    [{"index": 0, "value": CLONE_NAMESPACE_FLAGS, "valueTwo": 0, "op": "SCMP_CMP_MASKED_EQ"}],
+                    clone[0].get("args") if clone else None)
+            clone3 = [rule for rule in rules if rule.get("names") == ["clone3"]]
+            t.check("%s: clone3 fails with ENOSYS" % case, ("SCMP_ACT_ERRNO", 38),
+                    (clone3[0].get("action"), clone3[0].get("errnoRet")) if clone3 else None)
             if not t.check("%s: profile allows exactly the listed calls" % case, True, allowed == expected):
                 t.log("%s: allowed but not listed: %s; listed but not allowed: %s"
                       % (case, " ".join(sorted(allowed - expected)) or "-",

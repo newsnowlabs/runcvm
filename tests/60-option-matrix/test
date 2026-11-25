@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""RunCVM options that no other test runs, under the default confinement.
+"""RunCVM options that no other test runs, under the strictest confinement.
 
 The processes RunCVM runs in the container (QEMU, virtiofsd, dnsmasq, and
-RunCVM's scripts and tools) run under RunCVM's own seccomp profile and
-capability set, which allow only what those processes need; which system
-calls they make depends on the options a Container/VM is launched with. Each
-case launches one Container/VM, with a disk where the option concerns its
-I/O or memory, on a user-defined network:
+RunCVM's scripts and tools) run here under RunCVM's own seccomp profile
+(RUNCVM_SECCOMP=minimal) and capability set (RUNCVM_CAPS at its default,
+minimal), which allow only what those processes need; which system calls they
+make depends on the options a Container/VM is launched with. Each case launches one
+Container/VM, with a disk where the option concerns its I/O or memory, on a
+user-defined network:
 
 - disks: RUNCVM_DISK_AIO=threads;
 - memory: RUNCVM_HUGETLB=1 (where the host has at least 1 GiB of free
@@ -23,7 +24,13 @@ Each Container/VM boots and serves 'docker exec', with and without a
 terminal; writes a file to its disk, where it has one, and reads it back;
 writes, chowns and removes a file in the VM's root filesystem, through
 virtiofsd; resolves its own name through DNS; has its network interface up;
-and stops when asked to. Other options are left to their own tests, e.g.
+and shuts down cleanly when asked to stop: its workload exits on SIGTERM, with
+status 0, within docker stop's timeout. Each
+option's own effect is checked too: in QEMU's or virtiofsd's command line
+(the disk's aio mode, the memory backend's hugetlb or prealloc, vhost-net,
+the VGA device, the serial monitor, the curses display, USB, the EFI
+firmware, virtiofsd's --killpriv-v2), or for RUNCVM_IPV6=1, a global IPv6
+address in the VM. Other options are left to their own tests, e.g.
 disk filesystems and layouts to 21-disks and 29-multipath-disks, VNC to
 36-vnc, CPU and memory sizes to 22-resources, extra networks to
 38-multi-network, and capabilities and seccomp to 55-seccomp,
@@ -33,6 +40,7 @@ disk filesystems and layouts to 21-disks and 29-multipath-disks, VNC to
 import os
 import random
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import framework as t  # noqa: E402
@@ -42,6 +50,26 @@ IMAGE = "alpine"
 SIZE = 128 << 20
 ARCH = os.uname().machine
 DISK = "/disks/d,/srv/d,ext4,%d" % SIZE
+STOP_TIMEOUT = 10
+# Exits on docker stop's SIGTERM, which the VM's PID 1 otherwise ignores.
+WORKLOAD = 'trap "exit 0" TERM; sleep infinity & wait'
+X86 = ARCH == "x86_64"
+
+# Each option's effect: (process, a string in its command line), or "ipv6" for a global IPv6 address.
+EFFECTS = {
+    "aio-threads": ("qemu", "aio=threads"),
+    "hugetlb": ("qemu", "hugetlb=on"),
+    "prealloc": ("qemu", "prealloc=on"),
+    "vhost": ("qemu", "vhost=on"),
+    "ipv6": "ipv6",
+    "vnc-std": ("qemu", "-vga std" if X86 else "bochs-display"),
+    "vga-cirrus": ("qemu", "-vga cirrus"),
+    "serial": ("qemu", "-mon chardev=char0"),
+    "curses": ("qemu", "-display curses"),
+    "usb": ("qemu", "usb=on" if X86 else "qemu-xhci"),
+    "efi": ("qemu", "OVMF.fd"),
+    "virtiofsd-killpriv": ("virtiofsd", "--killpriv-v2"),
+}
 
 
 def hugepages_free():
@@ -99,7 +127,8 @@ def run(case):
     network = NETWORK6 if name == "ipv6" else NETWORK
     t.cleanup_container(container)
     r = t.docker("create", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
-                 "--network", network, *opts, *disk_opts, IMAGE, "sleep", "infinity")
+                 "--network", network, "--env", "RUNCVM_SECCOMP=minimal", *opts, *disk_opts,
+                 IMAGE, "sh", "-c", WORKLOAD)
     if r.returncode == 0:
         r = t.docker("start", container)
     results = {}
@@ -118,8 +147,20 @@ def run(case):
     results["dns"] = t.docker("exec", container, "nslookup", container + ".").returncode
     results["interfaces"] = len([line for line in t.docker("exec", container, "ip", "-o", "link", "show", "up")
                                  .stdout.splitlines() if ": lo:" not in line])
-    t.docker("stop", "-t", "10", container)
-    results["stopped"] = t.docker("inspect", "-f", "{{.State.Running}}", container).stdout.strip()
+    effect = EFFECTS[name]
+    if effect == "ipv6":
+        results["effect"] = t.docker("exec", container, "ip", "-6", "-o", "addr", "show", "scope",
+                                     "global").stdout.strip() != ""
+    else:
+        process, text = effect
+        r = t.docker("top", container, "-eo", "pid,args")
+        # By name anywhere in the line, as RunCVM runs each binary through its own loader.
+        results["effect"] = any(process in line and text in line for line in r.stdout.splitlines()[1:])
+    started = time.time()
+    t.docker("stop", "-t", str(STOP_TIMEOUT), container)
+    results["stop_seconds"] = time.time() - started
+    results["stopped"] = t.docker("inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}",
+                                  container).stdout.strip()
     return results
 
 
@@ -138,6 +179,9 @@ for (name, opts, disk, _), results in zip(RUNS, t.parallel(run, RUNS, remove=Tru
     t.check("%s: 'docker exec -t' works" % name, "tty-ok", results["tty"])
     t.check("%s: own name resolves through DNS" % name, 0, results["dns"])
     t.check("%s: network interface up" % name, 1, results["interfaces"])
-    t.check("%s: stops when asked to" % name, "false", results["stopped"])
+    t.check("%s: option takes effect" % name, True, results["effect"])
+    t.check("%s: stops when asked to, with its workload's exit status" % name, "false 0", results["stopped"])
+    t.check("%s: shuts down within docker stop's timeout" % name, True,
+            results["stop_seconds"] < STOP_TIMEOUT)
 
 t.finish()

@@ -47,6 +47,7 @@ ppoll
 prlimit64
 pselect6
 recvfrom
+restart_syscall
 rt_sigsuspend
 rt_sigtimedwait
 seccomp

@@ -64,6 +64,7 @@ def run(item):
     volume = t.unique("matrix-" + tag)
     t.volume_create(volume)
     name = t.unique("matrix-" + tag)
+    t.cleanup_container(name)
     env = []
     if seccomp:
         env += ["--env", "RUNCVM_SECCOMP=" + seccomp]

@@ -53,6 +53,7 @@ ppoll
 prlimit64
 readlink
 recvfrom
+restart_syscall
 rt_sigsuspend
 rt_sigtimedwait
 seccomp

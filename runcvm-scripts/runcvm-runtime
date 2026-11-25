@@ -405,6 +405,37 @@ get_config_env() {
   [ -n "$value" ] && echo -n "$value" || echo -n "$default"
 }
 
+# set_capabilities <file> <path> <RUNCVM_CAPS> <RUNCVM_SYS_ADMIN>
+# Sets the capability sets at <path> (a JSON array path, e.g. ["process","capabilities"]) in
+# <file>, a bundle's config.json or an exec's process.json, for RunCVM's processes (see
+# RUNCVM_CAPS where the create command calls this). The same sets apply to the container's init and
+# to the processes 'docker exec' starts in the container.
+set_capabilities() {
+  local file="$1" path="$2" mode="$3" sys_admin="$4" caps filter
+
+  case "$mode" in
+    ''|minimal)
+      caps='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_MKNOD","CAP_NET_ADMIN",
+        "CAP_NET_BIND_SERVICE","CAP_SETFCAP","CAP_SETGID","CAP_SETUID","CAP_SYS_CHROOT"]'
+      filter='setpath($p; {"bounding": $caps, "effective": $caps, "permitted": $caps,
+        "inheritable": [], "ambient": []})'
+      ;;
+    engine)
+      caps='["CAP_AUDIT_WRITE","CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_KILL",
+        "CAP_MKNOD","CAP_NET_ADMIN","CAP_NET_BIND_SERVICE","CAP_NET_RAW","CAP_SETFCAP","CAP_SETGID",
+        "CAP_SETPCAP","CAP_SETUID","CAP_SYS_CHROOT"]'
+      filter='reduce ("bounding", "effective", "permitted") as $set (.;
+        setpath($p + [$set]; (getpath($p + [$set]) // []) + $caps | unique))'
+      ;;
+    *) error "RUNCVM_CAPS '$mode' invalid (should be minimal or engine)" ;;
+  esac
+  if [ "$sys_admin" = "1" ]; then
+    filter+=' | reduce ("bounding", "effective", "permitted") as $set (.;
+      setpath($p + [$set]; (getpath($p + [$set]) // []) + ["CAP_SYS_ADMIN"] | unique))'
+  fi
+  jq_set "$file" --argjson p "$path" --argjson caps "$caps" "$filter"
+}
+
 set_config_env() {
   local var="$1"
   local value="$2"
@@ -951,11 +982,12 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   #   scripts/seccomp/virtiofsd, and denies any other with EPERM, as the engines' default profiles
   #   do. The image build writes it from those lists (build-utils/make-seccomp-profile.sh).
   # - unconfined: no profile, leaving RunCVM's processes unfiltered.
-  # A bundle the engine left with no profile (docker run --security-opt seccomp=unconfined, or
-  # --privileged) is left unconfined too, but that is not a supported way to run them so: these
-  # options are reserved to apply, in future, to the VM rather than to RunCVM's processes. A profile
-  # of the user's own (--security-opt seccomp=<file>) is unsupported: 'minimal' replaces it, and
-  # 'engine' adds to it.
+  # Under 'engine', a bundle the engine left with no profile (docker run --security-opt
+  # seccomp=unconfined, or --privileged) is left unconfined, but that is not a supported way to run
+  # them so: these options are reserved to apply, in future, to the VM rather than to RunCVM's
+  # processes. 'minimal' gives every bundle RunCVM's profile, whether or not the engine gave it one.
+  # A profile of the user's own (--security-opt seccomp=<file>) is unsupported: 'minimal' replaces
+  # it, and 'engine' adds to it.
   RUNCVM_SECCOMP="$(get_config_env 'RUNCVM_SECCOMP')"
   case "$RUNCVM_SECCOMP" in
     '') RUNCVM_SECCOMP=engine ;;
@@ -975,7 +1007,7 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     [ -n "$SECCOMP_IO_URING" ] && SECCOMP_ALLOW+=",$SECCOMP_IO_URING"
     jq_set "$CFG" --argjson names "[$SECCOMP_ALLOW]" '
       if .linux.seccomp then
-        .linux.seccomp.syscalls |= (map(if .action == "SCMP_ACT_ALLOW" then . else .names -= $names end)
+        .linux.seccomp.syscalls |= ((. // []) | map(if .action == "SCMP_ACT_ALLOW" then . else .names -= $names end)
           | map(select(.names | length > 0)))
         | .linux.seccomp.syscalls += [{"names": $names, "action": "SCMP_ACT_ALLOW"}]
       else . end'
@@ -983,9 +1015,7 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     SECCOMP_PROFILE="$RUNCVM/scripts/seccomp/profile.json"
     [ -f "$SECCOMP_PROFILE" ] || error "RUNCVM_SECCOMP=minimal: no seccomp profile ($SECCOMP_PROFILE) for this architecture; use RUNCVM_SECCOMP=engine"
     jq_set "$CFG" --slurpfile profile "$SECCOMP_PROFILE" --argjson io_uring "[$SECCOMP_IO_URING]" '
-      if .linux.seccomp then
-        .linux.seccomp = ($profile[0] | .syscalls[0].names += $io_uring)
-      else . end'
+      .linux.seccomp = ($profile[0] | .syscalls[0].names += $io_uring)'
   fi
   
   # CONFIGURE MEMORY
@@ -1046,33 +1076,10 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   #     net.ipv4.ip_unprivileged_port_start to 0 in the container's network namespace.
   # - engine: Docker's default capabilities and CAP_NET_ADMIN, added to those the container was
   #   given.
-  RUNCVM_CAPS="$(get_config_env 'RUNCVM_CAPS')"
-  case "$RUNCVM_CAPS" in
-    ''|minimal)
-      jq_set "$CFG" --argjson caps '[
-        "CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_MKNOD","CAP_NET_ADMIN",
-        "CAP_NET_BIND_SERVICE","CAP_SETFCAP","CAP_SETGID","CAP_SETUID","CAP_SYS_CHROOT"]' '
-        reduce ("bounding", "effective", "permitted") as $set (.;
-          .process.capabilities[$set] = $caps)
-        | .process.capabilities.inheritable = [] | .process.capabilities.ambient = []'
-      ;;
-    engine)
-      jq_set "$CFG" --argjson caps '[
-        "CAP_AUDIT_WRITE","CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_KILL",
-        "CAP_MKNOD","CAP_NET_ADMIN","CAP_NET_BIND_SERVICE","CAP_NET_RAW","CAP_SETFCAP","CAP_SETGID",
-        "CAP_SETPCAP","CAP_SETUID","CAP_SYS_CHROOT"]' '
-        reduce ("bounding", "effective", "permitted") as $set (.;
-          .process.capabilities[$set] = ((.process.capabilities[$set] // []) + $caps | unique))'
-      ;;
-    *) error "RUNCVM_CAPS '$RUNCVM_CAPS' invalid (should be minimal or engine)" ;;
-  esac
-  
-  # Filter for RUNCVM_SYS_ADMIN=1
-  RUNCVM_SYS_ADMIN=$(get_config_env "RUNCVM_SYS_ADMIN")
-  if [ "$RUNCVM_SYS_ADMIN" = "1" ]; then
-    # TODO use 'unique'
-    jq_set "$CFG" '.process.capabilities.bounding += ["CAP_SYS_ADMIN"] | .process.capabilities.effective += ["CAP_SYS_ADMIN"] | .process.capabilities.permitted += ["CAP_SYS_ADMIN"]'
-  fi
+  # RUNCVM_SYS_ADMIN=1 adds CAP_SYS_ADMIN, for virtiofsd's --modcaps=+sys_admin and mke2fs's
+  # copying of trusted.* xattrs. The exec command gives 'docker exec' processes the same sets.
+  set_capabilities "$CFG" '["process","capabilities"]' "$(get_config_env 'RUNCVM_CAPS')" \
+    "$(get_config_env 'RUNCVM_SYS_ADMIN')"
 
   # CONFIGURE ENVIRONMENT
   # This must remain the last change to config.json: it follows every set_config_env, and the
@@ -1137,6 +1144,12 @@ elif [ "$COMMAND" = "exec" ]; then
     # Save formatted process.json
     jq -r . <$PROCESS >"$RUNCVM_DEBUG_DIR/process.json-$$-1"
   fi
+
+  # The exec's process runs on the host, in the container, with the capabilities RunCVM's processes
+  # hold (see set_capabilities), whatever the engine gave it (e.g. docker exec --privileged, or
+  # the container's --cap-add). The container's RUNCVM_ settings reach it in its environment.
+  set_capabilities "$PROCESS" '["capabilities"]' "$(get_process_env "$PROCESS" 'RUNCVM_CAPS')" \
+    "$(get_process_env "$PROCESS" 'RUNCVM_SYS_ADMIN')"
 
   ARG1=$(jq_get "$PROCESS" '.args[0]')
   if [ "$ARG1" = "---" ]; then
