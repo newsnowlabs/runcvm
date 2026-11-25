@@ -1,0 +1,63 @@
+# System calls RUNCVM_SECCOMP=engine-plus denies: runcvm-runtime takes them out of every rule of
+# the engine's profile that allows them, whatever the rule's conditions, so that they fail with
+# the profile's default action (EPERM). No process RunCVM runs in the container makes them: none
+# is in ./x86_64, ./aarch64 or ./virtiofsd, which build-utils/make-seccomp-profile.sh checks. A
+# name an architecture lacks is absent from its profiles, and so denied there already. clone and
+# clone3 are not listed: engine-plus allows clone only without the flags that create namespaces,
+# and makes clone3 fail with ENOSYS, as RUNCVM_SECCOMP=minimal does.
+#
+# Changing the mount tree beneath QEMU and virtiofsd: virtiofsd sandboxes itself with chroot, and
+# RunCVM's processes mount nothing once runc has applied the container's mounts.
+fsconfig
+fsmount
+fsopen
+fspick
+mount
+mount_setattr
+move_mount
+open_tree
+pivot_root
+umount
+umount2
+# Creating or entering namespaces (with clone and clone3, as above): above all user namespaces,
+# which need no capability and give their creator capabilities in them.
+setns
+unshare
+# The kernel's keyrings.
+add_key
+keyctl
+request_key
+# Other processes' memory, such as QEMU's, which holds the VM's.
+kcmp
+pidfd_getfd
+process_vm_readv
+process_vm_writev
+ptrace
+# The host: its kernel log, kernel, modules, accounting, swap and quotas.
+acct
+delete_module
+finit_module
+init_module
+kexec_file_load
+kexec_load
+quotactl
+reboot
+swapoff
+swapon
+syslog
+# eBPF, performance monitoring and userfaultfd, each with a record of kernel exploits.
+bpf
+perf_event_open
+userfaultfd
+# File handles: virtiofsd runs with --inode-file-handles=never.
+name_to_handle_at
+open_by_handle_at
+# Splicing user memory into pipes (vmsplice), and changing the process's execution domain and
+# address-space layout (personality).
+personality
+vmsplice
+# NUMA memory policies: QEMU makes these calls only for a memory backend given a NUMA policy or
+# host nodes, which RunCVM never gives it.
+get_mempolicy
+mbind
+set_mempolicy

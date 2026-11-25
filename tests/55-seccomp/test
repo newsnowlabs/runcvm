@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The container's seccomp filter, and QEMU's disks under it.
 
-Container/VMs with a disk each: with RUNCVM_SECCOMP unset, =minimal, =engine
-and =unconfined; with RUNCVM_SYS_ADMIN=1; and launched with --security-opt
+Container/VMs with a disk each: with RUNCVM_SECCOMP unset, =engine-plus,
+=minimal, =engine and =unconfined; with RUNCVM_SYS_ADMIN=1; and launched with --security-opt
 seccomp=unconfined, for which the engine gives the container no profile (not a
 supported way to run unconfined, but one that must still work). Five more:
 with RUNCVM_SECCOMP unset, one with a disk and RUNCVM_DISK_AIO=native, and one
@@ -34,13 +34,23 @@ disk and --security-opt seccomp=unconfined or --privileged. For each:
   (runcvm-scripts/seccomp/<arch>, with runcvm-scripts/seccomp/virtiofsd;
   scripts/seccomp/ in the package), with io_uring's only where allowed
   (above), except that clone is allowed only without the flags that create
-  namespaces, and clone3 fails with ENOSYS. Otherwise (by default, and with
-  RUNCVM_SECCOMP=engine), it is the engine's default profile with RunCVM's
-  further calls in a final allow rule of their own, and in no rule that
-  denies them: the engine's own profile for the same options, read from a
-  standard (runc) container's bundle, with those calls taken out of its
-  denying rules and nothing else changed. Where unconfined, the bundle has no profile. Each bundle is read, as
-  root, through a short-lived container with the host's process namespace.
+  namespaces, and clone3 fails with ENOSYS. With RUNCVM_SECCOMP=engine, it is
+  the engine's default profile with RunCVM's further calls in a final allow
+  rule of their own, and in no rule that denies them: the engine's own
+  profile for the same options, read from a standard (runc) container's
+  bundle, with those calls taken out of its denying rules and nothing else
+  changed. By default, and with RUNCVM_SECCOMP=engine-plus, it is the same,
+  except that the calls listed in runcvm-scripts/seccomp/engine-plus-deny are
+  also taken out of every rule allowing them, clone and clone3 out of every
+  rule, rules left empty dropped, and minimal's two clone rules added before
+  RunCVM's own: computed here from the engine's own profile and the list, and
+  compared with the bundle's. The engine's own profile allows at least one
+  listed call, so that the comparison shows the narrowing. Where unconfined,
+  the bundle has no profile. Each bundle is read, as root, through a
+  short-lived container with the host's process namespace.
+
+The denylist names none of the calls listed for any architecture, nor
+virtiofsd's: calls RunCVM's processes make.
 
 A Container/VM with an invalid RUNCVM_SECCOMP value fails to start, with an
 error naming the variable.
@@ -60,6 +70,7 @@ IMAGE = "alpine"
 SIZE = 64 << 20
 CASES = {
     "default": [],
+    "engine-plus": ["--env", "RUNCVM_SECCOMP=engine-plus"],
     "minimal": ["--env", "RUNCVM_SECCOMP=minimal"],
     "engine": ["--env", "RUNCVM_SECCOMP=engine"],
     "sys-admin": ["--env", "RUNCVM_SYS_ADMIN=1"],
@@ -75,6 +86,12 @@ DISKLESS = ("no-disk", "minimal-no-disk")
 MINIMAL = ("minimal", "minimal-no-disk", "minimal-unconfined", "minimal-privileged")
 CLONE_NAMESPACE_FLAGS = 0x7E020000
 UNCONFINED = ("runcvm-unconfined", "unconfined")
+ENGINE = ("engine",)
+CLONE_RULES = [
+    {"names": ["clone"], "action": "SCMP_ACT_ALLOW",
+     "args": [{"index": 0, "value": CLONE_NAMESPACE_FLAGS, "valueTwo": 0, "op": "SCMP_CMP_MASKED_EQ"}]},
+    {"names": ["clone3"], "action": "SCMP_ACT_ERRNO", "errnoRet": 38},
+]
 
 
 def io_uring_disabled():
@@ -109,15 +126,15 @@ def qemu_io_uring_fds(case, pid):
 
 
 IO_URING = {"io_uring_setup", "io_uring_enter", "io_uring_register"}
-ENGINE_ADDED = {"get_mempolicy", "set_mempolicy", "mbind", "chroot"}
+ENGINE_ADDED = {"chroot"}
 
 
-def listed_calls():
-    """The system calls RunCVM lists for this host's architecture (with virtiofsd's), or None
-    where it lists none."""
+def list_names(*files):
+    """The system calls named in RunCVM's lists FILES (in scripts/seccomp), or None if one is
+    unreadable."""
     seccomp = os.path.join(t.scripts_dir(), "seccomp")
     names = set()
-    for f in (os.uname().machine, "virtiofsd"):
+    for f in files:
         try:
             with open(os.path.join(seccomp, f)) as lines:
                 names.update(line.strip() for line in lines
@@ -125,6 +142,26 @@ def listed_calls():
         except OSError:
             return None
     return names
+
+
+def listed_calls():
+    """The system calls RunCVM lists for this host's architecture (with virtiofsd's), or None
+    where it lists none."""
+    return list_names(os.uname().machine, "virtiofsd")
+
+
+DENIED = list_names("engine-plus-deny")
+
+
+def engine_plus(rules, added):
+    """The rules engine-plus makes of the engine's RULES, RunCVM's calls ADDED being allowed."""
+    out = []
+    for rule in rules:
+        drop = {"clone", "clone3"} | (DENIED if rule.get("action") == "SCMP_ACT_ALLOW" else added)
+        names = [n for n in rule["names"] if n not in drop]
+        if names:
+            out.append(dict(rule, names=names))
+    return out + CLONE_RULES
 
 
 def expected_aio(case):
@@ -205,6 +242,7 @@ for case, results in zip(CASES, t.parallel(run, list(CASES), remove=True)):
         if case in UNCONFINED:
             t.check("%s: bundle has no seccomp profile" % case, {}, profile)
         elif case not in MINIMAL:
+            plus = case not in ENGINE
             rules = profile.get("syscalls", [])
             added = rules[-1].get("names", []) if rules else []
             expected = ENGINE_ADDED | (IO_URING if io_uring_allowed(case) else set())
@@ -216,11 +254,22 @@ for case, results in zip(CASES, t.parallel(run, list(CASES), remove=True)):
             t.check("%s: no rule denies RunCVM's calls" % case, [], denying)
             original = results.get("engine_profile")
             if t.check("%s: engine's own profile read" % case, True, bool(original)):
-                kept = [dict(rule, names=[n for n in rule["names"] if n not in expected])
-                        if rule.get("action") != "SCMP_ACT_ALLOW" else rule
-                        for rule in original.get("syscalls") or []]
-                kept = [rule for rule in kept if rule.get("names")]
-                t.check("%s: engine's rules kept, less denials of RunCVM's calls" % case, kept, rules[:-1])
+                if plus:
+                    allowing = set(n for rule in original.get("syscalls") or []
+                                   if rule.get("action") == "SCMP_ACT_ALLOW" for n in rule["names"])
+                    t.check("%s: engine's own profile allows calls engine-plus denies" % case, True,
+                            bool(allowing & (DENIED or set())))
+                    t.check("%s: engine's rules less the denylist and clone, then the clone rules" % case,
+                            engine_plus(original.get("syscalls") or [], expected), rules[:-1])
+                    still = sorted(set(n for rule in rules if rule.get("action") == "SCMP_ACT_ALLOW"
+                                       for n in rule.get("names", [])) & (DENIED or set()))
+                    t.check("%s: no rule allows a denied call" % case, [], still)
+                else:
+                    kept = [dict(rule, names=[n for n in rule["names"] if n not in expected])
+                            if rule.get("action") != "SCMP_ACT_ALLOW" else rule
+                            for rule in original.get("syscalls") or []]
+                    kept = [rule for rule in kept if rule.get("names")]
+                    t.check("%s: engine's rules kept, less denials of RunCVM's calls" % case, kept, rules[:-1])
                 t.check("%s: engine's profile otherwise unchanged" % case,
                         {k: v for k, v in original.items() if k != "syscalls"},
                         {k: v for k, v in profile.items() if k != "syscalls"})
@@ -256,6 +305,11 @@ for case, results in zip(CASES, t.parallel(run, list(CASES), remove=True)):
     if aio == "io_uring":
         t.check("%s: no warning that io_uring is unused" % case, False,
                 "io_uring is not used for disks" in results["logs"])
+
+t.check("engine-plus's denylist read", True, bool(DENIED))
+for f in ("x86_64", "aarch64", "virtiofsd"):
+    t.check("engine-plus's denylist names no call in scripts/seccomp/%s" % f, [],
+            sorted((DENIED or set()) & (list_names(f) or set())))
 
 name = t.unique("seccomp-invalid")
 r = t.docker("run", "--rm", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),

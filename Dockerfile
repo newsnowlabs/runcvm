@@ -537,8 +537,10 @@ RUN apk update && apk add --no-cache rsync
 ADD runcvm-scripts /opt/runcvm/scripts/
 ADD runcvm-etc /opt/runcvm/etc/
 
-# The container's seccomp profile under RUNCVM_SECCOMP=minimal, scripts/seccomp/profile.json, built
-# from the lists in scripts/seccomp; the build stops if they don't fit the virtiofsd built.
+# The seccomp profile of RunCVM's processes in the container under RUNCVM_SECCOMP=minimal,
+# scripts/seccomp/profile.json, and engine-plus's denylist and rules,
+# scripts/seccomp/engine-plus.json, built from the lists in scripts/seccomp; the build stops if
+# they don't fit the virtiofsd built, or if the denylist names a call the other lists need.
 COPY build-utils/make-seccomp-profile.sh /usr/local/bin/
 RUN make-seccomp-profile.sh /opt/runcvm
 COPY LICENSE NOTICE /opt/runcvm/
