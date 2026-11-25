@@ -46,6 +46,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked <<_EOE_
 apt-get update
 apt-get install -y --no-install-recommends \
+  apparmor \
   ca-certificates \
   curl \
   dbus \
