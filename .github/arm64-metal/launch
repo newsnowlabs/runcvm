@@ -319,6 +319,11 @@ set -e
 curl -fsSL https://get.docker.com | sh
 usermod -aG docker,kvm ubuntu
 ls -l /dev/kvm
+# 1 GiB of hugepages, for RUNCVM_HUGETLB=1's case in tests/60-option-matrix, which is skipped
+# without them (as it is where the kernel, with memory fragmented, reserves fewer).
+echo 1 >/proc/sys/vm/compact_memory
+sysctl -w vm.nr_hugepages=\$(( 1048576 / \$(awk '/^Hugepagesize:/ {print \$2}' /proc/meminfo) ))
+grep -E '^HugePages_(Total|Free)|^Hugepagesize' /proc/meminfo
 sudo -u ubuntu git init -q /home/ubuntu/runcvm
 cd /home/ubuntu/runcvm
 sudo -u ubuntu git fetch -q --depth 1 https://github.com/$REPO.git $REF

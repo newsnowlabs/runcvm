@@ -190,6 +190,16 @@ jobs:
           ls -l /dev/kvm
           [ -r /dev/kvm ] && [ -w /dev/kvm ]
 
+      - name: Reserve 1 GiB of hugepages
+        # For RUNCVM_HUGETLB=1's case in tests/60-option-matrix, which needs 1 GiB of free
+        # hugepages and is skipped without them, as it is where the kernel, with memory
+        # fragmented, reserves fewer than asked; compacting memory first makes that less likely.
+        run: |
+          size_kb=$(awk '/^Hugepagesize:/ {print $2}' /proc/meminfo)
+          echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null
+          sudo sysctl -w vm.nr_hugepages=$(( 1048576 / size_kb ))
+          grep -E '^HugePages_(Total|Free)|^Hugepagesize' /proc/meminfo
+
       # After installing Docker, so that the image goes into the Docker that runs the tests.
       - name: Download the image
         uses: actions/download-artifact@v4
@@ -275,6 +285,17 @@ jobs:
             echo "=== no /dev/kvm: Container/VMs run under software emulation (TCG)"
             echo "kvm=false" >>"$GITHUB_OUTPUT"
           fi
+
+      - name: Reserve 1 GiB of hugepages
+        if: steps.facts.outputs.kvm == 'true'
+        # For RUNCVM_HUGETLB=1's case in tests/60-option-matrix, which needs 1 GiB of free
+        # hugepages and is skipped without them, as it is where the kernel, with memory
+        # fragmented, reserves fewer than asked; compacting memory first makes that less likely.
+        run: |
+          size_kb=$(awk '/^Hugepagesize:/ {print $2}' /proc/meminfo)
+          echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null
+          sudo sysctl -w vm.nr_hugepages=$(( 1048576 / size_kb ))
+          grep -E '^HugePages_(Total|Free)|^Hugepagesize' /proc/meminfo
 
       - uses: docker/setup-buildx-action@v3
         id: buildx
