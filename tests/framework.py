@@ -33,6 +33,8 @@ RUN_ID = os.environ.get("RUNCVM_TEST_RUN_ID") or "manual-%d" % os.getpid()
 TEST_NAME = os.environ.get("RUNCVM_TEST_NAME") or os.path.basename(os.getcwd())
 RUNTIME = os.environ.get("RUNTIME") or "runcvm"
 MOCK = os.environ.get("RUNCVM_TEST_MOCK") == "1"
+# The container engine whose CLI the tests' docker commands run (see tests/run --engine)
+ENGINE = os.environ.get("RUNCVM_TEST_ENGINE") or "docker"
 ACCEL = os.environ.get("RUNCVM_TEST_ACCEL") or None
 # Whether to run checks that launch Container/VMs explicitly under software emulation (TCG),
 # which are slow on a host with KVM: as RUNCVM_TEST_TCG_CASES says (see tests/run), or, where
@@ -361,6 +363,21 @@ def volume_read(volume, path):
     return r.stdout if r.returncode == 0 else None
 
 
+def host_processes(name):
+    """The processes of container NAME, as [(pid, args)], each by its PID on the host, as
+    proc_status and /proc read it; [] if they could not be listed. Docker's 'top' gives host PIDs,
+    Podman's those in the container's own PID namespace unless asked for 'hpid'."""
+    r = docker("top", name, *(["hpid", "args"] if ENGINE == "podman" else ["-eo", "pid,args"]))
+    if r.returncode != 0:
+        return []
+    procs = []
+    for line in r.stdout.splitlines()[1:]:
+        pid, _, args = line.strip().partition(" ")
+        if pid.isdigit():
+            procs.append((pid, args.strip()))
+    return procs
+
+
 def proc_status(pid):
     """The fields of /proc/PID/status on the host, as {name: value string}; {} if unreadable."""
     fields = {}
@@ -378,15 +395,21 @@ def proc_status(pid):
 def bundle_config(name):
     """The OCI configuration (config.json) of container NAME's bundle, as a dict, or None if it
     could not be read. It is read, as root, through a short-lived standard (runc) container with
-    the host's process namespace, from containerd's state (where Docker uses a system containerd,
-    or runs its own) or Podman's storage."""
-    r = docker("inspect", "-f", "{{.Id}}", name)
-    cid = r.stdout.strip()
-    if r.returncode != 0 or not re.fullmatch(r"[0-9a-f]{64}", cid):
-        return None
-    paths = ["/proc/1/root/run/containerd/io.containerd.runtime.v2.task/moby/%s/config.json" % cid,
-             "/proc/1/root/run/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/%s/config.json" % cid,
-             "/proc/1/root/var/lib/containers/storage/overlay-containers/%s/userdata/config.json" % cid]
+    the host's process namespace: under Docker, from containerd's state (where Docker uses a system
+    containerd, or runs its own); under Podman, from the path Podman gives, in its storage."""
+    if ENGINE == "podman":
+        r = docker("inspect", "-f", "{{.OCIConfigPath}}", name)
+        path = r.stdout.strip()
+        if r.returncode != 0 or not re.fullmatch(r"/[^\n]*/config\.json", path):
+            return None
+        paths = ["/proc/1/root" + path]
+    else:
+        r = docker("inspect", "-f", "{{.Id}}", name)
+        cid = r.stdout.strip()
+        if r.returncode != 0 or not re.fullmatch(r"[0-9a-f]{64}", cid):
+            return None
+        paths = ["/proc/1/root/run/containerd/io.containerd.runtime.v2.task/moby/%s/config.json" % cid,
+                 "/proc/1/root/run/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/%s/config.json" % cid]
     r = docker("run", "--rm", "--name", unique("bundle-" + name), *labels(), "--runtime=runc",
                "--privileged", "--pid=host", "alpine", "sh", "-c",
                'for f in "$@"; do [ -f "$f" ] && exec cat "$f"; done; exit 1', "sh", *paths)

@@ -93,8 +93,9 @@ the runtime or the scripts.
   detached, the deadline `RUNCVM_TEST_EXEC_TIMEOUT`; a test that runs docker through `subprocess`
   itself passes a timeout); `log_detail` for
   step-by-step progress (e.g. each of many requests' outcomes), which goes to the test's log,
-  and to the terminal only with `tests/run --verbose`; `proc_status` and `bundle_config`
-  (Python) to read a host process's `/proc/<pid>/status` and a container's OCI configuration;
+  and to the terminal only with `tests/run --verbose`; `host_processes`, `proc_status` and `bundle_config`
+  (Python) to list a container's processes by their host PIDs, read a host process's
+  `/proc/<pid>/status` and read a container's OCI configuration, under Docker or Podman;
   `parallel` (Python) to run independent cases at once, with `remove=True` to remove each
   case's Container/VMs and volumes as soon as its call returns, so that no more than
   `RUNCVM_TEST_JOBS` cases' VMs run at once (leave `jobs` to `RUNCVM_TEST_JOBS`, except where a
