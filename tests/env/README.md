@@ -158,12 +158,13 @@ The dev user is `runcvm`:
 
 ```
 VOLUME /disks
-ENV RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G
+ENV RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/var/lib/containers:/opt/runcvm:/home,ext4,40G
 ```
 
-A single disk holds `/var/lib/docker`, `/var/lib/containerd`, `/opt/runcvm` and `/home`, in the default `subdirs` layout (see the RunCVM README's `RUNCVM_DISKS`). Without the disk, these paths would be served over virtiofs:
+A single disk holds `/var/lib/docker`, `/var/lib/containerd`, `/var/lib/containers`, `/opt/runcvm` and `/home`, in the default `subdirs` layout (see the RunCVM README's `RUNCVM_DISKS`). Without the disk, these paths would be served over virtiofs:
 
 - `/var/lib/docker` and `/var/lib/containerd`: Docker would fall back to its slow `vfs` storage driver, as overlayfs cannot use virtiofs;
+- `/var/lib/containers`: Podman's storage, likewise; and virtiofs, which RunCVM's `virtiofsd` serves without `CAP_SYS_ADMIN` unless `RUNCVM_SYS_ADMIN=1`, cannot hold the `trusted.*` extended attributes that tests set on Podman volumes;
 - `/opt/runcvm`: L2s would see L1's RunCVM over a second, nested, virtiofs;
 - `/home`: builds and checkouts would be slower than on a block device.
 
@@ -173,8 +174,8 @@ Being sparse, the backing file can outgrow the free space on L0's filesystem whi
 
 ```sh
 docker run -d --runtime=runcvm -m 4g --cpus=4 --stop-timeout=120 --name=runcvm-l1 \
-  --env=RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G,prealloc=on runcvm-l1
-docker exec runcvm-l1 runcvm-l1-check --disks=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G,prealloc=on
+  --env=RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/var/lib/containers:/opt/runcvm:/home,ext4,40G,prealloc=on runcvm-l1
+docker exec runcvm-l1 runcvm-l1-check --disks=/disks/l1,/var/lib/docker:/var/lib/containerd:/var/lib/containers:/opt/runcvm:/home,ext4,40G,prealloc=on
 ```
 
 `prealloc=on` also applies to an existing disk, which it allocates in full when L1 next starts.

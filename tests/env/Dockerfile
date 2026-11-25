@@ -144,10 +144,11 @@ COPY rootfs/ /
 COPY README.md /usr/local/share/doc/runcvm-l1/README.md
 
 # One sparse disk, in the /disks volume, holding the paths that should not be served over
-# virtiofs: Docker's and containerd's storage (overlayfs cannot use virtiofs), the RunCVM that
-# L1 runs L2s with (which would otherwise be nested virtiofs) and /home.
+# virtiofs: Docker's, containerd's and Podman's storage (overlayfs cannot use virtiofs, nor can
+# virtiofs keep trusted.* xattrs without CAP_SYS_ADMIN), the RunCVM that L1 runs L2s with (which
+# would otherwise be nested virtiofs) and /home.
 VOLUME /disks
-ENV RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/opt/runcvm:/home,ext4,40G
+ENV RUNCVM_DISKS=/disks/l1,/var/lib/docker:/var/lib/containerd:/var/lib/containers:/opt/runcvm:/home,ext4,40G
 
 # IPv6 in L1's kernel, whether or not L1's network on L0 is dual-stack.
 ENV RUNCVM_IPV6=1
