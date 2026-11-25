@@ -1,0 +1,76 @@
+# System calls the processes RunCVM runs in the container on the host (x86_64) need, beyond those
+# in ./virtiofsd: QEMU, dnsmasq, RunCVM's scripts and tools, and runc's own after it loads the
+# filter (before it runs the container's init): the calls those processes make across RunCVM's
+# configurations (disks, filesystems, display modes, networks, --init and more). io_uring's calls
+# are not listed: runcvm-runtime adds them only for a Container/VM with disks that may use
+# io_uring. get_mempolicy, set_mempolicy and mbind are for QEMU's memory backend, which calls them
+# when QEMU is built with NUMA support.
+access
+arch_prctl
+bind
+chdir
+chroot
+close_range
+connect
+dup2
+execve
+faccessat
+faccessat2
+fadvise64
+fork
+get_mempolicy
+getcwd
+getgid
+getgroups
+getpeername
+getpgid
+getppid
+getresgid
+getresuid
+getsockname
+getsockopt
+getuid
+inotify_add_watch
+inotify_init1
+io_destroy
+io_setup
+io_submit
+ioctl
+kill
+lgetxattr
+listen
+llistxattr
+lremovexattr
+lsetxattr
+lstat
+mbind
+memfd_create
+mkdir
+nanosleep
+pipe
+poll
+ppoll
+prlimit64
+readlink
+recvfrom
+rt_sigsuspend
+rt_sigtimedwait
+seccomp
+select
+sendfile
+set_mempolicy
+set_tid_address
+setfsgid
+setfsuid
+setgid
+setsid
+setsockopt
+setuid
+signalfd4
+socket
+socketpair
+stat
+symlink
+sysinfo
+uname
+wait4

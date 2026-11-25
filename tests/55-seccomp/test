@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """The container's seccomp filter, and QEMU's disks under it.
 
-Four Container/VMs with a disk each: one under the engine's default seccomp
-profile; one under that profile with RUNCVM_SYS_ADMIN=1; one with
-RUNCVM_SECCOMP=unconfined; and one launched with --security-opt
+Container/VMs with a disk each: with RUNCVM_SECCOMP unset, =minimal, =engine
+and =unconfined; with RUNCVM_SYS_ADMIN=1; and launched with --security-opt
 seccomp=unconfined, for which the engine gives the container no profile (not a
-supported way to run unconfined, but one that must still work). Two more under
-the default profile: one with a disk and RUNCVM_DISK_AIO=native, and one with
+supported way to run unconfined, but one that must still work). Two more with
+RUNCVM_SECCOMP unset: one with a disk and RUNCVM_DISK_AIO=native, and one with
 no disk. For each:
 
 - The container's init (runcvm-ctr-entrypoint) and QEMU, on the host, are
-  seccomp-filtered (Seccomp: 2 in their /proc/<pid>/status) under the
-  default profile, and not filtered (Seccomp: 0) when unconfined. virtiofsd,
+  seccomp-filtered (Seccomp: 2 in their /proc/<pid>/status) under a
+  profile, and not filtered (Seccomp: 0) when unconfined. virtiofsd,
   which installs a seccomp filter of its own, is not a witness.
 - QEMU opens the disk with aio=io_uring, unless RUNCVM_DISK_AIO=native forces
   aio=native, or the host's kernel.io_uring_disabled turns io_uring off for
@@ -26,6 +25,17 @@ no disk. For each:
   read through a short-lived container with the host's process namespace, as
   they are readable only by root.
 
+- On an architecture for which RunCVM lists the system calls its processes
+  need (runcvm-scripts/seccomp/<arch>, with runcvm-scripts/seccomp/virtiofsd;
+  scripts/seccomp/ in the package), the profile
+  in the container's bundle is RunCVM's own (by default, and with
+  RUNCVM_SECCOMP=minimal): it denies every other system call with EPERM, and
+  allows exactly the listed calls, with io_uring's only where allowed (above).
+  With RUNCVM_SECCOMP=engine, it is the engine's default profile with RunCVM's
+  further calls in a rule of their own. Where unconfined, the bundle has no
+  profile. The bundle is read, as root, through the same short-lived
+  container.
+
 A Container/VM with an invalid RUNCVM_SECCOMP value fails to start, with an
 error naming the variable.
 
@@ -33,6 +43,7 @@ The init's process is found with docker inspect, QEMU's with docker top, and
 their status read from the host's /proc.
 """
 
+import json
 import os
 import sys
 
@@ -44,6 +55,8 @@ IMAGE = "alpine"
 SIZE = 64 << 20
 CASES = {
     "default": [],
+    "minimal": ["--env", "RUNCVM_SECCOMP=minimal"],
+    "engine": ["--env", "RUNCVM_SECCOMP=engine"],
     "sys-admin": ["--env", "RUNCVM_SYS_ADMIN=1"],
     "runcvm-unconfined": ["--env", "RUNCVM_SECCOMP=unconfined"],
     "unconfined": ["--security-opt", "seccomp=unconfined"],
@@ -82,6 +95,42 @@ def qemu_io_uring_fds(case, pid):
                  # between its listing and its reading; the directory's presence is the test.
                  "ls -l /proc/%s/fd 2>/dev/null; test -d /proc/%s/fd" % (pid, pid))
     return r.stdout.count("anon_inode:[io_uring]") if r.returncode == 0 else None
+
+
+IO_URING = {"io_uring_setup", "io_uring_enter", "io_uring_register"}
+ENGINE_ADDED = {"get_mempolicy", "set_mempolicy", "mbind", "chroot"}
+
+
+def listed_calls():
+    """The system calls RunCVM lists for this host's architecture (with virtiofsd's), or None
+    where it lists none."""
+    seccomp = os.path.join(t.scripts_dir(), "seccomp")
+    names = set()
+    for f in (os.uname().machine, "virtiofsd"):
+        try:
+            with open(os.path.join(seccomp, f)) as lines:
+                names.update(line.strip() for line in lines
+                             if line.strip() and not line.startswith(("#", "virtiofsd-version")))
+        except OSError:
+            return None
+    return names
+
+
+def bundle_seccomp(case, name):
+    """The seccomp section of container NAME's bundle (config.json), as Docker or Podman keeps
+    it: a dict, {} where it has none, or None if the bundle could not be read."""
+    cid = t.docker("inspect", "-f", "{{.Id}}", name).stdout.strip()
+    paths = ["/proc/1/root/run/containerd/io.containerd.runtime.v2.task/moby/%s/config.json" % cid,
+             "/proc/1/root/var/lib/containers/storage/overlay-containers/%s/userdata/config.json" % cid]
+    r = t.docker("run", "--rm", "--name", t.unique("seccomp-bundle-" + case), *t.labels(), "--privileged",
+                 "--pid=host", IMAGE, "sh", "-c",
+                 "for f in %s; do [ -f \"$f\" ] && exec cat \"$f\"; done; exit 1" % " ".join(paths))
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout).get("linux", {}).get("seccomp") or {}
+    except ValueError:
+        return None
 
 
 def expected_aio(case):
@@ -132,6 +181,7 @@ def run(case):
         return results
 
     results["init"] = seccomp_mode(t.docker("inspect", "-f", "{{.State.Pid}}", name).stdout.strip())
+    results["profile"] = bundle_seccomp(case, name)
     for pid, args in processes(name).items():
         if "qemu-system" in args:
             results["qemu"] = (seccomp_mode(pid), args)
@@ -158,6 +208,29 @@ for case, results in zip(CASES, t.parallel(run, list(CASES), remove=True)):
     qemu_mode, qemu_args = results.get("qemu", (None, ""))
     t.check("%s: init's Seccomp mode" % case, filtered, results["init"])
     t.check("%s: QEMU's Seccomp mode" % case, filtered, qemu_mode)
+    listed = listed_calls()
+    profile = results.get("profile")
+    if listed is not None and t.check("%s: bundle's seccomp profile read" % case, True, profile is not None):
+        if case in UNCONFINED:
+            t.check("%s: bundle has no seccomp profile" % case, {}, profile)
+        elif case == "engine":
+            rules = profile.get("syscalls", [])
+            added = rules[-1].get("names", []) if rules else []
+            expected = ENGINE_ADDED | (IO_URING if io_uring_allowed(case) else set())
+            t.check("%s: engine's profile kept, with its own rules" % case, True, len(rules) > 1)
+            t.check("%s: RunCVM's calls added to the engine's profile" % case, sorted(expected), sorted(added))
+        else:
+            rules = profile.get("syscalls", [])
+            t.check("%s: profile denies unlisted calls with EPERM" % case, ("SCMP_ACT_ERRNO", 1),
+                    (profile.get("defaultAction"), profile.get("defaultErrnoRet")))
+            allowed = set(n for rule in rules if rule.get("action") == "SCMP_ACT_ALLOW"
+                          for n in rule.get("names", []))
+            expected = listed | (IO_URING if io_uring_allowed(case) else set())
+            t.check("%s: profile has RunCVM's rule alone" % case, 1, len(rules))
+            if not t.check("%s: profile allows exactly the listed calls" % case, True, allowed == expected):
+                t.log("%s: allowed but not listed: %s; listed but not allowed: %s"
+                      % (case, " ".join(sorted(allowed - expected)) or "-",
+                         " ".join(sorted(expected - allowed)) or "-"))
     holds = io_uring_allowed(case) and io_uring_usable(case)
     fds = results.get("io_uring_fds")
     if t.check("%s: QEMU's file descriptors read" % case, True, fds is not None):

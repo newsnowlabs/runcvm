@@ -529,6 +529,21 @@ RUN apk update && apk add --no-cache rsync
 
 ADD runcvm-scripts /opt/runcvm/scripts/
 ADD runcvm-etc /opt/runcvm/etc/
+
+# The container's seccomp profile (runcvm-runtime) allows virtiofsd's own system calls, listed in
+# scripts/seccomp/virtiofsd for one virtiofsd version, and the other processes' for the build's
+# architecture in scripts/seccomp/<arch>. The build stops if the virtiofsd built is another
+# version, whose system calls the list may not cover, or if the architecture has no list.
+RUN <<EOF
+set -e
+built=$(/opt/runcvm/lib/ld /opt/runcvm/usr/lib/qemu/virtiofsd --version | sed -n 's/^virtiofsd \([0-9.]*\).*/\1/p')
+listed=$(sed -n 's/^virtiofsd-version //p' /opt/runcvm/scripts/seccomp/virtiofsd)
+if [ -z "$built" ] || [ "$built" != "$listed" ]; then
+  echo "virtiofsd built is version '$built', but scripts/seccomp/virtiofsd lists the system calls of version '$listed': update the list from that version's src/seccomp.rs" >&2
+  exit 1
+fi
+[ -f "/opt/runcvm/scripts/seccomp/$(uname -m)" ] || { echo "scripts/seccomp/$(uname -m) missing: no seccomp list for this architecture" >&2; exit 1; }
+EOF
 COPY LICENSE NOTICE /opt/runcvm/
 
 # The integration tests, which run from the package as /opt/runcvm/tests/run, so that a host can
