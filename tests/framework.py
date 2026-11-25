@@ -21,6 +21,7 @@ Usage, in a test directory's executable 'test' file:
 
 import atexit
 import concurrent.futures
+import json
 import os
 import re
 import subprocess
@@ -358,6 +359,43 @@ def volume_read(volume, path):
     r = docker("run", "--rm", "--runtime=runc", "--network=none", *labels(), "-v", "%s:/v:ro" % volume,
                "alpine", "cat", "/v/%s" % path)
     return r.stdout if r.returncode == 0 else None
+
+
+def proc_status(pid):
+    """The fields of /proc/PID/status on the host, as {name: value string}; {} if unreadable."""
+    fields = {}
+    try:
+        with open("/proc/%s/status" % pid) as f:
+            for line in f:
+                key, sep, value = line.partition(":")
+                if sep:
+                    fields[key] = value.strip()
+    except OSError:
+        pass
+    return fields
+
+
+def bundle_config(name):
+    """The OCI configuration (config.json) of container NAME's bundle, as a dict, or None if it
+    could not be read. It is read, as root, through a short-lived standard (runc) container with
+    the host's process namespace, from containerd's state (where Docker uses a system containerd,
+    or runs its own) or Podman's storage."""
+    r = docker("inspect", "-f", "{{.Id}}", name)
+    cid = r.stdout.strip()
+    if r.returncode != 0 or not re.fullmatch(r"[0-9a-f]{64}", cid):
+        return None
+    paths = ["/proc/1/root/run/containerd/io.containerd.runtime.v2.task/moby/%s/config.json" % cid,
+             "/proc/1/root/run/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/%s/config.json" % cid,
+             "/proc/1/root/var/lib/containers/storage/overlay-containers/%s/userdata/config.json" % cid]
+    r = docker("run", "--rm", "--name", unique("bundle-" + name), *labels(), "--runtime=runc",
+               "--privileged", "--pid=host", "alpine", "sh", "-c",
+               'for f in "$@"; do [ -f "$f" ] && exec cat "$f"; done; exit 1', "sh", *paths)
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return None
 
 
 def _register(kind, name):

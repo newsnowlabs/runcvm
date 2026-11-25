@@ -1,12 +1,33 @@
 #!/usr/bin/env python3
-"""A RunCVM Container/VM with capabilities taken away from its container.
+"""The capabilities of a RunCVM Container/VM's container.
 
 RunCVM's own processes in the container (QEMU, virtiofsd, dnsmasq and the
-network configuration) need capabilities, which the container keeps whatever
-it was given: a Container/VM launched with --cap-drop=ALL, also with
---security-opt=no-new-privileges, boots, runs its workload and serves
-'docker exec'. The workload runs under the VM's own kernel, so it keeps its
-capabilities there. Each case runs with and without --init.
+network configuration) hold exactly the capabilities they need, whatever the
+container was given: CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_FOWNER, CAP_FSETID,
+CAP_MKNOD, CAP_NET_ADMIN, CAP_NET_BIND_SERVICE, CAP_SETFCAP, CAP_SETGID,
+CAP_SETUID and CAP_SYS_CHROOT, and CAP_SYS_ADMIN too with RUNCVM_SYS_ADMIN=1.
+The container's init, on the host, holds exactly these in its effective and
+bounding sets, and none in its inheritable and ambient sets: by default
+(RUNCVM_CAPS unset, and =minimal); with capabilities taken away
+(--cap-drop=ALL, also with --security-opt=no-new-privileges, and
+--cap-drop=NET_ADMIN); with one added (--cap-add=SYS_PTRACE); and with
+--privileged. With RUNCVM_CAPS=engine, it holds Docker's default capabilities
+and CAP_NET_ADMIN, with any the container was given (--cap-add=SYS_PTRACE),
+even with --cap-drop=ALL. Each Container/VM boots, runs its workload and
+serves 'docker exec'. An invalid RUNCVM_CAPS stops a Container/VM starting.
+The workload runs under the VM's own kernel, so it keeps its capabilities
+there. Each case runs with and without --init.
+
+The processes 'docker exec' starts in the container, on the host, which relay
+its command to the VM, hold RunCVM's own fixed set, in the effective,
+permitted and bounding sets, with the inheritable and ambient sets empty, in
+each case, whatever RUNCVM_CAPS and RUNCVM_SYS_ADMIN are: for a plain 'docker
+exec', and for one with --privileged and RUNCVM_CAPS=engine and
+RUNCVM_SYS_ADMIN=1 in its own environment.
+
+'docker exec <container> --- <command>', which runs <command> in the container
+rather than the VM, runs with the capabilities the engine gives the exec (with
+--privileged, including CAP_SYS_ADMIN).
 """
 
 import os
@@ -17,14 +38,44 @@ import framework as t  # noqa: E402
 
 BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
 
+CAPS = {"CAP_CHOWN": 0, "CAP_DAC_OVERRIDE": 1, "CAP_FOWNER": 3, "CAP_FSETID": 4, "CAP_SETGID": 6,
+        "CAP_SETUID": 7, "CAP_NET_BIND_SERVICE": 10, "CAP_NET_ADMIN": 12, "CAP_SYS_CHROOT": 18,
+        "CAP_MKNOD": 27, "CAP_SETFCAP": 31}
+EXPECTED = sum(1 << bit for bit in CAPS.values())
+# RUNCVM_CAPS=engine: Docker's default capabilities and CAP_NET_ADMIN, added to the container's
+ENGINE = EXPECTED | sum(1 << bit for bit in (5, 8, 13, 29))  # CAP_KILL, CAP_SETPCAP, CAP_NET_RAW, CAP_AUDIT_WRITE
+CAP_SYS_ADMIN = 1 << 21
+CAP_SYS_PTRACE = 1 << 19
+
 # (name, docker run options)
 CASES = [
+    ("default", []),
     ("cap-drop-all", ["--cap-drop=ALL"]),
     ("cap-drop-all-no-new-privileges", ["--cap-drop=ALL", "--security-opt=no-new-privileges"]),
     ("cap-drop-net-admin", ["--cap-drop=NET_ADMIN"]),
+    ("cap-add-sys-ptrace", ["--cap-add=SYS_PTRACE"]),
+    ("privileged", ["--privileged"]),
+    ("sys-admin", ["--env=RUNCVM_SYS_ADMIN=1"]),
+    ("minimal", ["--env=RUNCVM_CAPS=minimal", "--cap-add=SYS_PTRACE"]),
+    ("engine", ["--env=RUNCVM_CAPS=engine"]),
+    ("engine-cap-add-sys-ptrace", ["--env=RUNCVM_CAPS=engine", "--cap-add=SYS_PTRACE"]),
+    ("engine-cap-drop-all", ["--env=RUNCVM_CAPS=engine", "--cap-drop=ALL"]),
 ]
 
 RUNS = [(init, case) for init in (False, True) for case in CASES]
+
+
+def host_caps(pid):
+    """The capability sets in /proc/PID/status on the host, as {field: int}; {} if unreadable."""
+    return {key: int(value, 16) for key, value in t.proc_status(pid).items() if key.startswith("Cap")}
+
+
+def relay_pids(container):
+    """The host PIDs of the processes in CONTAINER that relay a 'docker exec' to the VM:
+    runcvm-ctr-exec, and the dbclient it becomes."""
+    r = t.docker("top", container, "-eo", "pid,args")
+    return set(pid for pid, _, args in (line.strip().partition(" ") for line in r.stdout.splitlines()[1:])
+               if pid.isdigit() and ("runcvm-ctr-exec" in args or "dbclient" in args))
 
 
 def run(item):
@@ -35,12 +86,35 @@ def run(item):
                  *(["--init"] if init else []), *opts, "alpine", "sh", "-c",
                  "echo workload-ran; sleep 600")
     if r.returncode != 0 or not t.wait_for_exec(container, BOOT_TIMEOUT):
-        return False, "", t.docker("logs", container).stdout
+        return False, "", {}, {}, t.docker("logs", container).stdout
     caps = t.docker("exec", container, "grep", "CapEff", "/proc/self/status").stdout.split()
-    return True, caps[1] if len(caps) > 1 else "", t.docker("logs", container).stdout
+    host = host_caps(t.docker("inspect", "-f", "{{.State.Pid}}", container).stdout.strip())
+    # The processes 'docker exec' starts in the container, on the host, while its command runs in
+    # the VM: for a plain exec, and for one that asks for more (--privileged, and RunCVM's settings
+    # overridden in its environment).
+    helpers = {}
+    for kind, seconds, exec_opts in (("plain", "601", []),
+                                     ("privileged", "602", ["--privileged", "-e", "RUNCVM_CAPS=engine",
+                                                            "-e", "RUNCVM_SYS_ADMIN=1"])):
+        found = helpers[kind] = {}
+        # Each exec's processes are the relay processes that appear once it starts.
+        before = relay_pids(container)
+        if t.docker("exec", "-d", *exec_opts, container, "sleep", seconds).returncode != 0:
+            continue
+
+        def exec_helpers():
+            for pid in relay_pids(container) - before:
+                sets = host_caps(pid)
+                if sets:
+                    found[pid] = sets
+            return found
+
+        t.wait_for("'docker exec' (%s) processes in %s" % (kind, container), 30, exec_helpers)
+    return True, caps[1] if len(caps) > 1 else "", host, \
+        {kind: list(found.values()) for kind, found in helpers.items()}, t.docker("logs", container).stdout
 
 
-for (init, (name, opts)), (started, caps, logs) in zip(RUNS, t.parallel(run, RUNS)):
+for (init, (name, opts)), (started, caps, host, helpers, logs) in zip(RUNS, t.parallel(run, RUNS, remove=True)):
     desc = "%s, %s" % (name, "--init" if init else "no --init")
     t.param(desc, " ".join(opts))
     if not t.check("%s: Container/VM boots and 'docker exec' works" % desc, True, started):
@@ -49,5 +123,43 @@ for (init, (name, opts)), (started, caps, logs) in zip(RUNS, t.parallel(run, RUN
     t.check("%s: workload ran" % desc, True, "workload-ran" in logs)
     t.check("%s: 'docker exec' process has CAP_NET_ADMIN in the VM" % desc, True,
             caps != "" and int(caps, 16) != 0 and int(caps, 16) & (1 << 12) != 0)
+    if name.startswith("engine"):
+        expected = ENGINE | (CAP_SYS_PTRACE if "--cap-add=SYS_PTRACE" in opts else 0)
+    else:
+        expected = EXPECTED | (CAP_SYS_ADMIN if name == "sys-admin" else 0)
+    for key in ("CapEff", "CapPrm", "CapBnd"):
+        t.check("%s: container's init on the host: %s" % (desc, key), "%016x" % expected,
+                "%016x" % host[key] if key in host else "unreadable")
+    for kind, found in sorted(helpers.items()):
+        if not t.check("%s: %s 'docker exec' processes found on the host" % (desc, kind), True, len(found) > 0):
+            continue
+        for key in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
+            t.check("%s: %s 'docker exec' processes on the host: %s" % (desc, kind, key),
+                    ["%016x" % (0 if key in ("CapInh", "CapAmb") else EXPECTED)],
+                    sorted(set("%016x" % h[key] if key in h else "unreadable" for h in found)))
+    if name.startswith("engine"):
+        continue
+    for key in ("CapInh", "CapAmb"):
+        t.check("%s: container's init on the host: %s" % (desc, key), "%016x" % 0,
+                "%016x" % host[key] if key in host else "unreadable")
+
+name = t.unique("caps-invalid")
+r = t.docker("run", "--rm", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+             "--env", "RUNCVM_CAPS=bogus", "alpine", "true")
+t.check("invalid RUNCVM_CAPS: Container/VM fails to start", True, r.returncode != 0)
+t.check("invalid RUNCVM_CAPS: error names RUNCVM_CAPS", True, "RUNCVM_CAPS" in (r.stdout or ""))
+
+# 'docker exec <container> --- <command>' runs <command> in the container rather than the VM, with
+# the capabilities the engine gives the exec.
+desc = "--- passthrough"
+name = t.unique("caps-passthrough")
+t.cleanup_container(name)
+r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+             "alpine", "sleep", "infinity")
+if t.check("%s: Container/VM boots" % desc, True, r.returncode == 0 and t.wait_for_exec(name, BOOT_TIMEOUT)):
+    r = t.docker("exec", "--privileged", name, "---", "grep", "CapEff", "/proc/self/status")
+    caps = r.stdout.split()
+    t.check("%s: runs, with the exec's capabilities (--privileged: CAP_SYS_ADMIN)" % desc, True,
+            r.returncode == 0 and len(caps) > 1 and int(caps[1], 16) & CAP_SYS_ADMIN != 0)
 
 t.finish()

@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""RunCVM options that no other test runs, under the strictest confinement.
+
+The processes RunCVM runs in the container (QEMU, virtiofsd, dnsmasq, and
+RunCVM's scripts and tools) run here under RunCVM's own seccomp profile and
+capability set (RUNCVM_SECCOMP=minimal, RUNCVM_CAPS=minimal, each checked on
+the container's init), which allow only what those processes need; which
+system calls they make depends on the options a Container/VM is launched with.
+Each case launches one Container/VM, with a disk where the option concerns
+its I/O or memory, on a user-defined IPv4 network:
+
+- disks: RUNCVM_DISK_AIO=threads;
+- memory: RUNCVM_HUGETLB=1 (where the host has at least 1 GiB of free
+  hugepages) and RUNCVM_QEMU_MEM_PREALLOC=on;
+- network: RUNCVM_QEMU_NET_VHOST=1 (where the host has /dev/vhost-net), and
+  RUNCVM_IPV6=1;
+- display and devices: RUNCVM_DISPLAY_MODE=vnc with RUNCVM_QEMU_VGA=std;
+  RUNCVM_QEMU_VGA=cirrus (x86-64); RUNCVM_DISPLAY_MODE=serial;
+  RUNCVM_QEMU_DISPLAY=curses (with a terminal); RUNCVM_QEMU_USB=on;
+  RUNCVM_BIOS=EFI (x86-64);
+- virtiofsd: RUNCVM_VIRTIOFSD_KILLPRIV=1.
+
+Each Container/VM boots and serves 'docker exec', with and without a
+terminal; writes a file to its disk, where it has one, and reads it back;
+writes, chowns and removes a file in the VM's root filesystem, through
+virtiofsd; resolves its own name through DNS; has its network interface up;
+and shuts down cleanly when asked to stop: its workload exits on SIGTERM, with
+its own exit status, 42, which RunCVM gives the container, and docker stop
+succeeds within its timeout, rather than killing the VM at its end. The
+bundle holds RunCVM's minimal profile. Each
+option's own effect is checked too: in QEMU's or virtiofsd's command line
+(the disk's aio mode, the memory backend's hugetlb or prealloc, vhost-net,
+the VNC server and VGA device, the serial monitor, the curses display, USB,
+the EFI firmware, virtiofsd's --killpriv-v2); and IPv6 in the VM's kernel,
+which only the RUNCVM_IPV6=1 case has, all cases being on an IPv4 network. Other
+options are left to their own tests, e.g. disk filesystems and layouts to
+21-disks and 29-multipath-disks, VNC to 36-vnc, CPU and memory sizes to
+22-resources, extra networks to 38-multi-network, and capabilities and seccomp
+to 55-seccomp, 57-capabilities and 59-confinement-matrix.
+"""
+
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 180
+IMAGE = "alpine"
+SIZE = 128 << 20
+ARCH = os.uname().machine
+DISK = "/disks/d,/srv/d,ext4,%d" % SIZE
+STOP_TIMEOUT = 10
+# Exits on docker stop's SIGTERM, which the VM's PID 1 otherwise ignores, with its own exit
+# status, which RunCVM gives the container (as in 15-stop-kill).
+EXIT_STATUS = 42
+WORKLOAD = 'trap "echo %d >/.runcvm/exitcode; exit 0" TERM; sleep infinity & wait' % EXIT_STATUS
+# RunCVM's own capability set (RUNCVM_CAPS=minimal), as CapEff
+MINIMAL_CAPS = "%016x" % sum(1 << bit for bit in (0, 1, 3, 4, 6, 7, 10, 12, 18, 27, 31))
+X86 = ARCH == "x86_64"
+
+# Each option's effect: (process, strings in its command line), or "ipv6" for IPv6 in the VM's kernel.
+EFFECTS = {
+    "aio-threads": ("qemu", ["aio=threads"]),
+    "hugetlb": ("qemu", ["hugetlb=on"]),
+    "prealloc": ("qemu", ["prealloc=on"]),
+    "vhost": ("qemu", ["vhost=on"]),
+    "ipv6": "ipv6",
+    "vnc-std": ("qemu", ["-vnc", "-vga std" if X86 else "bochs-display"]),
+    "vga-cirrus": ("qemu", ["-vga cirrus"]),
+    "serial": ("qemu", ["-mon chardev=char0"]),
+    "curses": ("qemu", ["-display curses"]),
+    "usb": ("qemu", ["usb=on" if X86 else "qemu-xhci"]),
+    "efi": ("qemu", ["OVMF.fd"]),
+    "virtiofsd-killpriv": ("virtiofsd", ["--killpriv-v2"]),
+}
+
+
+def hugepages_free():
+    """The host's free hugepage memory, in bytes."""
+    free = size = 0
+    with open("/proc/meminfo") as f:
+        for line in f:
+            if line.startswith("HugePages_Free:"):
+                free = int(line.split()[1])
+            elif line.startswith("Hugepagesize:"):
+                size = int(line.split()[1]) * 1024
+    return free * size
+
+
+# (name, docker run options, disk spec or None, reason to skip or None)
+CASES = [
+    ("aio-threads", ["--env", "RUNCVM_DISK_AIO=threads"], DISK, None),
+    ("hugetlb", ["--memory=512m", "--env", "RUNCVM_HUGETLB=1"], DISK,
+     None if hugepages_free() >= (1 << 30) else "the host has less than 1 GiB of free hugepages"),
+    ("prealloc", ["--env", "RUNCVM_QEMU_MEM_PREALLOC=on"], DISK, None),
+    ("vhost", ["--env", "RUNCVM_QEMU_NET_VHOST=1"], DISK,
+     None if os.path.exists("/dev/vhost-net") else "the host has no /dev/vhost-net"),
+    ("ipv6", ["--env", "RUNCVM_IPV6=1"], None, None),
+    ("vnc-std", ["--env", "RUNCVM_DISPLAY_MODE=vnc", "--env", "RUNCVM_QEMU_VGA=std"], None, None),
+    ("vga-cirrus", ["--env", "RUNCVM_QEMU_VGA=cirrus"], None,
+     None if ARCH == "x86_64" else "cirrus is x86-64 only"),
+    ("serial", ["--env", "RUNCVM_DISPLAY_MODE=serial"], None, None),
+    ("curses", ["-t", "--env", "RUNCVM_QEMU_DISPLAY=curses"], None, None),
+    ("usb", ["--env", "RUNCVM_QEMU_USB=on"], None, None),
+    ("efi", ["--env", "RUNCVM_BIOS=EFI"], DISK, None if ARCH == "x86_64" else "EFI is x86-64 only"),
+    ("virtiofsd-killpriv", ["--env", "RUNCVM_VIRTIOFSD_KILLPRIV=1"], None, None),
+]
+
+NETWORK = t.unique("options")
+t.docker("network", "create", *t.labels(), NETWORK, check=True)
+t.cleanup_network(NETWORK)
+
+RUNS = [c for c in CASES if c[3] is None]
+
+
+def run(case):
+    name, opts, disk, _ = case
+    container = t.unique("option-" + name)
+    disk_opts = []
+    if disk:
+        volume = t.unique("option-" + name)
+        t.volume_create(volume)
+        disk_opts = ["--mount", "type=volume,src=%s,dst=/disks" % volume, "--env", "RUNCVM_DISKS=" + disk]
+    t.cleanup_container(container)
+    r = t.docker("create", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 "--network", NETWORK, "--env", "RUNCVM_SECCOMP=minimal", "--env", "RUNCVM_CAPS=minimal",
+                 *opts, *disk_opts, IMAGE, "sh", "-c", WORKLOAD)
+    if r.returncode == 0:
+        r = t.docker("start", container)
+    results = {}
+    if r.returncode != 0 or not t.wait_for_exec(container, BOOT_TIMEOUT):
+        results["error"] = (r.stdout or "") + t.docker("logs", container).stdout
+        return results
+    results["init"] = t.proc_status(t.docker("inspect", "-f", "{{.State.Pid}}", container).stdout.strip())
+    if disk:
+        results["disk"] = t.docker("exec", container, "sh", "-c",
+                                   "echo written >/srv/d/f && sync && cat /srv/d/f").stdout.strip()
+    r = t.docker("exec", container, "sh", "-c",
+                 "echo a >/root/f && chown 12:34 /root/f && stat -c %u:%g /root/f && rm /root/f")
+    results["rootfs"] = r.stdout.strip() if r.returncode == 0 else "failed: " + r.stdout.strip()
+    config = t.bundle_config(container)
+    rules = ((config or {}).get("linux", {}).get("seccomp") or {}).get("syscalls") or []
+    results["minimal_profile"] = len(rules) == 3 and rules[2].get("names") == ["clone3"]
+    results["tty"] = t.docker("exec", "-t", container, "sh", "-c", "echo tty-ok").stdout.strip()
+    # As an absolute name, so that the host's search domains (which the container inherits) play no
+    # part in the lookup.
+    results["dns"] = t.docker("exec", container, "nslookup", container + ".").returncode
+    results["interfaces"] = len([line for line in t.docker("exec", container, "ip", "-o", "link", "show", "up")
+                                 .stdout.splitlines() if ": lo:" not in line])
+    # IPv6 in the VM's kernel: /proc/sys/net/ipv6 exists unless the kernel booted with ipv6.disable=1.
+    r = t.docker("exec", container, "test", "-d", "/proc/sys/net/ipv6")
+    results["ipv6"] = r.returncode == 0 if r.returncode in (0, 1) else None
+    effect = EFFECTS[name]
+    if effect == "ipv6":
+        results["effect"] = results["ipv6"] is True
+    else:
+        process, texts = effect
+        r = t.docker("top", container, "-eo", "pid,args")
+        # By name anywhere in the line, as RunCVM runs each binary through its own loader.
+        results["effect"] = r.returncode == 0 and any(
+            process in line and all(text in line for text in texts) for line in r.stdout.splitlines()[1:])
+    started = time.time()
+    results["stop_status"] = t.docker("stop", "-t", str(STOP_TIMEOUT), container).returncode
+    results["stop_seconds"] = time.time() - started
+    results["stopped"] = t.docker("inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}",
+                                  container).stdout.strip()
+    return results
+
+
+t.param("arch", ARCH)
+for name, _, _, reason in CASES:
+    if reason:
+        t.skip_check("%s: Container/VM boots" % name, reason)
+
+for (name, opts, disk, _), results in zip(RUNS, t.parallel(run, RUNS, remove=True)):
+    if not t.check("%s: Container/VM boots and 'docker exec' works" % name, True, "error" not in results):
+        t.log(results["error"])
+        continue
+    if disk:
+        t.check("%s: disk reads back what was written" % name, "written", results["disk"])
+    t.check("%s: file chowned in the VM's root filesystem" % name, "12:34", results["rootfs"])
+    t.check("%s: 'docker exec -t' works" % name, "tty-ok", results["tty"])
+    t.check("%s: own name resolves through DNS" % name, 0, results["dns"])
+    t.check("%s: network interface up" % name, 1, results["interfaces"])
+    t.check("%s: container's init seccomp-filtered" % name, "2", results["init"].get("Seccomp"))
+    t.check("%s: bundle has RunCVM's minimal profile" % name, True, results["minimal_profile"])
+    t.check("%s: container's init holds RunCVM's own capabilities" % name, MINIMAL_CAPS,
+            results["init"].get("CapEff"))
+    t.check("%s: option takes effect" % name, True, results["effect"])
+    t.check("%s: IPv6 in the VM's kernel only with RUNCVM_IPV6=1" % name, name == "ipv6", results["ipv6"])
+    t.check("%s: docker stop succeeds" % name, 0, results["stop_status"])
+    t.check("%s: stops when asked to, with the workload's exit status" % name, "false %d" % EXIT_STATUS,
+            results["stopped"])
+    t.check("%s: shuts down within docker stop's timeout" % name, True,
+            results["stop_seconds"] < STOP_TIMEOUT)
+
+t.finish()

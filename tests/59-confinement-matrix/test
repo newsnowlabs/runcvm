@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Every combination of RUNCVM_SECCOMP and RUNCVM_CAPS.
+
+RUNCVM_SECCOMP (unset, minimal, engine, unconfined) and RUNCVM_CAPS (unset,
+minimal, engine) each choose how RunCVM's own processes in the container are
+confined. Each of the 12 combinations runs a Container/VM with a disk twice:
+with the engine's defaults, and with --cap-drop=ALL and
+--security-opt=no-new-privileges. Each Container/VM:
+
+- boots, and serves 'docker exec';
+- writes a file to its disk, mounted (ext4) at its destination, and reads it
+  back;
+- makes, through virtiofsd, file operations needing its capabilities in the
+  VM's root filesystem (chown, chmod with the setuid bit, mknod);
+- has its container's init, on the host, seccomp-filtered (Seccomp: 2) unless
+  RUNCVM_SECCOMP=unconfined (Seccomp: 0), under the profile RUNCVM_SECCOMP
+  chooses, read from the container's bundle: RunCVM's own three rules for
+  minimal, the engine's with RunCVM's further calls last for engine or unset,
+  and none for unconfined; with the capabilities RUNCVM_CAPS
+  gives: exactly RunCVM's own set for minimal or unset, and Docker's default
+  capabilities with CAP_NET_ADMIN, added to the container's, for engine.
+"""
+
+import itertools
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+IMAGE = "alpine"
+SIZE = 64 << 20
+
+SECCOMP = ["", "minimal", "engine", "unconfined"]
+CAPS = ["", "minimal", "engine"]
+VARIANTS = [("engine-defaults", []),
+            ("cap-drop-all-nnp", ["--cap-drop=ALL", "--security-opt=no-new-privileges"])]
+
+# Capability bits: RunCVM's own set (minimal), and Docker's defaults with CAP_NET_ADMIN (engine).
+MINIMAL = sum(1 << b for b in (0, 1, 3, 4, 6, 7, 10, 12, 18, 27, 31))
+ENGINE = MINIMAL | sum(1 << b for b in (5, 8, 13, 29))
+
+RUNS = list(itertools.product(SECCOMP, CAPS, VARIANTS))
+
+
+def label(seccomp, caps, variant):
+    return "seccomp=%s caps=%s %s" % (seccomp or "unset", caps or "unset", variant[0])
+
+
+def bundle_seccomp(name):
+    """The seccomp section of container NAME's bundle: a dict, {} where it has none, or None if
+    the bundle could not be read."""
+    config = t.bundle_config(name)
+    return None if config is None else config.get("linux", {}).get("seccomp") or {}
+
+
+def profile_kind(profile):
+    """Which profile PROFILE is: 'minimal' (RunCVM's own three rules), 'engine' (the engine's, with
+    RunCVM's further calls in its last rule), 'none', or 'other'."""
+    if profile is None:
+        return "unreadable"
+    if not profile:
+        return "none"
+    rules = profile.get("syscalls") or []
+    if len(rules) == 3 and rules[2].get("names") == ["clone3"] and profile.get("defaultErrnoRet") == 1:
+        return "minimal"
+    if len(rules) > 3 and rules[-1].get("action") == "SCMP_ACT_ALLOW" and "chroot" in rules[-1].get("names", []):
+        return "engine"
+    return "other"
+
+
+def run(item):
+    seccomp, caps, (vname, vopts) = item
+    tag = "%s-%s-%s" % (seccomp or "unset", caps or "unset", vname)
+    volume = t.unique("matrix-" + tag)
+    t.volume_create(volume)
+    name = t.unique("matrix-" + tag)
+    t.cleanup_container(name)
+    env = []
+    if seccomp:
+        env += ["--env", "RUNCVM_SECCOMP=" + seccomp]
+    if caps:
+        env += ["--env", "RUNCVM_CAPS=" + caps]
+    r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 *env, *vopts, "--mount", "type=volume,src=%s,dst=/disks" % volume,
+                 "--env", "RUNCVM_DISKS=/disks/d,/srv/d,ext4,%d" % SIZE, IMAGE, "sleep", "infinity")
+    if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
+        return {"error": r.stdout + t.docker("logs", name).stdout}
+    results = {"host": t.proc_status(t.docker("inspect", "-f", "{{.State.Pid}}", name).stdout.strip())}
+    results["disk"] = t.docker("exec", name, "sh", "-c",
+                               "awk '$2 == \"/srv/d\" && $3 == \"ext4\" { found = 1 } END { exit !found }'"
+                               " /proc/mounts && echo written >/srv/d/f && sync && cat /srv/d/f").stdout.strip()
+    results["profile"] = bundle_seccomp(name)
+    results["fsops"] = t.docker("exec", name, "sh", "-c",
+                                "cd /root && echo a >f && chown 12:34 f && chmod 4755 f"
+                                " && mknod c c 1 3 && stat -c '%u:%g %a' f && rm -f f c").stdout.strip()
+    return results
+
+
+for (seccomp, caps, variant), results in zip(RUNS, t.parallel(run, RUNS, remove=True)):
+    desc = label(seccomp, caps, variant)
+    if not t.check("%s: Container/VM boots and 'docker exec' works" % desc, True, "error" not in results):
+        t.log(results["error"])
+        continue
+    t.check("%s: disk reads back what was written" % desc, "written", results["disk"])
+    t.check("%s: file operations through virtiofsd" % desc, "12:34 4755", results["fsops"])
+    host = results["host"] or {}
+    t.check("%s: container's init Seccomp mode" % desc, "0" if seccomp == "unconfined" else "2",
+            host.get("Seccomp"))
+    t.check("%s: container's seccomp profile" % desc,
+            {"minimal": "minimal", "unconfined": "none"}.get(seccomp, "engine"), profile_kind(results["profile"]))
+    t.check("%s: container's init CapEff" % desc, "%016x" % (ENGINE if caps == "engine" else MINIMAL),
+            host.get("CapEff"))
+
+t.finish()

@@ -291,12 +291,14 @@ jq_set() {
   
   local tmp="$file.runcvm-tmp.$$"
 
-  if jq "$@" "$file" >"$tmp"; then
-    busybox mv "$tmp" "$file"
-  else
+  # Any failure stops the operation: runc must never run a configuration only partly updated.
+  if ! jq "$@" "$file" >"$tmp"; then
     busybox rm -f "$tmp"
-    echo "Failed to update ${file##*/}; aborting!" 2>&1
-    exit 1
+    error "Failed to update $file"
+  fi
+  if ! busybox mv "$tmp" "$file"; then
+    busybox rm -f "$tmp"
+    error "Failed to replace $file"
   fi
 }
 
@@ -313,7 +315,7 @@ get_process_env() {
   local default="$3"
   local value
   
-  value=$(jq_get "$file" --arg env "$var" '.env[] | select(match("^" + $env + "=")) | match("^" + $env + "=(.*)") | .captures[] | .string')
+  value=$(jq_get "$file" --arg env "$var" '[.env[] | select(startswith($env + "="))][0] // empty | .[($env | length) + 1:]')
   
   [ -n "$value" ] && echo -n "$value" || echo -n "$default"
 }
@@ -323,7 +325,7 @@ get_process_env_boolean() {
   local var="$2"
   local value
   
-  value=$(jq_get "$file" --arg env "$var" '.env[] | select(match("^" + $env + "=")) | match("^" + $env + "=(.*)") | .captures[] | .string')
+  value=$(jq_get "$file" --arg env "$var" '[.env[] | select(startswith($env + "="))][0] // empty | .[($env | length) + 1:]')
   
   [ -n "$value" ] && echo "1" || echo "0"
 }
@@ -400,10 +402,32 @@ get_config_env() {
   local default="$2"
   local value
 
-  value=$(jq_get "$CFG" --arg env "$var" '.process.env[] | select(match("^" + $env + "=")) | match("^" + $env + "=(.*)") | .captures[] | .string')
+  value=$(jq_get "$CFG" --arg env "$var" '[.process.env[] | select(startswith($env + "="))][0] // empty | .[($env | length) + 1:]')
   
   [ -n "$value" ] && echo -n "$value" || echo -n "$default"
 }
+
+# config_env_is <var> <value>
+# Whether the container's environment sets <var> to exactly <value>: its whole
+# value, as the container's scripts see it. (get_config_env's output, read through command
+# substitution, loses any trailing newlines, so cannot decide this.)
+config_env_is() {
+  [ "$(jq_get "$CFG" --arg entry "$1=$2" 'any(.process.env[]; . == $entry)')" = "true" ]
+}
+
+# RunCVM's capability sets (see the create command's RUNCVM_CAPS): its own processes' needs
+# (minimal), and Docker's default capabilities with CAP_NET_ADMIN (engine).
+RUNCVM_MINIMAL_CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_MKNOD",
+  "CAP_NET_ADMIN","CAP_NET_BIND_SERVICE","CAP_SETFCAP","CAP_SETGID","CAP_SETUID","CAP_SYS_CHROOT"]'
+RUNCVM_ENGINE_CAPS='["CAP_AUDIT_WRITE","CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID",
+  "CAP_KILL","CAP_MKNOD","CAP_NET_ADMIN","CAP_NET_BIND_SERVICE","CAP_NET_RAW","CAP_SETFCAP",
+  "CAP_SETGID","CAP_SETPCAP","CAP_SETUID","CAP_SYS_CHROOT"]'
+# A jq filter setting a capabilities object to exactly $caps, with no inheritable or ambient ones.
+RUNCVM_CAPS_EXACTLY='{"bounding": $caps, "effective": $caps, "permitted": $caps,
+  "inheritable": [], "ambient": []}'
+# A jq filter adding $caps to a capabilities object's bounding, effective and permitted sets.
+RUNCVM_CAPS_ADD='reduce ("bounding", "effective", "permitted") as $set (.;
+  .[$set] = ((.[$set] // []) + $caps | unique))'
 
 set_config_env() {
   local var="$1"
@@ -934,42 +958,66 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     jq_set "$CFG" '.linux.devices+=[{"path":"/dev/vhost-net","type":"c","major":10,"minor":238,"fileMode":8630,"uid":0,"gid":0}]'
   fi
   
-  # Seccomp: unless RUNCVM_SECCOMP=unconfined (below), the container keeps the default profile
-  # Docker or Podman resolved into the bundle (a profile of the user's own, from --security-opt
-  # seccomp=<file>, is unsupported), with these system calls also allowed, which RunCVM's processes in the container need beyond the default:
-  # - io_uring_setup, io_uring_enter, io_uring_register: QEMU's disks (aio=io_uring; see
-  #   disk_choose_aio in runcvm-ctr-qemu), and so only where the container has disks
-  #   (RUNCVM_DISKS) and RUNCVM_DISK_AIO does not choose native or threads, the modes that do
-  #   without io_uring. QEMU also tries io_uring for its event loop, and without it uses epoll.
-  # - get_mempolicy, set_mempolicy, mbind: QEMU's memory, which the default profile allows only
-  #   with CAP_SYS_NICE.
-  # - chroot: virtiofsd's sandbox (--sandbox=chroot), which the default profile allows only with
-  #   CAP_SYS_CHROOT, and so not for a container launched without it (e.g. --cap-drop=ALL).
-  # The engine resolves its profile against the capabilities given to docker run or podman run,
-  # not those the runtime gives RunCVM's own processes (below), so these calls must be allowed
-  # here, not left to a capability. Of those capabilities, only CAP_SYS_CHROOT gates a system
-  # call in Docker's default profile.
-  # RUNCVM_SECCOMP=unconfined removes the profile, leaving RunCVM's processes unfiltered. A bundle
-  # the engine left with no profile (docker run --security-opt seccomp=unconfined, or --privileged)
-  # is left unconfined too, but that is not a supported way to run them so: these options are
-  # reserved to apply, in future, to the VM rather than to RunCVM's processes.
+  # Seccomp (RUNCVM_SECCOMP): the processes RunCVM runs in the container on the host (QEMU,
+  # virtiofsd, dnsmasq, and RunCVM's own scripts and tools) run under a profile allowing the system
+  # calls they need. The workload runs in the VM, behind the VM's kernel, so its system calls are
+  # not the profile's concern. io_uring's calls (io_uring_setup, io_uring_enter, io_uring_register)
+  # are allowed only where the container has disks (RUNCVM_DISKS) and RUNCVM_DISK_AIO does not
+  # choose native or threads, the modes that do without io_uring (see disk_choose_aio in
+  # runcvm-ctr-qemu); QEMU also tries io_uring for its event loop, and without it uses epoll.
+  # - engine (the default): the engine's profile, with the calls RunCVM's processes need beyond
+  #   its default also allowed: io_uring's (as above), get_mempolicy, set_mempolicy and mbind (which
+  #   the default profile allows only with CAP_SYS_NICE), and chroot (for virtiofsd's --sandbox=chroot, which it
+  #   allows only with CAP_SYS_CHROOT). The engine resolves its profile against the capabilities
+  #   given to docker run or podman run, not those the runtime gives RunCVM's processes (below), so
+  #   these calls must be allowed here, not left to a capability. They are also taken out of the
+  #   profile's rules that deny them (Podman's profile denies chroot without CAP_SYS_CHROOT), as a
+  #   rule naming a call takes precedence over a later one.
+  # - minimal: RunCVM's own profile, scripts/seccomp/profile.json, in place of the one Docker or
+  #   Podman resolved into the bundle, with io_uring's calls as above. It allows only the calls
+  #   listed for the host's architecture in scripts/seccomp/<arch> and, for virtiofsd, in
+  #   scripts/seccomp/virtiofsd, and denies any other with EPERM, as the engines' default profiles
+  #   do. The image build writes it from those lists (build-utils/make-seccomp-profile.sh).
+  # - unconfined: no profile, leaving RunCVM's processes unfiltered.
+  # Under 'engine', a bundle the engine left with no profile (docker run --security-opt
+  # seccomp=unconfined, or --privileged) is left unconfined, but that is not a supported way to run
+  # them so: these options are reserved to apply, in future, to the VM rather than to RunCVM's
+  # processes. 'minimal' gives every bundle RunCVM's profile, whether or not the engine gave it one.
+  # A profile of the user's own (--security-opt seccomp=<file>) is unsupported: 'minimal' replaces
+  # it, and 'engine' adds to it.
   RUNCVM_SECCOMP="$(get_config_env 'RUNCVM_SECCOMP')"
+  [ -z "$RUNCVM_SECCOMP" ] || config_env_is RUNCVM_SECCOMP "$RUNCVM_SECCOMP" ||
+    error "RUNCVM_SECCOMP invalid (should be minimal, engine or unconfined)"
   case "$RUNCVM_SECCOMP" in
-    '') ;;
+    '') RUNCVM_SECCOMP=engine ;;
+    minimal|engine) ;;
     unconfined) jq_set "$CFG" 'del(.linux.seccomp)' ;;
-    *) error "RUNCVM_SECCOMP '$RUNCVM_SECCOMP' invalid (should be unconfined)" ;;
+    *) error "RUNCVM_SECCOMP '$RUNCVM_SECCOMP' invalid (should be minimal, engine or unconfined)" ;;
   esac
-  SECCOMP_ALLOW='"get_mempolicy","set_mempolicy","mbind","chroot"'
-  if [ -n "$(get_config_env 'RUNCVM_DISKS')" ]; then
-    case "$(get_config_env 'RUNCVM_DISK_AIO')" in
-      native|threads) ;;
-      *) SECCOMP_ALLOW+=',"io_uring_setup","io_uring_enter","io_uring_register"' ;;
-    esac
+  SECCOMP_IO_URING=
+  # Whether RUNCVM_DISKS names any disk: its value split as runcvm-ctr-qemu splits it, with the same
+  # split_list.
+  split_list SECCOMP_DISK_SPECS ';' "$(get_config_env 'RUNCVM_DISKS')"
+  if [ "${#SECCOMP_DISK_SPECS[@]}" -gt 0 ]; then
+    # As runcvm-ctr-qemu reads it: native or threads, exactly, or else io_uring where it can.
+    config_env_is RUNCVM_DISK_AIO native || config_env_is RUNCVM_DISK_AIO threads ||
+      SECCOMP_IO_URING='"io_uring_setup","io_uring_enter","io_uring_register"'
   fi
-  jq_set "$CFG" --argjson names "[$SECCOMP_ALLOW]" '
-    if .linux.seccomp then
-      .linux.seccomp.syscalls += [{"names": $names, "action": "SCMP_ACT_ALLOW"}]
-    else . end'
+  if [ "$RUNCVM_SECCOMP" = "engine" ]; then
+    SECCOMP_ALLOW='"get_mempolicy","set_mempolicy","mbind","chroot"'
+    [ -n "$SECCOMP_IO_URING" ] && SECCOMP_ALLOW+=",$SECCOMP_IO_URING"
+    jq_set "$CFG" --argjson names "[$SECCOMP_ALLOW]" '
+      if .linux.seccomp then
+        .linux.seccomp.syscalls |= ((. // []) | map(if .action == "SCMP_ACT_ALLOW" then . else .names -= $names end)
+          | map(select(.names | length > 0)))
+        | .linux.seccomp.syscalls += [{"names": $names, "action": "SCMP_ACT_ALLOW"}]
+      else . end'
+  elif [ "$RUNCVM_SECCOMP" != "unconfined" ]; then
+    SECCOMP_PROFILE="$RUNCVM/scripts/seccomp/profile.json"
+    [ -f "$SECCOMP_PROFILE" ] || error "RUNCVM_SECCOMP=minimal: no seccomp profile ($SECCOMP_PROFILE) for this architecture; use RUNCVM_SECCOMP=engine"
+    jq_set "$CFG" --slurpfile profile "$SECCOMP_PROFILE" --argjson io_uring "[$SECCOMP_IO_URING]" '
+      .linux.seccomp = ($profile[0] | .syscalls[0].names += $io_uring)'
+  fi
   
   # CONFIGURE MEMORY
   # Set /dev/shm to RUNCVM_MEM_SIZE env var, or to default
@@ -1012,23 +1060,35 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
       else . end'
   fi
 
-  # The container's capabilities are those of RunCVM's own processes (QEMU, virtiofsd, dnsmasq and
-  # the network configuration), which run as root; the workload runs under the VM's kernel. They
-  # hold Docker's default capabilities and CAP_NET_ADMIN, whatever the container was given (e.g.
-  # docker run --cap-drop, or --security-opt no-new-privileges), in the bounding, effective and
-  # permitted sets, so that they hold under no_new_privs too.
-  jq_set "$CFG" --argjson caps '[
-    "CAP_AUDIT_WRITE","CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_KILL",
-    "CAP_MKNOD","CAP_NET_ADMIN","CAP_NET_BIND_SERVICE","CAP_NET_RAW","CAP_SETFCAP","CAP_SETGID",
-    "CAP_SETPCAP","CAP_SETUID","CAP_SYS_CHROOT"]' '
-    reduce ("bounding", "effective", "permitted") as $set (.;
-      .process.capabilities[$set] = ((.process.capabilities[$set] // []) + $caps | unique))'
-  
-  # Filter for RUNCVM_SYS_ADMIN=1
-  RUNCVM_SYS_ADMIN=$(get_config_env "RUNCVM_SYS_ADMIN")
-  if [ "$RUNCVM_SYS_ADMIN" = "1" ]; then
-    # TODO use 'unique'
-    jq_set "$CFG" '.process.capabilities.bounding += ["CAP_SYS_ADMIN"] | .process.capabilities.effective += ["CAP_SYS_ADMIN"] | .process.capabilities.permitted += ["CAP_SYS_ADMIN"]'
+  # The container's capabilities (RUNCVM_CAPS) are those of RunCVM's own processes (QEMU,
+  # virtiofsd, dnsmasq and the network configuration), which run as root; the workload runs under
+  # the VM's kernel. They are set in the bounding, effective and permitted sets, so that they hold
+  # under no_new_privs too.
+  # - minimal (the default): exactly these, whatever the container was given (e.g. docker run
+  #   --cap-add, --cap-drop, --privileged, or --security-opt no-new-privileges), with the
+  #   inheritable and ambient sets empty:
+  #   - CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_FOWNER, CAP_FSETID, CAP_MKNOD, CAP_SETFCAP, CAP_SETUID:
+  #     virtiofsd keeps these for serving the VM's file operations, and fails to start without any
+  #     of them (it sets its capabilities with capset, which fails unless all are permitted).
+  #   - CAP_SETGID, CAP_SYS_CHROOT: virtiofsd's sandbox (dropping supplementary groups, and
+  #     --sandbox=chroot).
+  #   - CAP_NET_ADMIN: the container's network configuration (ip, nft) and QEMU's tap devices.
+  #   - CAP_NET_BIND_SERVICE: dnsmasq's port 53, where the engine does not set
+  #     net.ipv4.ip_unprivileged_port_start to 0 in the container's network namespace.
+  # - engine: Docker's default capabilities and CAP_NET_ADMIN, added to those the container was
+  #   given.
+  # RUNCVM_SYS_ADMIN=1 adds CAP_SYS_ADMIN, for virtiofsd's --modcaps=+sys_admin and mke2fs's
+  # copying of trusted.* xattrs. The exec command gives 'docker exec' processes the minimal sets.
+  RUNCVM_CAPS="$(get_config_env 'RUNCVM_CAPS')"
+  [ -z "$RUNCVM_CAPS" ] || config_env_is RUNCVM_CAPS "$RUNCVM_CAPS" ||
+    error "RUNCVM_CAPS invalid (should be minimal or engine)"
+  case "$RUNCVM_CAPS" in
+    ''|minimal) jq_set "$CFG" --argjson caps "$RUNCVM_MINIMAL_CAPS" ".process.capabilities = $RUNCVM_CAPS_EXACTLY" ;;
+    engine) jq_set "$CFG" --argjson caps "$RUNCVM_ENGINE_CAPS" ".process.capabilities |= ($RUNCVM_CAPS_ADD)" ;;
+    *) error "RUNCVM_CAPS '$RUNCVM_CAPS' invalid (should be minimal or engine)" ;;
+  esac
+  if config_env_is RUNCVM_SYS_ADMIN 1; then
+    jq_set "$CFG" --argjson caps '["CAP_SYS_ADMIN"]' ".process.capabilities |= ($RUNCVM_CAPS_ADD)"
   fi
 
   # CONFIGURE ENVIRONMENT
@@ -1097,8 +1157,18 @@ elif [ "$COMMAND" = "exec" ]; then
 
   ARG1=$(jq_get "$PROCESS" '.args[0]')
   if [ "$ARG1" = "---" ]; then
+    # 'docker exec <container> --- <command>' runs <command> in the container, on the host, rather
+    # than in the VM, as 'docker exec' would in a standard container (with the capabilities the
+    # engine gives it), for debugging and diagnostics.
     jq_set "$PROCESS" 'del(.args[0])'
   else
+    # The exec's process, which relays the command to the VM, runs on the host, in the container,
+    # with RunCVM's own fixed set of capabilities (the minimal set), whatever the engine gave it
+    # (e.g. docker exec --privileged, or the container's --cap-add) and whatever the container's or
+    # the exec's RUNCVM_CAPS and RUNCVM_SYS_ADMIN: no more than the container's init holds in any
+    # mode.
+    jq_set "$PROCESS" --argjson caps "$RUNCVM_MINIMAL_CAPS" ".capabilities = $RUNCVM_CAPS_EXACTLY"
+
     uidgid=$(jq_get "$PROCESS" '(.user.uid | tostring) + ":" + (.user.gid | tostring) + ":" + ((.user.additionalGids // []) | join(","))')
     cwd=$(jq_get "$PROCESS" '.cwd')
     hasHome=$(get_process_env_boolean "$PROCESS" 'HOME')

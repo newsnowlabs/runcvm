@@ -36,7 +36,10 @@ the runtime or the scripts.
   runtime with Docker. Installation elsewhere than `/opt/runcvm` is unsupported.
 - Changes confined to `runcvm-scripts/` can be tried without a rebuild by copying the scripts
   into `/opt/runcvm/scripts/`. They take effect for Container/VMs created afterwards — on that
-  host, for every user of RunCVM, so do this only on a development or test host.
+  host, for every user of RunCVM, so do this only on a development or test host. After changing
+  a system call list in `runcvm-scripts/seccomp/`, also run
+  `sudo build-utils/make-seccomp-profile.sh` to rebuild `/opt/runcvm/scripts/seccomp/profile.json`
+  from the copied lists.
 - RunCVM is designed for hosts with KVM (`/dev/kvm`). Without it, a Container/VM launched with
   `--env=RUNCVM_QEMU_ACCEL=tcg` runs under QEMU's software emulation (TCG): much slower, but it
   exercises RunCVM itself, so it suits sandboxes and CI hosts without nested virtualisation.
@@ -90,11 +93,12 @@ the runtime or the scripts.
   detached, the deadline `RUNCVM_TEST_EXEC_TIMEOUT`; a test that runs docker through `subprocess`
   itself passes a timeout); `log_detail` for
   step-by-step progress (e.g. each of many requests' outcomes), which goes to the test's log,
-  and to the terminal only with `tests/run --verbose`; `parallel` (Python) to run independent
-  cases at once, with `remove=True` to remove each case's Container/VMs and volumes as soon as
-  its call returns, so that no more than `RUNCVM_TEST_JOBS` cases' VMs run at once (leave `jobs`
-  to `RUNCVM_TEST_JOBS`, except where a case's VMs must run together); `skip` and `finish` to
-  end.
+  and to the terminal only with `tests/run --verbose`; `proc_status` and `bundle_config`
+  (Python) to read a host process's `/proc/<pid>/status` and a container's OCI configuration;
+  `parallel` (Python) to run independent cases at once, with `remove=True` to remove each
+  case's Container/VMs and volumes as soon as its call returns, so that no more than
+  `RUNCVM_TEST_JOBS` cases' VMs run at once (leave `jobs` to `RUNCVM_TEST_JOBS`, except where a
+  case's VMs must run together); `skip` and `finish` to end.
 - Pass `vm_opts` before a test's own `docker run` options, so that a test's own `--env`,
   `--cpus` or `--memory` overrides the runner's (`tests/run --vm-env`, `--vm-cpus`,
   `--vm-memory`); a test that checks the VM's size against its defaults uses

@@ -11,10 +11,10 @@ security.capability).
 
 - Each destination's tree on the disk matches its source: ownership, modes,
   times, contents, hard links, symlink targets and xattrs. The Container/VM
-  runs with --cap-add=SYS_ADMIN, without which mke2fs, running in the
-  container, cannot read trusted.* xattrs; for xfs and btrfs, also with
-  RUNCVM_SYS_ADMIN=1, without which virtiofsd, through which the VM copies
-  the destinations, drops the capability.
+  runs with RUNCVM_SYS_ADMIN=1, without which neither mke2fs, which
+  prepopulates ext4 disks in the container, nor virtiofsd, through which
+  the VM copies the destinations for xfs and btrfs, can read trusted.*
+  xattrs.
 - The 'subdirs' disks are mounted at /.runcvm/disks/0 and
   /.runcvm/disks/1; /mp/one, /mp/two and /default are bind mounts of their
   directories 'mp-one', 'mp-two' and 'default'.
@@ -113,8 +113,8 @@ def run(item):
     name = t.unique("multipath-disks-" + label)
     t.cleanup_container(name)
     r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
-                 *(["--init"] if init else []), "--cap-add=SYS_ADMIN",
-                 *(["--env=RUNCVM_SYS_ADMIN=1"] if fs != "ext4" else []), "--mount", "type=volume,src=%s,dst=/disks" % volume,
+                 *(["--init"] if init else []), "--env=RUNCVM_SYS_ADMIN=1",
+                 "--mount", "type=volume,src=%s,dst=/disks" % volume,
                  "--mount", "type=volume,src=%s,dst=/mp/two" % two, "--env", "RUNCVM_DISKS=" + disks(fs),
                  image, "sleep", "infinity")
     if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):

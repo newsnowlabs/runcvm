@@ -536,6 +536,11 @@ RUN apk update && apk add --no-cache rsync
 
 ADD runcvm-scripts /opt/runcvm/scripts/
 ADD runcvm-etc /opt/runcvm/etc/
+
+# The container's seccomp profile under RUNCVM_SECCOMP=minimal, scripts/seccomp/profile.json, built
+# from the lists in scripts/seccomp; the build stops if they don't fit the virtiofsd built.
+COPY build-utils/make-seccomp-profile.sh /usr/local/bin/
+RUN make-seccomp-profile.sh /opt/runcvm
 COPY LICENSE NOTICE /opt/runcvm/
 
 # The integration tests, which run from the package as /opt/runcvm/tests/run, so that a host can
