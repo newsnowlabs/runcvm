@@ -49,6 +49,9 @@ Optional per-test metadata files, in each test directory:
                     RunCVM's package is installed at /opt/runcvm (for tests
                     that run its scripts and tools without a VM, in runc
                     containers, so in stand-in mode too)
+              docker
+                    the engine is Docker (for tests of Docker's own features,
+                    e.g. swarm mode, which Podman lacks)
               docker>=<major>.<minor>
                     dockerd's version is at least <major>.<minor>, e.g.
                     docker>=29.0
@@ -128,7 +131,7 @@ import xml.etree.ElementTree as ET
 
 SKIP_CODE = 77
 TIERS = ("core", "extended")
-KNOWN_REQUIREMENTS = ("vm", "kvm", "ipv6", "runcvm-package")
+KNOWN_REQUIREMENTS = ("vm", "kvm", "ipv6", "docker", "runcvm-package")
 DOCKER_VERSION_REQUIREMENT = re.compile(r"^docker>=(\d+)\.(\d+)$")
 ACCELS = ("kvm", "auto", "tcg")
 DEFAULT_TIMEOUT = 1800
@@ -276,6 +279,11 @@ class Environment:
                 return True
             self._probe_notes[req] = "not installed at /opt/runcvm"
             return False
+        if req == "docker":
+            if self.engine != "docker":
+                self._probe_notes[req] = "the engine is %s, not Docker" % self.engine
+                return False
+            return True
         if req == "ipv6":
             if not self.use_docker:
                 return False

@@ -585,6 +585,11 @@ class RunnerTests(unittest.TestCase):
                         self.assertEqual(r.test("t-docker-29")["reason"], "requires docker>=29.0 (%s)"
                                          % ("could not read dockerd's version" if version == "dev"
                                             else "dockerd is " + version))
+            ft.add("t-docker", "#!/bin/bash\nexit 0\n", requires="docker")
+            r = ft.run("t-docker", preflight=True,
+                       env={"PATH": bindir + os.pathsep + os.environ["PATH"], "FAKE_DOCKER_VERSION": "29.0.0"})
+            self.assertEqual(r.rc, 0, r.out)
+            self.assertEqual(r.status("t-docker"), "pass")
             ft.add("u-docker-bad", "#!/bin/bash\nexit 0\n", requires="docker>=29")
             r = ft.run("u-docker-bad")
             self.assertEqual(r.rc, 2)
