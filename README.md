@@ -580,6 +580,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [`RUNCVM_SYS_ADMIN=1`](#runcvm_sys_admin) adds `CAP_SYS_ADMIN`, whichever mode is chosen.
       - The processes `docker exec` starts in the container, which relay each command to the VM, hold the `minimal` set, whatever the container or the exec was given.
       - [-] Other effects of the container's options remain as the engine applies them: `--privileged` still gives the container the host's devices, an unrestricted device cgroup, a writable `/sys`, and no masked paths or AppArmor profile.
+   - [+] RunCVM's processes in the container, including those `docker exec` starts to relay each command to the VM, run with `no_new_privs`, whatever the container or the exec was given: executing a setuid or setgid file, or one with file capabilities, gives them no privileges they do not already hold. The workload runs under the VM's own kernel, where this does not apply.
    - The RunCVM software package at `/opt/runcvm` is mounted read-only within RunCVM containers. Container applications cannot compromise RunCVM, but they can execute binaries from within the RunCVM package. The set of binaries available to the VM may be reduced to a minimum in a later version.
 - Kernels
    - [+] Use any kernel, either one pre-packaged with RunCVM or roll your own
