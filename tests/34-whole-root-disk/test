@@ -115,7 +115,8 @@ def case_live(init):
 
         t.docker("stop", "-t", "30", name)
         r = t.docker("inspect", "-f", "{{.State.ExitCode}}", name)
-        result("'docker stop' exit status", "9", r.stdout.strip())
+        # The exit status is the output's last line: Podman may write warnings before it.
+        result("'docker stop' exit status", "9", (r.stdout.strip().splitlines() or [""])[-1])
 
         r = t.docker("run", "--rm", "--name", name + "-again", *t.labels(), *VM, *init_opts, *disk_opts,
                      "alpine", "cat", "/on-disk", timeout=TIMEOUT)

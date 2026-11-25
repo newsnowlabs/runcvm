@@ -51,13 +51,16 @@ tb_size_in_use() {
   docker top "$1" -eo pid,args 2>/dev/null | grep -oE 'tb-size=[0-9]+' | head -n 1 | cut -d= -f2
 }
 
-# mem_limit_mb NAME: the container's cgroup memory limit in Mb, or empty if not found
+# mem_limit_mb NAME: the container's cgroup memory limit in Mb, or empty if not found: under Docker
+# or Podman, with cgroup v1 or v2, managed by systemd or by the engine itself
 mem_limit_mb() {
   local id f
   id=$(docker inspect -f '{{.Id}}' "$1")
   for f in /sys/fs/cgroup/memory/docker/$id/memory.limit_in_bytes \
            /sys/fs/cgroup/system.slice/docker-$id.scope/memory.max \
-           /sys/fs/cgroup/docker/$id/memory.max; do
+           /sys/fs/cgroup/docker/$id/memory.max \
+           /sys/fs/cgroup/machine.slice/libpod-$id.scope/memory.max \
+           /sys/fs/cgroup/libpod_parent/libpod-$id/memory.max; do
     if [ -r "$f" ]; then echo $(( $(cat "$f") / 1024 / 1024 )); return; fi
   done
 }

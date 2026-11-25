@@ -35,6 +35,9 @@ RUNTIME = os.environ.get("RUNTIME") or "runcvm"
 MOCK = os.environ.get("RUNCVM_TEST_MOCK") == "1"
 # The container engine whose CLI the tests' docker commands run (see tests/run --engine)
 ENGINE = os.environ.get("RUNCVM_TEST_ENGINE") or "docker"
+# The exit statuses with which 'docker run' reports that the OCI runtime failed to create the
+# container: Docker's 125; Podman's 126, or 127 where the runtime's error names a missing file
+RUNTIME_ERROR = (126, 127) if ENGINE == "podman" else (125,)
 ACCEL = os.environ.get("RUNCVM_TEST_ACCEL") or None
 # Whether to run checks that launch Container/VMs explicitly under software emulation (TCG),
 # which are slow on a host with KVM: as RUNCVM_TEST_TCG_CASES says (see tests/run), or, where

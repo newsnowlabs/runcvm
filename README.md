@@ -312,6 +312,8 @@ For Podman (experimental), the RunCVM runtime is an entry in the `[engine.runtim
 runcvm = [ "/opt/runcvm/scripts/runcvm-runtime" ]
 ```
 
+On hosts that enforce AppArmor with Podman's own profiles, such as Ubuntu 24.04, Podman's profile for containers (`containers-default`) lets a container receive only SIGINT, SIGQUIT, SIGKILL and SIGTERM from Podman's OCI runtime, for any runtime, not only RunCVM. So `podman stop` cannot deliver another stop signal, such as the SIGRTMIN+3 that images for systemd declare, and that Podman uses for any container it runs in systemd mode (e.g. with `/sbin/init` as its command): the Container/VM is killed when the stop timeout runs out, rather than shut down cleanly. To stop it cleanly there, launch it with `--stop-signal=SIGTERM`, which RunCVM treats the same way (see [`RUNCVM_SHUTDOWN`](#runcvm_shutdown)), or with `--security-opt apparmor=unconfined`.
+
 ### Install on Google Cloud
 
 Create an image that will allow instances to have VMX capability:

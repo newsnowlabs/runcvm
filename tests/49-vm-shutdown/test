@@ -24,6 +24,11 @@
 - RUNCVM_SHUTDOWN=signal:USR1 sends the VM's PID 1 SIGUSR1, which an
   entrypoint trapping it reports as its exit status.
 - An invalid RUNCVM_SHUTDOWN stops the Container/VM being created.
+
+A case stopped with SIGRTMIN+3 (signal 37) is skipped where the engine
+cannot deliver that signal to a standard container either: e.g. Podman on
+a host whose AppArmor profile for containers (containers-default) refuses
+real-time signals from Podman's OCI runtime.
 """
 
 import os
@@ -85,6 +90,26 @@ CASES = [
 ]
 
 
+def rt_stop_signal_delivered():
+    """Whether 'docker stop' can deliver SIGRTMIN+3 (signal 37) to a standard (runc) container,
+    which reports it as its exit status."""
+    name = t.unique("rt-signal")
+    t.cleanup_container(name)
+    r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=runc", "--stop-signal=37", "alpine",
+                 "sh", "-c", "trap 'exit 7' 37; while :; do sleep 1; done")
+    if r.returncode != 0:
+        return False
+    time.sleep(2)
+    t.docker("stop", "-t", "10", name)
+    status = t.docker("inspect", "-f", "{{.State.ExitCode}}", name).stdout.strip().splitlines()
+    t.docker("rm", "-f", name)
+    return status[-1:] == ["7"]
+
+
+RT_STOP_SIGNAL = rt_stop_signal_delivered()
+t.param("SIGRTMIN+3 delivered by 'docker stop'", "yes" if RT_STOP_SIGNAL else "no")
+
+
 def booted(container, image):
     if not t.wait_for_exec(container, BOOT_TIMEOUT):
         return False
@@ -127,6 +152,11 @@ def run(c):
             t.docker("exec", container, "sh", "-c", WRITE)
         start = time.time()
         if c["end"][0] == "stop":
+            signal = t.docker("inspect", "-f", "{{.Config.StopSignal}}", container).stdout.strip().splitlines()
+            if signal[-1:] in (["37"], ["SIGRTMIN+3"], ["RTMIN+3"]) and not RT_STOP_SIGNAL:
+                t.docker("rm", "-f", container)
+                result["skip"] = "the engine does not deliver SIGRTMIN+3 to a standard container either"
+                return result
             t.docker("stop", "-t", str(c["end"][1]), container)
         elif c["end"][0] == "vm-signal":
             t.docker("exec", container, "/.runcvm/guest/bin/busybox", "kill", "-s", c["end"][1], "1")
@@ -157,6 +187,9 @@ for c, result in zip(CASES, t.parallel(run, CASES, remove=True)):
         continue
     if "mode" in result:
         t.check("%s: /.runcvm/state/shutdown" % name, c["mode"], result["mode"])
+    if "skip" in result:
+        t.skip_check("%s: stopped with SIGRTMIN+3" % name, result["skip"])
+        continue
     if c["end"] is None:
         continue
     t.check("%s: exit status" % name, c["status"], result["status"])

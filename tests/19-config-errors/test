@@ -77,7 +77,10 @@ def run(case):
 
 
 for (name, opts, status, message), r in zip(CASES, t.parallel(run, CASES)):
-    t.check("%s: exit status" % opts[0], status, r.returncode)
+    if status == 125:  # the runtime's failure to create the container, as Docker reports it
+        t.check("%s: exit status" % opts[0], True, r.returncode in t.RUNTIME_ERROR)
+    else:
+        t.check("%s: exit status" % opts[0], status, r.returncode)
     if not t.check("%s: error message" % opts[0], True, message in r.stdout):
         t.log("output:\n%s" % r.stdout)
 
