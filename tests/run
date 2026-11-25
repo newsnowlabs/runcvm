@@ -56,8 +56,8 @@ Optional per-test metadata files, in each test directory:
 Container engine (--engine docker|podman, or RUNCVM_TEST_ENGINE; default
 docker). With podman, tests/engines/podman goes first in PATH, so that the
 runner's and the tests' 'docker' commands run rootful Podman (through sudo
-when not root), and RunCVM must be registered with Podman in
-/etc/containers/containers.conf. Tests see RUNCVM_TEST_ENGINE, and
+when not root), and RunCVM must be registered with Podman (as
+runcvm-install-runtime.sh does, in /etc/containers/containers.conf.d/runcvm.conf). Tests see RUNCVM_TEST_ENGINE, and
 'docker>=<major>.<minor>' requirements are not met.
 
 Stand-in mode (--mock, or RUNCVM_TEST_MOCK=1) runs tests with a standard

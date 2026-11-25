@@ -97,23 +97,32 @@ echo 'runcvm ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/runcvm
 chmod 0440 /etc/sudoers.d/runcvm
 _EOE_
 
-# Stock RunCVM, registered with L1's Docker. The installer restarts dockerd through
-# /etc/init.d/docker if that exists, and then waits indefinitely for a dockerd that cannot start
-# during a build; systemd's docker.service does not need it.
-COPY --from=runcvm /opt/runcvm /opt/runcvm
-RUN rm -f /etc/init.d/docker && \
-    sh /opt/runcvm/scripts/runcvm-install-runtime.sh --no-dockerd
-
-# Podman (Ubuntu's package), alongside Docker, with RunCVM registered as its 'runcvm' runtime, for
-# 'tests/run --engine podman'. It uses the runc that Docker's containerd.io package installs.
+# Podman (Ubuntu's package), alongside Docker, for 'tests/run --engine podman'. It uses the runc
+# that Docker's containerd.io package installs. Installed before RunCVM, whose installer registers
+# RunCVM with Podman where Podman is installed.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked <<_EOE_
 apt-get update
 apt-get install -y podman
 mkdir -p /etc/containers/registries.conf.d
-printf '[engine.runtimes]\nruncvm = ["/opt/runcvm/scripts/runcvm-runtime"]\n' >/etc/containers/containers.conf
 # Resolve short image names (e.g. alpine) on Docker Hub, as Docker does.
 printf 'unqualified-search-registries = ["docker.io"]\n' >/etc/containers/registries.conf.d/50-runcvm-l1-docker-io.conf
+_EOE_
+
+# Stock RunCVM, registered with L1's Docker and Podman. The installer restarts dockerd through
+# /etc/init.d/docker if that exists, and then waits indefinitely for a dockerd that cannot start
+# during a build; systemd's docker.service does not need it. Where the installer does not register
+# RunCVM with Podman (e.g. v1.8.0's), the same entry is written here.
+COPY --from=runcvm /opt/runcvm /opt/runcvm
+RUN <<_EOE_
+set -e
+rm -f /etc/init.d/docker
+sh /opt/runcvm/scripts/runcvm-install-runtime.sh --no-dockerd
+conf=/etc/containers/containers.conf.d/runcvm.conf
+if ! [ -f "$conf" ]; then
+  mkdir -p "${conf%/*}"
+  printf '[engine.runtimes]\nruncvm = [ "/opt/runcvm/scripts/runcvm-runtime" ]\n' >"$conf"
+fi
 _EOE_
 
 # Claude Code (optional): installed for the runcvm user when CLAUDE_CODE_VERSION is set, with
