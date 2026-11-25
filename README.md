@@ -272,8 +272,8 @@ The installation script:
     - Enables the RunCVM runtime, by setting `runtimes.runcvm.path` in `/etc/docker/daemon.json` to `/opt/runcvm/scripts/runcvm-runtime`, leaving any other runtimes there unchanged (see [Registering the runtime by hand](#registering-the-runtime-by-hand))
     - Restarts `dockerd`, if it can be detected how for your system (e.g. `systemctl restart docker`)
     - Verifies that RunCVM is recognised via `docker info`
-  - For Podman support (experimental):
-    - Displays instructions on patching `/etc/containers/containers.conf`
+  - For Podman support (experimental), where Podman is installed:
+    - Registers the RunCVM runtime with Podman, in a drop-in file of its own, `/etc/containers/containers.conf.d/runcvm.conf`, leaving `/etc/containers/containers.conf` unchanged
 
 Following installation, launch a basic test RunCVM Container/VM:
 
@@ -305,9 +305,10 @@ Then restart `dockerd` (e.g. `sudo systemctl restart docker`), and check that Do
 docker info --format '{{.Runtimes.runcvm.Path}}'
 ```
 
-For Podman (experimental), add the following to the `[engine.runtimes]` section of `/etc/containers/containers.conf`:
+For Podman (experimental), the RunCVM runtime is an entry in the `[engine.runtimes]` table of Podman's configuration, which the installer writes to `/etc/containers/containers.conf.d/runcvm.conf`; the same entry may instead be added to that table in `/etc/containers/containers.conf`:
 
 ```toml
+[engine.runtimes]
 runcvm = [ "/opt/runcvm/scripts/runcvm-runtime" ]
 ```
 
