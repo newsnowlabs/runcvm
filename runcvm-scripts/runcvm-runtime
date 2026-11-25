@@ -307,24 +307,6 @@ jq_get() {
   jq -r "$@" $file
 }
 
-# Print the system call names in the given list files, one name per line in each, as a
-# comma-separated list of JSON strings, skipping blank lines, comments (#) and the
-# 'virtiofsd-version' line.
-seccomp_names() {
-  local file line out=""
-
-  for file in "$@"; do
-    [ -f "$file" ] || error "seccomp list '$file' missing"
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        ''|'#'*|virtiofsd-version*) ;;
-        *) out+="\"$line\"," ;;
-      esac
-    done <"$file"
-  done
-  printf '%s' "${out%,}"
-}
-
 get_process_env() {
   local file="$1"
   local var="$2"
@@ -955,19 +937,19 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   # are allowed only where the container has disks (RUNCVM_DISKS) and RUNCVM_DISK_AIO does not
   # choose native or threads, the modes that do without io_uring (see disk_choose_aio in
   # runcvm-ctr-qemu); QEMU also tries io_uring for its event loop, and without it uses epoll.
-  # - minimal (the default): RunCVM's own profile, in place of the one Docker or Podman resolved
-  #   into the bundle. It allows only the calls listed for the host's architecture in
-  #   scripts/seccomp/<arch> and, for virtiofsd, in scripts/seccomp/virtiofsd, with io_uring's as
-  #   above, and denies any other with EPERM, as the engines' default profiles do. On an
-  #   architecture with no list, 'engine' applies.
-  # - engine: the engine's profile, with the calls RunCVM's processes need beyond its default also
-  #   allowed: io_uring's (as above), get_mempolicy, set_mempolicy and mbind (which the default
-  #   profile allows only with CAP_SYS_NICE), and chroot (for virtiofsd's --sandbox=chroot, which it
+  # - engine (the default): the engine's profile, with the calls RunCVM's processes need beyond
+  #   its default also allowed: io_uring's (as above), get_mempolicy, set_mempolicy and mbind (which
+  #   the default profile allows only with CAP_SYS_NICE), and chroot (for virtiofsd's --sandbox=chroot, which it
   #   allows only with CAP_SYS_CHROOT). The engine resolves its profile against the capabilities
   #   given to docker run or podman run, not those the runtime gives RunCVM's processes (below), so
   #   these calls must be allowed here, not left to a capability. They are also taken out of the
   #   profile's rules that deny them (Podman's profile denies chroot without CAP_SYS_CHROOT), as a
   #   rule naming a call takes precedence over a later one.
+  # - minimal: RunCVM's own profile, scripts/seccomp/profile.json, in place of the one Docker or
+  #   Podman resolved into the bundle, with io_uring's calls as above. It allows only the calls
+  #   listed for the host's architecture in scripts/seccomp/<arch> and, for virtiofsd, in
+  #   scripts/seccomp/virtiofsd, and denies any other with EPERM, as the engines' default profiles
+  #   do. The image build writes it from those lists (build-utils/make-seccomp-profile.sh).
   # - unconfined: no profile, leaving RunCVM's processes unfiltered.
   # A bundle the engine left with no profile (docker run --security-opt seccomp=unconfined, or
   # --privileged) is left unconfined too, but that is not a supported way to run them so: these
@@ -976,7 +958,8 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   # 'engine' adds to it.
   RUNCVM_SECCOMP="$(get_config_env 'RUNCVM_SECCOMP')"
   case "$RUNCVM_SECCOMP" in
-    ''|minimal|engine) ;;
+    '') RUNCVM_SECCOMP=engine ;;
+    minimal|engine) ;;
     unconfined) jq_set "$CFG" 'del(.linux.seccomp)' ;;
     *) error "RUNCVM_SECCOMP '$RUNCVM_SECCOMP' invalid (should be minimal, engine or unconfined)" ;;
   esac
@@ -987,17 +970,7 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
       *) SECCOMP_IO_URING='"io_uring_setup","io_uring_enter","io_uring_register"' ;;
     esac
   fi
-  SECCOMP_LIST="$RUNCVM/scripts/seccomp/$(busybox uname -m)"
-  if [ "$RUNCVM_SECCOMP" != "engine" ] && [ -f "$SECCOMP_LIST" ]; then
-    SECCOMP_ALLOW=$(seccomp_names "$SECCOMP_LIST" "$RUNCVM/scripts/seccomp/virtiofsd")
-    [ -n "$SECCOMP_IO_URING" ] && SECCOMP_ALLOW+=",$SECCOMP_IO_URING"
-    jq_set "$CFG" --argjson names "[$SECCOMP_ALLOW]" '
-      if .linux.seccomp then
-        .linux.seccomp |= {"defaultAction": "SCMP_ACT_ERRNO", "defaultErrnoRet": 1,
-          "architectures": .architectures,
-          "syscalls": [{"names": ($names | unique), "action": "SCMP_ACT_ALLOW"}]}
-      else . end'
-  else
+  if [ "$RUNCVM_SECCOMP" = "engine" ]; then
     SECCOMP_ALLOW='"get_mempolicy","set_mempolicy","mbind","chroot"'
     [ -n "$SECCOMP_IO_URING" ] && SECCOMP_ALLOW+=",$SECCOMP_IO_URING"
     jq_set "$CFG" --argjson names "[$SECCOMP_ALLOW]" '
@@ -1005,6 +978,13 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
         .linux.seccomp.syscalls |= (map(if .action == "SCMP_ACT_ALLOW" then . else .names -= $names end)
           | map(select(.names | length > 0)))
         | .linux.seccomp.syscalls += [{"names": $names, "action": "SCMP_ACT_ALLOW"}]
+      else . end'
+  elif [ "$RUNCVM_SECCOMP" != "unconfined" ]; then
+    SECCOMP_PROFILE="$RUNCVM/scripts/seccomp/profile.json"
+    [ -f "$SECCOMP_PROFILE" ] || error "RUNCVM_SECCOMP=minimal: no seccomp profile ($SECCOMP_PROFILE) for this architecture; use RUNCVM_SECCOMP=engine"
+    jq_set "$CFG" --slurpfile profile "$SECCOMP_PROFILE" --argjson io_uring "[$SECCOMP_IO_URING]" '
+      if .linux.seccomp then
+        .linux.seccomp = ($profile[0] | .syscalls[0].names += $io_uring)
       else . end'
   fi
   

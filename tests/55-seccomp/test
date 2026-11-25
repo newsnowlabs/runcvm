@@ -4,9 +4,9 @@
 Container/VMs with a disk each: with RUNCVM_SECCOMP unset, =minimal, =engine
 and =unconfined; with RUNCVM_SYS_ADMIN=1; and launched with --security-opt
 seccomp=unconfined, for which the engine gives the container no profile (not a
-supported way to run unconfined, but one that must still work). Two more with
-RUNCVM_SECCOMP unset: one with a disk and RUNCVM_DISK_AIO=native, and one with
-no disk. For each:
+supported way to run unconfined, but one that must still work). Three more:
+with RUNCVM_SECCOMP unset, one with a disk and RUNCVM_DISK_AIO=native, and one
+with no disk; and one with RUNCVM_SECCOMP=minimal and no disk. For each:
 
 - The container's init (runcvm-ctr-entrypoint) and QEMU, on the host, are
   seccomp-filtered (Seccomp: 2 in their /proc/<pid>/status) under a
@@ -20,21 +20,21 @@ no disk. For each:
 - QEMU holds an io_uring instance (which it uses for its event loop where it
   can) only where the profile allows io_uring's system calls, which it does
   only for a container with a disk that may use io_uring (not with no disk,
-  nor with RUNCVM_DISK_AIO=native), or with no profile; and where the host's
-  kernel.io_uring_disabled lets QEMU use io_uring. QEMU's file descriptors are
+  nor with RUNCVM_DISK_AIO=native), under either profile, or with no
+  profile; and where the host's kernel.io_uring_disabled lets QEMU use
+  io_uring. QEMU's file descriptors are
   read through a short-lived container with the host's process namespace, as
   they are readable only by root.
 
-- On an architecture for which RunCVM lists the system calls its processes
-  need (runcvm-scripts/seccomp/<arch>, with runcvm-scripts/seccomp/virtiofsd;
-  scripts/seccomp/ in the package), the profile
-  in the container's bundle is RunCVM's own (by default, and with
-  RUNCVM_SECCOMP=minimal): it denies every other system call with EPERM, and
-  allows exactly the listed calls, with io_uring's only where allowed (above).
-  With RUNCVM_SECCOMP=engine, it is the engine's default profile with RunCVM's
-  further calls in a rule of their own. Where unconfined, the bundle has no
-  profile. The bundle is read, as root, through the same short-lived
-  container.
+- With RUNCVM_SECCOMP=minimal, the profile in the container's bundle is
+  RunCVM's own: it denies every other system call with EPERM, and allows
+  exactly the calls listed for the host's architecture
+  (runcvm-scripts/seccomp/<arch>, with runcvm-scripts/seccomp/virtiofsd;
+  scripts/seccomp/ in the package), with io_uring's only where allowed
+  (above). Otherwise (by default, and with RUNCVM_SECCOMP=engine), it is the
+  engine's default profile with RunCVM's further calls in a rule of their
+  own. Where unconfined, the bundle has no profile. The bundle is read, as
+  root, through the same short-lived container.
 
 A Container/VM with an invalid RUNCVM_SECCOMP value fails to start, with an
 error naming the variable.
@@ -62,8 +62,10 @@ CASES = {
     "unconfined": ["--security-opt", "seccomp=unconfined"],
     "aio-native": ["--env", "RUNCVM_DISK_AIO=native"],
     "no-disk": [],
+    "minimal-no-disk": ["--env", "RUNCVM_SECCOMP=minimal"],
 }
-DISKLESS = ("no-disk",)
+DISKLESS = ("no-disk", "minimal-no-disk")
+MINIMAL = ("minimal", "minimal-no-disk")
 UNCONFINED = ("runcvm-unconfined", "unconfined")
 
 
@@ -210,10 +212,10 @@ for case, results in zip(CASES, t.parallel(run, list(CASES), remove=True)):
     t.check("%s: QEMU's Seccomp mode" % case, filtered, qemu_mode)
     listed = listed_calls()
     profile = results.get("profile")
-    if listed is not None and t.check("%s: bundle's seccomp profile read" % case, True, profile is not None):
+    if t.check("%s: bundle's seccomp profile read" % case, True, profile is not None):
         if case in UNCONFINED:
             t.check("%s: bundle has no seccomp profile" % case, {}, profile)
-        elif case == "engine":
+        elif case not in MINIMAL:
             rules = profile.get("syscalls", [])
             added = rules[-1].get("names", []) if rules else []
             expected = ENGINE_ADDED | (IO_URING if io_uring_allowed(case) else set())
@@ -225,7 +227,7 @@ for case, results in zip(CASES, t.parallel(run, list(CASES), remove=True)):
                     (profile.get("defaultAction"), profile.get("defaultErrnoRet")))
             allowed = set(n for rule in rules if rule.get("action") == "SCMP_ACT_ALLOW"
                           for n in rule.get("names", []))
-            expected = listed | (IO_URING if io_uring_allowed(case) else set())
+            expected = (listed or set()) | (IO_URING if io_uring_allowed(case) else set())
             t.check("%s: profile has RunCVM's rule alone" % case, 1, len(rules))
             if not t.check("%s: profile allows exactly the listed calls" % case, True, allowed == expected):
                 t.log("%s: allowed but not listed: %s; listed but not allowed: %s"
