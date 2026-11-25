@@ -16,6 +16,10 @@ networks() { echo $NETWORK; }
 # TEST DETAILS
 COMMAND='env | sort'
 EXPECTED_OUTPUT="$(echo -e "HOME=/root\nHOSTNAME=$NODE\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nPWD=/\nSHLVL=1\n")"
+# Podman adds container=podman to every container's environment, which RunCVM passes to the VM.
+if [ "$RUNCVM_TEST_ENGINE" = "podman" ]; then
+  EXPECTED_OUTPUT+=$'\ncontainer=podman'
+fi
 
 # TEST FUNCTIONS
 # --------------

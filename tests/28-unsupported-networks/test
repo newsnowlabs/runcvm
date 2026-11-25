@@ -5,8 +5,9 @@
   container's addresses and routes onto bridges for the VM, which in the
   host's network namespace would reconfigure the host's own interfaces.
   runcvm-runtime refuses it before anything runs: 'docker run' fails with
-  exit status 125, and the host's interfaces and routes are unchanged
-  (other than Docker's own, which concurrent runs add and remove).
+  Docker's runtime-error exit status 125 (Podman's 126 or 127), and the
+  host's interfaces and routes are unchanged (other than the engine's own,
+  which concurrent runs add and remove).
 - --network=none, or only --internal networks: with no default route, the
   container-side entrypoint fails with exit status 1 and an explanation,
   before the VM starts.
@@ -36,7 +37,11 @@ def run(label, *opts):
 
 
 def check_failure(desc, r, status, message):
-    t.check("%s: exit status" % desc, status, r.returncode)
+    """STATUS is an exit status, or a tuple of those any of which passes."""
+    if isinstance(status, tuple):
+        t.check("%s: exit status in %s" % (desc, status), True, r.returncode in status)
+    else:
+        t.check("%s: exit status" % desc, status, r.returncode)
     if not t.check("%s: RunCVM's message" % desc, True, message in r.stdout):
         t.log("output:\n%s" % r.stdout)
     t.check("%s: workload did not run" % desc, False, "workload-ran" in r.stdout)
@@ -50,8 +55,12 @@ for label, desc, opts in (("none", "--network=none", ["--network=none"]),
                           ("internal", "--internal network", ["--network", internal])):
     check_failure(desc, run(label, *opts), 1, NO_ROUTE_MESSAGE)
 
-runtimes = json.loads(t.docker("info", "--format", "{{json .Runtimes}}").stdout or "{}")
-path = (runtimes.get(t.RUNTIME) or {}).get("path")
+if t.ENGINE == "podman":
+    # Podman's info names only its default OCI runtime; RunCVM is installed in /opt/runcvm.
+    path = "/opt/runcvm/scripts/runcvm-runtime"
+else:
+    runtimes = json.loads(t.docker("info", "--format", "{{json .Runtimes}}").stdout or "{}")
+    path = (runtimes.get(t.RUNTIME) or {}).get("path")
 try:
     with open(path) as f:
         rejects_host = HOST_MESSAGE in f.read()
@@ -59,22 +68,22 @@ except (OSError, TypeError):
     rejects_host = False
 
 if rejects_host:
-    # Docker's own interfaces, which other Container/VMs and tests running at the same time on
-    # this host add and remove: each container's veth end, and each network's bridge (br- and the
-    # network id's first 12 hex digits). RunCVM's would be named after the host's interfaces
-    # (br-<interface>, tap-<interface>), so leaving out Docker's still shows any change RunCVM
-    # makes to the host's own.
-    DOCKER_INTERFACE = re.compile(r"^(veth.*|br-[0-9a-f]{12})$")
+    # The engine's own interfaces, which other Container/VMs and tests running at the same time on
+    # this host add and remove: each container's veth end, and each network's bridge (Docker's br-
+    # and the network id's first 12 hex digits; Podman's podman<n>). RunCVM's would be named after
+    # the host's interfaces (br-<interface>, tap-<interface>), so leaving out the engine's still
+    # shows any change RunCVM makes to the host's own.
+    ENGINE_INTERFACE = re.compile(r"^(veth.*|br-[0-9a-f]{12}|podman[0-9]+)$")
 
     def host_network():
         """The host's network interfaces and IPv4 routes, each as a set of lines, leaving out
-        Docker's own interfaces and their routes."""
+        the engine's own interfaces and their routes."""
         with open("/proc/net/route") as f:
-            routes = set(line.strip() for line in f if not DOCKER_INTERFACE.match(line.split("\t", 1)[0]))
-        return set(i for i in os.listdir("/sys/class/net") if not DOCKER_INTERFACE.match(i)), routes
+            routes = set(line.strip() for line in f if not ENGINE_INTERFACE.match(line.split("\t", 1)[0]))
+        return set(i for i in os.listdir("/sys/class/net") if not ENGINE_INTERFACE.match(i)), routes
 
     before = host_network()
-    check_failure("--network=host", run("host", "--network=host"), 125, HOST_MESSAGE)
+    check_failure("--network=host", run("host", "--network=host"), t.RUNTIME_ERROR, HOST_MESSAGE)
     after = host_network()
     # Log only the differences, if any: the full lists are long and would bury the result.
     for kind, old, new in zip(("interface", "route"), before, after):
