@@ -137,17 +137,6 @@ def expected_aio(case):
     return "io_uring"
 
 
-def processes(name):
-    """Return {pid: args} for the processes in container NAME."""
-    r = t.docker("top", name, "-eo", "pid,args")
-    procs = {}
-    for line in r.stdout.splitlines()[1:]:
-        pid, _, args = line.strip().partition(" ")
-        if pid.isdigit():
-            procs[pid] = args
-    return procs
-
-
 def bundle_seccomp(name):
     """The seccomp section of container NAME's bundle: a dict, {} where it has none, or None if
     the bundle could not be read."""
@@ -184,7 +173,7 @@ def run(case):
         if t.docker("run", "-d", "--name", twin, *t.labels(), "--runtime=runc", *CASES[case],
                     IMAGE, "sleep", "infinity").returncode == 0:
             results["engine_profile"] = bundle_seccomp(twin)
-    for pid, args in processes(name).items():
+    for pid, args in t.host_processes(name):
         if "qemu-system" in args:
             results["qemu"] = (seccomp_mode(pid), args)
             results["io_uring_fds"] = qemu_io_uring_fds(case, pid)

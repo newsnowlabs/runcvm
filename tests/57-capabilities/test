@@ -73,9 +73,8 @@ def host_caps(pid):
 def relay_pids(container):
     """The host PIDs of the processes in CONTAINER that relay a 'docker exec' to the VM:
     runcvm-ctr-exec, and the dbclient it becomes."""
-    r = t.docker("top", container, "-eo", "pid,args")
-    return set(pid for pid, _, args in (line.strip().partition(" ") for line in r.stdout.splitlines()[1:])
-               if pid.isdigit() and ("runcvm-ctr-exec" in args or "dbclient" in args))
+    return set(pid for pid, args in t.host_processes(container)
+               if "runcvm-ctr-exec" in args or "dbclient" in args)
 
 
 def run(item):
