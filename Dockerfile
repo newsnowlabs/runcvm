@@ -195,7 +195,15 @@ RUN <<EOF
 set -e
 apk add --no-cache build-base linux-headers util-linux-dev
 cd /root
-wget -q https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v$E2FSPROGS_VERSION/e2fsprogs-$E2FSPROGS_VERSION.tar.xz
+# kernel.org's mirrors can fail transiently (time out, or reset the connection), so the download is
+# tried up to 5 times, with a growing pause between attempts.
+for attempt in 1 2 3 4 5; do
+  rm -f e2fsprogs-$E2FSPROGS_VERSION.tar.xz
+  wget -q -T 60 https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v$E2FSPROGS_VERSION/e2fsprogs-$E2FSPROGS_VERSION.tar.xz && break
+  [ $attempt -lt 5 ] || { echo "e2fsprogs: download failed after $attempt attempts" >&2; exit 1; }
+  echo "e2fsprogs: download failed (attempt $attempt); retrying" >&2
+  sleep $((attempt * 10))
+done
 echo "$E2FSPROGS_SHA256  e2fsprogs-$E2FSPROGS_VERSION.tar.xz" | sha256sum -c -
 tar xf e2fsprogs-$E2FSPROGS_VERSION.tar.xz
 cd e2fsprogs-$E2FSPROGS_VERSION
