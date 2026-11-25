@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """RunCVM's DNS address (RUNCVM_DNS_IP).
 
-- By default, on a user-defined network, the VM's resolv.conf names
-  169.254.53.53, through which the VM resolves another container's name
-  (Docker's DNS, by way of dnsmasq), and 'docker exec' works.
-- With RUNCVM_DNS_IP set to another link-local address, the VM's
-  resolv.conf names that address instead, and DNS and 'docker exec' still
-  work.
+- On a user-defined network, the VM resolves another container's name, and
+  'docker exec' works, by default and with RUNCVM_DNS_IP set to another
+  link-local address. Where the container's DNS server is Docker's embedded
+  one (127.0.0.11, on Docker's user-defined networks), the VM's resolv.conf
+  names RUNCVM_DNS_IP (169.254.53.53 by default) in its place, which
+  dnsmasq answers; elsewhere (e.g. under Podman, whose DNS server is at the
+  network's gateway), it names the container's DNS servers unchanged.
 - A malformed or non-unicast RUNCVM_DNS_IP, or one in 0.0.0.0/8 or
   127.0.0.0/8, fails Container/VM creation with an error naming it.
 - A RUNCVM_DNS_IP equal to RunCVM's bridge address in the container
@@ -34,9 +35,16 @@ t.cleanup_container(peer)
 t.docker("run", "-d", "--name", peer, *t.labels(), "--network", network, "alpine", "sleep", "600", check=True)
 
 
-def nameservers(name):
-    r = t.docker("exec", name, "cat", "/etc/resolv.conf")
-    return [line.split()[1] for line in r.stdout.splitlines() if line.startswith("nameserver ")]
+def nameservers(resolv_conf):
+    return [line.split()[1] for line in resolv_conf.splitlines() if line.startswith("nameserver ")]
+
+
+# The DNS servers a standard container on the network is given: Docker's embedded server, which
+# RunCVM replaces in the VM with RUNCVM_DNS_IP, or the engine's own (e.g. Podman's, at the
+# network's gateway), which the VM queries directly.
+CONTAINER_DNS = nameservers(t.docker("run", "--rm", *t.labels(), "--network", network, "--dns-search=.",
+                                     "--dns-opt=ndots:1", "alpine", "cat", "/etc/resolv.conf", check=True).stdout)
+t.log("a standard container's DNS servers: %s" % CONTAINER_DNS)
 
 
 def resolves_peer(name):
@@ -53,7 +61,8 @@ def case_running(args):
         return [("%s: Container/VM starts and 'docker exec' works" % label, True, False)]
     return [
         ("%s: 'docker exec' works" % label, True, True),
-        ("%s: the VM's DNS server" % label, [address], nameservers(name)),
+        ("%s: the VM's DNS server" % label, [address] if CONTAINER_DNS == ["127.0.0.11"] else CONTAINER_DNS,
+         nameservers(t.docker("exec", name, "cat", "/etc/resolv.conf").stdout)),
         ("%s: the VM resolves another container's name" % label, True, resolves_peer(name)),
     ]
 
