@@ -600,6 +600,7 @@ if [ "$COMMAND" = "create" ]; then
   # First extract list of tmpfs mounts in fstab form, then delete them from the config. Each field
   # is encoded with fstab's octal escapes for '\', space, tab and newline before the fields are
   # joined, so that each field's boundaries survive.
+  # Podman's tmpcopyup/notmpcopyup (copy the image's files into a tmpfs, or not) are dropped: the VM's mount rejects them.
   RUNCVM_TMPFS=$(jq_get "$CFG" 'def enc: gsub("\\\\"; "\\134") | gsub(" "; "\\040") | gsub("\t"; "\\011") | gsub("\n"; "\\012"); ( .mounts[] | select(.type == "tmpfs" and (.destination | test("^/dev(/|$)") | not) ) ) | [(.source | enc) + " " + (.destination | enc) + " tmpfs " + (.options | map(select(. != "rprivate" and . != "private" and . != "tmpcopyup" and . != "notmpcopyup")) | join(",") | enc) + " 0 0"] | .[0]')
   jq_set "$CFG" -r 'del( .mounts[] | select(.type == "tmpfs" and (.destination | test("^/dev(/|$)") | not) ) )'
   set_config_env "RUNCVM_TMPFS" "$RUNCVM_TMPFS"

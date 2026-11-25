@@ -1434,6 +1434,8 @@ To publish the build, add `--push`, which after a successful build pushes each t
 
 The Alpine build stages fetch Alpine's package build recipes (aports) from `gitlab.alpinelinux.org`. Where that is unreachable, as from GitHub-hosted runners, give its GitHub mirror and Alpine's distfiles mirror as build arguments: `./build/build.sh -- --build-arg APORTS_URL=https://github.com/alpinelinux/aports.git --build-arg ALPINE_DISTFILES_MIRROR=https://distfiles.alpinelinux.org/distfiles`. RunCVM's CI (`.github/workflows/ci.yml`) builds this way.
 
+The build downloads e2fsprogs's source from kernel.org's content delivery network, `https://cdn.kernel.org`. The build argument `KERNEL_ORG_MIRROR` names another kernel.org site to download it from, e.g. kernel.org's mirror network: `./build/build.sh -- --build-arg KERNEL_ORG_MIRROR=https://mirrors.edge.kernel.org`. The download is checked against its SHA-256, whichever site serves it.
+
 To install a build tagged other than `latest`, name it in `REPO` when running the installation script, e.g. `sudo REPO=newsnowlabs/runcvm:dev ./runcvm-scripts/runcvm-install-runtime.sh`.
 
 Now follow the main [installation instructions](#installation) to install your built RunCVM from the Docker image.
