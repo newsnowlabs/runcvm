@@ -407,16 +407,12 @@ get_config_env() {
   [ -n "$value" ] && echo -n "$value" || echo -n "$default"
 }
 
-# config_env_is <var> <value>, process_env_is <file> <var> <value>
-# Whether the container's (or the exec's) environment sets <var> to exactly <value>: its whole
+# config_env_is <var> <value>
+# Whether the container's environment sets <var> to exactly <value>: its whole
 # value, as the container's scripts see it. (get_config_env's output, read through command
 # substitution, loses any trailing newlines, so cannot decide this.)
 config_env_is() {
   [ "$(jq_get "$CFG" --arg entry "$1=$2" 'any(.process.env[]; . == $entry)')" = "true" ]
-}
-
-process_env_is() {
-  [ "$(jq_get "$1" --arg entry "$2=$3" 'any(.env[]; . == $entry)')" = "true" ]
 }
 
 # RunCVM's capability sets (see the create command's RUNCVM_CAPS): its own processes' needs
@@ -1159,10 +1155,7 @@ elif [ "$COMMAND" = "exec" ]; then
   if [ "$ARG1" = "---" ]; then
     # 'docker exec <container> --- <command>' runs <command> in the container, on the host, rather
     # than in the VM, as 'docker exec' would in a standard container (with the capabilities the
-    # engine gives it), for debugging and diagnostics: only with RUNCVM_EXEC_DEBUG=1, in the
-    # container's environment or the exec's.
-    process_env_is "$PROCESS" RUNCVM_EXEC_DEBUG 1 ||
-      error "'docker exec <container> --- <command>', which runs <command> in the container rather than the VM, needs RUNCVM_EXEC_DEBUG=1"
+    # engine gives it), for debugging and diagnostics.
     jq_set "$PROCESS" 'del(.args[0])'
   else
     # The exec's process, which relays the command to the VM, runs on the host, in the container,

@@ -564,6 +564,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
 - `docker exec`
    - [+] `--user` (or `-u`), `--workdir` (or `-w`), `--env` (or `-e`), `--env-file`, `--detach` (or `-d`), `--interactive` (or `-i`) and `--tty` (or `-t`) are all supported
    - [+] Stdout and Stderr _are_ independently multiplexed so `docker exec <container> bash -c 'echo stdout; echo stderr >&2' >/tmp/stdout 2>/tmp/stderr` _does_ produce the expected result
+   - [-] `docker exec <container> --- <command>` runs `<command>` in the container on the host, alongside QEMU and `virtiofsd`, rather than in the VM, for debugging and diagnostics. It runs as `docker exec` would in a standard container, with the capabilities the engine gives the exec (e.g. all of them with `docker exec --privileged`), outside the VM's isolation, so anyone who can `docker exec` into a Container/VM (or `kubectl exec` into its pod) can reach QEMU, `virtiofsd` and the VM's disks.
 - Security
    - [+] The processes RunCVM runs in the container on the host (QEMU, `virtiofsd`, `dnsmasq` and RunCVM's own scripts and tools) are seccomp-filtered. The workload itself runs in the VM, behind the VM's kernel, not this filter. [`RUNCVM_SECCOMP`](#runcvm_seccomp) chooses the profile:
       - `engine` (the default): the engine's (Docker's or Podman's) default profile, with the calls those processes need beyond it also allowed: io_uring's (`io_uring_setup`, `io_uring_enter`, `io_uring_register`), for QEMU's disks, only for a Container/VM with disks ([`RUNCVM_DISKS`](#runcvm_disks)) that may use io_uring, i.e. unless `RUNCVM_DISK_AIO` is `native` or `threads` (QEMU also tries io_uring for its event loop, and without it uses epoll); the NUMA memory-policy calls (`get_mempolicy`, `set_mempolicy`, `mbind`); and `chroot`. Docker builds this profile from the capabilities the container was given, so that, e.g., `--cap-add=SYS_ADMIN` leaves `mount` and `unshare` allowed, although RunCVM's processes lack `CAP_SYS_ADMIN`.
@@ -1240,12 +1241,6 @@ By default BIOS console output is hidden. Enable it with this option. With `--en
 
 Enable debug logging for the runtime (the portion of RunCVM directly invoked by `docker run`, `docker exec` etc).
 Debug logs, and copies of the configuration the runtime is given and returns, are written to files in the host's `/run/runcvm`, a directory only root can read: `runtime-<pid>.log`, `config.json-<pid>-1` and `-2` (for `docker run`), and `process.json-<pid>-1` and `-2` (for `docker exec`).
-
-### RUNCVM_EXEC_DEBUG
-
-**`RUNCVM_EXEC_DEBUG=1`**
-
-Allow `docker exec <container> --- <command>`, for debugging and diagnostics, which runs `<command>` in the container on the host, alongside QEMU and `virtiofsd`, rather than in the VM. It runs as `docker exec` would in a standard container, with the capabilities the engine gives it (e.g. all of them with `docker exec --privileged`), outside the VM's isolation. Without this option, `---` is refused. The option takes effect from the container's environment (`docker run --env`) or the exec's (`docker exec --env`): a user who can set the latter can already run privileged containers, while Kubernetes' exec cannot set environment variables, so in a cluster only the pod's own settings can allow it.
 
 ### RUNCVM_QEMU_DEBUG
 

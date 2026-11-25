@@ -26,9 +26,8 @@ exec', and for one with --privileged and RUNCVM_CAPS=engine and
 RUNCVM_SYS_ADMIN=1 in its own environment.
 
 'docker exec <container> --- <command>', which runs <command> in the container
-rather than the VM, is refused without RUNCVM_EXEC_DEBUG=1, and with it runs
-with the capabilities the engine gives the exec (with --privileged, including
-CAP_SYS_ADMIN).
+rather than the VM, runs with the capabilities the engine gives the exec (with
+--privileged, including CAP_SYS_ADMIN).
 """
 
 import os
@@ -150,23 +149,17 @@ r = t.docker("run", "--rm", "--name", name, *t.labels(), "--runtime=" + t.RUNTIM
 t.check("invalid RUNCVM_CAPS: Container/VM fails to start", True, r.returncode != 0)
 t.check("invalid RUNCVM_CAPS: error names RUNCVM_CAPS", True, "RUNCVM_CAPS" in (r.stdout or ""))
 
-# 'docker exec <container> --- <command>' runs <command> in the container rather than the VM, only
-# with RUNCVM_EXEC_DEBUG=1, and then with the capabilities the engine gives the exec.
-for debug in (False, True):
-    desc = "--- passthrough %s RUNCVM_EXEC_DEBUG=1" % ("with" if debug else "without")
-    name = t.unique("caps-passthrough-%s" % ("debug" if debug else "default"))
-    t.cleanup_container(name)
-    r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
-                 *(["--env", "RUNCVM_EXEC_DEBUG=1"] if debug else []), "alpine", "sleep", "infinity")
-    if not t.check("%s: Container/VM boots" % desc, True, r.returncode == 0 and t.wait_for_exec(name, BOOT_TIMEOUT)):
-        continue
+# 'docker exec <container> --- <command>' runs <command> in the container rather than the VM, with
+# the capabilities the engine gives the exec.
+desc = "--- passthrough"
+name = t.unique("caps-passthrough")
+t.cleanup_container(name)
+r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+             "alpine", "sleep", "infinity")
+if t.check("%s: Container/VM boots" % desc, True, r.returncode == 0 and t.wait_for_exec(name, BOOT_TIMEOUT)):
     r = t.docker("exec", "--privileged", name, "---", "grep", "CapEff", "/proc/self/status")
-    if debug:
-        caps = r.stdout.split()
-        t.check("%s: runs, with the exec's capabilities (--privileged: CAP_SYS_ADMIN)" % desc, True,
-                r.returncode == 0 and len(caps) > 1 and int(caps[1], 16) & CAP_SYS_ADMIN != 0)
-    else:
-        t.check("%s: refused" % desc, True, r.returncode != 0)
-        t.check("%s: error names RUNCVM_EXEC_DEBUG" % desc, True, "RUNCVM_EXEC_DEBUG" in (r.stdout or ""))
+    caps = r.stdout.split()
+    t.check("%s: runs, with the exec's capabilities (--privileged: CAP_SYS_ADMIN)" % desc, True,
+            r.returncode == 0 and len(caps) > 1 and int(caps[1], 16) & CAP_SYS_ADMIN != 0)
 
 t.finish()
