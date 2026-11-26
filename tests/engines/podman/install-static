@@ -116,6 +116,8 @@ install_version() { # version
   fi
 
   # Podman's runc entry is the runc in PATH where there is one, and the build's own otherwise.
+  # runc is the default runtime, for containers run without --runtime: the build's crun does not
+  # support systemd's cgroup manager.
   runc=$(command -v runc || echo "$opt/usr/local/bin/runc")
 
   mkdir -p "$conf/networks" "$data/storage" "$data/tmp"
@@ -126,6 +128,7 @@ install_version() { # version
 seccomp_profile = "$opt/etc/containers/seccomp.json"
 
 [engine]
+runtime = "runc"
 conmon_path = ["$opt/usr/local/lib/podman/conmon"]
 # Rootful Podman's default locks are in one shared-memory segment for every installation on a
 # host; two installations that use the segment deadlock.
