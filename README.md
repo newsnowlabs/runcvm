@@ -580,7 +580,9 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [`RUNCVM_SYS_ADMIN=1`](#runcvm_sys_admin) adds `CAP_SYS_ADMIN`, whichever mode is chosen.
       - The processes `docker exec` starts in the container, which relay each command to the VM, hold the `minimal` set, whatever the container or the exec was given.
       - [-] Other effects of the container's options remain as the engine applies them: `--privileged` still gives the container the host's devices, an unrestricted device cgroup, a writable `/sys`, and no masked paths or AppArmor profile.
-   - The RunCVM software package at `/opt/runcvm` is mounted read-only within RunCVM containers. Container applications cannot compromise RunCVM, but they can execute binaries from within the RunCVM package. The set of binaries available to the VM may be reduced to a minimum in a later version.
+   - [+] RunCVM's processes in the container dump no core (`RLIMIT_CORE` 0), whatever the container was given (e.g. `--ulimit core=-1`), as QEMU's core dump would hold the VM's memory. The workload runs under the VM's own kernel, whose limits apply to it.
+   - [+] In the container on the host, the VM's root filesystem is mounted `nosuid` and `nodev`, so that no process there gains privileges from a setuid file, or reaches a device through a device node, that the workload creates; in the VM, setuid files and device nodes work as the VM's kernel allows.
+   - The RunCVM software package at `/opt/runcvm` is mounted read-only (and `nosuid` and `nodev`) within RunCVM containers. Container applications cannot compromise RunCVM, but they can execute binaries from within the RunCVM package. The set of binaries available to the VM may be reduced to a minimum in a later version.
 - Kernels
    - [+] Use any kernel, either one pre-packaged with RunCVM or roll your own
    - [+] RunCVM will try to select an appropriate kernel to use based on examination of `/etc/os-release` within the image being launched.
