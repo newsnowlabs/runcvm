@@ -17,12 +17,12 @@
 #   - ci:podman    also runs the same tests under rootful Podman (tests/run --engine podman),
 #                  as a second set of shards alongside Docker's.
 #   Adding ci:extended, ci:all or ci:podman runs the integration tests; other labels run nothing.
-# - Nightly, on main: every tier, under Docker and under Podman, with a build that uses no cached layers and pulls its base
-#   images afresh, so that changes upstream (Alpine, Docker, the kernels' packages) that break
-#   the build or the tests show up without a commit here. GitHub disables a public repository's
-#   scheduled workflows after 60 days without activity in it, and emails before doing so; the
-#   Actions tab re-enables them. GitHub sends a scheduled run's failure notices to whoever last
-#   changed the schedule.
+# - Nightly, on main: every tier, under Docker and under Podman, with a build that uses no
+#   cached layers and pulls its base images afresh, so that changes upstream (Alpine, Docker,
+#   the kernels' packages) that break the build or the tests show up without a commit here.
+#   GitHub disables a public repository's scheduled workflows after 60 days without activity
+#   in it, and emails before doing so; the Actions tab re-enables them. GitHub sends a scheduled
+#   run's failure notices to whoever last changed the schedule.
 # - By hand (workflow_dispatch): the tests input gives tests/run's arguments, podman runs them
 #   under Podman as well as Docker, and fresh_build builds as the nightly run does.
 # Drafts and labels act through the jobs' if: conditions, not through event filters: if CI
@@ -103,8 +103,8 @@ jobs:
 
   build:
     # Pull requests: not drafts, nor with ci:skip; for label changes, only adding ci:extended,
-    # ci:all or ci:podman, or removing ci:skip. The test jobs need this one, so they run or are skipped
-    # with it.
+    # ci:all or ci:podman, or removing ci:skip. The test jobs need this one, so they run or are
+    # skipped with it.
     if: >-
       github.event_name != 'pull_request' || (
         !github.event.pull_request.draft &&
