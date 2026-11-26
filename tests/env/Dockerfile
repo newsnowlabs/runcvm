@@ -113,9 +113,10 @@ _EOE_
 # Static Podman builds, pinned in tests/engines/podman/static-versions, beside Ubuntu's Podman, for
 # 'RUNCVM_TEST_PODMAN=/usr/local/sbin/podman-<version> tests/run --engine podman'. Their storage
 # is in /var/lib/containers, which is on L1's disk when L1 runs, but not during the build: hence
-# --no-fs-check. build.sh gives the build tests/engines/podman as the context podman-engine.
+# --no-fs-check. Podman cannot run containers during the build: hence --no-run-check. build.sh
+# gives the build tests/engines/podman as the context podman-engine.
 RUN --mount=type=bind,from=podman-engine,target=/tmp/podman-engine \
-    /tmp/podman-engine/install-static --no-fs-check
+    /tmp/podman-engine/install-static --no-fs-check --no-run-check
 
 # Stock RunCVM, registered with L1's Docker and Podman. The installer restarts dockerd through
 # /etc/init.d/docker if that exists, and then waits indefinitely for a dockerd that cannot start
