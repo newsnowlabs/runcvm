@@ -1174,7 +1174,15 @@ Sets the address, `169.254.53.53` by default, at which the VM reaches RunCVM's o
 
 The default is link-local, so that the VM's traffic to it is never routed beyond the host, and lies outside the link-local addresses that cloud platforms and Kubernetes are known to use: notably `169.254.169.254`, the instance metadata address of AWS, Azure, Google Cloud, OpenStack and others (which on Google Cloud is also the VM's DNS server); AWS's other services in `169.254.169.0/24` and `169.254.170.0/24`; Scaleway's `169.254.42.42`; and Kubernetes NodeLocal DNSCache's `169.254.20.10`. Firewall rules in the VM that block one of those, as hardening against server-side request forgery commonly does, therefore leave RunCVM's DNS and `docker exec` working.
 
-Set another address only if the default clashes with something in your environment, such as software in the VM that intercepts or blocks it. The address must be a unicast IPv4 address, outside `0.0.0.0/8` and `127.0.0.0/8`, and none of the container's own addresses, its gateway's, or RunCVM's bridge address in the container (`169.254.1.1`); a Container/VM with an invalid one fails to start, with an error saying so. An address in `169.254.0.0/16` keeps the VM's traffic to it on the host.
+Set another address only if the default clashes with something in your environment, such as software in the VM that intercepts or blocks it. The address must be a unicast IPv4 address, outside `0.0.0.0/8` and `127.0.0.0/8`, and none of the container's own addresses, its gateway's, or RunCVM's bridge address in the container ([`RUNCVM_BRIDGE_IP`](#runcvm_bridge_ip)); a Container/VM with an invalid one fails to start, with an error saying so. An address in `169.254.0.0/16` keeps the VM's traffic to it on the host.
+
+### RUNCVM_BRIDGE_IP
+
+**`RUNCVM_BRIDGE_IP=<IPv4 address>`**
+
+Sets the address, `169.254.53.1` by default, of the bridge RunCVM creates in the container to join the VM's network interface to the container's network. The bridge needs an address of its own to receive the VM's traffic, but the address is not seen beyond the container: `docker exec`'s connections to the VM leave the bridge from [`RUNCVM_DNS_IP`](#runcvm_dns_ip)'s address instead. The default is link-local, and lies outside both the addresses listed for `RUNCVM_DNS_IP` and those that container engines' networking is known to use in the container, such as `169.254.1.1`, at which rootless Podman's network (`pasta`) answers DNS.
+
+Set another address only if the default clashes with something in your environment. The address must be a unicast IPv4 address, outside `0.0.0.0/8` and `127.0.0.0/8`, other than `RUNCVM_DNS_IP`'s, and none of the container's own addresses or its gateway's; a Container/VM with an invalid one fails to start, with an error saying so.
 
 ### RUNCVM_QEMU_ACCEL
 
