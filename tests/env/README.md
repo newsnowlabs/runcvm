@@ -27,8 +27,10 @@ To launch a published image, give its name in place of `runcvm-l1` in [Launching
 ## Building
 
 ```sh
-docker build -t runcvm-l1 tests/env
+docker build -t runcvm-l1 --build-context podman-engine=tests/engines/podman tests/env
 ```
+
+The build needs `tests/engines/podman` as the named context `podman-engine`, for the static Podman builds. See [Packages](#packages). `tests/env/build.sh` gives the build this context.
 
 Alternatively, to tag the image as published, `ghcr.io/newsnowlabs/runcvm/images/test-l1:<tag>`, and optionally push it, run:
 
@@ -133,6 +135,7 @@ A generator decides the mode before any unit starts. For each further mode it ne
 - **AppArmor:** its user-space tools and Ubuntu's profiles, which load at boot, so that Docker and Podman confine containers with their AppArmor profiles (`docker-default`, `containers-default`) as on a stock Ubuntu host, where L1's kernel has AppArmor enabled. Without them, the kernel enforces no profile, and differences such as Podman's profile refusing a container any signal but SIGINT, SIGQUIT, SIGKILL and SIGTERM from Podman's OCI runtime would not show in L1.
 - **Docker:** Docker CE from Docker's own repository (see [Building](#building)), with the buildx and compose plugins. buildx provides the BuildKit that `./build/build.sh` needs.
 - **Podman:** Ubuntu's `podman` package, with RunCVM registered as its `runcvm` runtime in `/etc/containers/containers.conf.d/runcvm.conf`, as RunCVM's installer does, for running the tests with rootful Podman (`tests/run --engine podman`). It uses the runc that Docker's `containerd.io` package installs.
+- **Static Podman:** the static Podman builds pinned in `tests/engines/podman/static-versions`, installed by `tests/engines/podman/install-static` beside Ubuntu's Podman. Each version is in `/opt/podman-<version>`, with its own configuration in `/etc/containers-podman-<version>` and its storage in `/var/lib/containers/podman-static-<version>`, on L1's disk. To run the tests with a version, run `RUNCVM_TEST_PODMAN=/usr/local/sbin/podman-<version> tests/run --engine podman`.
 
 During the build, `systemctl` is diverted to a stand-in, `build/systemctl`. No systemd is running, so the stand-in:
 
@@ -248,7 +251,7 @@ Claude Code is installed only when the build is given a version and that version
 ```sh
 v=<version>
 sha=$(curl -fsSL https://downloads.claude.ai/claude-code-releases/$v/manifest.json | jq -r '.platforms["linux-x64"].checksum')
-docker build -t runcvm-l1 --build-arg CLAUDE_CODE_VERSION=$v --build-arg CLAUDE_CODE_SHA256=$sha tests/env
+docker build -t runcvm-l1 --build-context podman-engine=tests/engines/podman --build-arg CLAUDE_CODE_VERSION=$v --build-arg CLAUDE_CODE_SHA256=$sha tests/env
 ```
 
 The build checks the downloaded binary against the checksum, installs it as the `runcvm` user's `~/.local/bin/claude`, and configures it to:

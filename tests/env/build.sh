@@ -102,7 +102,10 @@ for tag in "${tags[@]}"; do
   tag_opts+=(-t "$IMAGE:$tag")
 done
 
-DOCKER_BUILDKIT=1 docker build "${tag_opts[@]}" "${arg_opts[@]}" "${build_opts[@]}" . || die "build failed"
+# The Dockerfile installs static Podman builds with tests/engines/podman/install-static, from the
+# named context podman-engine.
+DOCKER_BUILDKIT=1 docker build "${tag_opts[@]}" "${arg_opts[@]}" --build-context podman-engine=../engines/podman \
+  "${build_opts[@]}" . || die "build failed"
 
 if [ -n "$push" ]; then
   for tag in "${tags[@]}"; do
