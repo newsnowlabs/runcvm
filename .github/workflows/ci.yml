@@ -14,17 +14,22 @@
 #   - ci:skip      runs nothing while present; removing it runs CI.
 #   - ci:extended  runs the extended tier (tests/run --tier extended) in place of the core tier.
 #   - ci:all       runs every tier (tests/run --tier all); it takes precedence over ci:extended.
-#   - ci:podman    also runs the same tests under rootful Podman (tests/run --engine podman),
-#                  as a second set of shards alongside Docker's.
-#   Adding ci:extended, ci:all or ci:podman runs the integration tests; other labels run nothing.
-# - Nightly, on main: every tier, under Docker and under Podman, with a build that uses no
+#   - ci:podman    also runs the same tests under the runner's rootful Podman (tests/run
+#                  --engine podman), as a second set of shards alongside Docker's.
+#   - ci:podman:all  also runs them under the runner's Podman and under each static Podman
+#                  build pinned in tests/engines/podman/static-versions, each as a set of shards.
+#   Adding ci:extended, ci:all, ci:podman or ci:podman:all runs the integration tests; other
+#   labels run nothing.
+# - Nightly, on main: every tier, under Docker and under the runner's Podman, and on Saturdays
+#   (UTC) under each static Podman build too, with a build that uses no
 #   cached layers and pulls its base images afresh, so that changes upstream (Alpine, Docker,
 #   the kernels' packages) that break the build or the tests show up without a commit here.
 #   GitHub disables a public repository's scheduled workflows after 60 days without activity
 #   in it, and emails before doing so; the Actions tab re-enables them. GitHub sends a scheduled
 #   run's failure notices to whoever last changed the schedule.
-# - By hand (workflow_dispatch): the tests input gives tests/run's arguments, podman runs them
-#   under Podman as well as Docker, and fresh_build builds as the nightly run does.
+# - By hand (workflow_dispatch): the tests input gives tests/run's arguments, podman also runs
+#   them under the runner's Podman (system) or under it and each static Podman build (all), and
+#   fresh_build builds as the nightly run does.
 # Drafts and labels act through the jobs' if: conditions, not through event filters: if CI
 # becomes a required status check, a skipped job counts as passing, whereas a run that an event
 # filter prevents leaves the check pending and blocks merging. The Markdown paths filter and
@@ -55,9 +60,12 @@ on:
         description: tests/run arguments (e.g. "--tier all", or tests by name)
         default: --tier core
       podman:
-        description: also run the tests under rootful Podman
-        type: boolean
-        default: false
+        description: >-
+          also run the tests under rootful Podman: the runner's (system), or the runner's and each
+          static build in tests/engines/podman/static-versions (all)
+        type: choice
+        options: [none, system, all]
+        default: none
       fresh_build:
         description: build without cached layers, pulling base images afresh (as nightly)
         type: boolean
@@ -103,15 +111,15 @@ jobs:
 
   build:
     # Pull requests: not drafts, nor with ci:skip; for label changes, only adding ci:extended,
-    # ci:all or ci:podman, or removing ci:skip. The test jobs need this one, so they run or are
-    # skipped with it.
+    # ci:all, ci:podman or ci:podman:all, or removing ci:skip. The test jobs need this one, so
+    # they run or are skipped with it.
     if: >-
       github.event_name != 'pull_request' || (
         !github.event.pull_request.draft &&
         !contains(github.event.pull_request.labels.*.name, 'ci:skip') &&
         (github.event.action != 'labeled' ||
           github.event.label.name == 'ci:extended' || github.event.label.name == 'ci:all' ||
-          github.event.label.name == 'ci:podman') &&
+          github.event.label.name == 'ci:podman' || github.event.label.name == 'ci:podman:all') &&
         (github.event.action != 'unlabeled' || github.event.label.name == 'ci:skip')
       )
     concurrency:
@@ -159,23 +167,59 @@ jobs:
           compression-level: 0
           retention-days: 1
 
-  test:
+  # The engines that the test job runs the tests under, as a JSON list for its matrix:
+  # - docker, always;
+  # - podman (the runner's Podman): nightly, with ci:podman or ci:podman:all, or by hand with the
+  #   podman input system or all;
+  # - podman-<version> for each static Podman build in tests/engines/podman/static-versions: on
+  #   Saturday's (UTC) nightly run, with ci:podman:all, or by hand with the podman input all.
+  engines:
     needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      list: ${{ steps.list.outputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        env:
+          EVENT: ${{ github.event_name }}
+          PODMAN_INPUT: ${{ inputs.podman }}
+          LABEL_PODMAN: ${{ contains(github.event.pull_request.labels.*.name, 'ci:podman') }}
+          LABEL_PODMAN_ALL: ${{ contains(github.event.pull_request.labels.*.name, 'ci:podman:all') }}
+        run: |
+          system='' static=''
+          if [ "$EVENT" = schedule ] || [ "$LABEL_PODMAN" = true ] || [ "$LABEL_PODMAN_ALL" = true ] ||
+             [ "$PODMAN_INPUT" = system ] || [ "$PODMAN_INPUT" = all ]; then
+            system=1
+          fi
+          if { [ "$EVENT" = schedule ] && [ "$(date -u +%u)" = 6 ]; } || [ "$LABEL_PODMAN_ALL" = true ] ||
+             [ "$PODMAN_INPUT" = all ]; then
+            static=1
+          fi
+          engines=(docker)
+          [ -n "$system" ] && engines+=(podman)
+          if [ -n "$static" ]; then
+            for v in $(tests/engines/podman/install-static --list); do
+              engines+=("podman-$v")
+            done
+          fi
+          list=$(printf '%s\n' "${engines[@]}" | jq -R . | jq -cs .)
+          echo "Engines: $list"
+          echo "list=$list" >>"$GITHUB_OUTPUT"
+
+  test:
+    needs: [build, engines]
     strategy:
       fail-fast: false
       matrix:
-        # Docker, and Podman too nightly, with ci:podman, or by hand with the podman input. (The env
-        # context is not available here.)
-        engine: >-
-          ${{ fromJSON((github.event_name == 'schedule' || inputs.podman == true
-                        || contains(github.event.pull_request.labels.*.name, 'ci:podman'))
-                       && '["docker", "podman"]' || '["docker"]') }}
+        engine: ${{ fromJSON(needs.engines.outputs.list) }}
         shard: [1, 2, 3]
     concurrency:
       group: ci-test-${{ github.ref }}-${{ matrix.engine }}-${{ matrix.shard }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-    # Docker's jobs keep their names (test (1/3), ...); Podman's are named apart.
-    name: test (${{ matrix.engine == 'podman' && 'podman ' || '' }}${{ matrix.shard }}/3)
+    # Docker's jobs keep their names (test (1/3), ...); each Podman's are named apart.
+    name: test (${{ matrix.engine != 'docker' && format('{0} ', matrix.engine) || '' }}${{ matrix.shard }}/3)
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -240,6 +284,18 @@ jobs:
             sudo tee /etc/containers/registries.conf.d/50-runcvm-ci-docker-io.conf
           sudo podman run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=kvm alpine uname -mr
 
+      - name: Install static Podman ${{ startsWith(matrix.engine, 'podman-') && matrix.engine || '' }}
+        if: startsWith(matrix.engine, 'podman-')
+        run: |
+          # Beside the runner's Podman, with storage of its own in /var/lib/containers, on the
+          # runner's ext4 root filesystem.
+          version=${MATRIX_ENGINE#podman-}
+          sudo tests/engines/podman/install-static "$version"
+          echo "RUNCVM_TEST_PODMAN=/usr/local/sbin/podman-$version" >>"$GITHUB_ENV"
+          sudo /usr/local/sbin/podman-$version run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=kvm alpine uname -mr
+        env:
+          MATRIX_ENGINE: ${{ matrix.engine }}
+
       - name: Run a Container/VM under KVM
         run: |
           # With RUNCVM_QEMU_ACCEL=kvm, RunCVM refuses to start the VM without /dev/kvm rather
@@ -248,15 +304,19 @@ jobs:
             sh -c 'dmesg | grep -iE "hypervisor detected" | head -1; echo vcpus: $(nproc)'
 
       - name: Integration tests (${{ env.TESTS }}, ${{ matrix.engine }}, shard ${{ matrix.shard }}/3)
+        env:
+          # tests/run's engine: docker, or podman for the runner's Podman and for each static
+          # build. For a static build, RUNCVM_TEST_PODMAN (set by its install step) selects it.
+          ENGINE: ${{ matrix.engine == 'docker' && 'docker' || 'podman' }}
         run: |
           # Of the tests TESTS selects, this shard runs every third, starting with its own
           # number, so the three shards together run each once. Two tests at a time suits a
           # hosted runner's 4 CPUs and 16 GB of memory. TESTS holds several arguments, so it is
           # split into words.
           # shellcheck disable=SC2086
-          tests/run $TESTS --engine ${{ matrix.engine }} --shard ${{ matrix.shard }}/3 --list
+          tests/run $TESTS --engine "$ENGINE" --shard ${{ matrix.shard }}/3 --list
           # shellcheck disable=SC2086
-          RUNCVM_TEST_JOBS=2 tests/run $TESTS --engine ${{ matrix.engine }} --shard ${{ matrix.shard }}/3 \
+          RUNCVM_TEST_JOBS=2 tests/run $TESTS --engine "$ENGINE" --shard ${{ matrix.shard }}/3 \
             --results "$RUNNER_TEMP/results"
 
       - name: Upload test results

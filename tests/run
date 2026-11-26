@@ -61,7 +61,10 @@ docker). With podman, tests/engines/podman goes first in PATH, so that the
 runner's and the tests' 'docker' commands run rootful Podman (through sudo
 when not root), and RunCVM must be registered with Podman (as
 runcvm-install-runtime.sh does, in /etc/containers/containers.conf.d/runcvm.conf). Tests see RUNCVM_TEST_ENGINE, and
-'docker>=<major>.<minor>' requirements are not met.
+'docker>=<major>.<minor>' requirements are not met. RUNCVM_TEST_PODMAN names
+the Podman executable to run, without arguments (default: podman), e.g. a
+script that runs another Podman installation with its own configuration. The
+results record the engine and, unless --no-preflight, its version.
 
 Stand-in mode (--mock, or RUNCVM_TEST_MOCK=1) runs tests with a standard
 runtime (runc, unless --runtime or a non-RunCVM $RUNTIME is given) in place
@@ -224,6 +227,9 @@ class Environment:
     def __init__(self, runtime, mock, run_id, use_docker, accel=None, tcg_cases=False, pull=False,
                  vm_env=(), vm_cpus=None, vm_memory=None, engine="docker"):
         self.engine = engine
+        # The engine's version (Podman's, or dockerd's), recorded with the results once
+        # preflight has read it
+        self.engine_version = "unknown"
         self.runtime = runtime
         # The RunCVM package installed on this host, recorded with the results
         self.package = package_version()
@@ -248,9 +254,15 @@ class Environment:
             if r.returncode != 0:
                 raise HarnessError("cannot run rootful Podman ('podman info' failed: %s)"
                                    % (r.stderr.strip().splitlines() or ["?"])[-1])
+            self.engine_version = r.stdout.strip() or "unknown"
             return
-        if docker("info", "--format", "{{json .ServerVersion}}").returncode != 0:
+        r = docker("info", "--format", "{{json .ServerVersion}}")
+        if r.returncode != 0:
             raise HarnessError("cannot reach the Docker daemon ('docker info' failed)")
+        try:
+            self.engine_version = json.loads(r.stdout) or "unknown"
+        except ValueError:
+            pass
         r = docker("info", "--format", "{{json .Runtimes}}")
         try:
             runtimes = json.loads(r.stdout or "{}")
@@ -560,7 +572,8 @@ def write_junit(path, results, env, logs_dir):
     for r in results:
         suite = ET.SubElement(root, "testsuite", name=r.test.name, time=str(r.duration))
         props = ET.SubElement(suite, "properties")
-        for k, v in [("runtime", env.runtime), ("package", env.package), ("mock", "1" if env.mock else "0"),
+        for k, v in [("engine", env.engine), ("engine_version", env.engine_version),
+                     ("runtime", env.runtime), ("package", env.package), ("mock", "1" if env.mock else "0"),
                      ("accel", env.accel or ""), ("tcg_cases", "1" if env.tcg_cases else "0"),
                      ("pull", "1" if env.pull else "0"), ("vm_env", " ".join(env.vm_env)),
                      ("vm_cpus", env.vm_cpus or ""), ("vm_memory", env.vm_memory or ""), ("tier", r.test.tier), ("requires", " ".join(r.test.requires))] + r.params:
@@ -585,7 +598,8 @@ def write_junit(path, results, env, logs_dir):
 
 def write_json(path, results, env, tier, status_code, running):
     data = {
-        "run_id": env.run_id, "runtime": env.runtime, "package": env.package, "mock": env.mock, "accel": env.accel,
+        "run_id": env.run_id, "engine": env.engine, "engine_version": env.engine_version,
+        "runtime": env.runtime, "package": env.package, "mock": env.mock, "accel": env.accel,
         "tcg_cases": env.tcg_cases, "pull": env.pull, "vm_env": env.vm_env, "vm_cpus": env.vm_cpus,
         "vm_memory": env.vm_memory, "tier": tier,
         "complete": status_code is not None, "running": running, "status": status_code,
@@ -606,13 +620,13 @@ def write_results(results_dir, logs_dir, results, env, args, selected, status_co
     progress, with the test named by 'running' (if any) under way. Each file is written to a
     temporary name and renamed into place, so that a reader never sees a partly written file."""
     counts = {s: sum(1 for r in results if r.status == s) for s in ("pass", "fail", "timeout", "skip")}
-    header = ("run id: %s; runtime: %s; package: %s; mock: %d; accel: %s; tcg cases: %d; pull: %d; "
-              "vm env: %s; vm cpus: %s; vm memory: %s; tier: %s") % (
-        env.run_id, env.runtime, env.package, int(args.mock), args.accel or "default", int(env.tcg_cases),
+    header = ("run id: %s; engine: %s %s; runtime: %s; package: %s; mock: %d; accel: %s; tcg cases: %d; "
+              "pull: %d; vm env: %s; vm cpus: %s; vm memory: %s; tier: %s") % (
+        env.run_id, env.engine, env.engine_version, env.runtime, env.package, int(args.mock), args.accel or "default", int(env.tcg_cases),
         int(env.pull), " ".join(env.vm_env) or "none", env.vm_cpus or "default", env.vm_memory or "default",
         args.tier)
 
-    lines = ["RunCVM package: %s" % env.package, ""]
+    lines = ["RunCVM package: %s" % env.package, "Engine: %s %s" % (env.engine, env.engine_version), ""]
     lines += ["%-8s %-32s %5ss  %s" % (r.status.upper(), r.test.name, r.duration, r.reason) for r in results]
     if running:
         lines.append("%-8s %s" % ("RUNNING", running))
@@ -800,7 +814,8 @@ def main(argv):
     if not args.no_preflight:
         env.preflight()
 
-    results_dir = args.results or os.path.join(os.environ.get("TMPDIR", "/tmp"), "runcvm-tests", run_id)
+    # Absolute, as each test runs in its own directory and writes to it (e.g. its params).
+    results_dir = os.path.abspath(args.results or os.path.join(os.environ.get("TMPDIR", "/tmp"), "runcvm-tests", run_id))
     logs_dir = os.path.join(results_dir, "logs")
     try:
         os.makedirs(logs_dir, exist_ok=True)
@@ -812,7 +827,7 @@ def main(argv):
 
     say("Running RunCVM integration tests")
     say("  run id:   %s" % run_id)
-    say("  engine:   %s" % args.engine)
+    say("  engine:   %s %s" % (args.engine, env.engine_version))
     say("  runtime:  %s%s" % (runtime, " (stand-in mode)" if args.mock else ""))
     say("  package:  %s (%s)" % (env.package, PACKAGE_DIR))
     say("  accel:    %s" % (args.accel or "(RunCVM default)"))

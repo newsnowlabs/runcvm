@@ -1,0 +1,20 @@
+# Static Podman builds that the integration tests run with, beside the host's own Podman (see
+# install-static). Each line gives a version, an architecture and the SHA-256 hash of the
+# archive podman-linux-<arch>.tar.gz that https://github.com/mgoltzsche/podman-static publishes
+# for the version (release v<version>).
+#
+# install-static installs an archive only if its hash matches the hash here. To add or update a
+# version, download its archive and the archive's signature (podman-linux-<arch>.tar.gz.asc)
+# for each architecture, and check the signature against the project's signing key,
+# 0CCF102C4F95D89E583FF1D4F8B5AF50344BB503:
+#
+#   gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys 0CCF102C4F95D89E583FF1D4F8B5AF50344BB503
+#   gpg --batch --verify podman-linux-<arch>.tar.gz.asc podman-linux-<arch>.tar.gz
+#
+# Then record the archive's hash (sha256sum podman-linux-<arch>.tar.gz) here.
+#
+# version  arch   sha256
+5.8.10     amd64  9e7f117bb301aeab4f930935d4f3ae1b04243f449d83265fb635e5b103c23a80
+5.8.10     arm64  d33a039d144a03a0c67aee52ee68ea3044959ff5e47b4e0a080ebb812ddf4ae5
+6.2.0      amd64  981bcee9ff6a07b3a3e22b9ea98c9aa10bcf67bac2abdc3049595267122378be
+6.2.0      arm64  b1bcc37efd6a430dbe5448f07d99544dad435f361bdbab80418a571b5c2d7af1
