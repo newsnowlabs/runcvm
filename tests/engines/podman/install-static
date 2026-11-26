@@ -2,7 +2,7 @@
 # Installs static Podman builds beside the host's own Podman, for running the integration tests
 # with them: RUNCVM_TEST_PODMAN=/usr/local/sbin/podman-<version> tests/run --engine podman.
 #
-# Usage: install-static [--base DIR] [--no-fs-check] [--list] [VERSION...]
+# Usage: install-static [--base DIR] [--no-fs-check] [--no-run-check] [--list] [VERSION...]
 #
 #   VERSION     a version in static-versions (default: every version there for this host's
 #               architecture)
@@ -11,6 +11,8 @@
 #               or xfs, not virtiofs, overlay or tmpfs on overlay.
 #   --no-fs-check  do not check the filesystem of DIR: for an image build, where DIR is on a
 #               suitable filesystem only when the image runs
+#   --no-run-check  do not check each version by running a container and a build with its
+#               default runtime: for an image build, where Podman cannot run containers
 #   --list      print the versions in static-versions for this host's architecture, and exit
 #
 # For each version, the script installs:
@@ -40,6 +42,7 @@ versions_file="$here/static-versions"
 base=/var/lib/containers
 list=
 fs_check=1
+run_check=1
 wanted=()
 
 while [ $# -gt 0 ]; do
@@ -48,6 +51,7 @@ while [ $# -gt 0 ]; do
             base=$2; shift 2 ;;
     --base=*) base=${1#--base=}; shift ;;
     --no-fs-check) fs_check=; shift ;;
+    --no-run-check) run_check=; shift ;;
     --list) list=1; shift ;;
     -h|--help) sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;;
     -*) echo "install-static: unknown option: $1" >&2; exit 2 ;;
@@ -180,6 +184,18 @@ EOF
     mv -f "$f.new" "$f"
   done
   echo "install-static: Podman $v: $("$wrapper" --version)"
+
+  # A container and a one-step build, without --runtime, so with the default runtime, which the
+  # tests' plain containers and builds use.
+  if [ -n "$run_check" ]; then
+    if ! "$wrapper" run --rm docker.io/library/alpine true ||
+       ! printf 'FROM docker.io/library/alpine\nRUN true\n' | "$wrapper" build -q -t install-static-check - >/dev/null; then
+      echo "install-static: Podman $v cannot run a container or a build with its default runtime" >&2
+      return 1
+    fi
+    "$wrapper" rmi -f install-static-check >/dev/null
+    echo "install-static: Podman $v: a container and a build run with $("$wrapper" info --format '{{.Host.OCIRuntime.Name}}')"
+  fi
 }
 
 for v in "${wanted[@]}"; do
