@@ -7,7 +7,8 @@
   one (127.0.0.11, on Docker's user-defined networks), the VM's resolv.conf
   names RUNCVM_DNS_IP (169.254.53.53 by default) in its place, which
   dnsmasq answers; elsewhere (e.g. under Podman, whose DNS server is at the
-  network's gateway), it names the container's DNS servers unchanged.
+  network's gateway), it names the container's DNS servers unchanged, and no
+  dnsmasq runs in the container.
 - A malformed or non-unicast RUNCVM_DNS_IP, or one in 0.0.0.0/8 or
   127.0.0.0/8, fails Container/VM creation with an error naming it.
 - RunCVM's bridge in the container has the address RUNCVM_BRIDGE_IP
@@ -79,7 +80,11 @@ def case_running(args):
     if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
         return [("%s: Container/VM starts and 'docker exec' works" % label, True, False)]
     local = local_addresses(t.docker("inspect", "-f", "{{.State.Pid}}", name).stdout.strip())
+    # RunCVM's tools may run through its loader, so dnsmasq's path is any of its arguments.
+    dnsmasq = any(word == "dnsmasq" or word.endswith("/dnsmasq")
+                  for _, args in t.host_processes(name) for word in args.split())
     return [
+        ("%s: dnsmasq runs in the container" % label, CONTAINER_DNS == ["127.0.0.11"], dnsmasq),
         ("%s: 'docker exec' works" % label, True, True),
         ("%s: the container holds the bridge address %s" % (label, bridge), True,
          local is not None and bridge in local),
