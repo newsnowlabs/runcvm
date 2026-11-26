@@ -122,7 +122,13 @@ def run(case):
             return {"started": False, "output": r.stdout}
         args = ["docker", "exec", "-it", name, "sh"]
     else:
-        args = ["docker", "run", "-it", "--name", name, *t.labels(), *opts, "alpine", "sh"]
+        # Podman's 'run -it' forwards the terminal's SIGWINCH to the container (as 'runc kill'),
+        # which AppArmor's profiles for Podman and its containers block on hosts that enforce them,
+        # and it then writes the failure into the session's output. The session's window size
+        # reaches the container through Podman's resize of its terminal, not that signal, and the
+        # test's Ctrl-C and Ctrl-D are characters typed at the terminal, so neither needs it.
+        proxy = ["--sig-proxy=false"] if t.ENGINE == "podman" else []
+        args = ["docker", "run", "-it", *proxy, "--name", name, *t.labels(), *opts, "alpine", "sh"]
 
     s = Session(args)
     result = {"started": bool(s.expect(re.escape(PROMPT), BOOT_TIMEOUT))}
