@@ -1,0 +1,184 @@
+#!/bin/bash
+# Installs static Podman builds beside the host's own Podman, for running the integration tests
+# with them: RUNCVM_TEST_PODMAN=/usr/local/sbin/podman-<version> tests/run --engine podman.
+#
+# Usage: install-static [--base DIR] [--no-fs-check] [--list] [VERSION...]
+#
+#   VERSION     a version in static-versions (default: every version there for this host's
+#               architecture)
+#   --base DIR  the directory for each version's storage and temporary files (default
+#               /var/lib/containers). Overlay must accept DIR as an upper directory: e.g. ext4
+#               or xfs, not virtiofs, overlay or tmpfs on overlay.
+#   --no-fs-check  do not check the filesystem of DIR: for an image build, where DIR is on a
+#               suitable filesystem only when the image runs
+#   --list      print the versions in static-versions for this host's architecture, and exit
+#
+# For each version, the script installs:
+#   /opt/podman-<version>              the build, from https://github.com/mgoltzsche/podman-static,
+#                                      only if the archive's SHA-256 hash matches static-versions
+#   /etc/containers-podman-<version>/  its own containers.conf, storage.conf, registries.conf and
+#                                      network configuration
+#   <base>/podman-static-<version>/    its storage (storage/) and temporary files (tmp/)
+#   /usr/local/sbin/podman-<version>   a script that runs it with that configuration
+#
+# Each version has storage, networks, locks and run-time directories of its own, so that it does
+# not change the host's Podman or another version. Its containers.conf sets lock_type = "file":
+# rootful Podman's default locks are in one shared-memory segment for every installation on a
+# host, and two installations that use the segment deadlock.
+#
+# The script also installs the build's /etc/containers/policy.json where the host has none:
+# Podman reads image signature policy only from there.
+#
+# Runs as root, under bash 4 or later. Needs curl, findmnt, sha256sum, tar and the common
+# coreutils. A version already installed with the same archive hash is not downloaded again; its
+# configuration is written again.
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+versions_file="$here/static-versions"
+base=/var/lib/containers
+list=
+fs_check=1
+wanted=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --base) [ $# -ge 2 ] || { echo "install-static: --base needs a directory" >&2; exit 2; }
+            base=$2; shift 2 ;;
+    --base=*) base=${1#--base=}; shift ;;
+    --no-fs-check) fs_check=; shift ;;
+    --list) list=1; shift ;;
+    -h|--help) sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    -*) echo "install-static: unknown option: $1" >&2; exit 2 ;;
+    *) wanted+=("$1"); shift ;;
+  esac
+done
+
+case "$(uname -m)" in
+  x86_64) arch=amd64 ;;
+  aarch64) arch=arm64 ;;
+  *) echo "install-static: no static Podman build for architecture $(uname -m)" >&2; exit 1 ;;
+esac
+
+# "version sha256" for each version in static-versions for this architecture.
+pins=$(awk -v arch="$arch" '!/^#/ && NF == 3 && $2 == arch { print $1, $3 }' "$versions_file")
+
+if [ -n "$list" ]; then
+  awk '{ print $1 }' <<<"$pins"
+  exit 0
+fi
+
+[ -n "$base" ] || { echo "install-static: --base needs a directory" >&2; exit 2; }
+[ "$(id -u)" = 0 ] || { echo "install-static: run as root" >&2; exit 1; }
+[ ${#wanted[@]} -gt 0 ] || mapfile -t wanted < <(awk '{ print $1 }' <<<"$pins")
+
+mkdir -p "$base"
+if [ -n "$fs_check" ]; then
+  base_fstype=$(findmnt -n -o FSTYPE -T "$base")
+  case "$base_fstype" in
+    virtiofs|overlay|tmpfs|fuse*)
+      echo "install-static: $base is on $base_fstype, which overlay cannot use as an upper directory; give --base a directory on e.g. ext4 or xfs" >&2
+      exit 1 ;;
+  esac
+fi
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+install_version() { # version
+  local v=$1 sha opt conf data wrapper runc archive
+  sha=$(awk -v v="$v" '$1 == v { print $2 }' <<<"$pins")
+  [ -n "$sha" ] || { echo "install-static: version $v for $arch is not in $versions_file" >&2; return 1; }
+
+  opt=/opt/podman-$v
+  conf=/etc/containers-podman-$v
+  data=$base/podman-static-$v
+  wrapper=/usr/local/sbin/podman-$v
+
+  if [ "$(cat "$opt/.archive-sha256" 2>/dev/null)" != "$sha" ]; then
+    echo "install-static: downloading Podman $v for $arch"
+    archive=$work/podman-$v.tar.gz
+    curl -fsSL --retry 3 -o "$archive" \
+      "https://github.com/mgoltzsche/podman-static/releases/download/v$v/podman-linux-$arch.tar.gz"
+    if ! echo "$sha  $archive" | sha256sum -c --status; then
+      echo "install-static: the archive for Podman $v ($arch) does not match its hash in $versions_file" >&2
+      return 1
+    fi
+    rm -rf "$opt"
+    mkdir -p "$opt"
+    tar -xzf "$archive" -C "$opt" --strip-components=1 --no-same-owner
+    echo "$sha" >"$opt/.archive-sha256"
+  fi
+
+  if [ ! -e /etc/containers/policy.json ]; then
+    install -D -m 644 "$opt/etc/containers/policy.json" /etc/containers/policy.json
+  fi
+
+  # Podman's runc entry is the runc in PATH where there is one, and the build's own otherwise.
+  runc=$(command -v runc || echo "$opt/usr/local/bin/runc")
+
+  mkdir -p "$conf/networks" "$data/storage" "$data/tmp"
+  cat >"$conf/containers.conf.new" <<EOF
+# Static Podman $v, written by tests/engines/podman/install-static, with storage, networks,
+# locks and run-time directories of its own beside the host's Podman.
+[containers]
+seccomp_profile = "$opt/etc/containers/seccomp.json"
+
+[engine]
+conmon_path = ["$opt/usr/local/lib/podman/conmon"]
+# Rootful Podman's default locks are in one shared-memory segment for every installation on a
+# host; two installations that use the segment deadlock.
+lock_type = "file"
+cgroup_manager = "systemd"
+events_logger = "file"
+helper_binaries_dir = ["$opt/usr/local/lib/podman", "$opt/usr/local/libexec/podman", "$opt/usr/local/bin"]
+static_dir = "$data/storage/libpod"
+tmp_dir = "/run/libpod-$v"
+
+[engine.runtimes]
+crun = ["$opt/usr/local/bin/crun"]
+runc = ["$runc"]
+runcvm = ["/opt/runcvm/scripts/runcvm-runtime"]
+
+[network]
+network_config_dir = "$conf/networks"
+EOF
+  cat >"$conf/storage.conf.new" <<EOF
+# Static Podman $v, written by tests/engines/podman/install-static.
+[storage]
+driver = "overlay"
+graphroot = "$data/storage"
+runroot = "/run/containers/storage-$v"
+EOF
+  cat >"$conf/registries.conf.new" <<EOF
+# Static Podman $v, written by tests/engines/podman/install-static: short image names (e.g.
+# alpine) resolve on Docker Hub, as under Docker.
+unqualified-search-registries = ["docker.io"]
+EOF
+  cat >"$wrapper.new" <<EOF
+#!/bin/sh
+# Static Podman $v, written by tests/engines/podman/install-static: runs it with its own
+# configuration, in $conf.
+export CONTAINERS_CONF=$conf/containers.conf
+export CONTAINERS_STORAGE_CONF=$conf/storage.conf
+export CONTAINERS_REGISTRIES_CONF=$conf/registries.conf
+# Podman's build puts an overlay over the build context in TMPDIR, so TMPDIR must be on a
+# filesystem that overlay accepts as an upper directory. It is made here as well as at install,
+# for a base that is populated apart from the installation (e.g. a disk populated once).
+export TMPDIR=$data/tmp
+mkdir -p "\$TMPDIR"
+exec $opt/usr/local/bin/podman "\$@"
+EOF
+  chmod 755 "$wrapper.new"
+  # Each file is renamed into place, so that a Podman that runs during a reinstall reads either
+  # the old file or the new one.
+  for f in "$conf/containers.conf" "$conf/storage.conf" "$conf/registries.conf" "$wrapper"; do
+    mv -f "$f.new" "$f"
+  done
+  echo "install-static: Podman $v: $("$wrapper" --version)"
+}
+
+for v in "${wanted[@]}"; do
+  install_version "$v"
+done
