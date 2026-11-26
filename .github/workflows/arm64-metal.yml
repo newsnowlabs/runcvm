@@ -18,6 +18,15 @@
 #   nor with ci:skip, nor for pull requests from forks, which GitHub gives no OIDC token.
 # - By hand (workflow_dispatch, on main): the tests input gives tests/run's arguments.
 #
+# The engines, each in turn on the same host, as for ci.yml's tests:
+# - Docker, always;
+# - Podman, Ubuntu's package: nightly, with ci:podman or ci:podman:all as well as ci:arm64, or by
+#   hand with the podman input system or all;
+# - each static Podman build pinned in tests/engines/podman/static-versions: on Saturday's (UTC)
+#   nightly run, with ci:podman:all as well as ci:arm64, or by hand with the podman input all.
+# Adding ci:podman or ci:podman:all to a pull request runs nothing by itself: the engines apply
+# from the next run that ci:arm64 starts.
+#
 # The host terminates itself after MAX_MINUTES, whatever happens to this job; the teardown
 # step terminates it at the end of the job, run or cancelled; and each run first reaps any host
 # of its group left past its expiry.
@@ -33,6 +42,13 @@ on:
       tests:
         description: tests/run arguments (e.g. "--tier all", or tests by name)
         default: --tier core
+      podman:
+        description: >-
+          also run the tests under rootful Podman: Ubuntu's (system), or Ubuntu's and each static
+          build in tests/engines/podman/static-versions (all)
+        type: choice
+        options: [none, system, all]
+        default: none
 
 permissions:
   contents: read
@@ -84,6 +100,34 @@ jobs:
           role-duration-seconds: 10800
           aws-region: us-east-1
 
+      # PODMAN, for launch: none, system or all. ENGINES: the engines to run the tests under, in
+      # turn: docker, podman (Ubuntu's) and podman-<version> for each static build.
+      - name: Engines
+        env:
+          EVENT: ${{ github.event_name }}
+          PODMAN_INPUT: ${{ inputs.podman }}
+          LABEL_PODMAN: ${{ contains(github.event.pull_request.labels.*.name, 'ci:podman') }}
+          LABEL_PODMAN_ALL: ${{ contains(github.event.pull_request.labels.*.name, 'ci:podman:all') }}
+        run: |
+          podman=none
+          if [ "$EVENT" = schedule ] || [ "$LABEL_PODMAN" = true ] || [ "$PODMAN_INPUT" = system ]; then
+            podman=system
+          fi
+          if { [ "$EVENT" = schedule ] && [ "$(date -u +%u)" = 6 ]; } || [ "$LABEL_PODMAN_ALL" = true ] ||
+             [ "$PODMAN_INPUT" = all ]; then
+            podman=all
+          fi
+          engines=docker
+          [ "$podman" != none ] && engines+=" podman"
+          if [ "$podman" = all ]; then
+            for v in $(tests/engines/podman/install-static --list); do
+              engines+=" podman-$v"
+            done
+          fi
+          echo "Engines: $engines"
+          echo "PODMAN=$podman" >>"$GITHUB_ENV"
+          echo "ENGINES=$engines" >>"$GITHUB_ENV"
+
       - name: SSH key and address
         run: |
           ssh-keygen -q -t ed25519 -N '' -C "$RUN" -f "$RUNNER_TEMP/host-key"
@@ -109,16 +153,30 @@ jobs:
           WAIT_MINUTES: 55
         run: .github/arm64-metal/launch wait
 
-      - name: Integration tests (${{ env.TESTS }}, ${{ env.SHARDS }} shards)
-        timeout-minutes: 60
+      - name: Integration tests (${{ env.TESTS }}, ${{ env.SHARDS }} shards, ${{ env.ENGINES }})
+        timeout-minutes: 90
         env:
           IP: ${{ steps.launch.outputs.ip }}
         run: |
-          # TESTS holds several arguments, so it is split into words.
-          # shellcheck disable=SC2086
-          ssh -i "$RUNNER_TEMP/host-key" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-            -o UserKnownHostsFile="$RUNNER_TEMP/arm64-metal-known-hosts" -o ServerAliveInterval=30 \
-            "ubuntu@$IP" bash -s -- "$SHARDS" /home/ubuntu/results $TESTS <.github/arm64-metal/run-shards
+          # Each engine in turn, with its results in results/<engine>. Every engine runs, whatever
+          # the outcome of the one before. A static build runs under tests/run --engine podman,
+          # with RUNCVM_TEST_PODMAN naming its script.
+          status=0
+          for engine in $ENGINES; do
+            case "$engine" in
+              docker) run_env='' engine_opt=docker ;;
+              podman) run_env='' engine_opt=podman ;;
+              *) run_env="RUNCVM_TEST_PODMAN=/usr/local/sbin/$engine" engine_opt=podman ;;
+            esac
+            echo "=== $engine"
+            # TESTS holds several arguments, so it is split into words.
+            # shellcheck disable=SC2086
+            ssh -i "$RUNNER_TEMP/host-key" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+              -o UserKnownHostsFile="$RUNNER_TEMP/arm64-metal-known-hosts" -o ServerAliveInterval=30 \
+              "ubuntu@$IP" $run_env bash -s -- "$SHARDS" "/home/ubuntu/results/$engine" $TESTS \
+              --engine "$engine_opt" <.github/arm64-metal/run-shards || status=1
+          done
+          exit $status
 
       - name: Fetch the results
         if: always() && steps.launch.outputs.ip
@@ -165,4 +223,12 @@ jobs:
             ${{ steps.launch.outputs.type }} in ${{ steps.launch.outputs.region }},
             ${{ steps.launch.outputs.market }} at ${{ steps.launch.outputs.price }} USD/hour
           USAGE: ${{ steps.teardown.outputs.usage }}
-        run: .github/arm64-metal/summarise "$RUNNER_TEMP/results" "$SHARDS" "$HOST${USAGE:+; $USAGE}" || true
+        run: |
+          # Docker's summary keeps its plain title; each other engine's names the engine.
+          for engine in $ENGINES; do
+            label=$engine
+            [ "$engine" = docker ] && label=''
+            # An empty label gives summarise no ENGINE argument.
+            # shellcheck disable=SC2086
+            .github/arm64-metal/summarise "$RUNNER_TEMP/results/$engine" "$SHARDS" "$HOST${USAGE:+; $USAGE}" $label || true
+          done
