@@ -415,6 +415,30 @@ config_env_is() {
   [ "$(jq_get "$CFG" --arg entry "$1=$2" 'any(.process.env[]; . == $entry)')" = "true" ]
 }
 
+# The engines' default masked and read-only paths for a standard container (see the create
+# command's confinement), Docker's and Podman's.
+RUNCVM_DOCKER_MASKED_PATHS='["/proc/acpi","/proc/asound","/proc/interrupts","/proc/kcore","/proc/keys",
+  "/proc/latency_stats","/proc/sched_debug","/proc/scsi","/proc/timer_list","/proc/timer_stats",
+  "/sys/devices/virtual/powercap","/sys/firmware"]'
+RUNCVM_DOCKER_READONLY_PATHS='["/proc/bus","/proc/fs","/proc/irq","/proc/sys","/proc/sysrq-trigger"]'
+RUNCVM_PODMAN_MASKED_PATHS='["/proc/acpi","/proc/kcore","/proc/keys","/proc/latency_stats",
+  "/proc/timer_list","/proc/timer_stats","/proc/sched_debug","/proc/scsi","/sys/firmware",
+  "/sys/fs/selinux","/sys/dev/block","/sys/devices/virtual/powercap"]'
+RUNCVM_PODMAN_READONLY_PATHS='["/proc/asound","/proc/bus","/proc/fs","/proc/irq","/proc/sys",
+  "/proc/sysrq-trigger"]'
+
+# Prints the name of the first AppArmor profile loaded in the host's kernel that matches pattern $1
+# (e.g. docker-default, or containers-default-*), or nothing if none does or AppArmor is not
+# enabled.
+apparmor_loaded_profile() {
+  local line name
+  [ -r /sys/kernel/security/apparmor/profiles ] || return 0
+  while IFS= read -r line; do
+    name="${line% (*)}"
+    case "$name" in $1) echo -n "$name"; return 0 ;; esac
+  done </sys/kernel/security/apparmor/profiles
+}
+
 # RunCVM's capability sets (see the create command's RUNCVM_CAPS): its own processes' needs
 # (minimal), and Docker's default capabilities with CAP_NET_ADMIN (engine).
 RUNCVM_MINIMAL_CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_MKNOD",
@@ -939,6 +963,47 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     set_config_env "RUNCVM_QEMU_TCG_TB_MEM_SIZE" "$RUNCVM_QEMU_TCG_TB_MEM_SIZE"
     RUNCVM_CONTAINER_MEM_TCG="$RUNCVM_QEMU_TCG_TB_MEM_SIZE"
   fi
+
+  # The container's confinement on the host is that the engine gives a standard container, whatever
+  # the container was given (e.g. docker run --privileged, or podman run --privileged): RunCVM's
+  # processes in the container need no more, and the workload runs under the VM's own kernel.
+  # - The engine's default masked and read-only paths, where the bundle has none.
+  # - No host devices but those RunCVM adds below (/dev/net/tun, /dev/kvm, /dev/vhost-net): a device
+  #   cgroup rule allowing every device is taken out, with the host's devices that come with it.
+  # - /sys and /sys/fs/cgroup mounted read-only.
+  # - The engine's default AppArmor profile, where the bundle gives none or 'unconfined' and
+  #   AppArmor has that profile loaded.
+  # Podman marks its bundles with the annotation io.container.manager=libpod; any other engine is
+  # taken to be Docker.
+  if [ "$(jq_get "$CFG" '.annotations["io.container.manager"] // ""')" = "libpod" ]; then
+    RUNCVM_ENGINE_MASKED_PATHS="$RUNCVM_PODMAN_MASKED_PATHS"
+    RUNCVM_ENGINE_READONLY_PATHS="$RUNCVM_PODMAN_READONLY_PATHS"
+    RUNCVM_ENGINE_APPARMOR_PROFILE="containers-default-*"
+  else
+    RUNCVM_ENGINE_MASKED_PATHS="$RUNCVM_DOCKER_MASKED_PATHS"
+    RUNCVM_ENGINE_READONLY_PATHS="$RUNCVM_DOCKER_READONLY_PATHS"
+    RUNCVM_ENGINE_APPARMOR_PROFILE="docker-default"
+  fi
+  jq_set "$CFG" \
+    --argjson masked "$RUNCVM_ENGINE_MASKED_PATHS" \
+    --argjson readonly "$RUNCVM_ENGINE_READONLY_PATHS" '
+    def allows_all: .allow == true and (.type // "a") == "a" and .major == null and .minor == null;
+    (if (.linux.maskedPaths // []) == [] then .linux.maskedPaths = $masked else . end)
+    | (if (.linux.readonlyPaths // []) == [] then .linux.readonlyPaths = $readonly else . end)
+    | (if any(.linux.resources.devices[]?; allows_all) then
+        .linux.resources.devices = [{"allow": false, "access": "rwm"}] + (.linux.resources.devices | map(select(allows_all | not)))
+        | .linux.devices = []
+      else . end)
+    | .mounts |= map(
+        if .destination == "/sys" or .destination == "/sys/fs/cgroup"
+        then .options = ((.options // []) - ["rw", "ro"] + ["ro"])
+        else . end)'
+  case "$(jq_get "$CFG" '.process.apparmorProfile // ""')" in
+    ''|unconfined)
+      RUNCVM_APPARMOR_PROFILE=$(apparmor_loaded_profile "$RUNCVM_ENGINE_APPARMOR_PROFILE")
+      [ -z "$RUNCVM_APPARMOR_PROFILE" ] || jq_set "$CFG" --arg profile "$RUNCVM_APPARMOR_PROFILE" '.process.apparmorProfile = $profile'
+      ;;
+  esac
 
   # Configure devices
   # /dev/net/tun — always needed

@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""A Container/VM's confinement on the host, with and without --privileged.
+
+Whatever the container was given, RunCVM confines its container on the host as
+the engine does a standard container: --privileged gives the VM's workload
+nothing on the host, as it runs under the VM's own kernel, and RunCVM's
+processes in the container need no more. For each case (default; --privileged;
+--privileged with a disk; each with and without --init), the Container/VM
+boots, serves 'docker exec', and (with a disk) writes a file to its disk and
+reads it back; and its bundle, compared with that of a standard (runc)
+container the engine runs with the same image and no options:
+
+- has the same masked and read-only paths;
+- has no device cgroup rule allowing every device, and of the host's devices
+  only those RunCVM adds (/dev/net/tun, /dev/kvm, /dev/vhost-net);
+- mounts /sys and /sys/fs/cgroup read-only;
+- has the same AppArmor profile; and the container's init, on the host, runs
+  under the same AppArmor label as the standard container's.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+IMAGE = "alpine"
+RUNCVM_DEVICES = {"/dev/net/tun", "/dev/kvm", "/dev/vhost-net"}
+
+# (name, docker run options, with a disk)
+CASES = [
+    ("default", [], False),
+    ("privileged", ["--privileged"], False),
+    ("privileged-disk", ["--privileged"], True),
+]
+RUNS = [(init, case) for init in (False, True) for case in CASES]
+
+
+def apparmor_label(pid):
+    """The AppArmor label of host process PID, or None if unreadable (e.g. AppArmor disabled)."""
+    for path in ("/proc/%s/attr/apparmor/current" % pid, "/proc/%s/attr/current" % pid):
+        try:
+            with open(path) as f:
+                return f.read().strip("\0\n ")
+        except OSError:
+            continue
+    return None
+
+
+def init_pid(name):
+    return t.docker("inspect", "-f", "{{.State.Pid}}", name).stdout.strip()
+
+
+def summary(config):
+    """The parts of a bundle's configuration this test compares."""
+    linux = config.get("linux", {})
+    return {
+        "masked": sorted(linux.get("maskedPaths") or []),
+        "readonly": sorted(linux.get("readonlyPaths") or []),
+        "allow_all": any(r.get("allow") and r.get("type", "a") == "a" and r.get("major") is None
+                         and r.get("minor") is None for r in linux.get("resources", {}).get("devices") or []),
+        "devices": sorted(set(d.get("path") for d in linux.get("devices") or [])),
+        "sys_ro": sorted(m["destination"] for m in config.get("mounts", [])
+                         if m.get("destination") in ("/sys", "/sys/fs/cgroup") and "ro" in (m.get("options") or [])),
+        "apparmor": config.get("process", {}).get("apparmorProfile") or "",
+    }
+
+
+# The standard container to compare with.
+ref = t.unique("privconf-runc")
+t.cleanup_container(ref)
+r = t.docker("run", "-d", "--name", ref, *t.labels(), "--runtime=runc", IMAGE, "sleep", "600")
+ref_config = t.bundle_config(ref) if r.returncode == 0 else None
+if ref_config is None:
+    t.check("standard container's bundle read", True, False)
+    t.finish()
+REF = summary(ref_config)
+REF_LABEL = apparmor_label(init_pid(ref))
+t.docker("rm", "-f", ref)
+t.param("standard container", "masked %d, read-only %d, AppArmor profile %r, label %r"
+        % (len(REF["masked"]), len(REF["readonly"]), REF["apparmor"], REF_LABEL))
+
+
+def run(item):
+    init, (name, opts, disk) = item
+    container = t.unique("privconf-%s%s" % (name, "-init" if init else ""))
+    t.cleanup_container(container)
+    disk_opts = []
+    if disk:
+        volume = t.unique("privconf-%s%s-disks" % (name, "-init" if init else ""))
+        t.volume_create(volume)
+        disk_opts = ["--mount", "type=volume,src=%s,dst=/disks" % volume,
+                     "--env", "RUNCVM_DISKS=/disks/d,/data,ext4,%d" % (64 << 20)]
+    r = t.docker("run", "-d", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 *(["--init"] if init else []), *opts, *disk_opts, IMAGE, "sleep", "600")
+    if r.returncode != 0 or not t.wait_for_exec(container, BOOT_TIMEOUT):
+        return {"error": r.stdout + t.docker("logs", container).stdout}
+    results = {"config": t.bundle_config(container), "label": apparmor_label(init_pid(container))}
+    if disk:
+        results["disk"] = t.docker("exec", container, "sh", "-c",
+                                   "echo written >/data/f && sync && cat /data/f").stdout.strip()
+    return results
+
+
+for (init, (name, opts, disk)), results in zip(RUNS, t.parallel(run, RUNS, remove=True)):
+    desc = "%s, %s" % (name, "--init" if init else "no --init")
+    t.param(desc, " ".join(opts + (["(disk)"] if disk else [])))
+    if not t.check("%s: Container/VM boots and 'docker exec' works" % desc, True, "error" not in results):
+        t.log(results["error"])
+        continue
+    if disk:
+        t.check("%s: disk reads back what was written" % desc, "written", results.get("disk"))
+    if not t.check("%s: bundle read" % desc, True, results["config"] is not None):
+        continue
+    got = summary(results["config"])
+    t.check("%s: masked paths as a standard container's" % desc, REF["masked"], got["masked"])
+    t.check("%s: read-only paths as a standard container's" % desc, REF["readonly"], got["readonly"])
+    t.check("%s: no device cgroup rule allows every device" % desc, False, got["allow_all"])
+    t.check("%s: only RunCVM's devices" % desc, [], sorted(set(got["devices"]) - RUNCVM_DEVICES))
+    t.check("%s: /sys and /sys/fs/cgroup read-only" % desc, ["/sys", "/sys/fs/cgroup"], got["sys_ro"])
+    t.check("%s: AppArmor profile as a standard container's" % desc, REF["apparmor"], got["apparmor"])
+    t.check("%s: container's init AppArmor label as a standard container's" % desc, REF_LABEL, results["label"])
+
+t.finish()
