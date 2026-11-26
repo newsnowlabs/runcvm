@@ -688,6 +688,8 @@ The VM's root filesystem is the container's own filesystem, served over virtiofs
 
 One disk can hold both directories, in its subdirectories `var-lib-docker` and `var-lib-containerd` (see [Disk layouts](#disk-layouts)), so the two share the disk's space and you size only one disk. Give the disk both destinations whichever image store `dockerd` uses, and however it was installed: a `dockerd` that starts its own containerd, as in the `docker:dind` image, keeps containerd's storage under `/var/lib/docker`, and leaves `/var/lib/containerd` empty.
 
+Podman in a Container/VM has the same requirement. Rootful Podman keeps its storage in `/var/lib/containers`. Give Podman a disk that holds this directory, e.g. `RUNCVM_DISKS=/disks/podman,/var/lib/containers,ext4,10G`. One disk can hold the storage of Docker and of Podman: add `/var/lib/containers` to the destinations of the disk.
+
 For example, to launch `dockerd` from the `docker:dind` image with a 10G disk, whose backing file is in a Docker volume on the host, and run a container in it:
 
 ```console
@@ -1102,15 +1104,15 @@ This example behaves similarly, except that the `runcvm-disks` persistent Docker
 ##### Example #3
 
 ```console
-docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=/disks/data,/var/lib/docker:/var/lib/containerd:/home,ext4,40G' <docker-image>
+docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=/disks/data,/var/lib/docker:/var/lib/containerd:/var/lib/containers:/home,ext4,40G' <docker-image>
 ```
 
-In this example, a single 40G backing file at `/disks/data`, in the `runcvm-disks` volume, holds `/var/lib/docker`, `/var/lib/containerd` and `/home`, in its directories `var-lib-docker`, `var-lib-containerd` and `home`. `<docker-image>` would typically run `dockerd`: e.g. `docker:dind`, or an image that runs Docker under systemd, like the one in [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm).
+In this example, a single 40G backing file at `/disks/data`, in the `runcvm-disks` volume, holds `/var/lib/docker`, `/var/lib/containerd`, `/var/lib/containers` and `/home`, in its directories `var-lib-docker`, `var-lib-containerd`, `var-lib-containers` and `home`. `/var/lib/containers` is the storage of rootful Podman. `<docker-image>` would typically run `dockerd`, Podman or both: e.g. `docker:dind`, or an image that runs Docker under systemd, like the one in [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm).
 
 The same disk, in the keyed form:
 
 ```console
-docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=src=/disks/data,dst=/var/lib/docker,dst=/var/lib/containerd,dst=/home,fs=ext4,size=40G' <docker-image>
+docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=src=/disks/data,dst=/var/lib/docker,dst=/var/lib/containerd,dst=/var/lib/containers,dst=/home,fs=ext4,size=40G' <docker-image>
 ```
 
 > N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints, these are *NOT* mounted into the VM but only into the container, and are therefore suitable for use for mounting VM disks from backing files that cannot be accessed within the VM's filesystem.
