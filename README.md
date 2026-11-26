@@ -134,7 +134,10 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
 - **Very short-lived containers in large numbers.** Each Container/VM boots a kernel, taking a few seconds, and runs a VM of its own, sized by its memory and CPU limits.
 - **Workloads that rely on container features RunCVM does not provide**, such as adding networks to, or removing them from, a running Container/VM (`docker network connect` and `disconnect`): networks may be attached before a Container/VM starts, or while it is stopped. See [Features and limitations](#features-and-limitations).
 - **Hosts without KVM.** Without KVM, a Container/VM runs only under QEMU's software emulation, which is much slower, and only when allowed to (see [`RUNCVM_QEMU_ACCEL`](#runcvm_qemu_accel)).
-- **Podman, arm64 hosts and macOS.** Podman support is experimental. arm64 hosts, including Macs with Apple M3 or later chips, are supported experimentally, by v2.0.0 pre-releases (see [System requirements](#system-requirements)); Macs with M1 or M2 chips are not supported.
+- **Podman, arm64 hosts and macOS.**
+  - Podman support is experimental, and RunCVM supports only rootful Podman. See [Podman support](#podman-support).
+  - Support for arm64 hosts is experimental, in v2.0.0 pre-releases. This includes Macs with Apple M3 or later chips. See [System requirements](#system-requirements).
+  - Macs with M1 or M2 chips are not supported.
 
 ## Contents
 
@@ -149,6 +152,7 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
   - [Project ambitions](#project-ambitions)
 - **Installing**
   - [System requirements](#system-requirements)
+    - [Podman support](#podman-support)
   - [Installation](#installation)
     - [Registering the runtime by hand](#registering-the-runtime-by-hand)
     - [Install on Google Cloud](#install-on-google-cloud)
@@ -240,6 +244,21 @@ RunCVM comes packaged with all binaries and libraries it needs to run (including
 Stable RunCVM releases are continuously tested on x86-64 hosts with KVM running Ubuntu 24.04 LTS (Noble Numbat), with Docker's own packages (Docker Engine).
 
 Experimental arm64 support is periodically tested with KVM on AWS Graviton instances, and on Macs with Apple M3 or later chips in Lima's `docker-rootful` VM (see [macOS on Apple Silicon](#macos-on-apple-silicon)). The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
+
+### Podman support
+
+Podman support is experimental. RunCVM supports rootful Podman only. Rootless Podman is not supported.
+
+The integration tests are run with rootful Podman on x86-64 hosts with KVM, running Ubuntu 24.04 LTS. These Podman versions are tested:
+- 4.9.3, from Ubuntu's `podman` package;
+- 5.8 and 6.2, as static builds.
+
+To run a Container/VM, use `podman run --runtime=runcvm`. The installer registers RunCVM with Podman. See [Registering the runtime by hand](#registering-the-runtime-by-hand).
+
+These limits apply under Podman:
+- **Runtime selection through Podman's Docker-compatible API.** Podman's Docker-compatible API ignores the runtime that a client names. Thus `docker compose` and other Docker clients that connect to Podman's socket run every container with Podman's default runtime, not with RunCVM. This applies to `podman compose` when it runs Docker Compose. Use `podman run --runtime=runcvm` or `podman create --runtime=runcvm`.
+- **Stop signals on hosts with AppArmor.** On some hosts, `podman stop` cannot send a stop signal other than SIGTERM, SIGINT or SIGQUIT. See [Registering the runtime by hand](#registering-the-runtime-by-hand).
+- **Features not tested under Podman.** IPv6, and Container/VMs with more than one network, are tested only under Docker.
 
 ## Installation
 
@@ -1636,7 +1655,7 @@ Tests boot images by tag, and Docker pulls an image only when the host has no co
    ```console
    sudo sh -c 'jq "del(.runtimes.runcvm)" /etc/docker/daemon.json >/etc/docker/daemon.json.new && mv /etc/docker/daemon.json.new /etc/docker/daemon.json'
    ```
-   For Podman, remove the `runcvm` line from `/etc/containers/containers.conf`.
+   For Podman, remove `/etc/containers/containers.conf.d/runcvm.conf`. If you added the `runcvm` entry to `/etc/containers/containers.conf` by hand, remove it from that file.
 3. Remove the RunCVM software package:
    ```console
    sudo rm -rf /opt/runcvm
