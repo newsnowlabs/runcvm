@@ -3,8 +3,7 @@
 # filter (before it runs the container's init): the calls those processes make across RunCVM's
 # configurations (disks, filesystems, display modes, networks, --init and more). io_uring's calls
 # are not listed: runcvm-runtime adds them only for a Container/VM with disks that may use
-# io_uring. get_mempolicy, set_mempolicy and mbind are for QEMU's memory backend, which calls them
-# when QEMU is built with NUMA support.
+# io_uring.
 bind
 chdir
 chroot
@@ -15,7 +14,6 @@ execve
 faccessat
 faccessat2
 fadvise64
-get_mempolicy
 getcwd
 getgid
 getgroups
@@ -39,7 +37,6 @@ listen
 llistxattr
 lremovexattr
 lsetxattr
-mbind
 memfd_create
 nanosleep
 pipe2
@@ -52,7 +49,6 @@ rt_sigsuspend
 rt_sigtimedwait
 seccomp
 sendfile
-set_mempolicy
 set_tid_address
 setfsgid
 setfsuid

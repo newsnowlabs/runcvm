@@ -1006,34 +1006,46 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   # are allowed only where the container has disks (RUNCVM_DISKS) and RUNCVM_DISK_AIO does not
   # choose native or threads, the modes that do without io_uring (see disk_choose_aio in
   # runcvm-ctr-qemu); QEMU also tries io_uring for its event loop, and without it uses epoll.
-  # - engine (the default): the engine's profile, with the calls RunCVM's processes need beyond
-  #   its default also allowed: io_uring's (as above), get_mempolicy, set_mempolicy and mbind (which
-  #   the default profile allows only with CAP_SYS_NICE), and chroot (for virtiofsd's --sandbox=chroot, which it
-  #   allows only with CAP_SYS_CHROOT). The engine resolves its profile against the capabilities
-  #   given to docker run or podman run, not those the runtime gives RunCVM's processes (below), so
-  #   these calls must be allowed here, not left to a capability. They are also taken out of the
-  #   profile's rules that deny them (Podman's profile denies chroot without CAP_SYS_CHROOT), as a
-  #   rule naming a call takes precedence over a later one.
+  # - engine-plus (the default): the engine's profile, with the calls RunCVM's processes need
+  #   beyond it allowed, as under engine (below), and narrowed to deny what they never need:
+  #   - the calls listed in scripts/seccomp/engine-plus-deny (mounts, namespaces, keyrings, other
+  #     processes' memory, the host's kernel and more) are taken out of every rule that allows
+  #     them, whatever the rule's conditions, so that they fail with the profile's default action;
+  #   - clone and clone3 are taken out of every rule, and RunCVM's own rules allow clone only
+  #     without the flags that create namespaces, and make clone3, whose flags a filter cannot
+  #     inspect, fail with ENOSYS, so that its callers use clone: as minimal's profile does, and
+  #     Docker's for a container without CAP_SYS_ADMIN. With unshare and setns denied, no process
+  #     can then create or enter namespaces.
+  #   Rules left naming no call are dropped. The image build writes the list and the clone rules
+  #   to scripts/seccomp/engine-plus.json (build-utils/make-seccomp-profile.sh), and fails if the
+  #   list names a call in scripts/seccomp/<arch> or scripts/seccomp/virtiofsd.
+  # - engine: the engine's profile, with the calls RunCVM's processes need beyond its default also
+  #   allowed: io_uring's (as above), and chroot (for virtiofsd's --sandbox=chroot, which the
+  #   default profile allows only with CAP_SYS_CHROOT). The engine resolves its profile against the
+  #   capabilities given to docker run or podman run, not those the runtime gives RunCVM's processes
+  #   (below), so these calls must be allowed here, not left to a capability. They are also taken
+  #   out of the profile's rules that deny them (Podman's profile denies chroot without
+  #   CAP_SYS_CHROOT), as a rule naming a call takes precedence over a later one.
   # - minimal: RunCVM's own profile, scripts/seccomp/profile.json, in place of the one Docker or
   #   Podman resolved into the bundle, with io_uring's calls as above. It allows only the calls
   #   listed for the host's architecture in scripts/seccomp/<arch> and, for virtiofsd, in
   #   scripts/seccomp/virtiofsd, and denies any other with EPERM, as the engines' default profiles
   #   do. The image build writes it from those lists (build-utils/make-seccomp-profile.sh).
   # - unconfined: no profile, leaving RunCVM's processes unfiltered.
-  # Under 'engine', a bundle the engine left with no profile (docker run --security-opt
-  # seccomp=unconfined, or --privileged) is left unconfined, but that is not a supported way to run
-  # them so: these options are reserved to apply, in future, to the VM rather than to RunCVM's
-  # processes. 'minimal' gives every bundle RunCVM's profile, whether or not the engine gave it one.
-  # A profile of the user's own (--security-opt seccomp=<file>) is unsupported: 'minimal' replaces
-  # it, and 'engine' adds to it.
+  # Under engine-plus and engine, a bundle the engine left with no profile (docker run
+  # --security-opt seccomp=unconfined, or --privileged) is left unconfined, but that is not a
+  # supported way to run them so: these options are reserved to apply, in future, to the VM rather
+  # than to RunCVM's processes. 'minimal' gives every bundle RunCVM's profile, whether or not the
+  # engine gave it one. A profile of the user's own (--security-opt seccomp=<file>) is unsupported:
+  # 'minimal' replaces it, and 'engine-plus' and 'engine' change it.
   RUNCVM_SECCOMP="$(get_config_env 'RUNCVM_SECCOMP')"
   [ -z "$RUNCVM_SECCOMP" ] || config_env_is RUNCVM_SECCOMP "$RUNCVM_SECCOMP" ||
-    error "RUNCVM_SECCOMP invalid (should be minimal, engine or unconfined)"
+    error "RUNCVM_SECCOMP invalid (should be engine-plus, engine, minimal or unconfined)"
   case "$RUNCVM_SECCOMP" in
-    '') RUNCVM_SECCOMP=engine ;;
-    minimal|engine) ;;
+    '') RUNCVM_SECCOMP=engine-plus ;;
+    engine-plus|engine|minimal) ;;
     unconfined) jq_set "$CFG" 'del(.linux.seccomp)' ;;
-    *) error "RUNCVM_SECCOMP '$RUNCVM_SECCOMP' invalid (should be minimal, engine or unconfined)" ;;
+    *) error "RUNCVM_SECCOMP '$RUNCVM_SECCOMP' invalid (should be engine-plus, engine, minimal or unconfined)" ;;
   esac
   SECCOMP_IO_URING=
   # Whether RUNCVM_DISKS names any disk: its value split as runcvm-ctr-qemu splits it, with the same
@@ -1044,21 +1056,36 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     config_env_is RUNCVM_DISK_AIO native || config_env_is RUNCVM_DISK_AIO threads ||
       SECCOMP_IO_URING='"io_uring_setup","io_uring_enter","io_uring_register"'
   fi
-  if [ "$RUNCVM_SECCOMP" = "engine" ]; then
-    SECCOMP_ALLOW='"get_mempolicy","set_mempolicy","mbind","chroot"'
-    [ -n "$SECCOMP_IO_URING" ] && SECCOMP_ALLOW+=",$SECCOMP_IO_URING"
-    jq_set "$CFG" --argjson names "[$SECCOMP_ALLOW]" '
-      if .linux.seccomp then
-        .linux.seccomp.syscalls |= ((. // []) | map(if .action == "SCMP_ACT_ALLOW" then . else .names -= $names end)
-          | map(select(.names | length > 0)))
-        | .linux.seccomp.syscalls += [{"names": $names, "action": "SCMP_ACT_ALLOW"}]
-      else . end'
-  elif [ "$RUNCVM_SECCOMP" != "unconfined" ]; then
-    SECCOMP_PROFILE="$RUNCVM/scripts/seccomp/profile.json"
-    [ -f "$SECCOMP_PROFILE" ] || error "RUNCVM_SECCOMP=minimal: no seccomp profile ($SECCOMP_PROFILE) for this architecture; use RUNCVM_SECCOMP=engine"
-    jq_set "$CFG" --slurpfile profile "$SECCOMP_PROFILE" --argjson io_uring "[$SECCOMP_IO_URING]" '
-      .linux.seccomp = ($profile[0] | .syscalls[0].names += $io_uring)'
-  fi
+  SECCOMP_ALLOW='"chroot"'
+  [ -n "$SECCOMP_IO_URING" ] && SECCOMP_ALLOW+=",$SECCOMP_IO_URING"
+  case "$RUNCVM_SECCOMP" in
+    engine-plus)
+      SECCOMP_PLUS="$RUNCVM/scripts/seccomp/engine-plus.json"
+      [ -f "$SECCOMP_PLUS" ] || error "RUNCVM_SECCOMP=engine-plus: no denylist ($SECCOMP_PLUS); use RUNCVM_SECCOMP=engine"
+      jq_set "$CFG" --argjson names "[$SECCOMP_ALLOW]" --slurpfile plus "$SECCOMP_PLUS" '
+        if .linux.seccomp then
+          .linux.seccomp.syscalls |= ((. // [])
+            | map(.names -= ["clone", "clone3"]
+              | if .action == "SCMP_ACT_ALLOW" then .names -= $plus[0].deny else .names -= $names end)
+            | map(select(.names | length > 0)))
+          | .linux.seccomp.syscalls += $plus[0].rules + [{"names": $names, "action": "SCMP_ACT_ALLOW"}]
+        else . end'
+      ;;
+    engine)
+      jq_set "$CFG" --argjson names "[$SECCOMP_ALLOW]" '
+        if .linux.seccomp then
+          .linux.seccomp.syscalls |= ((. // []) | map(if .action == "SCMP_ACT_ALLOW" then . else .names -= $names end)
+            | map(select(.names | length > 0)))
+          | .linux.seccomp.syscalls += [{"names": $names, "action": "SCMP_ACT_ALLOW"}]
+        else . end'
+      ;;
+    minimal)
+      SECCOMP_PROFILE="$RUNCVM/scripts/seccomp/profile.json"
+      [ -f "$SECCOMP_PROFILE" ] || error "RUNCVM_SECCOMP=minimal: no seccomp profile ($SECCOMP_PROFILE) for this architecture; use RUNCVM_SECCOMP=engine"
+      jq_set "$CFG" --slurpfile profile "$SECCOMP_PROFILE" --argjson io_uring "[$SECCOMP_IO_URING]" '
+        .linux.seccomp = ($profile[0] | .syscalls[0].names += $io_uring)'
+      ;;
+  esac
   
   # CONFIGURE MEMORY
   # Set /dev/shm to RUNCVM_MEM_SIZE env var, or to default

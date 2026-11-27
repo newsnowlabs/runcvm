@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Every combination of RUNCVM_SECCOMP and RUNCVM_CAPS.
 
-RUNCVM_SECCOMP (unset, minimal, engine, unconfined) and RUNCVM_CAPS (unset,
-minimal, engine) each choose how RunCVM's own processes in the container are
-confined. Each of the 12 combinations runs a Container/VM with a disk twice:
+RUNCVM_SECCOMP (unset, engine-plus, minimal, engine, unconfined) and
+RUNCVM_CAPS (unset, minimal, engine) each choose how RunCVM's own processes in
+the container are confined. Each of the 15 combinations runs a Container/VM with a disk twice:
 with the engine's defaults, and with --cap-drop=ALL and
 --security-opt=no-new-privileges. Each Container/VM:
 
@@ -15,8 +15,10 @@ with the engine's defaults, and with --cap-drop=ALL and
 - has its container's init, on the host, seccomp-filtered (Seccomp: 2) unless
   RUNCVM_SECCOMP=unconfined (Seccomp: 0), under the profile RUNCVM_SECCOMP
   chooses, read from the container's bundle: RunCVM's own three rules for
-  minimal, the engine's with RunCVM's further calls last for engine or unset,
-  and none for unconfined; with the capabilities RUNCVM_CAPS
+  minimal; the engine's, allowing none of the calls engine-plus denies, with
+  the clone rules and RunCVM's further calls last, for engine-plus or unset;
+  the engine's with RunCVM's further calls last for engine; and none for
+  unconfined; with the capabilities RUNCVM_CAPS
   gives: exactly RunCVM's own set for minimal or unset, and Docker's default
   capabilities with CAP_NET_ADMIN, added to the container's, for engine;
   and with no_new_privs (NoNewPrivs: 1).
@@ -33,7 +35,7 @@ BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
 IMAGE = "alpine"
 SIZE = 64 << 20
 
-SECCOMP = ["", "minimal", "engine", "unconfined"]
+SECCOMP = ["", "engine-plus", "minimal", "engine", "unconfined"]
 CAPS = ["", "minimal", "engine"]
 VARIANTS = [("engine-defaults", []),
             ("cap-drop-all-nnp", ["--cap-drop=ALL", "--security-opt=no-new-privileges"])]
@@ -57,8 +59,10 @@ def bundle_seccomp(name):
 
 
 def profile_kind(profile):
-    """Which profile PROFILE is: 'minimal' (RunCVM's own three rules), 'engine' (the engine's, with
-    RunCVM's further calls in its last rule), 'none', or 'other'."""
+    """Which profile PROFILE is: 'minimal' (RunCVM's own three rules), 'engine-plus' (the engine's,
+    allowing none of mount, unshare, setns, ptrace and process_vm_readv, with the clone rules and
+    RunCVM's further calls in its last three), 'engine' (the engine's, with RunCVM's further calls
+    in its last rule), 'none', or 'other'."""
     if profile is None:
         return "unreadable"
     if not profile:
@@ -67,6 +71,11 @@ def profile_kind(profile):
     if len(rules) == 3 and rules[2].get("names") == ["clone3"] and profile.get("defaultErrnoRet") == 1:
         return "minimal"
     if len(rules) > 3 and rules[-1].get("action") == "SCMP_ACT_ALLOW" and "chroot" in rules[-1].get("names", []):
+        allowed = set(n for rule in rules if rule.get("action") == "SCMP_ACT_ALLOW" for n in rule.get("names", []))
+        if (rules[-3].get("names") == ["clone"] and rules[-3].get("args")
+                and rules[-2] == {"names": ["clone3"], "action": "SCMP_ACT_ERRNO", "errnoRet": 38}
+                and not allowed & {"mount", "unshare", "setns", "ptrace", "process_vm_readv"}):
+            return "engine-plus"
         return "engine"
     return "other"
 
@@ -110,7 +119,7 @@ for (seccomp, caps, variant), results in zip(RUNS, t.parallel(run, RUNS, remove=
     t.check("%s: container's init Seccomp mode" % desc, "0" if seccomp == "unconfined" else "2",
             host.get("Seccomp"))
     t.check("%s: container's seccomp profile" % desc,
-            {"minimal": "minimal", "unconfined": "none"}.get(seccomp, "engine"), profile_kind(results["profile"]))
+            {"": "engine-plus"}.get(seccomp, seccomp).replace("unconfined", "none"), profile_kind(results["profile"]))
     t.check("%s: container's init CapEff" % desc, "%016x" % (ENGINE if caps == "engine" else MINIMAL),
             host.get("CapEff"))
     t.check("%s: container's init NoNewPrivs" % desc, "1", host.get("NoNewPrivs"))

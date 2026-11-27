@@ -39,7 +39,7 @@ the runtime or the scripts.
   host, for every user of RunCVM, so do this only on a development or test host. After changing
   a system call list in `runcvm-scripts/seccomp/`, also run
   `sudo build-utils/make-seccomp-profile.sh` to rebuild `/opt/runcvm/scripts/seccomp/profile.json`
-  from the copied lists.
+  and `engine-plus.json` from the copied lists.
 - RunCVM is designed for hosts with KVM (`/dev/kvm`). Without it, a Container/VM launched with
   `--env=RUNCVM_QEMU_ACCEL=tcg` runs under QEMU's software emulation (TCG): much slower, but it
   exercises RunCVM itself, so it suits sandboxes and CI hosts without nested virtualisation.
