@@ -134,7 +134,10 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
 - **Very short-lived containers in large numbers.** Each Container/VM boots a kernel, taking a few seconds, and runs a VM of its own, sized by its memory and CPU limits.
 - **Workloads that rely on container features RunCVM does not provide**, such as adding networks to, or removing them from, a running Container/VM (`docker network connect` and `disconnect`): networks may be attached before a Container/VM starts, or while it is stopped. See [Features and limitations](#features-and-limitations).
 - **Hosts without KVM.** Without KVM, a Container/VM runs only under QEMU's software emulation, which is much slower, and only when allowed to (see [`RUNCVM_QEMU_ACCEL`](#runcvm_qemu_accel)).
-- **Podman, arm64 hosts and macOS.** Podman support is experimental. arm64 hosts, including Macs with Apple M3 or later chips, are supported experimentally, by v2.0.0 pre-releases (see [System requirements](#system-requirements)); Macs with M1 or M2 chips are not supported.
+- **Podman, arm64 hosts and macOS.**
+  - Podman support is experimental, and RunCVM supports only rootful Podman. See [Podman support](#podman-support).
+  - Support for arm64 hosts is experimental, in v2.0.0 pre-releases. This includes Macs with Apple M3 or later chips. See [System requirements](#system-requirements).
+  - Macs with M1 or M2 chips are not supported.
 
 ## Contents
 
@@ -149,6 +152,7 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
   - [Project ambitions](#project-ambitions)
 - **Installing**
   - [System requirements](#system-requirements)
+    - [Podman support](#podman-support)
   - [Installation](#installation)
     - [Registering the runtime by hand](#registering-the-runtime-by-hand)
     - [Install on Google Cloud](#install-on-google-cloud)
@@ -162,6 +166,7 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
   - [RunCVM vs Kata comparison](#runcvm-vs-kata-comparison)
   - [More examples](#more-examples)
   - [Option reference](#option-reference)
+  - [Host settings](#host-settings)
 - **Maintaining and developing**
   - [Upgrading](#upgrading)
   - [Building](#building)
@@ -240,6 +245,21 @@ RunCVM comes packaged with all binaries and libraries it needs to run (including
 Stable RunCVM releases are continuously tested on x86-64 hosts with KVM running Ubuntu 24.04 LTS (Noble Numbat), with Docker's own packages (Docker Engine).
 
 Experimental arm64 support is periodically tested with KVM on AWS Graviton instances, and on Macs with Apple M3 or later chips in Lima's `docker-rootful` VM (see [macOS on Apple Silicon](#macos-on-apple-silicon)). The integration tests can also run where KVM is unavailable, under software emulation (see [Testing](#testing)).
+
+### Podman support
+
+Podman support is experimental. RunCVM supports rootful Podman only. Rootless Podman is not supported.
+
+The integration tests are run with rootful Podman on x86-64 hosts with KVM, running Ubuntu 24.04 LTS. These Podman versions are tested:
+- 4.9.3, from Ubuntu's `podman` package;
+- 5.8 and 6.2, as static builds.
+
+To run a Container/VM, use `podman run --runtime=runcvm`. The installer registers RunCVM with Podman. See [Registering the runtime by hand](#registering-the-runtime-by-hand).
+
+These limits apply under Podman:
+- **Runtime selection through Podman's Docker-compatible API.** Podman's Docker-compatible API ignores the runtime that a client names. Thus `docker compose` and other Docker clients that connect to Podman's socket run every container with Podman's default runtime, not with RunCVM. This applies to `podman compose` when it runs Docker Compose. Use `podman run --runtime=runcvm` or `podman create --runtime=runcvm`.
+- **Stop signals on hosts with AppArmor.** On some hosts, `podman stop` cannot send a stop signal other than SIGTERM, SIGINT or SIGQUIT. See [Registering the runtime by hand](#registering-the-runtime-by-hand).
+- **Features not tested under Podman.** IPv6, and Container/VMs with more than one network, are tested only under Docker.
 
 ## Installation
 
@@ -567,7 +587,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
 - `docker exec`
    - [+] `--user` (or `-u`), `--workdir` (or `-w`), `--env` (or `-e`), `--env-file`, `--detach` (or `-d`), `--interactive` (or `-i`) and `--tty` (or `-t`) are all supported
    - [+] Stdout and Stderr _are_ independently multiplexed so `docker exec <container> bash -c 'echo stdout; echo stderr >&2' >/tmp/stdout 2>/tmp/stderr` _does_ produce the expected result
-   - [-] `docker exec <container> --- <command>` runs `<command>` in the container on the host, alongside QEMU and `virtiofsd`, rather than in the VM, for debugging and diagnostics. It runs as `docker exec` would in a standard container, with the capabilities the engine gives the exec (e.g. all of them with `docker exec --privileged`), outside the VM's isolation, so anyone who can `docker exec` into a Container/VM (or `kubectl exec` into its pod) can reach QEMU, `virtiofsd` and the VM's disks.
+   - [-] `docker exec <container> --- <command>` runs `<command>` in the container on the host, rather than in the VM, only where the host enables it: see [`RUNCVM_EXEC_PASSTHROUGH`](#runcvm_exec_passthrough)
 - Security
    - [+] The processes RunCVM runs in the container on the host (QEMU, `virtiofsd`, `dnsmasq` and RunCVM's own scripts and tools) are seccomp-filtered. The workload itself runs in the VM, behind the VM's kernel, not this filter. [`RUNCVM_SECCOMP`](#runcvm_seccomp) chooses the profile:
       - `engine-plus` (the default): the engine's (Docker's or Podman's) default profile, with the calls those processes need beyond it also allowed (as under `engine`), and narrowed to deny calls they never make, whatever capabilities the container was given: the mount API (`mount`, `umount2`, `pivot_root`, `open_tree`, `fsopen` and the rest), `unshare` and `setns`, the kernel's keyrings (`keyctl`, `add_key`, `request_key`), other processes' memory (`ptrace`, `process_vm_readv`, `process_vm_writev`, `pidfd_getfd`, `kcmp`), the host's kernel, modules, log and swap (`reboot`, `syslog`, `kexec_load`, `init_module`, `swapon` and others), `bpf`, `perf_event_open`, `userfaultfd`, file handles (`name_to_handle_at`, `open_by_handle_at`), `vmsplice`, `personality`, and the NUMA memory-policy calls (`get_mempolicy`, `set_mempolicy`, `mbind`); `/opt/runcvm/scripts/seccomp/engine-plus-deny` lists them all. As under `minimal`, `clone` is allowed only without the flags that create namespaces, and `clone3`, whose flags a filter cannot inspect, fails with `ENOSYS`, so that its callers fall back to `clone`; so no process can create or enter namespaces. Docker's default profile already denies most of these; Podman's allows many of them (among them `mount`, `unshare`, `setns`, `keyctl` and `clone3`).
@@ -581,7 +601,10 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
       - [`RUNCVM_SYS_ADMIN=1`](#runcvm_sys_admin) adds `CAP_SYS_ADMIN`, whichever mode is chosen.
       - The processes `docker exec` starts in the container, which relay each command to the VM, hold the `minimal` set, whatever the container or the exec was given.
       - [-] Other effects of the container's options remain as the engine applies them: `--privileged` still gives the container the host's devices, an unrestricted device cgroup, a writable `/sys`, and no masked paths or AppArmor profile.
-   - The RunCVM software package at `/opt/runcvm` is mounted read-only within RunCVM containers. Container applications cannot compromise RunCVM, but they can execute binaries from within the RunCVM package. The set of binaries available to the VM may be reduced to a minimum in a later version.
+   - [+] RunCVM's processes in the container, including those `docker exec` starts to relay each command to the VM, run with `no_new_privs`, whatever the container or the exec was given: executing a setuid or setgid file, or one with file capabilities, gives them no privileges they do not already hold. The workload runs under the VM's own kernel, where this does not apply.
+   - [+] RunCVM's processes in the container dump no core (`RLIMIT_CORE` 0), whatever the container was given (e.g. `--ulimit core=-1`), as QEMU's core dump would hold the VM's memory. The workload runs under the VM's own kernel, whose limits apply to it.
+   - [+] In the container on the host, the VM's root filesystem is mounted `nosuid` and `nodev`, so that no process there gains privileges from a setuid file, or reaches a device through a device node, that the workload creates; in the VM, setuid files and device nodes work as the VM's kernel allows.
+   - The RunCVM software package at `/opt/runcvm` is mounted read-only (and `nosuid` and `nodev`) within RunCVM containers. Container applications cannot compromise RunCVM, but they can execute binaries from within the RunCVM package. The set of binaries available to the VM may be reduced to a minimum in a later version.
 - Kernels
    - [+] Use any kernel, either one pre-packaged with RunCVM or roll your own
    - [+] RunCVM will try to select an appropriate kernel to use based on examination of `/etc/os-release` within the image being launched.
@@ -669,6 +692,8 @@ The VM's root filesystem is the container's own filesystem, served over virtiofs
 - `/var/lib/containerd`: the storage of the containerd service that Docker's packages (e.g. as installed by `get.docker.com`) run `dockerd` with. With Docker's [containerd image store](https://docs.docker.com/engine/storage/containerd/), the default for new installations of Docker Engine 29 and later, this holds images and their unpacked layers.
 
 One disk can hold both directories, in its subdirectories `var-lib-docker` and `var-lib-containerd` (see [Disk layouts](#disk-layouts)), so the two share the disk's space and you size only one disk. Give the disk both destinations whichever image store `dockerd` uses, and however it was installed: a `dockerd` that starts its own containerd, as in the `docker:dind` image, keeps containerd's storage under `/var/lib/docker`, and leaves `/var/lib/containerd` empty.
+
+Podman in a Container/VM has the same requirement. Rootful Podman keeps its storage in `/var/lib/containers`. Give Podman a disk that holds this directory, e.g. `RUNCVM_DISKS=/disks/podman,/var/lib/containers,ext4,10G`. One disk can hold the storage of Docker and of Podman: add `/var/lib/containers` to the destinations of the disk.
 
 For example, to launch `dockerd` from the `docker:dind` image with a 10G disk, whose backing file is in a Docker volume on the host, and run a container in it:
 
@@ -884,6 +909,8 @@ RunCVM options are specified either via standard `docker run` options (see [Feat
 
 A value set on the command line overrides the image's. Variables set with `docker exec --env` have no effect, except [`RUNCVM_RUNTIME_DEBUG=1`](#runcvm_runtime_debug), which logs the runtime's handling of that `docker exec`. On a shell command line, quote a value that holds shell metacharacters, such as `;` in `--env='RUNCVM_DISKS=<disk1>;<disk2>'`.
 
+Settings for the whole host, which no container can override, are in [Host settings](#host-settings).
+
 ### RUNCVM_KERNEL
 
 **`RUNCVM_KERNEL=<dist>[/<version>]`**
@@ -1084,15 +1111,15 @@ This example behaves similarly, except that the `runcvm-disks` persistent Docker
 ##### Example #3
 
 ```console
-docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=/disks/data,/var/lib/docker:/var/lib/containerd:/home,ext4,40G' <docker-image>
+docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=/disks/data,/var/lib/docker:/var/lib/containerd:/var/lib/containers:/home,ext4,40G' <docker-image>
 ```
 
-In this example, a single 40G backing file at `/disks/data`, in the `runcvm-disks` volume, holds `/var/lib/docker`, `/var/lib/containerd` and `/home`, in its directories `var-lib-docker`, `var-lib-containerd` and `home`. `<docker-image>` would typically run `dockerd`: e.g. `docker:dind`, or an image that runs Docker under systemd, like the one in [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm).
+In this example, a single 40G backing file at `/disks/data`, in the `runcvm-disks` volume, holds `/var/lib/docker`, `/var/lib/containerd`, `/var/lib/containers` and `/home`, in its directories `var-lib-docker`, `var-lib-containerd`, `var-lib-containers` and `home`. `/var/lib/containers` is the storage of rootful Podman. `<docker-image>` would typically run `dockerd`, Podman or both: e.g. `docker:dind`, or an image that runs Docker under systemd, like the one in [Container runtimes inside RunCVM](#container-runtimes-inside-runcvm).
 
 The same disk, in the keyed form:
 
 ```console
-docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=src=/disks/data,dst=/var/lib/docker,dst=/var/lib/containerd,dst=/home,fs=ext4,size=40G' <docker-image>
+docker run -it --runtime=runcvm --init --mount=type=volume,src=runcvm-disks,dst=/disks --env='RUNCVM_DISKS=src=/disks/data,dst=/var/lib/docker,dst=/var/lib/containerd,dst=/var/lib/containers,dst=/home,fs=ext4,size=40G' <docker-image>
 ```
 
 > N.B. `/disks` and any paths below it are _reserved mountpoints_. Unlike other mountpoints, these are *NOT* mounted into the VM but only into the container, and are therefore suitable for use for mounting VM disks from backing files that cannot be accessed within the VM's filesystem.
@@ -1175,7 +1202,15 @@ Sets the address, `169.254.53.53` by default, at which the VM reaches RunCVM's o
 
 The default is link-local, so that the VM's traffic to it is never routed beyond the host, and lies outside the link-local addresses that cloud platforms and Kubernetes are known to use: notably `169.254.169.254`, the instance metadata address of AWS, Azure, Google Cloud, OpenStack and others (which on Google Cloud is also the VM's DNS server); AWS's other services in `169.254.169.0/24` and `169.254.170.0/24`; Scaleway's `169.254.42.42`; and Kubernetes NodeLocal DNSCache's `169.254.20.10`. Firewall rules in the VM that block one of those, as hardening against server-side request forgery commonly does, therefore leave RunCVM's DNS and `docker exec` working.
 
-Set another address only if the default clashes with something in your environment, such as software in the VM that intercepts or blocks it. The address must be a unicast IPv4 address, outside `0.0.0.0/8` and `127.0.0.0/8`, and none of the container's own addresses, its gateway's, or RunCVM's bridge address in the container (`169.254.1.1`); a Container/VM with an invalid one fails to start, with an error saying so. An address in `169.254.0.0/16` keeps the VM's traffic to it on the host.
+Set another address only if the default clashes with something in your environment, such as software in the VM that intercepts or blocks it. The address must be a unicast IPv4 address, outside `0.0.0.0/8` and `127.0.0.0/8`, and none of the container's own addresses, its gateway's, or RunCVM's bridge address in the container ([`RUNCVM_BRIDGE_IP`](#runcvm_bridge_ip)); a Container/VM with an invalid one fails to start, with an error saying so. An address in `169.254.0.0/16` keeps the VM's traffic to it on the host.
+
+### RUNCVM_BRIDGE_IP
+
+**`RUNCVM_BRIDGE_IP=<IPv4 address>`**
+
+Sets the address, `169.254.53.1` by default, of the bridge RunCVM creates in the container to join the VM's network interface to the container's network. The bridge needs an address of its own to receive the VM's traffic, but the address is not seen beyond the container: `docker exec`'s connections to the VM leave the bridge from [`RUNCVM_DNS_IP`](#runcvm_dns_ip)'s address instead. The default is link-local, and lies outside both the addresses listed for `RUNCVM_DNS_IP` and those that container engines' networking is known to use in the container, such as `169.254.1.1`, at which rootless Podman's network (`pasta`) answers DNS.
+
+Set another address only if the default clashes with something in your environment. The address must be a unicast IPv4 address, outside `0.0.0.0/8` and `127.0.0.0/8`, other than `RUNCVM_DNS_IP`'s, and none of the container's own addresses or its gateway's; a Container/VM with an invalid one fails to start, with an error saying so.
 
 ### RUNCVM_QEMU_ACCEL
 
@@ -1440,6 +1475,25 @@ What happens to the VM's disks as it powers off, whether they are synced and unm
 
 To stop a Container/VM without a clean shutdown, e.g. one whose disks are thrown away, use `docker stop -t 0`, `docker kill` or `docker rm -f`.
 
+## Host settings
+
+Host settings apply to every Container/VM on the host. No container can override them. They are in `/etc/default/runcvm`:
+
+- Each setting is a `NAME=VALUE` line. Where a name is set more than once, the last line counts.
+- RunCVM ignores other lines, such as blank lines and comments that start with `#`.
+- RunCVM reads the file but never runs it as a script, so quotes are part of a value: write `RUNCVM_EXEC_PASSTHROUGH=1`, not `RUNCVM_EXEC_PASSTHROUGH="1"`.
+- RunCVM reads the file each time it needs a setting, so it is not necessary to restart Docker or Podman after a change.
+
+`/opt/runcvm/etc/default/runcvm.example` shows the format and every setting. To use it, copy it to `/etc/default/runcvm` and remove `#` from the settings to set.
+
+### RUNCVM_EXEC_PASSTHROUGH
+
+**`RUNCVM_EXEC_PASSTHROUGH=0|1`**
+
+`1` enables `docker exec <container> --- <command>`, which runs `<command>` in the container on the host, alongside QEMU and `virtiofsd`, rather than in the VM. It is for debugging and diagnostics. The default is `0`, with which such an exec fails with an error. With any other value, such an exec fails with an error that says the value is invalid.
+
+The command runs as `docker exec` would run it in a standard container, with the capabilities the engine gives the exec (e.g. all of them with `docker exec --privileged`). It is outside the VM's isolation. So, where this setting is `1`, anyone who can `docker exec` into a Container/VM (or `kubectl exec` into its pod) can reach QEMU, `virtiofsd` and the VM's disks.
+
 ## Upgrading
 
 To upgrade, follow this procedure:
@@ -1521,7 +1575,7 @@ The `runcvm-ctr-entrypoint`:
 - Creates a bridge (acting as a hub) for each container network interface, to join that interface to a VM tap network interface.
 - Launches `virtiofsd` to serve the container's root filesystem.
 - Configures `/etc/resolv.conf` in the container.
-- Launches `dnsmasq`. Where the container's DNS server is Docker's embedded one (`127.0.0.11`, on user-defined networks), which only the container can reach, it rewrites that server in `/vm/etc/resolv.conf` to RunCVM's DNS address (`RUNCVM_DNS_IP`, by default `169.254.53.53`), which `dnsmasq` answers, forwarding the VM's DNS requests to Docker's DNS. Elsewhere (e.g. on Docker's default bridge network, or under Podman, whose DNS server the VM can reach), the VM uses the container's DNS servers directly.
+- Where the container's DNS server is Docker's embedded one (`127.0.0.11`, on user-defined networks), which only the container can reach, rewrites that server in `/vm/etc/resolv.conf` to RunCVM's DNS address (`RUNCVM_DNS_IP`, by default `169.254.53.53`), and launches `dnsmasq`, which answers it, forwarding the VM's DNS requests to Docker's DNS. Elsewhere (e.g. on Docker's default bridge network, or under Podman, whose DNS server the VM can reach), the VM uses the container's DNS servers directly, and no `dnsmasq` runs.
 - Adds container firewall rules (with `nft`) for the traffic between the VM and RunCVM's own services in the container: replies to `docker exec`'s connections to the VM; the VM's UDP DNS requests to `dnsmasq`, where `dnsmasq` is its DNS server; and, in VNC display mode, connections to QEMU's VNC server. Such traffic crosses the container's bridge addressed to the VM, or to the Docker network's gateway, so rules in the bridge's prerouting hook readdress it to the container, by its arrival interface, addresses and ports, and `nat` rules hand it to the service. The rules match the VM's traffic to RunCVM's DNS address only from TCP port 22222 (dropbear's) and to UDP port 53; the VM's other traffic passes through the bridge unchanged. An `arp` rule sends the container's own ARP requests, which would name the bridge's private address as sender, as ARP probes, with sender address `0.0.0.0`: Linux answers those without validating the sender, so strict reverse-path filtering (`rp_filter=1`) on the host's bridge does not affect the reply, and RunCVM needs no particular `rp_filter` setting on the host.
 - Execs RunCVM's own `runcvm-init` init process to supervise `runcvm-ctr-qemu` to launch the VM.
 
@@ -1638,7 +1692,7 @@ Tests boot images by tag, and Docker pulls an image only when the host has no co
    ```console
    sudo sh -c 'jq "del(.runtimes.runcvm)" /etc/docker/daemon.json >/etc/docker/daemon.json.new && mv /etc/docker/daemon.json.new /etc/docker/daemon.json'
    ```
-   For Podman, remove the `runcvm` line from `/etc/containers/containers.conf`.
+   For Podman, remove `/etc/containers/containers.conf.d/runcvm.conf`. If you added the `runcvm` entry to `/etc/containers/containers.conf` by hand, remove it from that file.
 3. Remove the RunCVM software package:
    ```console
    sudo rm -rf /opt/runcvm

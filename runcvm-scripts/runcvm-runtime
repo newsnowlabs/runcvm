@@ -42,6 +42,10 @@ RUNCVM_QEMU_TCG_TB_MEM_SIZE_DEFAULT="128" # Memory (Mb) for QEMU's translated-co
 # README): link-local, so never routed beyond the host, and outside the link-local addresses known to
 # be used by cloud platforms (e.g. 169.254.169.254) and by Kubernetes (169.254.20.10).
 RUNCVM_DNS_IP_DEFAULT="169.254.53.53"
+# RunCVM's bridge address in the container (see RUNCVM_BRIDGE_IP in the README): link-local, and
+# outside both the address above and those that container engines' networking is known to use in
+# the container (e.g. rootless Podman's pasta answers DNS at 169.254.1.1).
+RUNCVM_BRIDGE_IP_DEFAULT="169.254.53.1"
 RUNCVM_QEMU_TCG_TB_MEM_SIZE_MIN="32"
 RUNCVM_QEMU_TCG_TB_MEM_SIZE_MAX="4096"
 RUNCVM_DEBUG=""
@@ -330,9 +334,9 @@ get_process_env_boolean() {
   [ -n "$value" ] && echo "1" || echo "0"
 }
 
-# Succeeds if $1 has the form RUNCVM_DNS_IP needs: a dotted-quad IPv4 address (without leading
-# zeros), unicast, and not in 0.0.0.0/8 or 127.0.0.0/8. (runcvm-ctr-entrypoint checks that it is
-# none of the container's own addresses.)
+# Succeeds if $1 has the form RUNCVM_DNS_IP and RUNCVM_BRIDGE_IP need: a dotted-quad IPv4 address
+# (without leading zeros), unicast, and not in 0.0.0.0/8 or 127.0.0.0/8. (runcvm-ctr-entrypoint
+# checks that it is none of the container's own addresses.)
 valid_dns_ip() {
   local ip="$1" octet
   local -a octets
@@ -413,6 +417,23 @@ get_config_env() {
 # substitution, loses any trailing newlines, so cannot decide this.)
 config_env_is() {
   [ "$(jq_get "$CFG" --arg entry "$1=$2" 'any(.process.env[]; . == $entry)')" = "true" ]
+}
+
+# The host's own settings for RunCVM, which apply to every Container/VM on the host and which a
+# container cannot override: lines NAME=VALUE in RUNCVM_HOST_SETTINGS. Other lines, such as blank
+# lines and comments starting '#', are ignored. The file is read, never sourced.
+RUNCVM_HOST_SETTINGS=/etc/default/runcvm
+
+# Prints host setting $1's value (the last line that sets it), or $2 if none does or there is no
+# file.
+get_host_setting() {
+  local line value
+  if [ -r "$RUNCVM_HOST_SETTINGS" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in "$1="*) value="${line#*=}" ;; esac
+    done <"$RUNCVM_HOST_SETTINGS"
+  fi
+  echo -n "${value-$2}"
 }
 
 # RunCVM's capability sets (see the create command's RUNCVM_CAPS): its own processes' needs
@@ -644,12 +665,17 @@ if [ "$COMMAND" = "create" ]; then
 
   # Mount / from container to $RUNCVM_VM_MOUNTPOINT, recursively binding all pre-existing mount points
   # (these being only the ones defined ahead of this item in the mounts[] array - so order matters!)
-  jq_set "$CFG" --arg root "$ROOT" --arg vm "$RUNCVM_VM_MOUNTPOINT" '.mounts |= [{"destination":$vm,"type":"bind","source":$root,"options":["rbind","private","rw"]}] + .'
+  # nosuid and nodev: on the host, no process in the container gains privileges from a setuid file,
+  # or reaches a device through a device node, that the VM's workload creates in its root
+  # filesystem. The VM's own kernel, not this mount's options, decides what the workload's setuid
+  # files and device nodes do in the VM.
+  jq_set "$CFG" --arg root "$ROOT" --arg vm "$RUNCVM_VM_MOUNTPOINT" '.mounts |= [{"destination":$vm,"type":"bind","source":$root,"options":["rbind","private","rw","nosuid","nodev"]}] + .'
 
   # Mount /opt/runcvm from host to container
   # Define this at top of mounts[] so it is recursively mounted
   # and before (but after in the mounts[] array) /.runcvm so it can be mounted inside it
-  jq_set "$CFG" --arg runcvm "$RUNCVM" --arg runcvm_guest "$RUNCVM_GUEST" '.mounts |= [{"destination":$runcvm_guest,"type":"bind","source":$runcvm,"options":["bind","private","ro"]}] + .'
+  # (read-only, nosuid and nodev: RunCVM's package holds no setuid files or device nodes).
+  jq_set "$CFG" --arg runcvm "$RUNCVM" --arg runcvm_guest "$RUNCVM_GUEST" '.mounts |= [{"destination":$runcvm_guest,"type":"bind","source":$runcvm,"options":["bind","private","ro","nosuid","nodev"]}] + .'
 
   # Mount a tmpfs at /.runcvm in container
   # Define this at top of mounts[] so it is recursively mounted
@@ -658,6 +684,11 @@ if [ "$COMMAND" = "create" ]; then
   # Mount a tmpfs at /run in container
   # Define this at bottom of mounts[] so it is not recursively mounted to /vm
   jq_set "$CFG" '.mounts += [{"destination":"/run","type":"tmpfs","source":"run","options":["nosuid","noexec","nodev","size=1M","mode=700"]}]'
+
+  # RunCVM's processes in the container dump no core (RLIMIT_CORE 0, soft and hard), whatever the
+  # container was given (docker run --ulimit core=...): QEMU's core dump would hold the VM's
+  # memory. The workload runs under the VM's own kernel, whose limits apply to it.
+  jq_set "$CFG" '.process.rlimits = ([.process.rlimits[]? | select(.type != "RLIMIT_CORE")] + [{"type": "RLIMIT_CORE", "soft": 0, "hard": 0}])'
 
   # DETERMINE LAUNCH KERNEL:
   #
@@ -906,6 +937,16 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   fi
   set_config_env "RUNCVM_DNS_IP" "$RUNCVM_DNS_IP"
 
+  # The address of RunCVM's bridge in the container, which must differ from RUNCVM_DNS_IP.
+  RUNCVM_BRIDGE_IP="$(get_config_env 'RUNCVM_BRIDGE_IP' "$RUNCVM_BRIDGE_IP_DEFAULT")"
+  if ! valid_dns_ip "$RUNCVM_BRIDGE_IP"; then
+    error "RUNCVM_BRIDGE_IP '$RUNCVM_BRIDGE_IP' invalid (should be a unicast IPv4 address, not in 0.0.0.0/8 or 127.0.0.0/8; default $RUNCVM_BRIDGE_IP_DEFAULT)"
+  fi
+  if [ "$RUNCVM_BRIDGE_IP" = "$RUNCVM_DNS_IP" ]; then
+    error "RUNCVM_BRIDGE_IP '$RUNCVM_BRIDGE_IP' is RUNCVM_DNS_IP's address; they must differ"
+  fi
+  set_config_env "RUNCVM_BRIDGE_IP" "$RUNCVM_BRIDGE_IP"
+
   # virtiofsd's caching: a comma-separated list of at most one cache policy and 'writeback'.
   # Writeback caching needs a policy that caches file contents in the VM (auto or always).
   RUNCVM_VIRTIOFSD_CACHE="$(get_config_env 'RUNCVM_VIRTIOFSD_CACHE')"
@@ -1118,6 +1159,13 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     jq_set "$CFG" --argjson caps '["CAP_SYS_ADMIN"]' ".process.capabilities |= ($RUNCVM_CAPS_ADD)"
   fi
 
+  # RunCVM's processes in the container run with no_new_privs, whatever the container was given
+  # (docker run --security-opt no-new-privileges): none of them gains privileges by executing a
+  # setuid or setgid file, or one with file capabilities. They run as root, with the same
+  # capabilities in the bounding, effective and permitted sets (above), so that each execve leaves
+  # them those they hold, with no_new_privs as without it.
+  jq_set "$CFG" '.process.noNewPrivileges = true'
+
   # CONFIGURE ENVIRONMENT
   # This must remain the last change to config.json: it follows every set_config_env, and the
   # placement of runcvm-ctr-entrypoint in process.args[0].
@@ -1186,15 +1234,21 @@ elif [ "$COMMAND" = "exec" ]; then
   if [ "$ARG1" = "---" ]; then
     # 'docker exec <container> --- <command>' runs <command> in the container, on the host, rather
     # than in the VM, as 'docker exec' would in a standard container (with the capabilities the
-    # engine gives it), for debugging and diagnostics.
+    # engine gives it), for debugging and diagnostics; only where the host enables it, with
+    # RUNCVM_EXEC_PASSTHROUGH=1 in RUNCVM_HOST_SETTINGS, as it reaches outside the VM's isolation.
+    case "$(get_host_setting RUNCVM_EXEC_PASSTHROUGH 0)" in
+      1) ;;
+      0) error "'docker exec <container> --- <command>' is disabled on this host (RUNCVM_EXEC_PASSTHROUGH=1 in $RUNCVM_HOST_SETTINGS enables it)" ;;
+      *) error "RUNCVM_EXEC_PASSTHROUGH in $RUNCVM_HOST_SETTINGS invalid (should be 0 or 1)" ;;
+    esac
     jq_set "$PROCESS" 'del(.args[0])'
   else
     # The exec's process, which relays the command to the VM, runs on the host, in the container,
     # with RunCVM's own fixed set of capabilities (the minimal set), whatever the engine gave it
     # (e.g. docker exec --privileged, or the container's --cap-add) and whatever the container's or
     # the exec's RUNCVM_CAPS and RUNCVM_SYS_ADMIN: no more than the container's init holds in any
-    # mode.
-    jq_set "$PROCESS" --argjson caps "$RUNCVM_MINIMAL_CAPS" ".capabilities = $RUNCVM_CAPS_EXACTLY"
+    # mode. It runs with no_new_privs, as the container's init does.
+    jq_set "$PROCESS" --argjson caps "$RUNCVM_MINIMAL_CAPS" ".capabilities = $RUNCVM_CAPS_EXACTLY | .noNewPrivileges = true"
 
     uidgid=$(jq_get "$PROCESS" '(.user.uid | tostring) + ":" + (.user.gid | tostring) + ":" + ((.user.additionalGids // []) | join(","))')
     cwd=$(jq_get "$PROCESS" '.cwd')

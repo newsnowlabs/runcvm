@@ -16,18 +16,22 @@ and CAP_NET_ADMIN, with any the container was given (--cap-add=SYS_PTRACE),
 even with --cap-drop=ALL. Each Container/VM boots, runs its workload and
 serves 'docker exec'. An invalid RUNCVM_CAPS stops a Container/VM starting.
 The workload runs under the VM's own kernel, so it keeps its capabilities
-there. Each case runs with and without --init.
+there. Each case runs with and without --init. The container's init runs with
+no_new_privs (NoNewPrivs: 1) in every case.
 
 The processes 'docker exec' starts in the container, on the host, which relay
 its command to the VM, hold RunCVM's own fixed set, in the effective,
 permitted and bounding sets, with the inheritable and ambient sets empty, in
 each case, whatever RUNCVM_CAPS and RUNCVM_SYS_ADMIN are: for a plain 'docker
 exec', and for one with --privileged and RUNCVM_CAPS=engine and
-RUNCVM_SYS_ADMIN=1 in its own environment.
+RUNCVM_SYS_ADMIN=1 in its own environment. They run with no_new_privs.
 
 'docker exec <container> --- <command>', which runs <command> in the container
-rather than the VM, runs with the capabilities the engine gives the exec (with
---privileged, including CAP_SYS_ADMIN).
+rather than the VM, fails with an error naming RUNCVM_EXEC_PASSTHROUGH unless
+the host enables it (RUNCVM_EXEC_PASSTHROUGH=1 in /etc/default/runcvm). Where
+it does, the command runs with the capabilities the engine gives the exec (with
+--privileged, including CAP_SYS_ADMIN), and without no_new_privs, which the
+engine sets only for a container given --security-opt=no-new-privileges.
 """
 
 import os
@@ -66,8 +70,28 @@ RUNS = [(init, case) for init in (False, True) for case in CASES]
 
 
 def host_caps(pid):
-    """The capability sets in /proc/PID/status on the host, as {field: int}; {} if unreadable."""
-    return {key: int(value, 16) for key, value in t.proc_status(pid).items() if key.startswith("Cap")}
+    """The capability sets and NoNewPrivs in /proc/PID/status on the host, as {field: int}; {} if
+    unreadable."""
+    return {key: int(value, 16) for key, value in t.proc_status(pid).items()
+            if key.startswith("Cap") or key == "NoNewPrivs"}
+
+
+HOST_SETTINGS = "/etc/default/runcvm"
+
+
+def passthrough_enabled():
+    """Whether the host enables 'docker exec <container> --- <command>': RUNCVM_EXEC_PASSTHROUGH=1
+    in the host's RunCVM settings, the last line setting it counting, as runcvm-runtime reads
+    them."""
+    value = "0"
+    try:
+        with open(HOST_SETTINGS) as f:
+            for line in f.read().splitlines():
+                if line.startswith("RUNCVM_EXEC_PASSTHROUGH="):
+                    value = line.partition("=")[2]
+    except OSError:
+        pass
+    return value == "1"
 
 
 def relay_pids(container):
@@ -129,6 +153,7 @@ for (init, (name, opts)), (started, caps, host, helpers, logs) in zip(RUNS, t.pa
     for key in ("CapEff", "CapPrm", "CapBnd"):
         t.check("%s: container's init on the host: %s" % (desc, key), "%016x" % expected,
                 "%016x" % host[key] if key in host else "unreadable")
+    t.check("%s: container's init on the host: NoNewPrivs" % desc, "1", str(host.get("NoNewPrivs", "unreadable")))
     for kind, found in sorted(helpers.items()):
         if not t.check("%s: %s 'docker exec' processes found on the host" % (desc, kind), True, len(found) > 0):
             continue
@@ -136,6 +161,8 @@ for (init, (name, opts)), (started, caps, host, helpers, logs) in zip(RUNS, t.pa
             t.check("%s: %s 'docker exec' processes on the host: %s" % (desc, kind, key),
                     ["%016x" % (0 if key in ("CapInh", "CapAmb") else EXPECTED)],
                     sorted(set("%016x" % h[key] if key in h else "unreadable" for h in found)))
+        t.check("%s: %s 'docker exec' processes on the host: NoNewPrivs" % (desc, kind), ["1"],
+                sorted(set(str(h.get("NoNewPrivs", "unreadable")) for h in found)))
     if name.startswith("engine"):
         continue
     for key in ("CapInh", "CapAmb"):
@@ -149,16 +176,25 @@ t.check("invalid RUNCVM_CAPS: Container/VM fails to start", True, r.returncode !
 t.check("invalid RUNCVM_CAPS: error names RUNCVM_CAPS", True, "RUNCVM_CAPS" in (r.stdout or ""))
 
 # 'docker exec <container> --- <command>' runs <command> in the container rather than the VM, with
-# the capabilities the engine gives the exec.
+# the capabilities the engine gives the exec, where the host enables it.
 desc = "--- passthrough"
 name = t.unique("caps-passthrough")
 t.cleanup_container(name)
 r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
              "alpine", "sleep", "infinity")
 if t.check("%s: Container/VM boots" % desc, True, r.returncode == 0 and t.wait_for_exec(name, BOOT_TIMEOUT)):
-    r = t.docker("exec", "--privileged", name, "---", "grep", "CapEff", "/proc/self/status")
-    caps = r.stdout.split()
-    t.check("%s: runs, with the exec's capabilities (--privileged: CAP_SYS_ADMIN)" % desc, True,
-            r.returncode == 0 and len(caps) > 1 and int(caps[1], 16) & CAP_SYS_ADMIN != 0)
+    r = t.docker("exec", "--privileged", name, "---", "grep", "-e", "CapEff", "-e", "NoNewPrivs", "/proc/self/status")
+    if passthrough_enabled():
+        t.param(desc, "enabled on this host (RUNCVM_EXEC_PASSTHROUGH=1 in %s)" % HOST_SETTINGS)
+        fields = dict(line.split(":", 1) for line in r.stdout.splitlines() if ":" in line)
+        caps = fields.get("CapEff", "").strip()
+        t.check("%s: runs, with the exec's capabilities (--privileged: CAP_SYS_ADMIN)" % desc, True,
+                r.returncode == 0 and caps != "" and int(caps, 16) & CAP_SYS_ADMIN != 0)
+        t.check("%s: runs without no_new_privs" % desc, "0", fields.get("NoNewPrivs", "").strip())
+    else:
+        t.param(desc, "not enabled on this host")
+        t.check("%s: fails" % desc, True, r.returncode != 0 and "CapEff" not in r.stdout)
+        t.check("%s: error names RUNCVM_EXEC_PASSTHROUGH" % desc, True,
+                "RUNCVM_EXEC_PASSTHROUGH" in (r.stdout or "") + (r.stderr or ""))
 
 t.finish()

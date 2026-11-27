@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""The mounts and resource limits of a Container/VM's container on the host.
+
+In the container on the host, the RunCVM package (/.runcvm/guest) is mounted
+read-only, nosuid and nodev, and the VM's root filesystem (/vm) nosuid and
+nodev; RunCVM's processes (the container's init and QEMU) dump no core
+(RLIMIT_CORE 0, soft and hard), by default and with --ulimit core=-1. In the
+VM, whose own kernel decides what setuid files do there, a setuid program in
+the image runs with its owner's privileges: 'passwd -S', run as an
+unprivileged user, reads /etc/shadow. Each case runs with and without --init.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import framework as t  # noqa: E402
+
+BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
+IMAGE = "debian:trixie-slim"
+
+# (name, docker run options)
+CASES = [("default", []), ("ulimit-core", ["--ulimit", "core=-1"])]
+RUNS = [(init, case) for init in (False, True) for case in CASES]
+
+
+def mount_options(pid):
+    """{mount point: set of options (per-mount and per-superblock)} from /proc/PID/mountinfo on the
+    host, for the container's mounts; {} if unreadable."""
+    mounts = {}
+    try:
+        with open("/proc/%s/mountinfo" % pid) as f:
+            for line in f:
+                fields = line.split()
+                sep = fields.index("-")
+                mounts[fields[4]] = set(fields[5].split(",")) | set(fields[sep + 3].split(","))
+    except (OSError, ValueError, IndexError):
+        pass
+    return mounts
+
+
+def core_limit(pid):
+    """The 'Max core file size' soft and hard limits of host process PID, or None."""
+    try:
+        with open("/proc/%s/limits" % pid) as f:
+            for line in f:
+                if line.startswith("Max core file size"):
+                    return line.split()[4:6]
+    except OSError:
+        pass
+    return None
+
+
+def run(item):
+    init, (name, opts) = item
+    container = t.unique("mntlim-%s%s" % (name, "-init" if init else ""))
+    t.cleanup_container(container)
+    r = t.docker("run", "-d", "--name", container, *t.labels(), "--runtime=" + t.RUNTIME, *t.vm_opts(),
+                 *(["--init"] if init else []), *opts, IMAGE, "sleep", "600")
+    if r.returncode != 0 or not t.wait_for_exec(container, BOOT_TIMEOUT):
+        return {"error": r.stdout + t.docker("logs", container).stdout}
+    pid = t.docker("inspect", "-f", "{{.State.Pid}}", container).stdout.strip()
+    qemu = [p for p, args in t.host_processes(container) if "qemu-system" in args]
+    passwd = t.docker("exec", "-u", "nobody", container, "passwd", "-S", "nobody")
+    return {"mounts": mount_options(pid), "init_core": core_limit(pid),
+            "qemu_core": core_limit(qemu[0]) if qemu else None,
+            "passwd": (passwd.returncode, passwd.stdout.strip())}
+
+
+for (init, (name, opts)), results in zip(RUNS, t.parallel(run, RUNS, remove=True)):
+    desc = "%s, %s" % (name, "--init" if init else "no --init")
+    t.param(desc, " ".join(opts))
+    if not t.check("%s: Container/VM boots and 'docker exec' works" % desc, True, "error" not in results):
+        t.log(results["error"])
+        continue
+    mounts = results["mounts"]
+    for point, wanted in (("/.runcvm/guest", {"ro", "nosuid", "nodev"}), ("/vm", {"nosuid", "nodev"})):
+        t.check("%s: %s mounted %s on the host" % (desc, point, ",".join(sorted(wanted))), sorted(wanted),
+                sorted(wanted & mounts.get(point, set())))
+    t.check("%s: container's init dumps no core" % desc, ["0", "0"], results["init_core"])
+    t.check("%s: QEMU dumps no core" % desc, ["0", "0"], results["qemu_core"])
+    rc, out = results["passwd"]
+    t.check("%s: a setuid program runs with its owner's privileges in the VM ('passwd -S' as nobody)" % desc,
+            True, rc == 0 and out.startswith("nobody "))
+    if rc != 0:
+        t.log("passwd -S: exit %d: %s" % (rc, out))
+
+t.finish()
