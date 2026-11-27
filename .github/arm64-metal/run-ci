@@ -1,0 +1,155 @@
+#!/bin/bash
+# Runs RunCVM's arm64 tests on an AWS Graviton bare-metal host (see launch), as the workflow
+# .github/workflows/arm64-metal.yml calls it: launches the host, waits for it to build and
+# install RunCVM, and runs the tests on it in shards over SSH (see run-shards). If AWS
+# reclaims a spot host while it waits or runs the tests, and RERUN_ON_INTERRUPT allows, it
+# tears that host down and repeats the launch, the wait and the tests once, on a new host. The
+# workflow's own teardown step still terminates whichever host is the last.
+#
+# After a step fails, the host's state reason decides whether to rerun (rerun_decision):
+# - Server.SpotInstanceTermination: AWS reclaimed the host; rerun, once.
+# - Client.*, such as Client.InstanceInitiatedShutdown: the host's own dead-man's switch
+#   powered it off after MAX_MINUTES; fail.
+# - Any other state reason, or none because the host is still running: a test failed, or SSH
+#   dropped for another reason; fail.
+# A launch that fails is not rerun either, as no host exists to ask. A rerun is never itself
+# rerun, so the whole run launches at most two hosts.
+#
+# Settings (environment), besides those of launch, which it passes on:
+#   RERUN_ON_INTERRUPT  how to rerun after a spot interruption: ondemand, on an on-demand host;
+#                       spot, on spot capacity again (with launch's FALLBACK); off, not at all
+#                       (default ondemand)
+#   PUBKEY, KEY    the SSH public key the host accepts, and the private key's file (required)
+#   SHARDS         the number of shards to run the tests in                         (default 8)
+#   TESTS          tests/run's arguments, split into words                (default "--tier core")
+#   LAUNCH_MINUTES, TEST_MINUTES  how long a launch, and the tests on a host, may take
+#                  (default 45 and 60)
+#   WAIT_MINUTES   how long to wait for a host's setup (launch wait's own setting)
+#   RUNNER_TEMP    where the SSH known-hosts file goes  (default ${TMPDIR:-/tmp})
+# Under GitHub Actions, it sets the step outputs id, region, type, market, price and ip, of the
+# host it last launched, as launch does, and rerun, the market of the rerun's host if it made one.
+#
+# Usage: run-ci
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+RERUN_ON_INTERRUPT=${RERUN_ON_INTERRUPT:-ondemand}
+SHARDS=${SHARDS:-8}
+TESTS=${TESTS:---tier core}
+LAUNCH_MINUTES=${LAUNCH_MINUTES:-45}
+TEST_MINUTES=${TEST_MINUTES:-60}
+RERUNS=0   # the reruns made so far
+
+# The host last launched and not torn down.
+HOST_ID="" HOST_REGION="" HOST_TYPE="" HOST_MARKET="" HOST_PRICE="" HOST_IP=""
+RERUN_MARKET=""
+
+# rerun_decision CODE [STATE]
+# Decides what to do after a step failed on a host whose StateReason.Code is CODE (empty if it
+# has none) and whose state is STATE (for the reason given). Prints "rerun", or "no-rerun" and
+# the reason; succeeds only for "rerun". Reads RERUN_ON_INTERRUPT and RERUNS, and calls nothing.
+rerun_decision() {
+  local code=${1:-} state=${2:-unknown}
+  if [ "$RERUN_ON_INTERRUPT" = off ]; then
+    echo "no-rerun: RERUN_ON_INTERRUPT is off"; return 1
+  fi
+  if [ "$RERUNS" -ge 1 ]; then
+    echo "no-rerun: the one rerun has been made"; return 1
+  fi
+  case "$code" in
+    Server.SpotInstanceTermination)
+      echo "rerun"; return 0 ;;
+    Client.*)
+      echo "no-rerun: the host powered itself off ($code), its dead-man's switch having fired"; return 1 ;;
+    "")
+      echo "no-rerun: the host is $state, so the failure is the run's own"; return 1 ;;
+    *)
+      echo "no-rerun: the host's state reason is $code, which is not a spot interruption"; return 1 ;;
+  esac
+}
+
+# host_state_reason
+# Prints the StateReason.Code and State.Name (blank if none) of the host, one per line; where the
+# host is stopping or shutting down without a reason yet, waits briefly for one.
+host_state_reason() {
+  local code state
+  for _ in 1 2 3 4 5 6; do
+    code=$(aws --region "$HOST_REGION" ec2 describe-instances --instance-ids "$HOST_ID" \
+      --query 'Reservations[0].Instances[0].StateReason.Code' --output text 2>/dev/null)
+    state=$(aws --region "$HOST_REGION" ec2 describe-instances --instance-ids "$HOST_ID" \
+      --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null)
+    case "$code" in None|null) code="" ;; esac
+    case "$state" in shutting-down|stopping) [ -z "$code" ] || break ;; *) break ;; esac
+    sleep 10
+  done
+  printf '%s\n%s\n' "$code" "$state"
+}
+
+launch_host() { # market
+  local out k v
+  out=$(mktemp) || return 1
+  GITHUB_OUTPUT=$out MARKET=$1 REAP=$([ "$RERUNS" = 0 ] && echo "${REAP:-0}" || echo 0) \
+    timeout "${LAUNCH_MINUTES}m" "$HERE/launch" launch || { rm -f "$out"; return 1; }
+  while IFS='=' read -r k v; do
+    case "$k" in
+      id) HOST_ID=$v ;; region) HOST_REGION=$v ;; type) HOST_TYPE=$v ;;
+      market) HOST_MARKET=$v ;; price) HOST_PRICE=$v ;; ip) HOST_IP=$v ;;
+    esac
+  done <"$out"
+  rm -f "$out"
+}
+
+# Runs the host's wait and the tests; the latter's status is the run's.
+run_on_host() {
+  local known="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/arm64-metal-known-hosts"
+  IP=$HOST_IP "$HERE/launch" wait || return $?
+  # TESTS holds several arguments, so it is split into words.
+  # shellcheck disable=SC2086
+  timeout "${TEST_MINUTES}m" ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile="$known" -o ServerAliveInterval=30 \
+    "ubuntu@$HOST_IP" bash -s -- "$SHARDS" /home/ubuntu/results $TESTS <"$HERE/run-shards"
+}
+
+teardown_host() {
+  GITHUB_OUTPUT="" REGION=$HOST_REGION PRICE=$HOST_PRICE "$HERE/launch" teardown
+  HOST_ID="" HOST_REGION="" HOST_TYPE="" HOST_MARKET="" HOST_PRICE="" HOST_IP=""
+}
+
+emit_outputs() {
+  [ -n "${GITHUB_OUTPUT:-}" ] || return 0
+  printf '%s\n' "id=$HOST_ID" "region=$HOST_REGION" "type=$HOST_TYPE" "market=$HOST_MARKET" \
+    "price=$HOST_PRICE" "ip=$HOST_IP" "rerun=$RERUN_MARKET" >>"$GITHUB_OUTPUT"
+}
+
+main() {
+  set -o pipefail
+  case "$RERUN_ON_INTERRUPT" in ondemand|spot|off) : ;; *)
+    echo "run-ci: RERUN_ON_INTERRUPT must be ondemand, spot or off" >&2; return 2 ;; esac
+  [ -n "${PUBKEY:-}" ] && [ -n "${KEY:-}" ] || { echo "run-ci: PUBKEY and KEY are required" >&2; return 2; }
+  trap emit_outputs EXIT
+
+  local market=${MARKET:-spot} rc reason code state decision
+  launch_host "$market" || return 1
+  while :; do
+    run_on_host && return 0
+    rc=$?
+    echo "run-ci: the run failed on $HOST_ID with status $rc; asking AWS about the host"
+    reason=$(host_state_reason)
+    code=$(sed -n 1p <<<"$reason")
+    state=$(sed -n 2p <<<"$reason")
+    echo "run-ci: host $HOST_ID is $state, with state reason '${code:-none}'"
+    decision=$(rerun_decision "$code" "$state") && rc_decision=0 || rc_decision=1
+    echo "run-ci: $decision"
+    [ "$rc_decision" = 0 ] || return "$rc"
+    RERUNS=$(( RERUNS + 1 ))
+    market=$RERUN_ON_INTERRUPT
+    [ "$market" = ondemand ] && RERUN_MARKET=ondemand || RERUN_MARKET=spot
+    echo "run-ci: relaunching once, on $RERUN_MARKET capacity"
+    teardown_host
+    launch_host "$RERUN_MARKET" || return 1
+  done
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi
