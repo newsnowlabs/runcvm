@@ -32,6 +32,19 @@ Nightly (every tier, on `main`); on pull requests labelled `ci:arm64` (the core 
 tier that `ci:extended` or `ci:all` selects); and by hand from the Actions tab, on `main`. Pull
 requests from forks are skipped: GitHub gives them no OIDC token.
 
+The tests run under each engine in turn, on the same host, as for `ci.yml`'s tests:
+
+- Docker: every run.
+- Ubuntu's Podman: nightly, with `ci:podman` or `ci:podman:all` as well as `ci:arm64`, or by
+  hand with the `podman` input `system` or `all`.
+- Each static Podman build pinned in `tests/engines/podman/static-versions`: in Saturday's (UTC)
+  nightly run, with `ci:podman:all` as well as `ci:arm64`, or by hand with the `podman` input
+  `all`.
+
+`launch`'s setting `PODMAN` (`none`, `system` or `all`) selects the Podman that the host
+installs. The results of each engine are in `results/<engine>`, and the job summary has a
+section for each engine.
+
 ## A host does not stay up for long after its run
 
 - Before anything else, the host schedules its own poweroff `MAX_MINUTES` after it boots. It is
@@ -256,6 +269,11 @@ ssh -i $KEY ubuntu@<address> bash -s -- 8 /home/ubuntu/results --tier core <.git
 scp -r -i $KEY ubuntu@<address>:results .   # each shard's results, in results/shard-<n>
 .github/arm64-metal/launch teardown
 ```
+
+To run the tests under Podman too, give `launch launch` the setting `PODMAN=system` or
+`PODMAN=all`, and run `run-shards` once for each engine, with its own results directory: e.g.
+`ssh -i $KEY ubuntu@<address> RUNCVM_TEST_PODMAN=/usr/local/sbin/podman-6.2.0 bash -s -- 8
+/home/ubuntu/results/podman-6.2.0 --tier core --engine podman <.github/arm64-metal/run-shards`.
 
 SSH reaches the host only from the address `launch` saw as its own; where the launching host's
 outbound address varies (e.g. several gateways in turn), give the range in `SSH_CIDR`, e.g.

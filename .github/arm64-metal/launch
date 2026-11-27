@@ -55,6 +55,9 @@
 #   REPO, REF      the GitHub repository and the ref or commit that the host builds
 #                  (default newsnowlabs/runcvm, main)
 #   PUBKEY         launch: the SSH public key the host accepts for user ubuntu  (required)
+#   PODMAN         launch: the Podman the host installs beside Docker, for tests/run --engine
+#                  podman: none; system (Ubuntu's podman package); or all (Ubuntu's, and each
+#                  static build that tests/engines/podman/install-static installs)  (default none)
 #   SSH_CIDR       launch: the addresses SSH accepts     (default: this host's public address/32)
 #   IP, KEY        wait: the host's address, and the SSH private key's file     (required)
 #   WAIT_MINUTES   wait: how long to wait for the host's setup   (default 60)
@@ -71,6 +74,8 @@ MIN_SCORE=${MIN_SCORE:-1}
 PRICE_CAP_PCT=${PRICE_CAP_PCT:-100}
 FALLBACK=${FALLBACK:-ondemand}
 MAX_MINUTES=${MAX_MINUTES:-120}
+PODMAN=${PODMAN:-none}
+case "$PODMAN" in none|system|all) : ;; *) echo "launch: PODMAN must be none, system or all" >&2; exit 2 ;; esac
 GROUP=${GROUP:-manual}
 REAP=${REAP:-0}
 SKIP_REGIONS=${SKIP_REGIONS:-}
@@ -303,7 +308,8 @@ write_userdata() {
   UD=$(mktemp)
   cat >"$UD" <<EOF
 #!/bin/bash
-# Builds and installs RunCVM at $REF, from $REPO, under the latest Docker release.
+# Builds and installs RunCVM at $REF, from $REPO, under the latest Docker release, with Podman
+# beside Docker as PODMAN ($PODMAN) gives.
 # Progress: /var/log/runcvm-setup.log; outcome: /var/log/runcvm-setup.done or .failed.
 exec >/var/log/runcvm-setup.log 2>&1
 set -x
@@ -319,6 +325,13 @@ set -e
 curl -fsSL https://get.docker.com | sh
 usermod -aG docker,kvm ubuntu
 ls -l /dev/kvm
+# Ubuntu's Podman, before RunCVM's installer, which registers RunCVM with Podman where Podman is
+# installed. Short image names (e.g. alpine) resolve on Docker Hub, as under Docker.
+if [ "$PODMAN" != none ]; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y podman
+  mkdir -p /etc/containers/registries.conf.d
+  printf 'unqualified-search-registries = ["docker.io"]\\n' >/etc/containers/registries.conf.d/50-runcvm-ci-docker-io.conf
+fi
 # 1 GiB of hugepages, for RUNCVM_HUGETLB=1's case in tests/60-option-matrix, which is skipped
 # without them (as it is where the kernel, with memory fragmented, reserves fewer).
 echo 1 >/proc/sys/vm/compact_memory
@@ -332,6 +345,16 @@ sudo -u ubuntu git log -1 --format='%H %s'
 ./build/build.sh --tag ci
 REPO=newsnowlabs/runcvm:ci ./runcvm-scripts/runcvm-install-runtime.sh </dev/null
 docker run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=kvm alpine uname -mr
+if [ "$PODMAN" != none ]; then
+  podman run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=kvm alpine uname -mr
+fi
+# The static Podman builds, each with its storage in /var/lib/containers, on the root volume.
+if [ "$PODMAN" = all ]; then
+  tests/engines/podman/install-static
+  for w in /usr/local/sbin/podman-*; do
+    \$w run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=kvm alpine uname -mr
+  done
+fi
 touch /var/log/runcvm-setup.done
 EOF
 }
