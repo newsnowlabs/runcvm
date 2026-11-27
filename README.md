@@ -591,11 +591,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
 - Security
    - [+] The processes RunCVM runs in the container on the host (QEMU, `virtiofsd`, `dnsmasq` and RunCVM's own scripts and tools) are seccomp-filtered, by default with a profile narrower than a standard container's: see [`RUNCVM_SECCOMP`](#runcvm_seccomp). The workload runs in the VM, behind the VM's kernel, not this filter.
    - [-] `--security-opt seccomp=unconfined`, `--security-opt seccomp=<file>` and `--privileged` do not set this filter as they set a standard container's: see [`RUNCVM_SECCOMP`](#runcvm_seccomp).
-   - [+] RunCVM's processes in the container are limited to the capabilities they need, which RunCVM sets as the bounding, effective and permitted sets of the container's processes (`virtiofsd` then drops those it does not keep), whatever the container was given (`--cap-add`, `--cap-drop`, `--privileged` or `--security-opt=no-new-privileges`). [`RUNCVM_CAPS`](#runcvm_caps) chooses them:
-      - `minimal` (the default): `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_FSETID`, `CAP_MKNOD`, `CAP_SETFCAP`, `CAP_SETGID`, `CAP_SETUID` and `CAP_SYS_CHROOT` for `virtiofsd`, which serves the VM's file operations from a chroot sandbox; `CAP_NET_ADMIN` for the container's network configuration and QEMU's tap devices; and `CAP_NET_BIND_SERVICE` for `dnsmasq`'s port 53.
-      - `engine`: Docker's default capabilities and `CAP_NET_ADMIN`, added to those the container was given.
-      - [`RUNCVM_SYS_ADMIN=1`](#runcvm_sys_admin) adds `CAP_SYS_ADMIN`, whichever mode is chosen.
-      - The processes `docker exec` starts in the container, which relay each command to the VM, hold the `minimal` set, whatever the container or the exec was given.
+   - [+] RunCVM's processes in the container on the host hold, by default, only the capabilities they need, whatever the container was given (`--cap-add`, `--cap-drop`, `--privileged` or `--security-opt=no-new-privileges`): see [`RUNCVM_CAPS`](#runcvm_caps). The workload keeps its own capabilities under the VM's kernel.
       - [-] Other effects of the container's options remain as the engine applies them: `--privileged` still gives the container the host's devices, an unrestricted device cgroup, a writable `/sys`, and no masked paths or AppArmor profile.
    - [+] RunCVM's processes in the container, including those `docker exec` starts to relay each command to the VM, run with `no_new_privs`, whatever the container or the exec was given: executing a setuid or setgid file, or one with file capabilities, gives them no privileges they do not already hold. The workload runs under the VM's own kernel, where this does not apply.
    - [+] RunCVM's processes in the container dump no core (`RLIMIT_CORE` 0), whatever the container was given (e.g. `--ulimit core=-1`), as QEMU's core dump would hold the VM's memory. The workload runs under the VM's own kernel, whose limits apply to it.
@@ -1240,11 +1236,14 @@ Under `engine-plus` and `engine`, `--security-opt seccomp=unconfined` and `--pri
 
 **`RUNCVM_CAPS=minimal|engine`**
 
-The capabilities of the processes RunCVM runs in the container on the host; see [Features and limitations](#features-and-limitations). The workload, which runs in the VM, keeps its own capabilities under the VM's kernel either way.
+The capabilities of the processes RunCVM runs in the container on the host. RunCVM sets them as the bounding, effective and permitted sets of the container's processes, and `virtiofsd` then drops those it does not keep. The workload, which runs in the VM, keeps its own capabilities under the VM's kernel either way.
 
 The processes `docker exec` starts in the container, which relay each command to the VM, hold the `minimal` capabilities whatever `RUNCVM_CAPS` is, and whatever the exec was given.
 
-- `minimal` (the default): exactly those RunCVM's processes need, whatever the container was given (`--cap-add`, `--cap-drop`, `--privileged` or `--security-opt=no-new-privileges`), with the inheritable and ambient sets empty.
+- `minimal` (the default): exactly those RunCVM's processes need, whatever the container was given (`--cap-add`, `--cap-drop`, `--privileged` or `--security-opt=no-new-privileges`), with the inheritable and ambient sets empty:
+  - `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_FSETID`, `CAP_MKNOD`, `CAP_SETFCAP`, `CAP_SETGID`, `CAP_SETUID` and `CAP_SYS_CHROOT`, for `virtiofsd`, which serves the VM's file operations from a chroot sandbox;
+  - `CAP_NET_ADMIN`, for the container's network configuration and QEMU's tap devices;
+  - `CAP_NET_BIND_SERVICE`, for `dnsmasq`'s port 53.
 - `engine`: Docker's default capabilities and `CAP_NET_ADMIN`, added to those the container was given.
 
 [`RUNCVM_SYS_ADMIN=1`](#runcvm_sys_admin) adds `CAP_SYS_ADMIN`, whichever mode is chosen.
