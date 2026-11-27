@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RunCVM's DNS address (RUNCVM_DNS_IP).
+"""RunCVM's DNS address (RUNCVM_DNS_IP) and bridge address (RUNCVM_BRIDGE_IP).
 
 - On a user-defined network, the VM resolves another container's name, and
   'docker exec' works, by default and with RUNCVM_DNS_IP set to another
@@ -10,8 +10,11 @@
   network's gateway), it names the container's DNS servers unchanged.
 - A malformed or non-unicast RUNCVM_DNS_IP, or one in 0.0.0.0/8 or
   127.0.0.0/8, fails Container/VM creation with an error naming it.
-- A RUNCVM_DNS_IP equal to RunCVM's bridge address in the container
-  (169.254.1.1) stops the Container/VM at start, with an error naming it.
+- RunCVM's bridge in the container has the address RUNCVM_BRIDGE_IP
+  (169.254.53.1 by default), and the VM resolves names and serves 'docker
+  exec' with it set to another link-local address too.
+- A RUNCVM_BRIDGE_IP of the wrong form, or equal to RUNCVM_DNS_IP, fails
+  Container/VM creation with an error naming RUNCVM_BRIDGE_IP.
 """
 
 import os
@@ -25,6 +28,7 @@ BOOT_TIMEOUT = 600 if t.ACCEL == "tcg" else 120
 # container names, as in tests/24-networking.
 VM = ["--runtime=" + t.RUNTIME, *t.vm_opts(), "--dns-search=.", "--dns-opt=ndots:1"]
 DEFAULT = "169.254.53.53"
+BRIDGE_DEFAULT = "169.254.53.1"
 
 network = t.unique("net")
 t.docker("network", "create", *t.labels(), network, check=True)
@@ -52,15 +56,33 @@ def resolves_peer(name):
     return r.returncode == 0 and "Address" in r.stdout.split("Name:", 1)[-1]
 
 
+def local_addresses(pid):
+    """The IPv4 addresses local to the network namespace of host process PID (its /proc/PID/net/fib_trie
+    entries of type LOCAL), or None if unreadable."""
+    try:
+        with open("/proc/%s/net/fib_trie" % pid) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    found = set()
+    for previous, line in zip(lines, lines[1:]):
+        if "/32 host LOCAL" in line and "|--" in previous:
+            found.add(previous.split("|--")[1].strip())
+    return found
+
+
 def case_running(args):
-    label, opts, address = args
+    label, opts, address, bridge = args
     name = t.unique(label)
     t.cleanup_container(name)
     r = t.docker("run", "-d", "--name", name, *t.labels(), *VM, "--network", network, *opts, "alpine", "sleep", "600")
     if r.returncode != 0 or not t.wait_for_exec(name, BOOT_TIMEOUT):
         return [("%s: Container/VM starts and 'docker exec' works" % label, True, False)]
+    local = local_addresses(t.docker("inspect", "-f", "{{.State.Pid}}", name).stdout.strip())
     return [
         ("%s: 'docker exec' works" % label, True, True),
+        ("%s: the container holds the bridge address %s" % (label, bridge), True,
+         local is not None and bridge in local),
         ("%s: the VM's DNS server" % label, [address] if CONTAINER_DNS == ["127.0.0.11"] else CONTAINER_DNS,
          nameservers(t.docker("exec", name, "cat", "/etc/resolv.conf").stdout)),
         ("%s: the VM resolves another container's name" % label, True, resolves_peer(name)),
@@ -79,23 +101,27 @@ def case_rejected(args):
     ]
 
 
-def case_bridge_address():
-    name = t.unique("bridge-ip")
+def case_bridge_rejected(args):
+    index, env = args
+    name = t.unique("bad-bridge-%d" % index)
     t.cleanup_container(name)
-    r = t.docker("run", "--name", name, *t.labels(), *VM, "--network", network,
-                 "--env=RUNCVM_DNS_IP=169.254.1.1", "alpine", "true", timeout=BOOT_TIMEOUT)
-    logs = t.docker("logs", name).stdout or ""
+    r = t.docker("run", "-d", "--name", name, *t.labels(), *VM, "--network", network,
+                 *["--env=" + e for e in env], "alpine", "sleep", "600")
+    desc = " ".join(env)
     return [
-        ("RUNCVM_DNS_IP=169.254.1.1: the Container/VM exits with an error", True, r.returncode != 0),
-        ("RUNCVM_DNS_IP=169.254.1.1: error names RUNCVM_DNS_IP", True, "RUNCVM_DNS_IP" in logs),
+        ("%s: creation fails" % desc, True, r.returncode != 0),
+        ("%s: error names RUNCVM_BRIDGE_IP" % desc, True, "RUNCVM_BRIDGE_IP" in (r.stdout or "")),
     ]
 
 
-results = t.parallel(case_running, [("default", [], DEFAULT),
-                                    ("override", ["--env=RUNCVM_DNS_IP=169.254.99.99"], "169.254.99.99")])
+results = t.parallel(case_running, [("default", [], DEFAULT, BRIDGE_DEFAULT),
+                                    ("override", ["--env=RUNCVM_DNS_IP=169.254.99.99"], "169.254.99.99", BRIDGE_DEFAULT),
+                                    ("bridge", ["--env=RUNCVM_BRIDGE_IP=169.254.77.1"], DEFAULT, "169.254.77.1")])
 results += [case_rejected(v) for v in enumerate(("bogus", "127.0.0.1", "0.1.2.3", "224.0.0.1", "169.254.300.1",
                                                    "169.254.053.53"))]
-results.append(case_bridge_address())
+results += [case_bridge_rejected(v) for v in enumerate((["RUNCVM_BRIDGE_IP=bogus"], ["RUNCVM_BRIDGE_IP=127.0.0.2"],
+                                                          ["RUNCVM_BRIDGE_IP=" + DEFAULT],
+                                                          ["RUNCVM_DNS_IP=169.254.9.9", "RUNCVM_BRIDGE_IP=169.254.9.9"]))]
 
 for checks in results:
     for desc, expected, actual in checks:

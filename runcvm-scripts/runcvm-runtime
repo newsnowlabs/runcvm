@@ -42,6 +42,10 @@ RUNCVM_QEMU_TCG_TB_MEM_SIZE_DEFAULT="128" # Memory (Mb) for QEMU's translated-co
 # README): link-local, so never routed beyond the host, and outside the link-local addresses known to
 # be used by cloud platforms (e.g. 169.254.169.254) and by Kubernetes (169.254.20.10).
 RUNCVM_DNS_IP_DEFAULT="169.254.53.53"
+# RunCVM's bridge address in the container (see RUNCVM_BRIDGE_IP in the README): link-local, and
+# outside both the address above and those that container engines' networking is known to use in
+# the container (e.g. rootless Podman's pasta answers DNS at 169.254.1.1).
+RUNCVM_BRIDGE_IP_DEFAULT="169.254.53.1"
 RUNCVM_QEMU_TCG_TB_MEM_SIZE_MIN="32"
 RUNCVM_QEMU_TCG_TB_MEM_SIZE_MAX="4096"
 RUNCVM_DEBUG=""
@@ -330,9 +334,9 @@ get_process_env_boolean() {
   [ -n "$value" ] && echo "1" || echo "0"
 }
 
-# Succeeds if $1 has the form RUNCVM_DNS_IP needs: a dotted-quad IPv4 address (without leading
-# zeros), unicast, and not in 0.0.0.0/8 or 127.0.0.0/8. (runcvm-ctr-entrypoint checks that it is
-# none of the container's own addresses.)
+# Succeeds if $1 has the form RUNCVM_DNS_IP and RUNCVM_BRIDGE_IP need: a dotted-quad IPv4 address
+# (without leading zeros), unicast, and not in 0.0.0.0/8 or 127.0.0.0/8. (runcvm-ctr-entrypoint
+# checks that it is none of the container's own addresses.)
 valid_dns_ip() {
   local ip="$1" octet
   local -a octets
@@ -906,6 +910,16 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
   fi
   set_config_env "RUNCVM_DNS_IP" "$RUNCVM_DNS_IP"
 
+  # The address of RunCVM's bridge in the container, which must differ from RUNCVM_DNS_IP.
+  RUNCVM_BRIDGE_IP="$(get_config_env 'RUNCVM_BRIDGE_IP' "$RUNCVM_BRIDGE_IP_DEFAULT")"
+  if ! valid_dns_ip "$RUNCVM_BRIDGE_IP"; then
+    error "RUNCVM_BRIDGE_IP '$RUNCVM_BRIDGE_IP' invalid (should be a unicast IPv4 address, not in 0.0.0.0/8 or 127.0.0.0/8; default $RUNCVM_BRIDGE_IP_DEFAULT)"
+  fi
+  if [ "$RUNCVM_BRIDGE_IP" = "$RUNCVM_DNS_IP" ]; then
+    error "RUNCVM_BRIDGE_IP '$RUNCVM_BRIDGE_IP' is RUNCVM_DNS_IP's address; they must differ"
+  fi
+  set_config_env "RUNCVM_BRIDGE_IP" "$RUNCVM_BRIDGE_IP"
+
   # virtiofsd's caching: a comma-separated list of at most one cache policy and 'writeback'.
   # Writeback caching needs a policy that caches file contents in the VM (auto or always).
   RUNCVM_VIRTIOFSD_CACHE="$(get_config_env 'RUNCVM_VIRTIOFSD_CACHE')"
@@ -1091,6 +1105,13 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     jq_set "$CFG" --argjson caps '["CAP_SYS_ADMIN"]' ".process.capabilities |= ($RUNCVM_CAPS_ADD)"
   fi
 
+  # RunCVM's processes in the container run with no_new_privs, whatever the container was given
+  # (docker run --security-opt no-new-privileges): none of them gains privileges by executing a
+  # setuid or setgid file, or one with file capabilities. They run as root, with the same
+  # capabilities in the bounding, effective and permitted sets (above), so that each execve leaves
+  # them those they hold, with no_new_privs as without it.
+  jq_set "$CFG" '.process.noNewPrivileges = true'
+
   # CONFIGURE ENVIRONMENT
   # This must remain the last change to config.json: it follows every set_config_env, and the
   # placement of runcvm-ctr-entrypoint in process.args[0].
@@ -1166,8 +1187,8 @@ elif [ "$COMMAND" = "exec" ]; then
     # with RunCVM's own fixed set of capabilities (the minimal set), whatever the engine gave it
     # (e.g. docker exec --privileged, or the container's --cap-add) and whatever the container's or
     # the exec's RUNCVM_CAPS and RUNCVM_SYS_ADMIN: no more than the container's init holds in any
-    # mode.
-    jq_set "$PROCESS" --argjson caps "$RUNCVM_MINIMAL_CAPS" ".capabilities = $RUNCVM_CAPS_EXACTLY"
+    # mode. It runs with no_new_privs, as the container's init does.
+    jq_set "$PROCESS" --argjson caps "$RUNCVM_MINIMAL_CAPS" ".capabilities = $RUNCVM_CAPS_EXACTLY | .noNewPrivileges = true"
 
     uidgid=$(jq_get "$PROCESS" '(.user.uid | tostring) + ":" + (.user.gid | tostring) + ":" + ((.user.additionalGids // []) | join(","))')
     cwd=$(jq_get "$PROCESS" '.cwd')
