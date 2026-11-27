@@ -162,6 +162,7 @@ RunCVM suits workloads that need what a container cannot give them, a whole mach
   - [RunCVM vs Kata comparison](#runcvm-vs-kata-comparison)
   - [More examples](#more-examples)
   - [Option reference](#option-reference)
+  - [Host settings](#host-settings)
 - **Maintaining and developing**
   - [Upgrading](#upgrading)
   - [Building](#building)
@@ -567,7 +568,7 @@ In the below summary of RunCVM's current main features and limitations, [+] is u
 - `docker exec`
    - [+] `--user` (or `-u`), `--workdir` (or `-w`), `--env` (or `-e`), `--env-file`, `--detach` (or `-d`), `--interactive` (or `-i`) and `--tty` (or `-t`) are all supported
    - [+] Stdout and Stderr _are_ independently multiplexed so `docker exec <container> bash -c 'echo stdout; echo stderr >&2' >/tmp/stdout 2>/tmp/stderr` _does_ produce the expected result
-   - [-] `docker exec <container> --- <command>` runs `<command>` in the container on the host, alongside QEMU and `virtiofsd`, rather than in the VM, for debugging and diagnostics, where the host enables it: with `RUNCVM_EXEC_PASSTHROUGH=1` in `/etc/default/runcvm`, a file of `NAME=VALUE` lines that applies to every Container/VM on the host and that no container can override. Otherwise such an exec fails with an error. `/opt/runcvm/etc/default/runcvm.example` shows the file's format and every setting. It runs as `docker exec` would in a standard container, with the capabilities the engine gives the exec (e.g. all of them with `docker exec --privileged`), outside the VM's isolation, so that, where it is enabled, anyone who can `docker exec` into a Container/VM (or `kubectl exec` into its pod) can reach QEMU, `virtiofsd` and the VM's disks.
+   - [-] `docker exec <container> --- <command>` runs `<command>` in the container on the host, rather than in the VM, only where the host enables it: see [`RUNCVM_EXEC_PASSTHROUGH`](#runcvm_exec_passthrough)
 - Security
    - [+] The processes RunCVM runs in the container on the host (QEMU, `virtiofsd`, `dnsmasq` and RunCVM's own scripts and tools) are seccomp-filtered. The workload itself runs in the VM, behind the VM's kernel, not this filter. [`RUNCVM_SECCOMP`](#runcvm_seccomp) chooses the profile:
       - `engine` (the default): the engine's (Docker's or Podman's) default profile, with the calls those processes need beyond it also allowed: io_uring's (`io_uring_setup`, `io_uring_enter`, `io_uring_register`), for QEMU's disks, only for a Container/VM with disks ([`RUNCVM_DISKS`](#runcvm_disks)) that may use io_uring, i.e. unless `RUNCVM_DISK_AIO` is `native` or `threads` (QEMU also tries io_uring for its event loop, and without it uses epoll); the NUMA memory-policy calls (`get_mempolicy`, `set_mempolicy`, `mbind`); and `chroot`. Docker builds this profile from the capabilities the container was given, so that, e.g., `--cap-add=SYS_ADMIN` leaves `mount` and `unshare` allowed, although RunCVM's processes lack `CAP_SYS_ADMIN`.
@@ -883,6 +884,8 @@ RunCVM options are specified either via standard `docker run` options (see [Feat
 - in Docker Compose: a service's `environment` or `env_file`.
 
 A value set on the command line overrides the image's. Variables set with `docker exec --env` have no effect, except [`RUNCVM_RUNTIME_DEBUG=1`](#runcvm_runtime_debug), which logs the runtime's handling of that `docker exec`. On a shell command line, quote a value that holds shell metacharacters, such as `;` in `--env='RUNCVM_DISKS=<disk1>;<disk2>'`.
+
+Settings for the whole host, which no container can override, are in [Host settings](#host-settings).
 
 ### RUNCVM_KERNEL
 
@@ -1438,6 +1441,25 @@ If `RUNCVM_SHUTDOWN` is left undefined, set to an empty string or set to `auto`,
 What happens to the VM's disks as it powers off, whether they are synced and unmounted, depends on the VM's init, provided `RUNCVM_SHUTDOWN` asks it in a way it acts on: see [Shutdown and disk data integrity](#shutdown-and-disk-data-integrity) under [`RUNCVM_DISKS`](#runcvm_disks).
 
 To stop a Container/VM without a clean shutdown, e.g. one whose disks are thrown away, use `docker stop -t 0`, `docker kill` or `docker rm -f`.
+
+## Host settings
+
+Host settings apply to every Container/VM on the host. No container can override them. They are in `/etc/default/runcvm`:
+
+- Each setting is a `NAME=VALUE` line. Where a name is set more than once, the last line counts.
+- RunCVM ignores other lines, such as blank lines and comments that start with `#`.
+- RunCVM reads the file but never runs it as a script, so quotes are part of a value: write `RUNCVM_EXEC_PASSTHROUGH=1`, not `RUNCVM_EXEC_PASSTHROUGH="1"`.
+- RunCVM reads the file each time it needs a setting, so it is not necessary to restart Docker or Podman after a change.
+
+`/opt/runcvm/etc/default/runcvm.example` shows the format and every setting. To use it, copy it to `/etc/default/runcvm` and remove `#` from the settings to set.
+
+### RUNCVM_EXEC_PASSTHROUGH
+
+**`RUNCVM_EXEC_PASSTHROUGH=0|1`**
+
+`1` enables `docker exec <container> --- <command>`, which runs `<command>` in the container on the host, alongside QEMU and `virtiofsd`, rather than in the VM. It is for debugging and diagnostics. The default is `0`, with which such an exec fails with an error. With any other value, such an exec fails with an error that says the value is invalid.
+
+The command runs as `docker exec` would run it in a standard container, with the capabilities the engine gives the exec (e.g. all of them with `docker exec --privileged`). It is outside the VM's isolation. So, where this setting is `1`, anyone who can `docker exec` into a Container/VM (or `kubectl exec` into its pod) can reach QEMU, `virtiofsd` and the VM's disks.
 
 ## Upgrading
 
