@@ -14,15 +14,17 @@
 #   - ci:skip      runs nothing while present; removing it runs CI.
 #   - ci:extended  runs the extended tier (tests/run --tier extended) in place of the core tier.
 #   - ci:all       runs every tier (tests/run --tier all); it takes precedence over ci:extended.
-#   Adding ci:extended or ci:all runs the integration tests; other labels run nothing.
-# - Nightly, on main: every tier, with a build that uses no cached layers and pulls its base
-#   images afresh, so that changes upstream (Alpine, Docker, the kernels' packages) that break
-#   the build or the tests show up without a commit here. GitHub disables a public repository's
-#   scheduled workflows after 60 days without activity in it, and emails before doing so; the
-#   Actions tab re-enables them. GitHub sends a scheduled run's failure notices to whoever last
-#   changed the schedule.
-# - By hand (workflow_dispatch): the tests input gives tests/run's arguments, and fresh_build
-#   builds as the nightly run does.
+#   - ci:podman    also runs the same tests under rootful Podman (tests/run --engine podman),
+#                  as a second set of shards alongside Docker's.
+#   Adding ci:extended, ci:all or ci:podman runs the integration tests; other labels run nothing.
+# - Nightly, on main: every tier, under Docker and under Podman, with a build that uses no
+#   cached layers and pulls its base images afresh, so that changes upstream (Alpine, Docker,
+#   the kernels' packages) that break the build or the tests show up without a commit here.
+#   GitHub disables a public repository's scheduled workflows after 60 days without activity
+#   in it, and emails before doing so; the Actions tab re-enables them. GitHub sends a scheduled
+#   run's failure notices to whoever last changed the schedule.
+# - By hand (workflow_dispatch): the tests input gives tests/run's arguments, podman runs them
+#   under Podman as well as Docker, and fresh_build builds as the nightly run does.
 # Drafts and labels act through the jobs' if: conditions, not through event filters: if CI
 # becomes a required status check, a skipped job counts as passing, whereas a run that an event
 # filter prevents leaves the check pending and blocks merging. The Markdown paths filter and
@@ -52,6 +54,10 @@ on:
       tests:
         description: tests/run arguments (e.g. "--tier all", or tests by name)
         default: --tier core
+      podman:
+        description: also run the tests under rootful Podman
+        type: boolean
+        default: false
       fresh_build:
         description: build without cached layers, pulling base images afresh (as nightly)
         type: boolean
@@ -96,15 +102,16 @@ jobs:
         run: tests/selftest/run-selftest --docker
 
   build:
-    # Pull requests: not drafts, nor with ci:skip; for label changes, only adding ci:extended
-    # or ci:all, or removing ci:skip. The test jobs need this one, so they run or are skipped
-    # with it.
+    # Pull requests: not drafts, nor with ci:skip; for label changes, only adding ci:extended,
+    # ci:all or ci:podman, or removing ci:skip. The test jobs need this one, so they run or are
+    # skipped with it.
     if: >-
       github.event_name != 'pull_request' || (
         !github.event.pull_request.draft &&
         !contains(github.event.pull_request.labels.*.name, 'ci:skip') &&
         (github.event.action != 'labeled' ||
-          github.event.label.name == 'ci:extended' || github.event.label.name == 'ci:all') &&
+          github.event.label.name == 'ci:extended' || github.event.label.name == 'ci:all' ||
+          github.event.label.name == 'ci:podman') &&
         (github.event.action != 'unlabeled' || github.event.label.name == 'ci:skip')
       )
     concurrency:
@@ -157,11 +164,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Docker, and Podman too nightly, with ci:podman, or by hand with the podman input. (The env
+        # context is not available here.)
+        engine: >-
+          ${{ fromJSON((github.event_name == 'schedule' || inputs.podman == true
+                        || contains(github.event.pull_request.labels.*.name, 'ci:podman'))
+                       && '["docker", "podman"]' || '["docker"]') }}
         shard: [1, 2, 3]
     concurrency:
-      group: ci-test-${{ github.ref }}-${{ matrix.shard }}
+      group: ci-test-${{ github.ref }}-${{ matrix.engine }}-${{ matrix.shard }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-    name: test (${{ matrix.shard }}/3)
+    # Docker's jobs keep their names (test (1/3), ...); Podman's are named apart.
+    name: test (${{ matrix.engine == 'podman' && 'podman ' || '' }}${{ matrix.shard }}/3)
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -214,6 +228,18 @@ jobs:
           sudo REPO=newsnowlabs/runcvm:ci ./runcvm-scripts/runcvm-install-runtime.sh </dev/null
           docker info --format '{{.Runtimes.runcvm.Path}}'
 
+      - name: Prepare Podman
+        if: matrix.engine == 'podman'
+        run: |
+          # The runner image's Podman, which the installer has registered RunCVM with. Short image
+          # names (e.g. alpine) resolve on Docker Hub, as under Docker.
+          sudo podman --version
+          cat /etc/containers/containers.conf.d/runcvm.conf
+          sudo mkdir -p /etc/containers/registries.conf.d
+          printf 'unqualified-search-registries = ["docker.io"]\n' |
+            sudo tee /etc/containers/registries.conf.d/50-runcvm-ci-docker-io.conf
+          sudo podman run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=kvm alpine uname -mr
+
       - name: Run a Container/VM under KVM
         run: |
           # With RUNCVM_QEMU_ACCEL=kvm, RunCVM refuses to start the VM without /dev/kvm rather
@@ -221,22 +247,23 @@ jobs:
           docker run --rm --runtime=runcvm --env=RUNCVM_QEMU_ACCEL=kvm alpine \
             sh -c 'dmesg | grep -iE "hypervisor detected" | head -1; echo vcpus: $(nproc)'
 
-      - name: Integration tests (${{ env.TESTS }}, shard ${{ matrix.shard }}/3)
+      - name: Integration tests (${{ env.TESTS }}, ${{ matrix.engine }}, shard ${{ matrix.shard }}/3)
         run: |
           # Of the tests TESTS selects, this shard runs every third, starting with its own
           # number, so the three shards together run each once. Two tests at a time suits a
           # hosted runner's 4 CPUs and 16 GB of memory. TESTS holds several arguments, so it is
           # split into words.
           # shellcheck disable=SC2086
-          tests/run $TESTS --shard ${{ matrix.shard }}/3 --list
+          tests/run $TESTS --engine ${{ matrix.engine }} --shard ${{ matrix.shard }}/3 --list
           # shellcheck disable=SC2086
-          RUNCVM_TEST_JOBS=2 tests/run $TESTS --shard ${{ matrix.shard }}/3 --results "$RUNNER_TEMP/results"
+          RUNCVM_TEST_JOBS=2 tests/run $TESTS --engine ${{ matrix.engine }} --shard ${{ matrix.shard }}/3 \
+            --results "$RUNNER_TEMP/results"
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ matrix.shard }}
+          name: test-results-${{ matrix.engine }}-${{ matrix.shard }}
           path: ${{ runner.temp }}/results
           if-no-files-found: ignore
 
