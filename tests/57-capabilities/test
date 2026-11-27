@@ -28,8 +28,9 @@ RUNCVM_SYS_ADMIN=1 in its own environment. They run with no_new_privs.
 
 'docker exec <container> --- <command>', which runs <command> in the container
 rather than the VM, fails with an error naming RUNCVM_EXEC_PASSTHROUGH unless
-the host enables it (RUNCVM_EXEC_PASSTHROUGH=1 in /etc/default/runcvm). Where
-it does, the command runs with the capabilities the engine gives the exec (with
+the host enables it (RUNCVM_EXEC_PASSTHROUGH=1 in
+/opt/runcvm/etc/default/runcvm or /etc/default/runcvm). Where it does, the
+command runs with the capabilities the engine gives the exec (with
 --privileged, including CAP_SYS_ADMIN), and without no_new_privs, which the
 engine sets only for a container given --security-opt=no-new-privileges.
 """
@@ -76,22 +77,24 @@ def host_caps(pid):
             if key.startswith("Cap") or key == "NoNewPrivs"}
 
 
-HOST_SETTINGS = "/etc/default/runcvm"
+# The host settings files, in the order runcvm-runtime reads them.
+HOST_SETTINGS = ["/opt/runcvm/etc/default/runcvm", "/etc/default/runcvm"]
 
 
 def passthrough_enabled():
     """Whether the host enables 'docker exec <container> --- <command>': RUNCVM_EXEC_PASSTHROUGH=1
-    in the host's RunCVM settings, the last line setting it counting, as runcvm-runtime reads
-    them."""
-    value = "0"
-    try:
-        with open(HOST_SETTINGS) as f:
-            for line in f.read().splitlines():
-                if line.startswith("RUNCVM_EXEC_PASSTHROUGH="):
-                    value = line.partition("=")[2]
-    except OSError:
-        pass
-    return value == "1"
+    in the host's RunCVM settings, the last line setting it in the last file setting it counting,
+    as runcvm-runtime reads them. Returns the value's file too, or None."""
+    value, source = "0", None
+    for path in HOST_SETTINGS:
+        try:
+            with open(path) as f:
+                for line in f.read().splitlines():
+                    if line.startswith("RUNCVM_EXEC_PASSTHROUGH="):
+                        value, source = line.partition("=")[2], path
+        except OSError:
+            pass
+    return value == "1", source
 
 
 def relay_pids(container):
@@ -184,8 +187,9 @@ r = t.docker("run", "-d", "--name", name, *t.labels(), "--runtime=" + t.RUNTIME,
              "alpine", "sleep", "infinity")
 if t.check("%s: Container/VM boots" % desc, True, r.returncode == 0 and t.wait_for_exec(name, BOOT_TIMEOUT)):
     r = t.docker("exec", "--privileged", name, "---", "grep", "-e", "CapEff", "-e", "NoNewPrivs", "/proc/self/status")
-    if passthrough_enabled():
-        t.param(desc, "enabled on this host (RUNCVM_EXEC_PASSTHROUGH=1 in %s)" % HOST_SETTINGS)
+    enabled, source = passthrough_enabled()
+    if enabled:
+        t.param(desc, "enabled on this host (RUNCVM_EXEC_PASSTHROUGH=1 in %s)" % source)
         fields = dict(line.split(":", 1) for line in r.stdout.splitlines() if ":" in line)
         caps = fields.get("CapEff", "").strip()
         t.check("%s: runs, with the exec's capabilities (--privileged: CAP_SYS_ADMIN)" % desc, True,
