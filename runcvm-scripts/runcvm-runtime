@@ -419,6 +419,23 @@ config_env_is() {
   [ "$(jq_get "$CFG" --arg entry "$1=$2" 'any(.process.env[]; . == $entry)')" = "true" ]
 }
 
+# The host's own settings for RunCVM, which apply to every Container/VM on the host and which a
+# container cannot override: lines NAME=VALUE in RUNCVM_HOST_SETTINGS. Other lines, such as blank
+# lines and comments starting '#', are ignored. The file is read, never sourced.
+RUNCVM_HOST_SETTINGS=/etc/default/runcvm
+
+# Prints host setting $1's value (the last line that sets it), or $2 if none does or there is no
+# file.
+get_host_setting() {
+  local line value
+  if [ -r "$RUNCVM_HOST_SETTINGS" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in "$1="*) value="${line#*=}" ;; esac
+    done <"$RUNCVM_HOST_SETTINGS"
+  fi
+  echo -n "${value-$2}"
+}
+
 # RunCVM's capability sets (see the create command's RUNCVM_CAPS): its own processes' needs
 # (minimal), and Docker's default capabilities with CAP_NET_ADMIN (engine).
 RUNCVM_MINIMAL_CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_MKNOD",
@@ -1190,7 +1207,13 @@ elif [ "$COMMAND" = "exec" ]; then
   if [ "$ARG1" = "---" ]; then
     # 'docker exec <container> --- <command>' runs <command> in the container, on the host, rather
     # than in the VM, as 'docker exec' would in a standard container (with the capabilities the
-    # engine gives it), for debugging and diagnostics.
+    # engine gives it), for debugging and diagnostics; only where the host enables it, with
+    # RUNCVM_EXEC_PASSTHROUGH=1 in RUNCVM_HOST_SETTINGS, as it reaches outside the VM's isolation.
+    case "$(get_host_setting RUNCVM_EXEC_PASSTHROUGH 0)" in
+      1) ;;
+      0) error "'docker exec <container> --- <command>' is disabled on this host (RUNCVM_EXEC_PASSTHROUGH=1 in $RUNCVM_HOST_SETTINGS enables it)" ;;
+      *) error "RUNCVM_EXEC_PASSTHROUGH in $RUNCVM_HOST_SETTINGS invalid (should be 0 or 1)" ;;
+    esac
     jq_set "$PROCESS" 'del(.args[0])'
   else
     # The exec's process, which relays the command to the VM, runs on the host, in the container,

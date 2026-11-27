@@ -1,0 +1,14 @@
+# An example of /etc/default/runcvm, RunCVM's host settings: NAME=VALUE lines that apply to every
+# Container/VM on the host, and that no container can override. Other lines, such as blank lines
+# and comments starting '#', are ignored. Where a name is set more than once, the last line
+# counts.
+#
+# The file is read, never sourced, so quotes are part of a value: write
+# RUNCVM_EXEC_PASSTHROUGH=1, not RUNCVM_EXEC_PASSTHROUGH="1".
+#
+# To use this example, copy it to /etc/default/runcvm and remove '#' from the settings to set.
+
+# 'docker exec <container> --- <command>' runs <command> in the container on the host, alongside
+# QEMU and virtiofsd, outside the VM's isolation, for debugging and diagnostics: 1 enables it,
+# 0 (the default) disables it.
+#RUNCVM_EXEC_PASSTHROUGH=0
