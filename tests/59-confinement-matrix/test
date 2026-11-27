@@ -18,7 +18,8 @@ with the engine's defaults, and with --cap-drop=ALL and
   minimal, the engine's with RunCVM's further calls last for engine or unset,
   and none for unconfined; with the capabilities RUNCVM_CAPS
   gives: exactly RunCVM's own set for minimal or unset, and Docker's default
-  capabilities with CAP_NET_ADMIN, added to the container's, for engine.
+  capabilities with CAP_NET_ADMIN, added to the container's, for engine;
+  and with no_new_privs (NoNewPrivs: 1).
 """
 
 import itertools
@@ -112,5 +113,6 @@ for (seccomp, caps, variant), results in zip(RUNS, t.parallel(run, RUNS, remove=
             {"minimal": "minimal", "unconfined": "none"}.get(seccomp, "engine"), profile_kind(results["profile"]))
     t.check("%s: container's init CapEff" % desc, "%016x" % (ENGINE if caps == "engine" else MINIMAL),
             host.get("CapEff"))
+    t.check("%s: container's init NoNewPrivs" % desc, "1", host.get("NoNewPrivs"))
 
 t.finish()
