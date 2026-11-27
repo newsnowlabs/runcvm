@@ -1,9 +1,12 @@
 #!/bin/sh
 # The 'docker' command for tests run with 'tests/run --engine podman', which puts this directory
 # first in PATH: it runs Podman's Docker-compatible CLI, as root (rootful Podman), through sudo
-# when not already root.
+# when not already root. RUNCVM_TEST_PODMAN names the Podman executable to run, as one path or
+# name, without arguments (default: podman, found in PATH, or through sudo in its secure path),
+# e.g. a script that runs another Podman installation with its own configuration.
+podman="${RUNCVM_TEST_PODMAN:-podman}"
 if [ "$(id -u)" = 0 ]; then
-  exec podman "$@"
+  exec "$podman" "$@"
 else
-  exec sudo -n podman "$@"
+  exec sudo -n "$podman" "$@"
 fi
