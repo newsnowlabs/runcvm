@@ -1105,6 +1105,13 @@ almalinux|fedora|ol) RUNCVM_KERNEL_OS_KERNEL_PATH="/boot/vmlinuz"
     jq_set "$CFG" --argjson caps '["CAP_SYS_ADMIN"]' ".process.capabilities |= ($RUNCVM_CAPS_ADD)"
   fi
 
+  # RunCVM's processes in the container run with no_new_privs, whatever the container was given
+  # (docker run --security-opt no-new-privileges): none of them gains privileges by executing a
+  # setuid or setgid file, or one with file capabilities. They run as root, with the same
+  # capabilities in the bounding, effective and permitted sets (above), so that each execve leaves
+  # them those they hold, with no_new_privs as without it.
+  jq_set "$CFG" '.process.noNewPrivileges = true'
+
   # CONFIGURE ENVIRONMENT
   # This must remain the last change to config.json: it follows every set_config_env, and the
   # placement of runcvm-ctr-entrypoint in process.args[0].
@@ -1180,8 +1187,8 @@ elif [ "$COMMAND" = "exec" ]; then
     # with RunCVM's own fixed set of capabilities (the minimal set), whatever the engine gave it
     # (e.g. docker exec --privileged, or the container's --cap-add) and whatever the container's or
     # the exec's RUNCVM_CAPS and RUNCVM_SYS_ADMIN: no more than the container's init holds in any
-    # mode.
-    jq_set "$PROCESS" --argjson caps "$RUNCVM_MINIMAL_CAPS" ".capabilities = $RUNCVM_CAPS_EXACTLY"
+    # mode. It runs with no_new_privs, as the container's init does.
+    jq_set "$PROCESS" --argjson caps "$RUNCVM_MINIMAL_CAPS" ".capabilities = $RUNCVM_CAPS_EXACTLY | .noNewPrivileges = true"
 
     uidgid=$(jq_get "$PROCESS" '(.user.uid | tostring) + ":" + (.user.gid | tostring) + ":" + ((.user.additionalGids // []) | join(","))')
     cwd=$(jq_get "$PROCESS" '.cwd')

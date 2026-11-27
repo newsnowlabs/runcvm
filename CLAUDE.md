@@ -67,6 +67,9 @@ the runtime or the scripts.
   `docker` command (`tests/engines/podman/docker`) that runs Podman's Docker-compatible CLI;
   RunCVM must be registered with Podman (`runcvm-install-runtime.sh` does so where Podman is
   installed, in `/etc/containers/containers.conf.d/runcvm.conf`), as L1 (`tests/env`) has it. Tests that depend on Docker-specific behaviour may fail under Podman.
+  `RUNCVM_TEST_PODMAN` names the Podman executable the wrapper runs (default `podman`), e.g. a
+  script running another Podman installation with its own configuration; the results record
+  the engine and (unless `--no-preflight`) its version.
 - `tests/run --accel tcg` runs real RunCVM Container/VMs under software emulation where KVM is
   unavailable; tests requiring `kvm` are skipped. Expect each VM to take tens of seconds to
   start, and allow for that in any wait.
