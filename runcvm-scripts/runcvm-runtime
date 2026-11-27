@@ -416,26 +416,20 @@ config_env_is() {
 }
 
 # The host's own settings for RunCVM, which apply to every Container/VM on the host and which a
-# container cannot override: lines NAME=VALUE in the files RUNCVM_HOST_SETTINGS lists, read in
-# that order. The file in /opt/runcvm is for settings distributed in a package image built from
-# RunCVM's, which supplies it (RunCVM's own image supplies only runcvm.example); an install or
-# upgrade replaces it with the image's file, or removes it if the image has none. The file in /etc is the host's own, which an upgrade never changes, so
-# its settings override the package's. Other lines, such as blank lines and comments starting
-# '#', are ignored. The files are read, never sourced.
-RUNCVM_HOST_SETTINGS=(/opt/runcvm/etc/default/runcvm /etc/default/runcvm)
+# container cannot override: lines NAME=VALUE in RUNCVM_HOST_SETTINGS. Other lines, such as blank
+# lines and comments starting '#', are ignored. The file is read, never sourced.
+RUNCVM_HOST_SETTINGS=/etc/default/runcvm
 
-# Sets host_setting to host setting $1's value (the last line that sets it, in the last file that
-# sets it), or to $2 if none does; and host_setting_file to the file that sets it, or to empty.
-read_host_setting() {
-  local file line
-  host_setting="$2"
-  host_setting_file=
-  for file in "${RUNCVM_HOST_SETTINGS[@]}"; do
-    [ -r "$file" ] || continue
+# Prints host setting $1's value (the last line that sets it), or $2 if none does or there is no
+# file.
+get_host_setting() {
+  local line value
+  if [ -r "$RUNCVM_HOST_SETTINGS" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in "$1="*) host_setting="${line#*=}"; host_setting_file="$file" ;; esac
-    done <"$file"
-  done
+      case "$line" in "$1="*) value="${line#*=}" ;; esac
+    done <"$RUNCVM_HOST_SETTINGS"
+  fi
+  echo -n "${value-$2}"
 }
 
 # RunCVM's capability sets (see the create command's RUNCVM_CAPS): its own processes' needs
@@ -1190,13 +1184,11 @@ elif [ "$COMMAND" = "exec" ]; then
     # 'docker exec <container> --- <command>' runs <command> in the container, on the host, rather
     # than in the VM, as 'docker exec' would in a standard container (with the capabilities the
     # engine gives it), for debugging and diagnostics; only where the host enables it, with
-    # RUNCVM_EXEC_PASSTHROUGH=1 in a file RUNCVM_HOST_SETTINGS lists, as it reaches outside the
-    # VM's isolation.
-    read_host_setting RUNCVM_EXEC_PASSTHROUGH 0
-    case "$host_setting" in
+    # RUNCVM_EXEC_PASSTHROUGH=1 in RUNCVM_HOST_SETTINGS, as it reaches outside the VM's isolation.
+    case "$(get_host_setting RUNCVM_EXEC_PASSTHROUGH 0)" in
       1) ;;
-      0) error "'docker exec <container> --- <command>' is disabled on this host (RUNCVM_EXEC_PASSTHROUGH=1 in ${RUNCVM_HOST_SETTINGS[0]} or ${RUNCVM_HOST_SETTINGS[1]} enables it)" ;;
-      *) error "RUNCVM_EXEC_PASSTHROUGH in $host_setting_file invalid (should be 0 or 1)" ;;
+      0) error "'docker exec <container> --- <command>' is disabled on this host (RUNCVM_EXEC_PASSTHROUGH=1 in $RUNCVM_HOST_SETTINGS enables it)" ;;
+      *) error "RUNCVM_EXEC_PASSTHROUGH in $RUNCVM_HOST_SETTINGS invalid (should be 0 or 1)" ;;
     esac
     jq_set "$PROCESS" 'del(.args[0])'
   else
