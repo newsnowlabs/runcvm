@@ -27,8 +27,7 @@
   a file in the image, not the host's.
 - An image's USER and WORKDIR apply in the VM.
 - An entrypoint that cannot be executed: the error is shown, and the exit
-  status is 0, as when any entrypoint exits without setting one (see
-  tests/14-exit-codes).
+  status is 127, as for a container (see tests/14-exit-codes).
 
 The expected values describe current behaviour. A change to it must update
 them deliberately.
@@ -45,7 +44,8 @@ import framework as t  # noqa: E402
 
 KERNELS_DIR = "/opt/runcvm/kernels"
 TIMEOUT = 600 if t.ACCEL == "tcg" else 120
-PROBE = 'echo "uname=$(uname -r)"; echo "id=$(id -u)"; echo "pwd=$(pwd)"; modprobe ip_vs 2>/dev/null && echo "modprobe=ok"'
+# Ends with true, so that a booted Container/VM exits 0 whether or not modprobe succeeds.
+PROBE = 'echo "uname=$(uname -r)"; echo "id=$(id -u)"; echo "pwd=$(pwd)"; modprobe ip_vs 2>/dev/null && echo "modprobe=ok"; true'
 
 
 def kernel_version(dist):
@@ -172,7 +172,7 @@ t.check("image USER applies", "1000", field(r.stdout, "id"))
 t.check("image WORKDIR applies", "/tmp", field(r.stdout, "pwd"))
 
 r = results["no-entrypoint"]
-t.check("entrypoint not found: exit status", 0, r.returncode)
+t.check("entrypoint not found: exit status", 127, r.returncode)
 t.check("entrypoint not found: error shown", True, "unable to exec /no/such/program" in r.stdout)
 
 

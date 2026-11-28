@@ -1563,6 +1563,25 @@ esac
 # Save choice of console device
 echo "$CONSOLE_DEV" >/.runcvm/console
 
+# The kernel log: a further kernel console, a virtio console port that QEMU writes to the file
+# KERNEL_LOG, so it waits on no reader. It gets the kernel's messages at quiet's level (errors and
+# worse), among them PID 1's exit panic, from which runcvm-ctr-exit takes the exit status. It is
+# hvc1 in headless mode, after the user's console, and hvc0 otherwise. It is named, as Alpine's
+# initramfs (mdev.conf) links each virtio port by its name in sysfs, and reports an error on the
+# console for a port without one.
+#
+# With RUNCVM_KERNEL_DEBUG=1 there is no kernel log: the kernel uses only the first virtio console
+# port named as a console, so in headless mode a kernel log port would take the messages from the
+# user's console (hvc0); and a log of every message could fill /.runcvm.
+KERNEL_LOG=/.runcvm/state/kernel.log
+if [ "$RUNCVM_KERNEL_DEBUG" != "1" ]; then
+  CONSOLE+=(
+    -chardev file,id=kernellog0,path=$KERNEL_LOG
+    -device virtconsole,chardev=kernellog0,id=kernellog0,name=org.runcvm.kernel-log
+  )
+  [ "$CONSOLE_DEV" = "hvc0" ] && KERNEL_LOG_DEV="hvc1" || KERNEL_LOG_DEV="hvc0"
+fi
+
 # Generate QEMU display options
 if [ -n "$RUNCVM_QEMU_DISPLAY" ]; then
   DISPLAY+=(-display $RUNCVM_QEMU_DISPLAY)
@@ -1707,10 +1726,15 @@ APPEND+=(scsi_mod.scan=none tsc=reliable no_timer_check rcupdate.rcu_expedited=1
 # - Override this by launching with --env='RUNCVM_KERNEL_APPEND=systemd.show_status=0'
 APPEND+=(systemd.show_status=1)
 
+# The kernel writes to every console named, and the last is /dev/console: the user's console with
+# RUNCVM_KERNEL_DEBUG=1; otherwise, after the kernel log, the consoles the kernel would choose
+# itself: tty0 on x86; tty0 and ttyAMA0 (the device tree's stdout-path) on arm64.
 if [ "$RUNCVM_KERNEL_DEBUG" = "1" ]; then
   APPEND+=($EARLY_CONSOLE console=$CONSOLE_DEV)
+elif [ "$RUNCVM_QEMU_ARCH" = "arm64" ]; then
+  APPEND+=(quiet console=$KERNEL_LOG_DEV console=tty0 console=ttyAMA0)
 else
-  APPEND+=(quiet)
+  APPEND+=(quiet console=$KERNEL_LOG_DEV console=tty0)
 fi
 
 ARGS=(

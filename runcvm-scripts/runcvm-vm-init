@@ -662,9 +662,12 @@ else
   # This VM's PID 1 may hold a terminal as its controlling terminal (as after a dracut initramfs's
   # systemd switches root to it), and giving it up, as runcvm-init and systemd each do, makes the
   # kernel send SIGHUP to PID 1's process group, which would otherwise include them. The session is
-  # created in the foreground, so it exists before runcvm-init runs.
+  # created in the foreground, so it exists before runcvm-init runs. Its input and output are
+  # /dev/null, not PID 1's, which may be a terminal: Alpine's initramfs, given console=, reopens
+  # them on that console ('switch_root -c'), and a daemon whose session starts holding that
+  # terminal can be ended before it runs.
   start_daemon() {
-    busybox setsid $RUNCVM_GUEST/bin/bash -c '"$@" &>/dev/null &' start_daemon "$@"
+    busybox setsid $RUNCVM_GUEST/bin/bash -c '"$@" &>/dev/null &' start_daemon "$@" </dev/null &>/dev/null
   }
 
   # Run the qemu guest agent, needed to support future functionality
