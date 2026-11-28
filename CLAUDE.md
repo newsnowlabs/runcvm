@@ -120,6 +120,44 @@ the runtime or the scripts.
 Use British English spelling in docs, code comments, commit messages and PR descriptions
 (e.g. "behaviour", "initialise", "licence" as a noun).
 
+## Writing style: Simplified Technical English
+
+Write `README.md` and the files in `docs/` with the writing rules of ASD-STE100, the
+Simplified Technical English standard. The aim is the least effort for the reader. Apply these rules to text that
+you add or change. It is not necessary to rewrite other text in the same change.
+
+- **One name for each thing.** Use the same name for an item each time. Do not use synonyms.
+  For example, use "Container/VM" for a container that RunCVM runs as a VM. Use the full path
+  of a file, such as `/etc/default/runcvm`, not "the host setting file".
+- **Short sentences.** Write a maximum of 20 words in an instruction and 25 words in a
+  description. Write one idea in each sentence. Do not put clauses in parentheses or join
+  clauses with semicolons. Use a list instead.
+- **Short paragraphs.** Write one topic in each paragraph, with a maximum of six sentences.
+- **Instructions and descriptions are different.**
+  - An instruction tells the reader to do an action. Use the imperative: "Add
+    `--runtime=runcvm`."
+  - A description gives a fact. Use a statement: "RunCVM starts `dnsmasq`."
+  - Do not write a description as an instruction.
+- **Required, forbidden and not necessary are different.** Use the correct form:
+  - required: "Add `--runtime=runcvm`.";
+  - forbidden: "Do not use `--network=host`.";
+  - not necessary: "It is not necessary to change the image."
+  - Do not use "Do not …" for an action that is only not necessary.
+- **One action in each step.** In a procedure, write one action in each numbered step. If two
+  actions must occur at the same time, put them in one step.
+- **Active voice and concrete verbs.** Write who or what does the action: "Podman kills the
+  Container/VM", not "the Container/VM is killed". Use verbs such as "run", "set", "remove"
+  and "start". Do not use vague verbs such as "handle", "deal with" or "proceed".
+- **Condition first.** Put a condition before the action: "If the Container/VM uses
+  `127.0.0.11`, RunCVM starts `dnsmasq`."
+- **Warnings.** Start a warning with the instruction, then give the reason.
+- **Articles.** Keep "the", "a" and "an". Do not remove them to make a sentence shorter.
+- **Technical names.** Names of commands, files, options, variables and products are
+  permitted. Put them in code format where they are literal text.
+
+Do not use the ASD-STE100 dictionary of approved words. Use normal technical English words,
+but give each word only one meaning in a document.
+
 ## Writing code and commit comments
 
 Code comments and commit messages must **strictly** describe the current code's behaviour as
@@ -158,8 +196,9 @@ Alpine aports, BundELF) may be named, with a URL where useful.
 ## Sweep for violations of the rules above before committing
 
 Before committing non-trivial work, and always before a branch is merged to `main`, run a
-compliance sweep of the changed files against the rules above: British English; no narrative
-history in docs or comments; reference only this repo's own files; PR descriptions and commit
+compliance sweep of the changed files against the rules above: British English; the
+Simplified Technical English rules, for `README.md` and `docs/`; no narrative history in docs
+or comments; reference only this repo's own files; PR descriptions and commit
 messages clear and self-contained, i.e. understandable by a reader who has only the
 repository and the pull request (not the conversation, plan or branch history that produced
 them).
